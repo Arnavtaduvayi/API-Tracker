@@ -141,8 +141,12 @@ fn is_placeholder(value: &str) -> bool {
     if NEEDLES.iter().any(|n| lower.contains(n)) {
         return true;
     }
-    // Angle-bracket / mustache templates: <token>, ${TOKEN}, {{TOKEN}}.
+    // Angle-bracket / mustache / template placeholders: <token>, ${TOKEN},
+    // {{TOKEN}}, {TOKEN}, %TOKEN%.
     if v.starts_with('<') || v.starts_with("${") || v.starts_with("{{") {
+        return true;
+    }
+    if (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('%') && v.ends_with('%')) {
         return true;
     }
     // A single repeated character (e.g. xxxxxxxx, ********).
@@ -179,6 +183,16 @@ pub fn shannon_entropy(s: &str) -> f64 {
 fn is_publishable_value(value: &str) -> bool {
     const PUBLISHABLE_PREFIXES: [&str; 4] = ["pk_live_", "pk_test_", "pk-", "pub_"];
     PUBLISHABLE_PREFIXES.iter().any(|p| value.starts_with(p))
+}
+
+/// True when a value is a plausible secret *token* rather than a code
+/// expression: only the characters real keys/tokens use, no code punctuation
+/// (parens, colons, quotes, spaces). This is the main entropy false-positive
+/// filter — it rejects things like `SecretString::from("...")`.
+fn is_token_like(value: &str) -> bool {
+    value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_-+/=.~".contains(c))
 }
 
 /// True for the secret-like left-hand side of an assignment.
@@ -348,7 +362,7 @@ pub fn scan_text(content: &str, file: &str, options: &ScanOptions) -> Vec<Findin
             if options.entropy
                 && is_secret_var_name(name)
                 && value.len() >= 20
-                && !value.contains(' ')
+                && is_token_like(&value)
                 && shannon_entropy(&value) >= 3.5
             {
                 let redacted = mask_value(&value);
@@ -514,6 +528,22 @@ mod tests {
         let findings = scan_text(secretish, "notes.txt", &ScanOptions::default());
         assert!(findings.iter().any(|f| f.rule == "high-entropy"));
         assert!(findings.iter().all(|f| f.confidence <= Confidence::Medium));
+    }
+
+    #[test]
+    fn code_expressions_are_not_flagged_as_entropy_secrets() {
+        // Rust/other source lines with a secret-ish word in scope but a code
+        // expression as the "value" must not be flagged (the value is not a
+        // token). These are exactly the dogfooding false positives.
+        for line in [
+            "        SecretString::from(\"test-backup-password\")",
+            "    let key: SecretString = load_secret();",
+            "        let token = compute_secret(&some, &args);",
+            "TOKEN={OPENAI_FAKE}",
+        ] {
+            let findings = scan_text(line, "src/lib.rs", &ScanOptions::default());
+            assert!(findings.is_empty(), "false positive on code: {line}");
+        }
     }
 
     #[test]
