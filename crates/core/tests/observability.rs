@@ -343,14 +343,14 @@ fn doc_watch_scheduling_and_history() {
     );
     let results = v.check_due_doc_watches(&fetcher).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].1, "firstcapture");
+    assert_eq!(results[0].1, "first_capture");
 
     // Freshly checked -> no longer due; history recorded.
     let due = api_tracker_core::docwatch::due_watches(v.connection(), 24).unwrap();
     assert!(due.is_empty());
     let history = v.doc_watch_history(None, 10).unwrap();
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].outcome, "firstcapture");
+    assert_eq!(history[0].outcome, "first_capture");
 
     // A change lands in history too.
     let fetcher = api_tracker_core::docwatch::MockFetcher::with(

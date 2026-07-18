@@ -501,11 +501,13 @@ ALTER TABLE usage_snapshots ADD COLUMN quantity REAL;
 ALTER TABLE usage_snapshots ADD COLUMN unit TEXT;
 
 -- When a provider-side entity was FIRST seen locally (synced_at moves on
--- every sync; first_seen_at does not). Backfilled from synced_at.
+-- every sync; first_seen_at does not). Pre-existing rows are backfilled
+-- with the epoch — "existed before tracking began" — so the upgrade does
+-- not flood users with false "new key appeared" alerts.
 ALTER TABLE provider_side_keys ADD COLUMN first_seen_at TEXT;
 ALTER TABLE provider_side_projects ADD COLUMN first_seen_at TEXT;
-UPDATE provider_side_keys SET first_seen_at = synced_at WHERE first_seen_at IS NULL;
-UPDATE provider_side_projects SET first_seen_at = synced_at WHERE first_seen_at IS NULL;
+UPDATE provider_side_keys SET first_seen_at = '1970-01-01T00:00:00Z' WHERE first_seen_at IS NULL;
+UPDATE provider_side_projects SET first_seen_at = '1970-01-01T00:00:00Z' WHERE first_seen_at IS NULL;
 
 -- Documentation-watch change history (validators/hashes only, no content).
 CREATE TABLE doc_watch_history (
@@ -542,6 +544,17 @@ CREATE TABLE notification_channels (
     created_at      TEXT NOT NULL,
     last_delivery_at TEXT,
     last_error      TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- One row per (channel, alert): what was last delivered, so open alerts
+-- are not re-posted on every monitor run. Re-delivery happens only when
+-- the alert's severity escalates.
+CREATE TABLE notification_deliveries (
+    channel_id         TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    alert_id           TEXT NOT NULL,
+    delivered_severity TEXT NOT NULL,
+    delivered_at       TEXT NOT NULL,
+    PRIMARY KEY (channel_id, alert_id)
 ) STRICT;
 "#,
     },

@@ -198,10 +198,8 @@ pub fn notify(ctx: &Ctx, cmd: NotifyCmd) -> Result<()> {
                 .find(|c| c.name.eq_ignore_ascii_case(&channel) || c.id == channel)
                 .ok_or_else(|| anyhow::anyhow!("no channel named '{channel}'"))?;
             let http = api_tracker_core::http::UreqClient::new();
-            match vault.notification_channel_test(&ch.id, &http) {
-                Ok(detail) => println!("OK: {detail}"),
-                Err(e) => println!("Delivery failed: {e}"),
-            }
+            let detail = vault.notification_channel_test(&ch.id, &http)?;
+            println!("OK: {detail}");
         }
     }
     Ok(())

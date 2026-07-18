@@ -138,6 +138,10 @@ impl UreqClient {
             // adapters parse error bodies (e.g. AWS `__type`) to decide
             // create-on-missing and to report honest errors.
             .http_status_as_error(false)
+            // Provider APIs never need redirects, and following one could
+            // forward non-Authorization secret headers (Anthropic's
+            // x-api-key) to a different host. Refuse the whole class.
+            .max_redirects(0)
             .build();
         Self {
             agent: config.into(),

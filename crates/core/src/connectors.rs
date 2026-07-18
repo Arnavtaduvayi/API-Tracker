@@ -382,7 +382,13 @@ impl Connector for GitHub {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
-                let mut snap = NewUsageSnapshot::new("github", &date, &date);
+                // Normalize plain dates to RFC 3339 day windows so GitHub
+                // rows compare like every other source.
+                let window_start = format!("{date}T00:00:00Z");
+                let window_end = crate::clock::parse_rfc3339(&window_start)
+                    .map(|t| crate::clock::to_rfc3339(t + time::Duration::days(1)))
+                    .unwrap_or_else(|_| window_start.clone());
+                let mut snap = NewUsageSnapshot::new("github", &window_start, &window_end);
                 snap.quantity = item.get("quantity").and_then(|v| v.as_f64());
                 snap.unit = item
                     .get("unitType")
@@ -406,7 +412,9 @@ impl Connector for GitHub {
         Ok(FetchedUsage {
             snapshots,
             attribution: Attribution::ProviderAccount,
-            source: "GitHub Enhanced Billing usage (account level)".to_string(),
+            source: "GitHub Enhanced Billing usage (account level, CURRENT billing month \
+                     only regardless of the requested window)"
+                .to_string(),
         })
     }
 
@@ -995,7 +1003,9 @@ impl Connector for Stripe {
             };
             let mut last_id = None;
             for event in data {
-                let created = event.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+                let Some(created) = event.get("created").and_then(|v| v.as_i64()) else {
+                    continue; // no timestamp — cannot bucket honestly
+                };
                 let day = crate::clock::to_rfc3339(
                     unix_to_time(created).replace_time(time::Time::MIDNIGHT),
                 );

@@ -1862,7 +1862,50 @@ impl UnlockedVault {
         // Incremental scan of registered repositories: only NEW commits
         // since the last monitor run are examined (one `git rev-parse` per
         // repo when nothing changed). Local-only, like all scanning.
-        let _ = self.scan_repos_incremental();
+        // Findings (vault-matched or not) raise an alert; silent coverage
+        // gaps are not acceptable in a security tool.
+        let _ = self.prune_observability_state();
+        let mut repos_scanned = 0usize;
+        let mut repo_findings = 0usize;
+        if let Ok(reports) = self.scan_repos_incremental() {
+            for report in &reports {
+                repos_scanned += 1;
+                repo_findings += report.findings;
+                if report.findings > 0 {
+                    let alert = alerts::NewAlert {
+                        kind: alerts::AlertKind::PossibleExposure,
+                        severity: alerts::Severity::High,
+                        dedup_key: format!(
+                            "repo_scan_findings:{}:{}",
+                            report.repo_path, report.head_commit
+                        ),
+                        title: format!(
+                            "likely secret(s) in new commits: {}",
+                            report.repo_path
+                        ),
+                        detail: format!(
+                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect.",
+                            report.findings, report.head_commit, report.repo_path
+                        ),
+                        evidence: format!(
+                            "repo={} head={} findings={}",
+                            report.repo_path, report.head_commit, report.findings
+                        ),
+                        confidence: crate::providers::Confidence::Medium,
+                        recommended_action:
+                            "inspect the findings; rotate anything real and scrub history"
+                                .into(),
+                        project_id: None,
+                        credential_id: None,
+                        observed_at: now.clone(),
+                    };
+                    active_keys.push(alert.dedup_key.clone());
+                    if alerts::upsert(&self.conn, &alert)? {
+                        created += 1;
+                    }
+                }
+            }
+        }
 
         // Expanded explainable observability rules (request spikes, dormant
         // activation, auth failures, first-seen provider entities, unusual
@@ -1894,6 +1937,8 @@ impl UnlockedVault {
         managed.extend(crate::observe::managed_kinds());
         let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
         Ok(MonitorSummary {
+            repos_scanned,
+            repo_findings,
             checked: credentials.len(),
             alerts_created: created,
             alerts_resolved: resolved,
@@ -2040,11 +2085,17 @@ impl UnlockedVault {
         url: &str,
     ) -> Result<(crate::docwatch::CheckResult, crate::docwatch::DocWatch)> {
         let (result, watch) = crate::docwatch::check_watch(&self.conn, fetcher, url)?;
+        let outcome = match result {
+            crate::docwatch::CheckResult::FirstCapture => "first_capture",
+            crate::docwatch::CheckResult::Unchanged => "unchanged",
+            crate::docwatch::CheckResult::Changed => "changed",
+            crate::docwatch::CheckResult::Failed => "failed",
+        };
         crate::docwatch::record_history(
             &self.conn,
             url,
             &watch.provider,
-            &format!("{result:?}").to_lowercase(),
+            outcome,
             &watch.last_status,
         )?;
         if result == crate::docwatch::CheckResult::Changed {
@@ -2857,17 +2908,19 @@ impl UnlockedVault {
         // Provider-side metadata is best-effort.
         let mut side_projects = Vec::new();
         let mut side_keys: Vec<crate::openai::ProviderSideKey> = Vec::new();
-        let mut key_expiries: Vec<(String, String)> = Vec::new();
+        let mut key_expiries: Vec<(String, Option<String>)> = Vec::new();
         match anthropic::fetch_workspaces(http, admin_secret) {
             Ok(workspaces) => side_projects = workspaces,
             Err(e) => notes.push(format!("workspace metadata unavailable: {e}")),
         }
+        let mut key_expiry_known = false;
         match anthropic::fetch_api_keys(http, admin_secret) {
             Ok(keys) => {
+                key_expiry_known = true;
                 for (key, expires_at) in keys {
-                    if let Some(expiry) = expires_at {
-                        key_expiries.push((key.id.clone(), expiry));
-                    }
+                    // None is meaningful too: a removed/extended expiry must
+                    // clear the stale local value.
+                    key_expiries.push((key.id.clone(), expires_at));
                     side_keys.push(key);
                 }
             }
@@ -2970,13 +3023,16 @@ impl UnlockedVault {
             )?;
         }
         // Provider-reported key expirations flow onto LINKED credentials
-        // (recorded verbatim from the provider, never invented).
-        for (key_id, expiry) in &key_expiries {
-            if let Some((credential_id, _)) = links.get(key_id) {
-                tx.execute(
-                    "UPDATE credentials SET provider_expires_at = ?1 WHERE id = ?2",
-                    params![expiry, credential_id],
-                )?;
+        // (recorded verbatim from the provider, never invented; a listing
+        // WITHOUT an expiry clears any stale local value).
+        if key_expiry_known {
+            for (key_id, expiry) in &key_expiries {
+                if let Some((credential_id, _)) = links.get(key_id) {
+                    tx.execute(
+                        "UPDATE credentials SET provider_expires_at = ?1 WHERE id = ?2",
+                        params![expiry, credential_id],
+                    )?;
+                }
             }
         }
         let (from_s, to_s) = (clock::to_rfc3339(from), clock::to_rfc3339(to));
@@ -4438,9 +4494,35 @@ impl UnlockedVault {
                 Some(last) if last == &head => continue,
                 Some(last) => {
                     // History rewritten or range unreadable: re-baseline
-                    // rather than failing the whole monitor run.
-                    let units =
-                        crate::gitrepo::range_added_units(repo, last, &head).unwrap_or_default();
+                    // rather than failing the whole monitor run — but say
+                    // so, because commits in the unread range were NOT
+                    // scanned.
+                    let (units, range_ok) =
+                        match crate::gitrepo::range_added_units(repo, last, &head) {
+                            Ok(units) => (units, true),
+                            Err(_) => (Vec::new(), false),
+                        };
+                    if !range_ok {
+                        let _ = alerts::upsert(
+                            &self.conn,
+                            &alerts::NewAlert {
+                                kind: alerts::AlertKind::PossibleExposure,
+                                severity: alerts::Severity::Medium,
+                                dedup_key: format!("repo_rebaselined:{path}:{head}"),
+                                title: format!("repository re-baselined: {path}"),
+                                detail: format!(
+                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --history` if secrets may have landed there."
+                                ),
+                                evidence: format!("last={last} head={head}"),
+                                confidence: crate::providers::Confidence::Medium,
+                                recommended_action:
+                                    "run an explicit history scan of this repository".into(),
+                                project_id: None,
+                                credential_id: None,
+                                observed_at: clock::now_rfc3339(),
+                            },
+                        );
+                    }
                     let mut findings = Vec::new();
                     for unit in &units {
                         let options = scanner::ScanOptions {
@@ -4507,12 +4589,36 @@ impl UnlockedVault {
         let mut out = Vec::new();
         for url in due {
             let outcome = match self.check_doc_watch(fetcher, &url) {
-                Ok((result, _)) => format!("{result:?}").to_lowercase(),
+                Ok((crate::docwatch::CheckResult::FirstCapture, _)) => "first_capture".to_string(),
+                Ok((crate::docwatch::CheckResult::Unchanged, _)) => "unchanged".to_string(),
+                Ok((crate::docwatch::CheckResult::Changed, _)) => "changed".to_string(),
+                Ok((crate::docwatch::CheckResult::Failed, _)) => "failed".to_string(),
                 Err(e) => format!("error: {e}"),
             };
             out.push((url, outcome));
         }
         Ok(out)
+    }
+
+    /// Sweep bookkeeping rows that would otherwise grow forever: doc-watch
+    /// history beyond 200 entries per URL, and scan state for repository
+    /// paths no longer registered on any project.
+    fn prune_observability_state(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM doc_watch_history WHERE id IN (
+                 SELECT id FROM (
+                     SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY url ORDER BY id DESC) AS rn
+                     FROM doc_watch_history)
+                 WHERE rn > 200)",
+            [],
+        )?;
+        self.conn.execute(
+            "DELETE FROM repo_scan_state WHERE repo_path NOT IN (
+                 SELECT DISTINCT path FROM project_repos)",
+            [],
+        )?;
+        Ok(())
     }
 
     pub fn doc_watch_history(
@@ -4536,10 +4642,14 @@ impl UnlockedVault {
         min_severity: &str,
     ) -> Result<crate::notify::NotificationChannel> {
         let url_trim = url.expose().trim();
-        if !url_trim.starts_with("https://") && !url_trim.starts_with("http://localhost") {
-            return Err(CoreError::InvalidInput(
-                "webhook URLs must be https (or http://localhost for testing)".into(),
-            ));
+        crate::notify::validate_webhook_url(url_trim)?;
+        if !matches!(
+            min_severity,
+            "info" | "low" | "medium" | "high" | "critical"
+        ) {
+            return Err(CoreError::InvalidInput(format!(
+                "'{min_severity}' is not a severity (info/low/medium/high/critical)"
+            )));
         }
         let id = uuid::Uuid::new_v4().to_string();
         let ciphertext = crypto::encrypt(
@@ -4696,7 +4806,15 @@ impl UnlockedVault {
                     observed_at: &alert.observed_at,
                 };
                 match crate::notify::deliver_webhook(http, url.expose(), &payload) {
-                    Ok(_) => delivered += 1,
+                    Ok(_) => {
+                        delivered += 1;
+                        crate::notify::mark_delivered(
+                            &self.conn,
+                            &channel.id,
+                            &alert.id,
+                            &alert.severity,
+                        )?;
+                    }
                     Err(e) => {
                         channel_error = Some(e.to_string());
                         break; // one failure: stop hammering this channel
@@ -7537,6 +7655,10 @@ pub struct Suppression {
 /// Summary of a monitoring run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonitorSummary {
+    /// Registered repositories examined this run (incremental).
+    pub repos_scanned: usize,
+    /// Findings in newly scanned commits across those repositories.
+    pub repo_findings: usize,
     pub checked: usize,
     pub alerts_created: usize,
     pub alerts_resolved: usize,
