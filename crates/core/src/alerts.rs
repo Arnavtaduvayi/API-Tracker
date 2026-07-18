@@ -34,6 +34,8 @@ pub enum AlertKind {
     CostSpike,
     UsageAfterDisabled,
     CredentialActivated,
+    RotationDue,
+    RotationStuck,
 }
 
 impl AlertKind {
@@ -56,6 +58,8 @@ impl AlertKind {
             AlertKind::CostSpike => "cost_spike",
             AlertKind::UsageAfterDisabled => "usage_after_disabled",
             AlertKind::CredentialActivated => "credential_activated",
+            AlertKind::RotationDue => "rotation_due",
+            AlertKind::RotationStuck => "rotation_stuck",
         }
     }
 }

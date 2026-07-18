@@ -24,6 +24,10 @@ pub struct VaultSettings {
     /// Days after the last successful provider sync before synchronized
     /// data is flagged stale (connected providers only). 0 disables.
     pub provider_stale_days: u32,
+    /// How long replaced credential values are retained (encrypted) for
+    /// destination rollback. Older versions are pruned; SQLite secure_delete
+    /// overwrites the freed pages.
+    pub rollback_window_days: u32,
 }
 
 impl Default for VaultSettings {
@@ -35,17 +39,19 @@ impl Default for VaultSettings {
             stale_days: 90,
             clipboard_clear_seconds: 30,
             provider_stale_days: 3,
+            rollback_window_days: 30,
         }
     }
 }
 
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 7] = [
     "auto_lock_minutes",
     "expiring_soon_days",
     "unused_days",
     "stale_days",
     "clipboard_clear_seconds",
     "provider_stale_days",
+    "rollback_window_days",
 ];
 
 impl VaultSettings {
@@ -89,6 +95,7 @@ impl VaultSettings {
             "stale_days" => Ok(self.stale_days),
             "clipboard_clear_seconds" => Ok(self.clipboard_clear_seconds),
             "provider_stale_days" => Ok(self.provider_stale_days),
+            "rollback_window_days" => Ok(self.rollback_window_days),
             other => Err(CoreError::InvalidInput(format!(
                 "unknown setting '{other}'"
             ))),
@@ -103,6 +110,7 @@ impl VaultSettings {
             "stale_days" => self.stale_days = value,
             "clipboard_clear_seconds" => self.clipboard_clear_seconds = value,
             "provider_stale_days" => self.provider_stale_days = value,
+            "rollback_window_days" => self.rollback_window_days = value,
             other => {
                 return Err(CoreError::InvalidInput(format!(
                     "unknown setting '{other}'"

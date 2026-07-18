@@ -212,6 +212,18 @@ pub fn unlock_vault(paths: &VaultPaths, master_password: &SecretString) -> Resul
     let fingerprint_key = unwrap_fingerprint_key(&conn, &vault_id, &vault_key)?;
     let settings = VaultSettings::load(&conn)?;
     audit::record(&conn, "vault_unlocked", None, None, "")?;
+    // Best-effort sweeps on unlock: expired temporary exports and retained
+    // versions past the rollback window (secure_delete overwrites pages).
+    let _ = crate::envgov::cleanup_exports(&conn, false, false, &clock::now_rfc3339());
+    if settings.rollback_window_days > 0 {
+        let cutoff = clock::to_rfc3339(
+            clock::now() - time::Duration::days(i64::from(settings.rollback_window_days)),
+        );
+        let _ = conn.execute(
+            "DELETE FROM credential_versions WHERE created_at < ?1",
+            [&cutoff],
+        );
+    }
 
     Ok(UnlockedVault {
         conn,
@@ -371,12 +383,14 @@ struct CredentialRow {
     marked_invalid: bool,
     possibly_exposed: bool,
     exposure_note: String,
+    provider_expires_at: Option<String>,
 }
 
 const CREDENTIAL_COLUMNS: &str = "id, project_id, provider, name, environment, credential_type, \
      ciphertext, linked_credential_id, fingerprint, masked_value, created_at, updated_at, \
      key_created_at, expires_at, last_validated_at, last_used_at, docs_url, notes, \
-     manually_disabled, revoked, marked_invalid, possibly_exposed, exposure_note";
+     manually_disabled, revoked, marked_invalid, possibly_exposed, exposure_note, \
+     provider_expires_at";
 
 fn credential_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRow> {
     Ok(CredentialRow {
@@ -403,6 +417,7 @@ fn credential_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CredentialRow> {
         marked_invalid: row.get(20)?,
         possibly_exposed: row.get(21)?,
         exposure_note: row.get(22)?,
+        provider_expires_at: row.get(23)?,
     })
 }
 
@@ -1223,6 +1238,7 @@ impl UnlockedVault {
         let inputs = StatusInputs {
             created_at: clock::parse_rfc3339(&row.created_at)?,
             expires_at: parse_optional_ts(row.expires_at.as_deref())?,
+            provider_expires_at: parse_optional_ts(row.provider_expires_at.as_deref())?,
             last_validated_at: parse_optional_ts(row.last_validated_at.as_deref())?,
             last_used_at: parse_optional_ts(row.last_used_at.as_deref())?,
             manually_disabled: row.manually_disabled,
@@ -1251,6 +1267,7 @@ impl UnlockedVault {
             updated_at: row.updated_at.clone(),
             key_created_at: row.key_created_at.clone(),
             expires_at: row.expires_at.clone(),
+            provider_expires_at: row.provider_expires_at.clone(),
             last_validated_at: row.last_validated_at.clone(),
             last_used_at: row.last_used_at.clone(),
             docs_url: row.docs_url.clone(),
@@ -1803,12 +1820,25 @@ impl UnlockedVault {
             }
         }
 
+        // Rotation schedules that are due (preflight-checked) and rotations
+        // stuck mid-flight. Scheduling never executes anything by itself —
+        // it raises an alert (and, in the desktop app, a notification) and
+        // pauses on preflight failure. No destructive action is queued.
+        for alert in self.rotation_monitor_alerts(&now)? {
+            active_keys.push(alert.dedup_key.clone());
+            if alerts::upsert(&self.conn, &alert)? {
+                created += 1;
+            }
+        }
+
         let mut managed = crate::monitor::managed_credential_kinds();
         managed.extend(crate::activity::managed_kinds());
         managed.extend([
             alerts::AlertKind::ProviderDataStale,
             alerts::AlertKind::UnmatchedProviderKey,
             alerts::AlertKind::UnmappedProviderProject,
+            alerts::AlertKind::RotationDue,
+            alerts::AlertKind::RotationStuck,
         ]);
         let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
         Ok(MonitorSummary {
@@ -2039,6 +2069,12 @@ impl UnlockedVault {
                 ..Default::default()
             },
         )?;
+        if let Some(expiry) = &result.provider_expires_at {
+            self.conn.execute(
+                "UPDATE credentials SET provider_expires_at = ?1 WHERE id = ?2",
+                params![expiry, cred.id],
+            )?;
+        }
         audit::record(
             &self.conn,
             "credential_validated",
@@ -2071,13 +2107,18 @@ impl UnlockedVault {
         let connector = self.connector_for(&cred.provider)?;
         let value = self.decrypt_value(selector)?;
         let fetched = connector.fetch_permissions(http, &value)?;
-        let normalized = match cred.provider.as_str() {
-            "github" => crate::permissions::normalize_github(&fetched.raw_scopes),
-            _ => crate::permissions::NormalizedPermissions {
-                summary: "raw scopes only (no provider-specific normalization)".into(),
-                ..Default::default()
-            },
-        };
+        let normalized = crate::permissions::normalize_for(&cred.provider, &fetched.raw_scopes);
+        audit::record(
+            &self.conn,
+            "permission_snapshot",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!(
+                "scopes={} source={}",
+                fetched.raw_scopes.len(),
+                fetched.source
+            ),
+        )?;
         crate::permissions::store(
             &self.conn,
             &cred.id,
@@ -3411,6 +3452,18 @@ impl UnlockedVault {
             "DELETE FROM credential_versions WHERE credential_id = ?1 AND version <= ?2",
             params![row.id, version - KEEP_VERSIONS],
         )?;
+        // Rollback window: versions older than the configured window are
+        // pruned too (secure_delete overwrites the freed pages). 0 disables
+        // age-based pruning; the count cap above always applies.
+        let window_days = self.settings.rollback_window_days;
+        if window_days > 0 {
+            let cutoff =
+                clock::to_rfc3339(clock::now() - time::Duration::days(i64::from(window_days)));
+            self.conn.execute(
+                "DELETE FROM credential_versions WHERE credential_id = ?1 AND created_at < ?2",
+                params![row.id, cutoff],
+            )?;
+        }
         Ok(version)
     }
 
@@ -5065,6 +5118,1458 @@ impl UnlockedVault {
         }
         self.destination_attachments(credential)
     }
+
+    // ------------------------------------------------------------------
+    // Credential rotation (docs/decisions/0013)
+    // ------------------------------------------------------------------
+
+    /// True when the provider can CREATE a replacement key via API and an
+    /// administrative connection is available to do it.
+    fn rotation_mode_for(&self, provider: &str) -> Result<(&'static str, String)> {
+        let manifest = crate::providers::find(provider);
+        let manage_url = manifest
+            .as_ref()
+            .map(|m| m.manage_url.clone())
+            .unwrap_or_default();
+        let api_create = manifest
+            .as_ref()
+            .map(|m| {
+                matches!(
+                    m.capabilities.create_credential.support,
+                    crate::providers::SupportLevel::Implemented
+                )
+            })
+            .unwrap_or(false);
+        let has_admin = self.provider_admin_secret(provider).is_ok();
+        if api_create && has_admin {
+            Ok((crate::rotation::MODE_API, manage_url))
+        } else {
+            Ok((crate::rotation::MODE_MANUAL, manage_url))
+        }
+    }
+
+    /// Build a rotation dry run: capability check, destination inspection,
+    /// mode determination. Writes nothing anywhere and changes no state
+    /// beyond recording the plan itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rotation_plan(
+        &self,
+        credential: &str,
+        grace_minutes: i64,
+        provider_project_id: Option<&str>,
+        old_provider_key_id: Option<&str>,
+        note: &str,
+    ) -> Result<RotationView> {
+        let cred = self.resolve_credential(credential)?;
+        if cred.linked_credential_id.is_some() {
+            return Err(CoreError::InvalidInput(
+                "this record is a reference; rotate the credential it points to".into(),
+            ));
+        }
+        if !(0..=60 * 24 * 90).contains(&grace_minutes) {
+            return Err(CoreError::InvalidInput(
+                "the grace period must be between 0 minutes and 90 days".into(),
+            ));
+        }
+        let (mode, manage_url) = self.rotation_mode_for(&cred.provider)?;
+        // Old provider-side key id: explicit option, else a confirmed link.
+        let old_key_id: Option<String> = match old_provider_key_id {
+            Some(id) => Some(id.to_string()),
+            None => self
+                .conn
+                .query_row(
+                    "SELECT provider_api_key_id FROM provider_key_links
+                     WHERE provider = ?1 AND credential_id = ?2",
+                    params![cred.provider, cred.id],
+                    |r| r.get(0),
+                )
+                .optional()?,
+        };
+        // Provider project for API creation: explicit option, else derived
+        // from the linked old key's cached metadata.
+        let project_id: Option<String> = match provider_project_id {
+            Some(p) => Some(p.to_string()),
+            None => match &old_key_id {
+                Some(key) => self
+                    .conn
+                    .query_row(
+                        "SELECT provider_project_id FROM provider_side_keys
+                         WHERE provider = ?1 AND api_key_id = ?2",
+                        params![cred.provider, key],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .flatten(),
+                None => None,
+            },
+        };
+        let manifest = crate::providers::find(&cred.provider);
+        let can_disable = manifest
+            .as_ref()
+            .map(|m| {
+                matches!(
+                    m.capabilities.disable_credential.support,
+                    crate::providers::SupportLevel::Implemented
+                )
+            })
+            .unwrap_or(false);
+        let can_revoke = manifest
+            .as_ref()
+            .map(|m| {
+                matches!(
+                    m.capabilities.revoke_credential.support,
+                    crate::providers::SupportLevel::Implemented
+                )
+            })
+            .unwrap_or(false);
+        let mut manual = Vec::new();
+        if mode == crate::rotation::MODE_MANUAL {
+            manual.push(format!(
+                "create the replacement key yourself at {manage_url}, then run \
+                 `rotation provide-key` with the new value"
+            ));
+        }
+        if old_key_id.is_none() && (can_disable || can_revoke) {
+            manual.push(
+                "no provider-side key id is linked for the OLD key; link one \
+                 (`provider link`) or pass --old-key-id, otherwise disabling/revoking \
+                 the old key stays manual"
+                    .to_string(),
+            );
+        }
+        if !can_disable && !can_revoke {
+            manual.push(format!(
+                "this provider has no API disable/revoke — after the grace period, \
+                 revoke the old key yourself at {manage_url} and run \
+                 `rotation complete-manual`"
+            ));
+        }
+        let id = crate::rotation::insert(
+            &self.conn,
+            &cred.id,
+            &cred.provider,
+            mode,
+            note,
+            grace_minutes,
+            old_key_id.as_deref(),
+            project_id.as_deref(),
+            &manual.join("\n"),
+        )?;
+        audit::record(
+            &self.conn,
+            "rotation_planned",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("rotation={id} mode={mode}"),
+        )?;
+        self.rotation_get(&id)
+    }
+
+    /// Approve a planned rotation (reauthentication + explicit user action).
+    pub fn rotation_approve(
+        &self,
+        id: &str,
+        master_password: &SecretString,
+    ) -> Result<RotationView> {
+        self.verify_master_password(master_password)?;
+        let rot = crate::rotation::load(&self.conn, id)?;
+        if rot.state != crate::rotation::PLANNED {
+            return Err(CoreError::InvalidInput(format!(
+                "rotation {id} is '{}', not awaiting approval",
+                rot.state
+            )));
+        }
+        crate::rotation::set_field(&self.conn, id, "approved_at", Some(&clock::now_rfc3339()))?;
+        crate::rotation::set_state(&self.conn, id, crate::rotation::APPROVED, "user approved")?;
+        let cred = self
+            .credential_row_by_id(&rot.credential_id)?
+            .ok_or(CoreError::NotFound {
+                kind: "credential",
+                ident: rot.credential_id.clone(),
+            })?;
+        audit::record(
+            &self.conn,
+            "rotation_approved",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("rotation={id}"),
+        )?;
+        self.rotation_get(id)
+    }
+
+    /// Advance a rotation as far as it can go right now. Idempotent: every
+    /// step re-checks recorded state, so calling again after a crash, a
+    /// failure, or a restart continues where it left off. Returns with
+    /// `waiting_on` set when the workflow needs time or user action.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rotation_advance(
+        &mut self,
+        id: &str,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+        provide_value: Option<SecretString>,
+        acknowledge_continued_use: bool,
+    ) -> Result<RotationView> {
+        self.verify_master_password(master_password)?;
+        let mut provide_value = provide_value;
+        // A bounded loop: each iteration performs at most one step.
+        for _ in 0..12 {
+            let rot = crate::rotation::load(&self.conn, id)?;
+            match rot.state.as_str() {
+                crate::rotation::PLANNED => {
+                    return Err(CoreError::InvalidInput(
+                        "the rotation is a dry run; approve it first (`rotation approve`)".into(),
+                    ));
+                }
+                crate::rotation::APPROVED => {
+                    if rot.mode == crate::rotation::MODE_API {
+                        match self.rotation_create_replacement(&rot, master_password, http) {
+                            Ok(detail) => crate::rotation::set_state(
+                                &self.conn,
+                                id,
+                                crate::rotation::REPLACEMENT_STORED,
+                                &detail,
+                            )?,
+                            Err(e) => {
+                                crate::rotation::record_error(&self.conn, id, &e.to_string())?;
+                                return self.rotation_get(id);
+                            }
+                        }
+                    } else if let Some(value) = provide_value.take() {
+                        let detail =
+                            self.rotation_store_replacement(&rot, master_password, value)?;
+                        crate::rotation::set_state(
+                            &self.conn,
+                            id,
+                            crate::rotation::REPLACEMENT_STORED,
+                            &detail,
+                        )?;
+                    } else {
+                        crate::rotation::set_state(
+                            &self.conn,
+                            id,
+                            crate::rotation::AWAITING_MANUAL_KEY,
+                            "waiting for the manually created replacement key",
+                        )?;
+                        return self.rotation_get(id);
+                    }
+                }
+                crate::rotation::AWAITING_MANUAL_KEY => {
+                    let Some(value) = provide_value.take() else {
+                        return self.rotation_get(id);
+                    };
+                    let detail = self.rotation_store_replacement(&rot, master_password, value)?;
+                    crate::rotation::set_state(
+                        &self.conn,
+                        id,
+                        crate::rotation::REPLACEMENT_STORED,
+                        &detail,
+                    )?;
+                }
+                crate::rotation::REPLACEMENT_STORED => {
+                    let plan =
+                        self.sync_plan_create(&rot.credential_id, &format!("rotation {id}"))?;
+                    crate::rotation::set_field(&self.conn, id, "sync_plan_id", Some(&plan.id))?;
+                    crate::rotation::set_state(
+                        &self.conn,
+                        id,
+                        crate::rotation::UPDATING_DESTINATIONS,
+                        &format!(
+                            "sync plan {} created ({} step(s))",
+                            plan.id,
+                            plan.steps.len()
+                        ),
+                    )?;
+                }
+                crate::rotation::UPDATING_DESTINATIONS => {
+                    let plan_id = rot
+                        .sync_plan_id
+                        .clone()
+                        .ok_or(CoreError::VaultCorrupted("rotation lost its sync plan id"))?;
+                    match self.sync_plan_execute(&plan_id, None, master_password, http, runner) {
+                        Ok(plan) if plan.status == crate::syncplan::PLAN_EXECUTED => {
+                            crate::rotation::set_state(
+                                &self.conn,
+                                id,
+                                crate::rotation::DESTINATIONS_VERIFIED,
+                                "every destination step executed and verified",
+                            )?;
+                        }
+                        Ok(plan) => {
+                            crate::rotation::record_error(
+                                &self.conn,
+                                id,
+                                &format!(
+                                    "destination sync is '{}'; fix the failing destination and \
+                                     advance again (only failed steps re-run)",
+                                    plan.status
+                                ),
+                            )?;
+                            return self.rotation_get(id);
+                        }
+                        Err(e) => {
+                            crate::rotation::record_error(&self.conn, id, &e.to_string())?;
+                            return self.rotation_get(id);
+                        }
+                    }
+                }
+                crate::rotation::DESTINATIONS_VERIFIED => {
+                    // Validate the NEW value against the provider before any
+                    // destructive step becomes possible.
+                    match self.validate_credential(&rot.credential_id, http) {
+                        Ok(result) if result.valid => {
+                            crate::rotation::mark_new_value_validated(&self.conn, id)?;
+                            let ends = clock::rfc3339_after(std::time::Duration::from_secs(
+                                (rot.grace_minutes.max(0) as u64) * 60,
+                            ));
+                            crate::rotation::set_field(
+                                &self.conn,
+                                id,
+                                "grace_ends_at",
+                                Some(&ends),
+                            )?;
+                            crate::rotation::set_state(
+                                &self.conn,
+                                id,
+                                crate::rotation::GRACE_PERIOD,
+                                &format!(
+                                    "new value validated ({}); grace/overlap until {ends}",
+                                    result.detail
+                                ),
+                            )?;
+                        }
+                        Ok(result) => {
+                            crate::rotation::record_error(
+                                &self.conn,
+                                id,
+                                &format!(
+                                    "the NEW value failed validation ({}); the old key is \
+                                     untouched — retry, or roll back",
+                                    result.detail
+                                ),
+                            )?;
+                            return self.rotation_get(id);
+                        }
+                        Err(e) => {
+                            crate::rotation::record_error(&self.conn, id, &e.to_string())?;
+                            return self.rotation_get(id);
+                        }
+                    }
+                }
+                crate::rotation::GRACE_PERIOD => {
+                    if let Some(ends) = &rot.grace_ends_at {
+                        if clock::now_rfc3339().as_str() < ends.as_str() {
+                            return self.rotation_get(id);
+                        }
+                    }
+                    // Continued-use detection where provider data exists.
+                    if let (Some(old_key), false) =
+                        (&rot.old_provider_key_id, acknowledge_continued_use)
+                    {
+                        let since = rot
+                            .approved_at
+                            .clone()
+                            .unwrap_or_else(|| rot.created_at.clone());
+                        let used: i64 = self.conn.query_row(
+                            "SELECT count(*) FROM usage_snapshots
+                             WHERE provider = ?1 AND provider_api_key_id = ?2
+                               AND window_start >= ?3 AND source != 'manual'",
+                            params![rot.provider, old_key, since],
+                            |r| r.get(0),
+                        )?;
+                        if used > 0 {
+                            crate::rotation::record_error(
+                                &self.conn,
+                                id,
+                                "provider usage data shows activity attributed to the OLD key \
+                                 since approval (daily buckets — same-day rows may predate the \
+                                 switch). Verify every consumer moved, run `provider sync` for \
+                                 fresh data, then advance with --acknowledge-continued-use",
+                            )?;
+                            return self.rotation_get(id);
+                        }
+                    }
+                    if !self.rotation_disable_old(&rot, id, http)? {
+                        // The disable call failed (error recorded, retryable).
+                        return self.rotation_get(id);
+                    }
+                }
+                crate::rotation::OLD_DISABLED => {
+                    if !rot.new_value_validated {
+                        crate::rotation::record_error(
+                            &self.conn,
+                            id,
+                            "refusing to revoke: the new value was never validated",
+                        )?;
+                        return self.rotation_get(id);
+                    }
+                    match self.rotation_revoke_old(&rot, id, http) {
+                        Ok(true) => {
+                            self.rotation_complete(&rot, id)?;
+                            return self.rotation_get(id);
+                        }
+                        Ok(false) => return self.rotation_get(id), // manual_required
+                        Err(e) => {
+                            crate::rotation::record_error(&self.conn, id, &e.to_string())?;
+                            return self.rotation_get(id);
+                        }
+                    }
+                }
+                _ => return self.rotation_get(id),
+            }
+        }
+        self.rotation_get(id)
+    }
+
+    /// API-mode replacement: create at the provider, store encrypted, link.
+    fn rotation_create_replacement(
+        &mut self,
+        rot: &crate::rotation::Rotation,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<String> {
+        // Idempotency guard: if a new version was already stored (crash after
+        // storing, before the state write), do not create a second key.
+        if rot.new_version.is_some() {
+            return Ok("replacement already stored (recovered)".into());
+        }
+        let admin = self.provider_admin_secret(&rot.provider)?;
+        let cred = self
+            .credential_row_by_id(&rot.credential_id)?
+            .ok_or(CoreError::NotFound {
+                kind: "credential",
+                ident: rot.credential_id.clone(),
+            })?;
+        let connector = self.connector_for(&rot.provider)?;
+        let created = connector.create_credential(
+            http,
+            &admin,
+            &crate::connectors::CreateParams {
+                name: format!("api-tracker-rotation-{}", &rot.id[..8]),
+                provider_project_id: rot.provider_project_id.clone(),
+            },
+        )?;
+        let detail = created.detail.clone();
+        if let Some(key_id) = &created.provider_key_id {
+            crate::rotation::set_field(&self.conn, &rot.id, "new_provider_key_id", Some(key_id))?;
+            self.cache_created_key(&rot.provider, key_id, &created)?;
+        }
+        let stored = self.rotation_store_replacement(rot, master_password, created.value)?;
+        // The rotation itself is the user's confirmation for linking the new
+        // provider-side key id to this credential.
+        if let Some(key_id) = &created.provider_key_id {
+            let _ = self.provider_link_key(&rot.provider, key_id, &cred.id);
+        }
+        Ok(format!("{detail}; {stored}"))
+    }
+
+    /// Store the replacement value (retaining the old version) and record
+    /// old/new version numbers on the rotation.
+    fn rotation_store_replacement(
+        &mut self,
+        rot: &crate::rotation::Rotation,
+        master_password: &SecretString,
+        value: SecretString,
+    ) -> Result<String> {
+        if value.expose().trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "the replacement value must not be empty".into(),
+            ));
+        }
+        let old_version = self.value_version_of(&rot.credential_id)?;
+        let (cred, _warnings) =
+            self.replace_credential_value(&rot.credential_id, master_password, value)?;
+        let new_version = self.value_version_of(&cred.id)?;
+        crate::rotation::set_versions(&self.conn, &rot.id, Some(old_version), new_version)?;
+        Ok(format!(
+            "replacement stored encrypted (v{old_version} retained → v{new_version})"
+        ))
+    }
+
+    /// Disable the old key where the provider supports it; otherwise move on
+    /// honestly (OpenAI/Supabase have no disable state). Returns whether the
+    /// state advanced (false = failed, error recorded, retryable).
+    fn rotation_disable_old(
+        &mut self,
+        rot: &crate::rotation::Rotation,
+        id: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<bool> {
+        let can_disable = crate::providers::find(&rot.provider)
+            .map(|m| {
+                matches!(
+                    m.capabilities.disable_credential.support,
+                    crate::providers::SupportLevel::Implemented
+                )
+            })
+            .unwrap_or(false);
+        match (&rot.old_provider_key_id, can_disable) {
+            (Some(old_key), true) => {
+                let admin = self.provider_admin_secret(&rot.provider)?;
+                let connector = self.connector_for(&rot.provider)?;
+                match connector.disable_credential(
+                    http,
+                    &admin,
+                    rot.provider_project_id.as_deref(),
+                    old_key,
+                ) {
+                    Ok(detail) => {
+                        crate::rotation::set_field(
+                            &self.conn,
+                            id,
+                            "old_disabled_at",
+                            Some(&clock::now_rfc3339()),
+                        )?;
+                        crate::rotation::set_state(
+                            &self.conn,
+                            id,
+                            crate::rotation::OLD_DISABLED,
+                            &format!("old key disabled: {detail}"),
+                        )?;
+                    }
+                    Err(e) => {
+                        crate::rotation::record_error(&self.conn, id, &e.to_string())?;
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => {
+                crate::rotation::set_state(
+                    &self.conn,
+                    id,
+                    crate::rotation::OLD_DISABLED,
+                    "provider has no separate disable step (or no key id); proceeding to \
+                     revocation",
+                )?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Revoke the old key. Returns Ok(true) when revoked, Ok(false) when the
+    /// workflow must wait for manual action.
+    fn rotation_revoke_old(
+        &mut self,
+        rot: &crate::rotation::Rotation,
+        id: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<bool> {
+        let can_revoke = crate::providers::find(&rot.provider)
+            .map(|m| {
+                matches!(
+                    m.capabilities.revoke_credential.support,
+                    crate::providers::SupportLevel::Implemented
+                )
+            })
+            .unwrap_or(false);
+        match (&rot.old_provider_key_id, can_revoke) {
+            (Some(old_key), true) => {
+                let admin = self.provider_admin_secret(&rot.provider)?;
+                let connector = self.connector_for(&rot.provider)?;
+                let detail = connector.revoke_credential(
+                    http,
+                    &admin,
+                    rot.provider_project_id.as_deref(),
+                    old_key,
+                )?;
+                crate::rotation::set_field(
+                    &self.conn,
+                    id,
+                    "old_revoked_at",
+                    Some(&clock::now_rfc3339()),
+                )?;
+                crate::rotation::record_error(&self.conn, id, "")?;
+                crate::rotation::set_state(
+                    &self.conn,
+                    id,
+                    crate::rotation::OLD_DISABLED,
+                    &format!("old key revoked: {detail}"),
+                )?;
+                Ok(true)
+            }
+            _ => {
+                let manage = crate::providers::find(&rot.provider)
+                    .map(|m| m.manage_url.clone())
+                    .unwrap_or_default();
+                crate::rotation::set_state(
+                    &self.conn,
+                    id,
+                    crate::rotation::MANUAL_REQUIRED,
+                    &format!(
+                        "revoke the old key yourself at {manage}, then run \
+                         `rotation complete-manual {id}`"
+                    ),
+                )?;
+                Ok(false)
+            }
+        }
+    }
+
+    fn rotation_complete(&self, rot: &crate::rotation::Rotation, id: &str) -> Result<()> {
+        crate::rotation::set_state(
+            &self.conn,
+            id,
+            crate::rotation::COMPLETED,
+            "rotation completed",
+        )?;
+        crate::rotation::schedule_mark_completed(&self.conn, &rot.credential_id, id)?;
+        let cred = self.credential_row_by_id(&rot.credential_id)?;
+        audit::record(
+            &self.conn,
+            "rotation_completed",
+            cred.as_ref().map(|c| c.project_id.as_str()),
+            Some(&rot.credential_id),
+            &format!("rotation={id}"),
+        )?;
+        Ok(())
+    }
+
+    /// The user confirms they performed the remaining manual provider-side
+    /// steps (e.g. dashboard revocation). Reauthentication-gated.
+    pub fn rotation_complete_manual(
+        &self,
+        id: &str,
+        master_password: &SecretString,
+        confirmation_note: &str,
+    ) -> Result<RotationView> {
+        self.verify_master_password(master_password)?;
+        let rot = crate::rotation::load(&self.conn, id)?;
+        if !matches!(
+            rot.state.as_str(),
+            crate::rotation::MANUAL_REQUIRED | crate::rotation::GRACE_PERIOD
+        ) {
+            return Err(CoreError::InvalidInput(format!(
+                "rotation {id} is '{}'; only manual-required (or grace) rotations can be \
+                 completed manually",
+                rot.state
+            )));
+        }
+        if !rot.new_value_validated {
+            return Err(CoreError::InvalidInput(
+                "refusing: the new value was never validated against the provider".into(),
+            ));
+        }
+        crate::rotation::set_state(
+            &self.conn,
+            id,
+            crate::rotation::COMPLETED,
+            &format!("completed after manual provider-side action: {confirmation_note}"),
+        )?;
+        crate::rotation::schedule_mark_completed(&self.conn, &rot.credential_id, id)?;
+        let cred = self.credential_row_by_id(&rot.credential_id)?;
+        audit::record(
+            &self.conn,
+            "rotation_completed",
+            cred.as_ref().map(|c| c.project_id.as_str()),
+            Some(&rot.credential_id),
+            &format!("rotation={id} manual"),
+        )?;
+        self.rotation_get(id)
+    }
+
+    /// Cancel a rotation that has not yet touched anything destructive.
+    pub fn rotation_cancel(
+        &self,
+        id: &str,
+        master_password: &SecretString,
+    ) -> Result<RotationView> {
+        self.verify_master_password(master_password)?;
+        let rot = crate::rotation::load(&self.conn, id)?;
+        if rot.old_disabled_at.is_some() || rot.old_revoked_at.is_some() {
+            return Err(CoreError::InvalidInput(
+                "the old key was already disabled/revoked; use rollback or complete manually"
+                    .into(),
+            ));
+        }
+        if rot.new_version.is_some() {
+            return Err(CoreError::InvalidInput(
+                "a replacement was already stored; roll back instead of cancelling".into(),
+            ));
+        }
+        crate::rotation::set_state(
+            &self.conn,
+            id,
+            crate::rotation::FAILED,
+            "cancelled by the user before any change",
+        )?;
+        self.rotation_get(id)
+    }
+
+    /// Roll a rotation back: destinations to the old version, the vault
+    /// value to the old value, re-enable a disabled old key where the
+    /// provider supports it, and optionally revoke the key we created.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rotation_rollback(
+        &mut self,
+        id: &str,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+        revoke_new_key: bool,
+    ) -> Result<RotationView> {
+        self.verify_master_password(master_password)?;
+        let rot = crate::rotation::load(&self.conn, id)?;
+        if rot.old_revoked_at.is_some() {
+            return Err(CoreError::InvalidInput(
+                "the old key was REVOKED — that is irreversible at every current provider. \
+                 The new key must stay in service; treat this as forward-fix territory"
+                    .into(),
+            ));
+        }
+        let Some(old_version) = rot.old_version else {
+            return Err(CoreError::InvalidInput(
+                "nothing to roll back: no replacement was stored".into(),
+            ));
+        };
+        crate::rotation::set_state(&self.conn, id, crate::rotation::ROLLING_BACK, "")?;
+        let mut notes: Vec<String> = Vec::new();
+        // 1. Vault value back to the old version (bumps a fresh version —
+        //    the change stays auditable rather than rewriting history).
+        let current = self.value_version_of(&rot.credential_id)?;
+        if Some(current) == rot.new_version {
+            let old_value = self.decrypt_credential_version(&rot.credential_id, old_version)?;
+            self.replace_credential_value(&rot.credential_id, master_password, old_value)?;
+            notes.push(format!("vault value restored from v{old_version}"));
+        } else {
+            notes.push(format!(
+                "vault value left as-is (v{current} is not the rotation's v{})",
+                rot.new_version.unwrap_or(-1)
+            ));
+        }
+        // 2. Destinations back via the rotation's sync plan.
+        if let Some(plan_id) = &rot.sync_plan_id {
+            match self.sync_plan_rollback(plan_id, None, master_password, http, runner) {
+                Ok(_) => notes.push("destinations rolled back".into()),
+                Err(e) => notes.push(format!("destination rollback: {e}")),
+            }
+        }
+        // 3. Re-enable the old key where disable is reversible (Anthropic).
+        if rot.old_disabled_at.is_some() {
+            if let Some(old_key) = &rot.old_provider_key_id {
+                let admin = self.provider_admin_secret(&rot.provider)?;
+                if rot.provider == "anthropic" {
+                    match crate::connectors::Anthropic::set_key_status(
+                        http, &admin, old_key, "active",
+                    ) {
+                        Ok(d) => notes.push(format!("old key re-enabled: {d}")),
+                        Err(e) => notes.push(format!("old key re-enable FAILED: {e}")),
+                    }
+                }
+            }
+        }
+        // 4. Optionally revoke the key this rotation created.
+        if revoke_new_key {
+            if let Some(new_key) = &rot.new_provider_key_id {
+                let admin = self.provider_admin_secret(&rot.provider)?;
+                let connector = self.connector_for(&rot.provider)?;
+                match connector.revoke_credential(
+                    http,
+                    &admin,
+                    rot.provider_project_id.as_deref(),
+                    new_key,
+                ) {
+                    Ok(d) => {
+                        let _ = self.provider_unlink_key(&rot.provider, new_key);
+                        notes.push(format!("new key revoked: {d}"));
+                    }
+                    Err(e) => notes.push(format!("new key revocation FAILED: {e}")),
+                }
+            }
+        }
+        crate::rotation::set_state(
+            &self.conn,
+            id,
+            crate::rotation::ROLLED_BACK,
+            &notes.join("; "),
+        )?;
+        let cred = self.credential_row_by_id(&rot.credential_id)?;
+        audit::record(
+            &self.conn,
+            "rotation_rolled_back",
+            cred.as_ref().map(|c| c.project_id.as_str()),
+            Some(&rot.credential_id),
+            &format!("rotation={id}"),
+        )?;
+        self.rotation_get(id)
+    }
+
+    pub fn rotation_get(&self, id: &str) -> Result<RotationView> {
+        let rot = crate::rotation::load(&self.conn, id)?;
+        self.hydrate_rotation(rot)
+    }
+
+    pub fn rotations(&self, credential: Option<&str>, limit: u32) -> Result<Vec<RotationView>> {
+        let credential_id = match credential {
+            Some(selector) => Some(self.resolve_credential(selector)?.id),
+            None => None,
+        };
+        crate::rotation::list(&self.conn, credential_id.as_deref(), limit)?
+            .into_iter()
+            .map(|r| self.hydrate_rotation(r))
+            .collect()
+    }
+
+    pub fn rotation_events(&self, id: &str) -> Result<Vec<crate::rotation::RotationEvent>> {
+        crate::rotation::load(&self.conn, id)?; // 404 check
+        crate::rotation::events(&self.conn, id)
+    }
+
+    fn hydrate_rotation(&self, rot: crate::rotation::Rotation) -> Result<RotationView> {
+        let (credential_name, project_name) = match self.credential_row_by_id(&rot.credential_id)? {
+            Some(row) => (row.name.clone(), self.project_name_of(&row.project_id)?),
+            None => ("(deleted)".into(), String::new()),
+        };
+        let waiting_on = match rot.state.as_str() {
+            crate::rotation::PLANNED => Some("approval (`rotation approve`)".to_string()),
+            crate::rotation::AWAITING_MANUAL_KEY => {
+                Some("the manually created replacement key (`rotation provide-key`)".to_string())
+            }
+            crate::rotation::GRACE_PERIOD => rot.grace_ends_at.clone().map(|ends| {
+                if clock::now_rfc3339() < ends {
+                    format!("grace/overlap period until {ends}")
+                } else if !rot.last_error.is_empty() {
+                    "resolution of the continued-use warning".to_string()
+                } else {
+                    "the next advance".to_string()
+                }
+            }),
+            crate::rotation::MANUAL_REQUIRED => Some("manual provider-side action".to_string()),
+            _ if !rot.last_error.is_empty() => Some("a retry after the recorded error".to_string()),
+            _ => None,
+        };
+        Ok(RotationView {
+            rotation: rot,
+            credential_name,
+            project_name,
+            waiting_on,
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // Scheduled rotation (intent only; execution is always human-approved)
+    // ------------------------------------------------------------------
+
+    /// Enable a rotation schedule. Only allowed after a manually approved
+    /// rotation has COMPLETED for this credential, so the combination is
+    /// proven to work end to end.
+    pub fn rotation_schedule_set(&self, credential: &str, interval_days: i64) -> Result<()> {
+        let cred = self.resolve_credential(credential)?;
+        let completed: i64 = self.conn.query_row(
+            "SELECT count(*) FROM rotations WHERE credential_id = ?1 AND state = ?2",
+            params![cred.id, crate::rotation::COMPLETED],
+            |r| r.get(0),
+        )?;
+        if completed == 0 {
+            return Err(CoreError::InvalidInput(
+                "scheduling needs one manually approved, successfully COMPLETED rotation for \
+                 this credential first — so the provider/destination combination is proven"
+                    .into(),
+            ));
+        }
+        crate::rotation::schedule_set(&self.conn, &cred.id, interval_days)?;
+        audit::record(
+            &self.conn,
+            "rotation_scheduled",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("every {interval_days} day(s)"),
+        )?;
+        Ok(())
+    }
+
+    pub fn rotation_schedule_remove(&self, credential: &str) -> Result<bool> {
+        let cred = self.resolve_credential(credential)?;
+        crate::rotation::schedule_remove(&self.conn, &cred.id)
+    }
+
+    pub fn rotation_schedules(&self) -> Result<Vec<crate::rotation::RotationSchedule>> {
+        crate::rotation::schedules(&self.conn)
+    }
+
+    /// Monitor rules for rotation: due schedules (with preflight) and
+    /// rotations stuck with an error for more than a day.
+    fn rotation_monitor_alerts(&self, now: &str) -> Result<Vec<alerts::NewAlert>> {
+        use crate::providers::Confidence;
+        let mut out = Vec::new();
+        for schedule in crate::rotation::schedules(&self.conn)? {
+            if !schedule.enabled || schedule.next_due_at.as_str() > now {
+                continue;
+            }
+            let Some(cred) = self.credential_row_by_id(&schedule.credential_id)? else {
+                continue;
+            };
+            // Preflight: the pieces the PROVEN rotation path needs must
+            // still be present. The proven path is the mode of the last
+            // completed rotation (falling back silently from API to manual
+            // would change the workflow fundamentally).
+            let mut problems = Vec::new();
+            let proven_mode: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT mode FROM rotations WHERE credential_id = ?1 AND state = ?2
+                     ORDER BY created_at DESC LIMIT 1",
+                    params![cred.id, crate::rotation::COMPLETED],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if proven_mode.as_deref() == Some(crate::rotation::MODE_API)
+                && self.provider_admin_secret(&cred.provider).is_err()
+            {
+                problems.push("the administrative connection is gone");
+            }
+            if cred.revoked {
+                problems.push("the credential is marked revoked");
+            }
+            let has_active: i64 = self.conn.query_row(
+                "SELECT count(*) FROM rotations WHERE credential_id = ?1
+                 AND state NOT IN (?2, ?3, ?4, ?5)",
+                params![
+                    cred.id,
+                    crate::rotation::COMPLETED,
+                    crate::rotation::ROLLED_BACK,
+                    crate::rotation::FAILED,
+                    crate::rotation::PLANNED
+                ],
+                |r| r.get(0),
+            )?;
+            if has_active > 0 {
+                continue; // a rotation is already in flight
+            }
+            let label = format!("{}/{}", self.project_name_of(&cred.project_id)?, cred.name);
+            if problems.is_empty() {
+                out.push(alerts::NewAlert {
+                    kind: alerts::AlertKind::RotationDue,
+                    severity: alerts::Severity::High,
+                    dedup_key: format!("rotation_due:{}", cred.id),
+                    title: format!("scheduled rotation due: {label}"),
+                    detail: format!(
+                        "the rotation schedule (every {} day(s)) is due since {}. Nothing                          runs automatically: start it with `rotation plan {label}` and                          approve it.",
+                        schedule.interval_days, schedule.next_due_at
+                    ),
+                    evidence: format!("next_due_at={}", schedule.next_due_at),
+                    confidence: Confidence::High,
+                    recommended_action: "plan, review, and approve the rotation".into(),
+                    project_id: Some(cred.project_id.clone()),
+                    credential_id: Some(cred.id.clone()),
+                    observed_at: now.to_string(),
+                });
+            } else {
+                // Preflight failed: pause the schedule and say why.
+                let reason = problems.join("; ");
+                crate::rotation::schedule_pause(&self.conn, &cred.id, &reason)?;
+                out.push(alerts::NewAlert {
+                    kind: alerts::AlertKind::RotationDue,
+                    severity: alerts::Severity::High,
+                    dedup_key: format!("rotation_due:{}", cred.id),
+                    title: format!("scheduled rotation PAUSED: {label}"),
+                    detail: format!(
+                        "the schedule came due but preflight failed: {reason}. The schedule                          is paused; fix the problem and re-enable it with `rotation schedule`."
+                    ),
+                    evidence: reason.clone(),
+                    confidence: Confidence::High,
+                    recommended_action: "fix the preflight problem, then re-enable the schedule"
+                        .into(),
+                    project_id: Some(cred.project_id.clone()),
+                    credential_id: Some(cred.id.clone()),
+                    observed_at: now.to_string(),
+                });
+            }
+        }
+        // Stuck rotations: active, error recorded, untouched for 24h+.
+        let day_ago = clock::to_rfc3339(clock::now() - time::Duration::days(1));
+        for rot in crate::rotation::active(&self.conn)? {
+            if rot.updated_at < day_ago {
+                let cred_label = self
+                    .credential_row_by_id(&rot.credential_id)?
+                    .map(|c| c.name)
+                    .unwrap_or_else(|| rot.credential_id.clone());
+                out.push(alerts::NewAlert {
+                    kind: alerts::AlertKind::RotationStuck,
+                    severity: alerts::Severity::Medium,
+                    dedup_key: format!("rotation_stuck:{}", rot.id),
+                    title: format!("rotation stuck: {cred_label}"),
+                    detail: format!(
+                        "rotation {} has been '{}' since {}{}. Resume it with `rotation                          advance`, or roll it back.",
+                        rot.id,
+                        rot.state,
+                        rot.updated_at,
+                        if rot.last_error.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (last error: {})", rot.last_error)
+                        }
+                    ),
+                    evidence: format!("state={} updated_at={}", rot.state, rot.updated_at),
+                    confidence: Confidence::High,
+                    recommended_action: "advance, roll back, or cancel the rotation".into(),
+                    project_id: None,
+                    credential_id: Some(rot.credential_id.clone()),
+                    observed_at: now.to_string(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    // ------------------------------------------------------------------
+    // Temporary local access grants (docs/decisions/0013)
+    // ------------------------------------------------------------------
+
+    /// Create a temporary access grant. This is a LOCAL control: it bounds
+    /// what `run` will inject on this machine; it never constrains the
+    /// provider-side credential.
+    #[allow(clippy::too_many_arguments)]
+    pub fn access_grant_create(
+        &self,
+        project: &str,
+        label: &str,
+        credentials: &[String],
+        ttl_minutes: u64,
+        max_launches: i64,
+        max_duration_secs: Option<i64>,
+        budget_warn_dollars: Option<&str>,
+    ) -> Result<crate::access::AccessGrant> {
+        let project_row = self.project_row_by_ident(project)?;
+        let mut credential_ids = Vec::new();
+        for selector in credentials {
+            let cred = self.resolve_credential(selector)?;
+            if cred.project_id != project_row.id {
+                return Err(CoreError::InvalidInput(format!(
+                    "credential '{selector}' is not in project '{}'",
+                    project_row.name
+                )));
+            }
+            credential_ids.push(cred.id);
+        }
+        let budget_warn_micros = budget_warn_dollars
+            .map(crate::pricing::dollars_to_micros)
+            .transpose()?;
+        let id = crate::access::insert(
+            &self.conn,
+            &project_row.id,
+            label,
+            &credential_ids,
+            ttl_minutes,
+            max_launches,
+            max_duration_secs,
+            budget_warn_micros,
+        )?;
+        audit::record(
+            &self.conn,
+            "access_grant_created",
+            Some(&project_row.id),
+            None,
+            &format!(
+                "grant={id} ttl_minutes={ttl_minutes} max_launches={max_launches}                  credentials={}",
+                credential_ids.len()
+            ),
+        )?;
+        crate::access::get(&self.conn, &id)
+    }
+
+    pub fn access_grants(&self, include_inactive: bool) -> Result<Vec<crate::access::AccessGrant>> {
+        crate::access::list(&self.conn, include_inactive)
+    }
+
+    /// Revoke a grant immediately. Returns the running injection sessions
+    /// launched under it (id, pid) so the caller can terminate them. The
+    /// caller must be honest: values already injected into a process stay
+    /// in that process's environment until it exits.
+    pub fn access_grant_end(
+        &self,
+        id: &str,
+    ) -> Result<(crate::access::AccessGrant, Vec<(String, i64)>)> {
+        let grant = crate::access::revoke(&self.conn, id)?;
+        let running = crate::inject::running_sessions_for_grant(&self.conn, id)?;
+        audit::record(
+            &self.conn,
+            "access_grant_revoked",
+            Some(&grant.project_id),
+            None,
+            &format!("grant={id} running_sessions={}", running.len()),
+        )?;
+        Ok((grant, running))
+    }
+
+    /// Build an injection under a grant: validates and atomically consumes a
+    /// launch, restricts credentials to the grant's subset, and returns any
+    /// advisory budget warning. The caller records the child PID afterwards.
+    pub fn build_injection_with_grant(
+        &self,
+        grant_id: &str,
+        command_label: &str,
+    ) -> Result<GrantInjection> {
+        let grant = crate::access::consume_launch(&self.conn, grant_id)?;
+        let project_row = self.project_row_by_ident(&grant.project_id)?;
+        // Resolve the env mapping set, filtered to the grant's credentials.
+        let mappings = crate::inject::list_mappings(&self.conn, &project_row.id)?;
+        let selected: Vec<_> = if grant.credential_ids.is_empty() {
+            mappings
+        } else {
+            let allowed: HashSet<&str> = grant.credential_ids.iter().map(|s| s.as_str()).collect();
+            mappings
+                .into_iter()
+                .filter(|m| allowed.contains(m.credential_id.as_str()))
+                .collect()
+        };
+        if selected.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "the grant matches no configured env mappings; map its credentials first                  (`mapping set`)"
+                    .into(),
+            ));
+        }
+        // Decrypt exactly the selected mappings — never the whole project.
+        let mut env: Vec<(String, SecretString)> = Vec::new();
+        for mapping in &selected {
+            let value = self.decrypt_value(&mapping.credential_id)?;
+            env.push((mapping.env_var.clone(), value));
+        }
+        let var_names: Vec<String> = env.iter().map(|(v, _)| v.clone()).collect();
+        let session_id = crate::inject::start_session(
+            &self.conn,
+            &project_row.id,
+            &format!("[grant {grant_id}] {command_label}"),
+            &var_names,
+        )?;
+        audit::record(
+            &self.conn,
+            "process_injection_started",
+            Some(&project_row.id),
+            None,
+            &format!("grant={grant_id} vars={}", var_names.join(",")),
+        )?;
+        self.conn.execute(
+            "UPDATE process_sessions SET grant_id = ?1 WHERE id = ?2",
+            params![grant_id, session_id],
+        )?;
+        // Advisory budget warning where activity data exists (local,
+        // advisory-only — it does not and cannot stop provider-side spend).
+        let mut warnings = Vec::new();
+        if let Some(warn_at) = grant.budget_warn_micros {
+            let cost_source = self.budget_cost_source()?;
+            let mut total: i64 = 0;
+            let credential_ids: Vec<String> = if grant.credential_ids.is_empty() {
+                selected.iter().map(|m| m.credential_id.clone()).collect()
+            } else {
+                grant.credential_ids.clone()
+            };
+            for cred_id in &credential_ids {
+                let report =
+                    crate::budget::credential_report(&self.conn, cred_id, cred_id, cost_source)?;
+                total += report.used_micros;
+            }
+            if total >= warn_at {
+                warnings.push(format!(
+                    "ADVISORY: month-to-date recorded cost for the granted credential(s) is                      {} — at or past the grant's warning threshold {}. This is a local                      observation only; it does not cap provider-side spend.",
+                    crate::usage::format_micros(total),
+                    crate::usage::format_micros(warn_at)
+                ));
+            }
+        }
+        let max_duration_secs = grant.max_duration_secs;
+        Ok(GrantInjection {
+            env,
+            session_id,
+            grant,
+            max_duration_secs,
+            warnings,
+        })
+    }
+
+    /// Record the spawned child PID for a session (termination support).
+    pub fn record_session_pid(
+        &self,
+        session_id: &str,
+        pid: u32,
+        grant_id: Option<&str>,
+    ) -> Result<()> {
+        crate::inject::set_session_pid(&self.conn, session_id, pid, grant_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Provider-created test keys + provider-side revocation
+    // ------------------------------------------------------------------
+
+    /// Create a provider-side key for quick testing and store it encrypted.
+    /// Reauthentication-gated (it creates real provider-side material).
+    /// Returns the credential plus honest enforcement notes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn test_key_create(
+        &mut self,
+        project: &str,
+        provider: &str,
+        provider_project_id: Option<&str>,
+        name: &str,
+        ttl_minutes: u64,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<(Credential, Vec<String>)> {
+        self.verify_master_password(master_password)?;
+        if ttl_minutes == 0 || ttl_minutes > 60 * 24 * 90 {
+            return Err(CoreError::InvalidInput(
+                "the test-key reminder lifetime must be between 1 minute and 90 days".into(),
+            ));
+        }
+        let provider = crate::providers::normalize(provider);
+        let admin = self.provider_admin_secret(&provider)?;
+        let connector = self.connector_for(&provider)?;
+        let created = connector.create_credential(
+            http,
+            &admin,
+            &crate::connectors::CreateParams {
+                name: name.to_string(),
+                provider_project_id: provider_project_id.map(str::to_string),
+            },
+        )?;
+        let expires = clock::rfc3339_after(std::time::Duration::from_secs(ttl_minutes * 60));
+        if let Some(key_id) = &created.provider_key_id {
+            self.cache_created_key(&provider, key_id, &created)?;
+        }
+        let created_key_id = created.provider_key_id.clone();
+        let created_detail = created.detail.clone();
+
+        let (credential, _warnings) = self.add_credential(AddCredential {
+            project: project.to_string(),
+            provider: provider.clone(),
+            name: name.to_string(),
+            environment: Environment::Test,
+            value: created.value,
+            credential_type: Some(created.credential_type.to_string()),
+            key_created_at: None,
+            expires_at: Some(expires.clone()),
+            docs_url: String::new(),
+            notes: format!(
+                "Test key created by API Tracker ({created_detail}). The expiration is a \
+                 LOCAL reminder — this provider's keys stay valid until revoked."
+            ),
+        })?;
+        if let Some(key_id) = &created_key_id {
+            let _ = self.provider_link_key(&provider, key_id, &credential.id);
+        }
+        audit::record(
+            &self.conn,
+            "test_key_created",
+            Some(&credential.project_id),
+            Some(&credential.id),
+            &format!("provider={provider} ttl_minutes={ttl_minutes}"),
+        )?;
+        let notes = vec![
+            format!(
+                "PROVIDER-ENFORCED: the key is scoped to provider project '{}' — usage and                  cost are attributable there.",
+                created.provider_project_id.as_deref().unwrap_or("?")
+            ),
+            format!(
+                "NOT provider-enforced: the {ttl_minutes}-minute expiry is a LOCAL reminder.                  The provider key remains valid until you revoke it                  (`key provider-revoke {}/{}`).",
+                credential.project_name, credential.name
+            ),
+            "ADVISORY-ONLY: budget warnings observe recorded usage; they cannot cap spend."
+                .to_string(),
+        ];
+        Ok((credential, notes))
+    }
+
+    /// Remember a key we created (id, project, name) so later operations —
+    /// revocation in particular — know which provider project it lives in.
+    fn cache_created_key(
+        &self,
+        provider: &str,
+        key_id: &str,
+        created: &crate::connectors::CreatedCredential,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO provider_side_keys
+                 (provider, api_key_id, provider_project_id, name, redacted_value, synced_at)
+             VALUES (?1, ?2, ?3, ?4, '', ?5)",
+            params![
+                provider,
+                key_id,
+                created.provider_project_id,
+                created.detail,
+                clock::now_rfc3339(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke a credential AT THE PROVIDER (via its linked provider-side key
+    /// id) and mark it revoked locally. Reauthentication-gated; the caller
+    /// must confirm first — this is destructive and usually irreversible.
+    pub fn credential_provider_revoke(
+        &mut self,
+        selector: &str,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<String> {
+        self.verify_master_password(master_password)?;
+        let cred = self.resolve_credential(selector)?;
+        let key_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT provider_api_key_id FROM provider_key_links
+                 WHERE provider = ?1 AND credential_id = ?2",
+                params![cred.provider, cred.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(key_id) = key_id else {
+            let manage = crate::providers::find(&cred.provider)
+                .map(|m| m.manage_url.clone())
+                .unwrap_or_default();
+            return Err(CoreError::InvalidInput(format!(
+                "no provider-side key id is linked to this credential; link one                  (`provider link`) or revoke it at {manage}"
+            )));
+        };
+        let project_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT provider_project_id FROM provider_side_keys
+                 WHERE provider = ?1 AND api_key_id = ?2",
+                params![cred.provider, key_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let admin = self.provider_admin_secret(&cred.provider)?;
+        let connector = self.connector_for(&cred.provider)?;
+        let detail = connector.revoke_credential(http, &admin, project_id.as_deref(), &key_id)?;
+        self.update_credential(
+            &cred.id,
+            UpdateCredential {
+                revoked: Some(true),
+                ..Default::default()
+            },
+        )?;
+        audit::record(
+            &self.conn,
+            "credential_provider_revoked",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("provider_key={key_id}"),
+        )?;
+        Ok(detail)
+    }
+
+    // ------------------------------------------------------------------
+    // Credential lifecycle timeline
+    // ------------------------------------------------------------------
+
+    /// A merged, chronological lifecycle view for one credential: audit
+    /// events (creation, replacement, validation, reveal, export,
+    /// permission snapshots, destination sync, rotation milestones),
+    /// activity events (disable/enable), retained versions, and rotation
+    /// transitions. Metadata only — never values.
+    pub fn credential_timeline(&self, selector: &str) -> Result<Vec<TimelineEvent>> {
+        let cred = self.resolve_credential(selector)?;
+        let mut out: Vec<TimelineEvent> = Vec::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT at, event, detail FROM audit_events WHERE credential_id = ?1
+             ORDER BY at",
+        )?;
+        let rows = stmt.query_map([&cred.id], |r| {
+            Ok(TimelineEvent {
+                at: r.get(0)?,
+                kind: r.get(1)?,
+                detail: r.get(2)?,
+                source: "audit".into(),
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT at, kind, detail FROM activity_events WHERE credential_id = ?1
+             ORDER BY at",
+        )?;
+        let rows = stmt.query_map([&cred.id], |r| {
+            Ok(TimelineEvent {
+                at: r.get(0)?,
+                kind: r.get(1)?,
+                detail: r.get(2)?,
+                source: "activity".into(),
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT created_at, version, reason FROM credential_versions
+             WHERE credential_id = ?1 ORDER BY version",
+        )?;
+        let rows = stmt.query_map([&cred.id], |r| {
+            let version: i64 = r.get(1)?;
+            let reason: String = r.get(2)?;
+            Ok(TimelineEvent {
+                at: r.get(0)?,
+                kind: "version_retained".into(),
+                detail: format!("v{version} retained ({reason})"),
+                source: "versions".into(),
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT e.at, e.to_state, e.detail FROM rotation_events e
+             JOIN rotations r ON r.id = e.rotation_id
+             WHERE r.credential_id = ?1 ORDER BY e.at",
+        )?;
+        let rows = stmt.query_map([&cred.id], |r| {
+            let state: String = r.get(1)?;
+            Ok(TimelineEvent {
+                at: r.get(0)?,
+                kind: format!("rotation:{state}"),
+                detail: r.get(2)?,
+                source: "rotation".into(),
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        out.sort_by(|a, b| a.at.cmp(&b.at));
+        Ok(out)
+    }
+}
+
+/// A grant-authorized injection, ready to spawn. Debug omits the env.
+pub struct GrantInjection {
+    pub env: Vec<(String, SecretString)>,
+    pub session_id: String,
+    pub grant: crate::access::AccessGrant,
+    pub max_duration_secs: Option<i64>,
+    pub warnings: Vec<String>,
+}
+
+impl std::fmt::Debug for GrantInjection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GrantInjection")
+            .field("session_id", &self.session_id)
+            .field("grant", &self.grant.id)
+            .field(
+                "env_vars",
+                &self.env.iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// One event in a credential's merged lifecycle timeline (metadata only).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TimelineEvent {
+    pub at: String,
+    pub kind: String,
+    pub detail: String,
+    pub source: String,
+}
+
+/// A rotation with display context and what it is waiting on.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RotationView {
+    #[serde(flatten)]
+    pub rotation: crate::rotation::Rotation,
+    pub credential_name: String,
+    pub project_name: String,
+    pub waiting_on: Option<String>,
 }
 
 /// A provider connection's stored state (no secrets; the key is masked).
@@ -5221,6 +6726,7 @@ impl CredentialRow {
             marked_invalid: self.marked_invalid,
             possibly_exposed: self.possibly_exposed,
             exposure_note: self.exposure_note.clone(),
+            provider_expires_at: self.provider_expires_at.clone(),
         }
     }
 }

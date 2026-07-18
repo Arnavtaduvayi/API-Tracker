@@ -408,6 +408,88 @@ CREATE TABLE sync_plan_steps (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 6,
+        name: "rotation workflows, access grants, provider expiry, schedules",
+        sql: r#"
+-- Expiration reported by the PROVIDER (e.g. GitHub's token-expiration
+-- header), distinct from the user-entered expires_at.
+ALTER TABLE credentials ADD COLUMN provider_expires_at TEXT;
+
+-- Durable credential-rotation workflows. Values never appear here — only
+-- version NUMBERS, provider-side ids, and state. Survives restarts; every
+-- transition is recorded in rotation_events.
+CREATE TABLE rotations (
+    id                  TEXT PRIMARY KEY,
+    credential_id       TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    provider            TEXT NOT NULL,
+    state               TEXT NOT NULL,
+    mode                TEXT NOT NULL,
+    note                TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    approved_at         TEXT,
+    old_version         INTEGER,
+    new_version         INTEGER,
+    sync_plan_id        TEXT,
+    grace_minutes       INTEGER NOT NULL DEFAULT 0,
+    grace_ends_at       TEXT,
+    old_provider_key_id TEXT,
+    new_provider_key_id TEXT,
+    provider_project_id TEXT,
+    new_value_validated INTEGER NOT NULL DEFAULT 0,
+    old_disabled_at     TEXT,
+    old_revoked_at      TEXT,
+    last_error          TEXT NOT NULL DEFAULT '',
+    manual_instructions TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE INDEX idx_rotations_credential ON rotations(credential_id);
+
+CREATE TABLE rotation_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    rotation_id TEXT NOT NULL REFERENCES rotations(id) ON DELETE CASCADE,
+    at          TEXT NOT NULL,
+    from_state  TEXT NOT NULL,
+    to_state    TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Scheduled rotation: recorded intent + due dates. Execution is NEVER
+-- automatic — due schedules raise an alert/notification and every
+-- destructive step still requires reauthentication and confirmation.
+CREATE TABLE rotation_schedules (
+    credential_id TEXT PRIMARY KEY REFERENCES credentials(id) ON DELETE CASCADE,
+    interval_days INTEGER NOT NULL,
+    next_due_at   TEXT NOT NULL,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    paused_reason TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    last_completed_rotation_id TEXT
+) STRICT;
+
+-- Child PID and grant linkage for injection sessions, so a temporary
+-- access session can be terminated and audited. Names/ids only.
+ALTER TABLE process_sessions ADD COLUMN pid INTEGER;
+ALTER TABLE process_sessions ADD COLUMN grant_id TEXT;
+
+-- Temporary LOCAL access grants for secure process injection. These bound
+-- what `api-tracker run` will inject and for how long; they do not (and
+-- never claim to) constrain the provider-side credential.
+CREATE TABLE access_grants (
+    id                 TEXT PRIMARY KEY,
+    project_id         TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    label              TEXT NOT NULL DEFAULT '',
+    credential_ids     TEXT NOT NULL DEFAULT '',
+    expires_at         TEXT NOT NULL,
+    max_launches       INTEGER NOT NULL DEFAULT 0,
+    launches_used      INTEGER NOT NULL DEFAULT 0,
+    max_duration_secs  INTEGER,
+    budget_warn_micros INTEGER,
+    created_at         TEXT NOT NULL,
+    revoked_at         TEXT
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

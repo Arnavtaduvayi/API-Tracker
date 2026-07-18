@@ -101,6 +101,8 @@ pub struct Credential {
     pub updated_at: String,
     pub key_created_at: Option<String>,
     pub expires_at: Option<String>,
+    /// Expiration reported by the provider (recorded during validation).
+    pub provider_expires_at: Option<String>,
     pub last_validated_at: Option<String>,
     pub last_used_at: Option<String>,
     pub docs_url: String,

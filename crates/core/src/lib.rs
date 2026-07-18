@@ -20,6 +20,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod activity;
 pub mod alerts;
 pub mod audit;
@@ -45,6 +46,7 @@ pub mod permissions;
 pub mod pricing;
 pub mod providers;
 pub mod reuse;
+pub mod rotation;
 pub mod scanner;
 pub mod secret;
 pub mod session;

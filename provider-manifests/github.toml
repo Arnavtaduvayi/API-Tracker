@@ -25,7 +25,7 @@ regex = "gh[posru]_[A-Za-z0-9]{36,}"
 confidence = "high"
 
 [capabilities]
-validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated GET /user (or /rate_limit) confirms the token works." }
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated GET /user confirms the token works; the provider-reported token expiration header is recorded when present." }
 fetch_metadata = { support = "implemented", attribution = "exact_credential", note = "GET / returns X-OAuth-Scopes and X-RateLimit headers for classic tokens." }
 fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "account_level", note = "The Enhanced Billing API reports metered usage at user/org/enterprise account level, never per token." }
 read_permissions = { support = "implemented", attribution = "exact_credential", note = "Classic tokens expose scopes via the X-OAuth-Scopes response header; fine-grained token permissions are not enumerable via the API." }

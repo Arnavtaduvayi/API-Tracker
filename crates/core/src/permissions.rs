@@ -71,6 +71,50 @@ pub fn normalize_github(raw: &[String]) -> NormalizedPermissions {
     p
 }
 
+/// Classify a Supabase key role. The raw "scope" is the documented key
+/// type (secret / service_role / publishable / anon / personal access
+/// token); Supabase has no finer per-key scopes.
+pub fn normalize_supabase(raw: &[String]) -> NormalizedPermissions {
+    let mut p = NormalizedPermissions::default();
+    for scope in raw {
+        let lower = scope.trim().to_ascii_lowercase();
+        match lower.as_str() {
+            "secret_key" | "service_role_key" | "service_role" | "secret" => {
+                p.write.push(scope.clone());
+                p.sensitive.push(scope.clone());
+            }
+            "personal_access_token" | "management" => {
+                p.admin.push(scope.clone());
+                p.sensitive.push(scope.clone());
+            }
+            "publishable_key" | "anon_key" | "publishable" | "anon" => {
+                p.read.push(scope.clone());
+            }
+            _ => p.write.push(scope.clone()),
+        }
+    }
+    p.summary = match p.admin.first().or(p.sensitive.first()).or(p.read.first()) {
+        Some(_) if !p.admin.is_empty() => {
+            "management token: full account/project administration".to_string()
+        }
+        Some(_) if !p.sensitive.is_empty() => {
+            "server key: full data access, BYPASSES row-level security".to_string()
+        }
+        Some(_) => "client key: safe for browsers, subject to row-level security".to_string(),
+        None => summarize(&p, raw.len()),
+    };
+    p
+}
+
+/// Dispatch normalization by provider; unknown providers get the cautious
+/// GitHub-style heuristic.
+pub fn normalize_for(provider: &str, raw: &[String]) -> NormalizedPermissions {
+    match provider {
+        "supabase" => normalize_supabase(raw),
+        _ => normalize_github(raw),
+    }
+}
+
 fn summarize(p: &NormalizedPermissions, total: usize) -> String {
     if total == 0 {
         return "no scopes are readable for this credential".to_string();
