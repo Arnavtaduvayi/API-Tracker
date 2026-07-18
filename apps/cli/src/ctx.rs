@@ -121,6 +121,11 @@ fn prompt_hidden(label: &str) -> Result<SecretString> {
     Ok(SecretString::new(value))
 }
 
+/// A hidden one-off secret prompt (destination credentials etc.).
+pub fn prompt_secret(label: &str) -> Result<SecretString> {
+    prompt_hidden(label)
+}
+
 /// The master password, for unlock and reauthentication.
 pub fn master_password() -> Result<SecretString> {
     if std::env::var_os(ENV_PASSWORD).is_some() {

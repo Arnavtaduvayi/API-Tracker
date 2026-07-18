@@ -7,12 +7,15 @@
 mod alerts_cmd;
 mod backup_cmd;
 mod ctx;
+mod destination_cmd;
+mod env_cmd;
 mod key_cmd;
 mod project_cmd;
 mod provider_cmd;
 mod render;
 mod run_cmd;
 mod scan_cmd;
+mod sync_cmd;
 mod usage_cmd;
 mod vault_cmd;
 
@@ -89,6 +92,15 @@ enum Commands {
     Mapping(usage_cmd::MappingCmd),
     /// Run a command with credentials injected into its environment.
     Run(run_cmd::RunArgs),
+    /// .env governance: discover, preview, import, drift, export, cleanup.
+    #[command(subcommand)]
+    Env(env_cmd::EnvCmd),
+    /// Secret destinations (keychain, AWS, GitHub Actions, Vercel, ...).
+    #[command(subcommand)]
+    Destination(destination_cmd::DestinationCmd),
+    /// Synchronization plans for credential value changes.
+    #[command(subcommand)]
+    Sync(sync_cmd::SyncCmd),
     /// Encrypted vault backups.
     #[command(subcommand)]
     Backup(backup_cmd::BackupCmd),
@@ -123,6 +135,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Activity(cmd) => usage_cmd::activity(&ctx, cmd),
         Commands::Mapping(cmd) => usage_cmd::mapping(&ctx, cmd),
         Commands::Run(args) => run_cmd::run(&ctx, args),
+        Commands::Env(cmd) => env_cmd::run(&ctx, cmd),
+        Commands::Destination(cmd) => destination_cmd::run(&ctx, cmd),
+        Commands::Sync(cmd) => sync_cmd::run(&ctx, cmd),
         Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
     }
 }
