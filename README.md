@@ -8,12 +8,25 @@ Think of it as a folder system for API keys: a **project** is a folder, each
 state each key is in — expired, expiring soon, unused, stale, reused across
 projects — with the reason and evidence for every claim.
 
-Everything stays on your computer. There is no account, no cloud service, no
-telemetry, and no API Tracker server. The only network traffic the finished
-product will ever produce is direct traffic between your machine and API
-providers you explicitly configure (not implemented yet — see status below).
+Everything stays on your computer. There is **no account**, no cloud service, no
+telemetry, and no API Tracker server. The only network traffic API Tracker ever
+produces is direct traffic between your machine and API providers (or
+documentation pages) you explicitly configure — your secrets are never uploaded
+to an API Tracker server.
 
-## Status: early, working foundation
+> **Public alpha.** API Tracker is usable and well-tested, but it is alpha
+> software: evaluate it carefully before storing highly sensitive production
+> credentials. Local-first reduces exposure but does **not** eliminate
+> local-device risks (malware, an unlocked machine, memory inspection) — see
+> [SECURITY.md](SECURITY.md) and [THREAT_MODEL.md](THREAT_MODEL.md). Provider
+> capability and usage-attribution precision **vary by provider** — see the
+> [provider support matrix](docs/PROVIDER_SUPPORT.md).
+>
+> Guides: [Install](docs/INSTALL.md) · [Provider support](docs/PROVIDER_SUPPORT.md)
+> · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Backup & recovery](docs/BACKUP_RECOVERY.md)
+> · [Packaging/signing](docs/PACKAGING.md) · [Changelog](CHANGELOG.md)
+
+## Status: working alpha
 
 Implemented and tested today:
 
@@ -39,11 +52,32 @@ Implemented and tested today:
   to one encrypted value instead of a duplicate copy.
 - **Encrypted backups** — create/verify/restore a single password-protected
   backup file; restore never silently overwrites a vault.
-- **Provider catalog** — version-controlled TOML manifests for OpenAI,
-  Anthropic, GitHub, Stripe, and Supabase, each with official links and an
-  **honest capability matrix** (support level + admin-credential + attribution
-  granularity). No provider network connector is implemented yet; every
-  capability is labeled accordingly (see `docs/decisions/0008-...`).
+- **Provider catalog + connectors** — version-controlled TOML manifests for
+  OpenAI, Anthropic, GitHub, Stripe, and Supabase with an **honest capability
+  matrix**. Implemented: credential **validation** (all five), GitHub
+  **metadata + permissions**, OpenAI/Anthropic **usage** sync (admin key,
+  account level), Stripe/Supabase metadata. Unimplemented capabilities link to
+  the official page instead of faking it. See the
+  [provider support matrix](docs/PROVIDER_SUPPORT.md).
+- **Usage, cost & budgets** — normalized usage snapshots with honest
+  attribution (account-level provider data is never shown as exact per-key);
+  estimated costs from a versioned pricing table (source + retrieval date +
+  staleness) with manual overrides; project/credential budgets with month-end
+  projection and over-budget alerts.
+- **Permissions** — raw scopes plus a normalized read/write/admin/sensitive
+  view; read-only GitHub scope sync.
+- **Suspicious-activity rules** — over-budget, cost-spike, and
+  usage-after-disabled, each with evidence and a comparison period.
+- **Secure process injection** — `api-tracker run --project P [--credential C
+  --env VAR] -- cmd` injects only that project's chosen credentials into the
+  child's environment; it never writes a `.env` or prints values, refuses
+  unrelated credentials, and records a process session (names only).
+- **Local repository scanning** — working-tree, staged, and Git-history scans
+  detect secrets via provider key patterns, known secret env-var names, and
+  calibrated entropy. Findings are redacted, show file/line/provider/
+  confidence, are matched against your vault (marking matches possibly
+  exposed), and can be suppressed with a required reason. Nothing leaves the
+  machine.
 - **Local repository scanning** — working-tree, staged, and Git-history scans
   detect secrets via provider key patterns, known secret env-var names, and
   calibrated entropy. Findings are redacted, show file/line/provider/
@@ -65,11 +99,12 @@ Implemented and tested today:
 - **Auto-lock** — configurable inactivity lock for the desktop app and CLI
   sessions.
 
-Not implemented yet (planned, see `docs/PRODUCT_SPEC.md`): provider API
-connectors (validation, usage, cost, permission changes), usage/cost
-dashboards, and packaged/signed installers. The documentation watcher is the
-only outbound network component; provider connectors remain future work and
-the catalog marks nothing as implemented.
+Not implemented yet (planned, see `docs/PRODUCT_SPEC.md`): programmatic
+permission *changes* and credential create/rotate/revoke (no provider offers a
+safe documented per-key method today — the app links to the official page
+instead); per-key usage attribution where the provider only exposes
+account/project-level data; and **signed/notarized** installers (the alpha
+artifacts are unsigned — see [docs/PACKAGING.md](docs/PACKAGING.md)).
 
 ## Install and build
 
@@ -132,6 +167,19 @@ api-tracker alerts list
 api-tracker alerts acknowledge <id> && api-tracker alerts resolve <id>
 api-tracker provider watch-docs openai         # watch official docs pages
 api-tracker provider check-docs openai         # conditional request, direct
+
+# Validate, sync usage, budget, and inspect permissions
+api-tracker key validate my-app/openai-main    # direct provider request
+api-tracker key permissions my-app/gh --sync   # e.g. GitHub scopes
+api-tracker provider connect openai my-app/admin-key   # admin key for usage
+api-tracker provider sync openai               # sync org-level usage
+api-tracker usage report --project my-app      # usage + estimated cost
+api-tracker budget set --project my-app --amount 50.00
+api-tracker activity list
+
+# Run a command with exactly one credential injected (never written to disk)
+api-tracker run --project my-app --credential my-app/openai-main \
+    --env OPENAI_API_KEY -- npm run dev
 
 api-tracker lock
 ```
