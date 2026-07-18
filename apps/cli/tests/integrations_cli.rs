@@ -339,3 +339,154 @@ fn walk(dir: &std::path::Path) -> Vec<PathBuf> {
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
+
+// ---------------------------------------------------------------------------
+// OpenAI administrative connection (milestone: real usage sync)
+// ---------------------------------------------------------------------------
+
+const FAKE_ADMIN: &str = "sk-admin-FAKE-TEST-NOT-A-REAL-KEY-000000000001";
+
+#[test]
+fn openai_admin_connect_status_disconnect_never_reveal_the_key() {
+    let v = TestVault::new();
+
+    // Connect non-interactively: the key arrives via the environment and is
+    // stored WITHOUT a live validation request (--no-verify).
+    v.cmd()
+        .env("API_TRACKER_PROVIDER_ADMIN_KEY", FAKE_ADMIN)
+        .args([
+            "provider",
+            "connect",
+            "openai",
+            "--no-verify",
+            "--org",
+            "test-org",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Connected OpenAI"))
+        .stdout(predicate::str::contains(FAKE_ADMIN).not())
+        .stderr(predicate::str::contains("ADMINISTRATIVE"))
+        .stderr(predicate::str::contains(FAKE_ADMIN).not());
+
+    // Status shows a masked key, the org label, and staleness info — never
+    // the value, in either text or JSON output.
+    v.cmd()
+        .args(["provider", "connection-status", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("administrative"))
+        .stdout(predicate::str::contains("test-org"))
+        .stdout(predicate::str::contains(FAKE_ADMIN).not());
+    v.cmd()
+        .args(["--json", "provider", "connection-status", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(FAKE_ADMIN).not());
+
+    // The key is nowhere on disk in plaintext.
+    for f in walk(&v.data_dir) {
+        let bytes = std::fs::read(&f).unwrap_or_default();
+        assert!(
+            !contains(&bytes, FAKE_ADMIN.as_bytes()),
+            "admin key stored in plaintext in {}",
+            f.display()
+        );
+    }
+
+    // Disconnect requires confirmation (--yes) and reauthentication (the
+    // master password comes from the environment here).
+    v.cmd()
+        .args(["provider", "disconnect", "openai", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Disconnected OpenAI"));
+    v.cmd()
+        .args(["provider", "connection-status", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(not connected)"));
+}
+
+#[test]
+fn usage_report_filters_by_source_and_provider() {
+    let v = TestVault::new();
+    v.add_key("app", "key", "openai", FAKE_OPENAI);
+    v.cmd()
+        .args([
+            "usage",
+            "record",
+            "--credential",
+            "app/key",
+            "--model",
+            "gpt-4o",
+            "--input-tokens",
+            "1000000",
+            "--output-tokens",
+            "1000000",
+        ])
+        .assert()
+        .success();
+
+    // Manual rows appear under --source manual but not --source provider.
+    v.cmd()
+        .args([
+            "usage",
+            "report",
+            "--provider",
+            "openai",
+            "--source",
+            "manual",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Estimated cost: $12.50"))
+        .stdout(predicate::str::contains("manual"));
+    v.cmd()
+        .args([
+            "usage",
+            "report",
+            "--provider",
+            "openai",
+            "--source",
+            "provider",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Snapshots:      0"));
+    v.cmd()
+        .args(["usage", "report", "--source", "nonsense"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown --source"));
+}
+
+#[test]
+fn budget_cost_source_is_configurable() {
+    let v = TestVault::new();
+    v.cmd()
+        .args(["budget", "source"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("best_available"));
+    v.cmd()
+        .args(["budget", "source", "provider_reported"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider_reported"));
+    v.cmd()
+        .args(["budget", "source", "bogus"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unknown cost source"));
+}
+
+#[test]
+fn provider_keys_listing_guides_before_first_sync() {
+    let v = TestVault::new();
+    v.cmd()
+        .args(["provider", "keys", "openai"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("provider sync openai"));
+}

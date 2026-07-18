@@ -13,6 +13,7 @@ pub const ENV_SESSION: &str = "API_TRACKER_SESSION";
 pub const ENV_PASSWORD: &str = "API_TRACKER_PASSWORD";
 pub const ENV_PROJECT_PASSWORD: &str = "API_TRACKER_PROJECT_PASSWORD";
 pub const ENV_BACKUP_PASSWORD: &str = "API_TRACKER_BACKUP_PASSWORD";
+pub const ENV_PROVIDER_ADMIN_KEY: &str = "API_TRACKER_PROVIDER_ADMIN_KEY";
 
 pub struct Ctx {
     pub paths: VaultPaths,
@@ -175,6 +176,28 @@ pub fn credential_value(value_stdin: bool) -> Result<SecretString> {
         return Ok(value);
     }
     prompt_hidden("Credential value (hidden)")
+}
+
+/// A provider administrative key: `--key-stdin` for scripts, the
+/// `API_TRACKER_PROVIDER_ADMIN_KEY` variable, or a hidden prompt. Never
+/// accepted as a command-line argument (it would leak via `ps` and shell
+/// history) and never echoed.
+pub fn provider_admin_key(key_stdin: bool) -> Result<SecretString> {
+    if key_stdin {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("failed to read the admin key from stdin")?;
+        let value = SecretString::new(buf.trim_end_matches(['\n', '\r']).to_owned());
+        if value.expose().trim().is_empty() {
+            bail!("no administrative key was provided on stdin");
+        }
+        return Ok(value);
+    }
+    if std::env::var_os(ENV_PROVIDER_ADMIN_KEY).is_some() {
+        return env_secret(ENV_PROVIDER_ADMIN_KEY);
+    }
+    prompt_hidden("Administrative key (hidden)")
 }
 
 /// Interactive yes/no confirmation. Non-interactive runs must pass `--yes`.

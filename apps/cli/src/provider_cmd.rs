@@ -1,7 +1,7 @@
 //! `provider` subcommands: browse the catalog and manage documentation
 //! watches. Catalog reads need no vault; doc watches use the local database.
 
-use crate::ctx::Ctx;
+use crate::ctx::{self, Ctx};
 use crate::render;
 use anyhow::{bail, Result};
 use api_tracker_core::docwatch::{CheckResult, HttpFetcher};
@@ -19,20 +19,77 @@ pub enum ProviderCmd {
     Docs { provider: String },
     /// Show a provider's capability matrix (honest support levels).
     Capabilities { provider: String },
-    /// Connect a provider by naming the vault credential to use as its admin
-    /// key for usage sync.
+    /// Connect a provider's administrative account for usage/cost sync.
+    /// Prompts for the admin key (OpenAI Admin API key) and stores it
+    /// encrypted in the vault; it can later be replaced or removed but never
+    /// displayed. Pass --credential to reference an existing vault
+    /// credential instead.
     Connect {
         provider: String,
-        credential: String,
+        /// Use an existing vault credential (project/name) as the admin key.
+        #[arg(long)]
+        credential: Option<String>,
+        /// Optional organization label recorded with the connection.
+        #[arg(long)]
+        org: Option<String>,
+        /// Read the admin key from stdin (for scripts) instead of prompting.
+        #[arg(long)]
+        key_stdin: bool,
+        /// Store without a live validation request (offline setup); verify
+        /// later with `provider test`.
+        #[arg(long)]
+        no_verify: bool,
     },
-    /// Sync usage from a connected provider (network request).
+    /// Remove a provider connection and its locally stored administrative
+    /// access (requires confirmation and reauthentication). Synced usage
+    /// stays available offline.
+    Disconnect {
+        provider: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Live administrative connection test (network request; requires
+    /// reauthentication).
+    Test { provider: String },
+    /// Sync usage and provider-reported costs from a connected provider
+    /// (network request). Default: incremental from the last checkpoint
+    /// (first sync covers 30 days).
     Sync {
         provider: String,
-        #[arg(long, default_value_t = 30)]
-        days: u32,
+        /// Look back exactly this many days instead.
+        #[arg(long, conflicts_with_all = ["from", "to"])]
+        days: Option<u32>,
+        /// Explicit window start (YYYY-MM-DD or RFC 3339).
+        #[arg(long)]
+        from: Option<String>,
+        /// Explicit window end (defaults to now).
+        #[arg(long, requires = "from")]
+        to: Option<String>,
     },
     /// Show a provider's connection status.
     ConnectionStatus { provider: String },
+    /// List provider-side API keys seen in metadata and synced usage, with
+    /// their local link state and any suggested association.
+    Keys { provider: String },
+    /// Confirm that a provider-side API-key id belongs to a local credential.
+    /// Existing synced rows are re-attributed as exact-credential.
+    Link {
+        provider: String,
+        api_key_id: String,
+        #[arg(long)]
+        credential: String,
+    },
+    /// Remove a provider-key association (rows honestly downgrade back to
+    /// provider-key attribution).
+    Unlink {
+        provider: String,
+        api_key_id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List provider-side projects with month-to-date reported cost and
+    /// local mapping state.
+    Projects { provider: String },
     /// Watch an official documentation URL for changes.
     WatchDocs {
         provider: String,
@@ -113,47 +170,286 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
         ProviderCmd::Connect {
             provider,
             credential,
+            org,
+            key_stdin,
+            no_verify,
         } => {
             let m = find(&provider)?;
             let (vault, _t) = ctx.unlocked()?;
-            vault.provider_connect(&m.id, &credential)?;
+            if let Some(credential) = credential {
+                vault.provider_connect(&m.id, &credential)?;
+                println!(
+                    "Connected {} using vault credential '{credential}' as its admin key.",
+                    m.name
+                );
+                return Ok(());
+            }
+            let existing = vault.provider_connection_status(&m.id)?;
+            if existing.connected {
+                eprintln!("Reauthentication required to replace the administrative connection.");
+                let password = ctx::master_password()?;
+                vault.verify_master_password(&password)?;
+            }
+            eprintln!(
+                "NOTE: this stores an ADMINISTRATIVE key with organization-wide access — \
+                 not an ordinary workload API key. It is encrypted locally, used only for \
+                 direct requests to {}, and can be removed with `provider disconnect {}`.",
+                m.name, m.id
+            );
+            let key = ctx::provider_admin_key(key_stdin)?;
+            let detail = if no_verify {
+                vault.provider_admin_connect(&m.id, &key, org.as_deref(), None)?
+            } else {
+                let http = UreqClient::new();
+                vault.provider_admin_connect(&m.id, &key, org.as_deref(), Some(&http))?
+            };
+            println!("Connected {}: {detail}", m.name);
             println!(
-                "Connected {} using '{credential}' as its admin key for usage sync.",
-                m.name
+                "Run `api-tracker provider sync {}` to synchronize usage.",
+                m.id
             );
         }
-        ProviderCmd::Sync { provider, days } => {
+        ProviderCmd::Disconnect { provider, yes } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            if !ctx::confirm(
+                &format!(
+                    "Remove the {} connection and its locally stored administrative access?",
+                    m.name
+                ),
+                yes,
+            )? {
+                bail!("aborted");
+            }
+            eprintln!("Reauthentication required to remove the administrative connection.");
+            let password = ctx::master_password()?;
+            vault.verify_master_password(&password)?;
+            if vault.provider_admin_disconnect(&m.id)? {
+                println!(
+                    "Disconnected {}. Previously synced usage remains viewable offline.",
+                    m.name
+                );
+            } else {
+                println!("{} was not connected.", m.name);
+            }
+        }
+        ProviderCmd::Test { provider } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            eprintln!("Reauthentication required to run a live connection test.");
+            let password = ctx::master_password()?;
+            vault.verify_master_password(&password)?;
+            let http = UreqClient::new();
+            let detail = vault.provider_admin_test(&m.id, &http)?;
+            println!("{}: {detail}", m.name);
+        }
+        ProviderCmd::Sync {
+            provider,
+            days,
+            from,
+            to,
+        } => {
             let m = find(&provider)?;
             let (vault, _t) = ctx.unlocked()?;
             let http = UreqClient::new();
-            let n = vault.usage_sync(&m.id, &http, days)?;
+            let report = if let Some(from) = from {
+                let from_ts = api_tracker_core::clock::parse_user_date(&from)?;
+                let to_ts = match to {
+                    Some(t) => api_tracker_core::clock::parse_user_date(&t)?,
+                    None => api_tracker_core::clock::now(),
+                };
+                vault.usage_sync_range(&m.id, &http, from_ts, to_ts)?
+            } else if let Some(days) = days {
+                vault.usage_sync(&m.id, &http, days)?
+            } else {
+                vault.usage_sync_default(&m.id, &http)?
+            };
             let status = vault.provider_connection_status(&m.id)?;
-            println!(
-                "Synced {n} usage snapshot(s) for {}. {}",
-                m.name, status.detail
-            );
+            render::emit(ctx.json, &report, || {
+                println!(
+                    "Synced {} usage row(s) and {} provider-reported cost row(s) for {}.",
+                    report.usage_rows, report.cost_rows, m.name
+                );
+                println!("Window: {} → {}", report.window_start, report.window_end);
+                for note in &report.notes {
+                    println!("NOTE: {note}");
+                }
+                println!(
+                    "Last successful sync: {}",
+                    status.last_success_at.as_deref().unwrap_or("never")
+                );
+            });
         }
         ProviderCmd::ConnectionStatus { provider } => {
             let m = find(&provider)?;
             let (vault, _t) = ctx.unlocked()?;
             let status = vault.provider_connection_status(&m.id)?;
             render::emit(ctx.json, &status, || {
-                println!("Provider:     {}", m.name);
-                println!(
-                    "Admin key:    {}",
-                    status
-                        .admin_credential_id
-                        .as_deref()
-                        .unwrap_or("(not connected)")
-                );
-                println!(
-                    "Last synced:  {}",
-                    status.last_synced_at.as_deref().unwrap_or("never")
-                );
-                println!("Last status:  {}", status.last_status);
-                if !status.detail.is_empty() {
-                    println!("Detail:       {}", status.detail);
+                println!("Provider:      {}", m.name);
+                if let Some(masked) = &status.admin_key_masked {
+                    println!("Admin key:     {masked} (administrative, encrypted at rest)");
+                } else if let Some(cred) = &status.admin_credential_id {
+                    println!("Admin key:     vault credential {cred}");
+                } else {
+                    println!("Admin key:     (not connected)");
                 }
+                if let Some(org) = &status.org_label {
+                    println!("Organization:  {org}");
+                }
+                println!(
+                    "Connected at:  {}",
+                    status.connected_at.as_deref().unwrap_or("-")
+                );
+                println!(
+                    "Last success:  {}",
+                    status.last_success_at.as_deref().unwrap_or("never")
+                );
+                println!(
+                    "Last failure:  {}",
+                    status.last_failure_at.as_deref().unwrap_or("never")
+                );
+                println!("Last status:   {}", status.last_status);
+                if !status.detail.is_empty() {
+                    println!("Detail:        {}", status.detail);
+                }
+                if !status.last_error.is_empty() {
+                    println!("Last error:    {}", status.last_error);
+                }
+                if status.stale {
+                    println!(
+                        "WARNING: synced data is STALE — run `api-tracker provider sync {}`.",
+                        m.id
+                    );
+                }
+            });
+        }
+        ProviderCmd::Keys { provider } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            let keys = vault.provider_keys_overview(&m.id)?;
+            render::emit(ctx.json, &keys, || {
+                if keys.is_empty() {
+                    println!(
+                        "No provider-side API keys known yet. Run `provider sync {}` first.",
+                        m.id
+                    );
+                    return;
+                }
+                let rows: Vec<Vec<String>> = keys
+                    .iter()
+                    .map(|k| {
+                        vec![
+                            k.api_key_id.clone(),
+                            k.name.clone(),
+                            k.provider_project_name
+                                .clone()
+                                .or_else(|| k.provider_project_id.clone())
+                                .unwrap_or_default(),
+                            k.linked_credential
+                                .clone()
+                                .unwrap_or_else(|| "(not linked)".into()),
+                            k.usage_rows.to_string(),
+                            k.suggested_credential.clone().unwrap_or_default(),
+                        ]
+                    })
+                    .collect();
+                render::table(
+                    &[
+                        "API KEY ID",
+                        "NAME",
+                        "PROJECT",
+                        "LINKED TO",
+                        "ROWS",
+                        "SUGGESTION",
+                    ],
+                    &rows,
+                );
+                for k in &keys {
+                    if !k.note.is_empty() {
+                        println!("  {}: {}", k.api_key_id, k.note);
+                    }
+                }
+                println!();
+                println!(
+                    "Suggestions are evidence only — confirm with \
+                     `provider link {} <api-key-id> --credential <project/name>`.",
+                    m.id
+                );
+            });
+        }
+        ProviderCmd::Link {
+            provider,
+            api_key_id,
+            credential,
+        } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            let updated = vault.provider_link_key(&m.id, &api_key_id, &credential)?;
+            println!(
+                "Linked {} key {api_key_id} to '{credential}'. {updated} synced row(s) are now \
+                 attributed as exact-credential.",
+                m.name
+            );
+        }
+        ProviderCmd::Unlink {
+            provider,
+            api_key_id,
+            yes,
+        } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            if !ctx::confirm(
+                &format!(
+                    "Unlink {} key {api_key_id} from its local credential?",
+                    m.name
+                ),
+                yes,
+            )? {
+                bail!("aborted");
+            }
+            let updated = vault.provider_unlink_key(&m.id, &api_key_id)?;
+            if updated == 0 {
+                println!("No link existed for {api_key_id}.");
+            } else {
+                println!("Unlinked. {updated} row(s) downgraded to provider-key attribution.");
+            }
+        }
+        ProviderCmd::Projects { provider } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            let projects = vault.provider_projects_overview(&m.id)?;
+            render::emit(ctx.json, &projects, || {
+                if projects.is_empty() {
+                    println!(
+                        "No provider-side projects known yet. Run `provider sync {}` first.",
+                        m.id
+                    );
+                    return;
+                }
+                let rows: Vec<Vec<String>> = projects
+                    .iter()
+                    .map(|p| {
+                        vec![
+                            p.provider_project_id.clone(),
+                            p.name.clone(),
+                            api_tracker_core::usage::format_micros(p.reported_cost_micros_month),
+                            if p.has_linked_usage {
+                                "yes".into()
+                            } else {
+                                "no".into()
+                            },
+                        ]
+                    })
+                    .collect();
+                render::table(
+                    &[
+                        "PROVIDER PROJECT",
+                        "NAME",
+                        "COST (MONTH, REPORTED)",
+                        "LINKED USAGE",
+                    ],
+                    &rows,
+                );
             });
         }
         ProviderCmd::WatchDocs { provider, url } => {

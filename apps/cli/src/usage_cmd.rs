@@ -9,12 +9,12 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum UsageCmd {
-    /// Sync usage from a provider using its connected admin credential.
+    /// Sync usage from a provider using its administrative connection.
     Sync {
         provider: String,
-        /// Look back this many days.
-        #[arg(long, default_value_t = 30)]
-        days: u32,
+        /// Look back this many days (default: incremental from checkpoint).
+        #[arg(long)]
+        days: Option<u32>,
     },
     /// Record a usage snapshot manually (attributed to a credential).
     Record {
@@ -33,6 +33,15 @@ pub enum UsageCmd {
         project: Option<String>,
         #[arg(long)]
         credential: Option<String>,
+        /// Only this provider's usage (also shows its sync freshness).
+        #[arg(long)]
+        provider: Option<String>,
+        /// Which records to include: all, provider (synced), or manual.
+        #[arg(long, default_value = "all")]
+        source: String,
+        /// How many individual records to list (0 hides the listing).
+        #[arg(long, default_value_t = 15)]
+        limit: usize,
     },
 }
 
@@ -41,9 +50,17 @@ pub fn usage(ctx: &Ctx, cmd: UsageCmd) -> Result<()> {
     match cmd {
         UsageCmd::Sync { provider, days } => {
             let http = UreqClient::new();
-            let n = vault.usage_sync(&provider, &http, days)?;
-            let status = vault.provider_connection_status(&provider)?;
-            println!("Synced {n} snapshot(s) for {provider}. {}", status.detail);
+            let report = match days {
+                Some(days) => vault.usage_sync(&provider, &http, days)?,
+                None => vault.usage_sync_default(&provider, &http)?,
+            };
+            println!(
+                "Synced {} usage row(s) and {} provider-reported cost row(s) for {provider}.",
+                report.usage_rows, report.cost_rows
+            );
+            for note in &report.notes {
+                println!("NOTE: {note}");
+            }
         }
         UsageCmd::Record {
             credential,
@@ -65,36 +82,146 @@ pub fn usage(ctx: &Ctx, cmd: UsageCmd) -> Result<()> {
         UsageCmd::Report {
             project,
             credential,
+            provider,
+            source,
+            limit,
         } => {
+            let source_filter = match source.as_str() {
+                "all" => usage::SourceFilter::All,
+                "provider" => usage::SourceFilter::Provider,
+                "manual" => usage::SourceFilter::Manual,
+                other => anyhow::bail!("unknown --source '{other}' (use all, provider, or manual)"),
+            };
             let start = budget::period_start(clock::now());
-            let totals = vault.usage_totals(&start, credential.as_deref(), project.as_deref())?;
-            render::emit(ctx.json, &totals, || print_usage_report(&totals, &start));
+            let (totals, rows) = vault.usage_report(
+                &start,
+                credential.as_deref(),
+                project.as_deref(),
+                provider.as_deref(),
+                source_filter,
+            )?;
+            let connection = match provider.as_deref() {
+                Some(p) => Some(vault.provider_connection_status(p)?),
+                None => None,
+            };
+            if ctx.json {
+                render::emit(
+                    true,
+                    &serde_json::json!({
+                        "totals": totals,
+                        "records": rows,
+                        "connection": connection,
+                    }),
+                    || {},
+                );
+            } else {
+                print_usage_report(&totals, &start, &rows, connection.as_ref(), limit);
+            }
         }
     }
     Ok(())
 }
 
-fn print_usage_report(totals: &usage::UsageTotals, start: &str) {
+fn print_usage_report(
+    totals: &usage::UsageTotals,
+    start: &str,
+    rows: &[usage::UsageSnapshot],
+    connection: Option<&api_tracker_core::vault::ProviderConnection>,
+    limit: usize,
+) {
     println!("Usage since {start} (current month):");
-    println!("  Snapshots:     {}", totals.snapshots);
-    println!("  Requests:      {}", totals.request_count);
-    println!("  Input tokens:  {}", totals.input_tokens);
-    println!("  Output tokens: {}", totals.output_tokens);
-    println!("  Total tokens:  {}", totals.total_tokens);
+    println!("  Snapshots:      {}", totals.snapshots);
+    println!("  Requests:       {}", totals.request_count);
+    println!("  Input tokens:   {}", totals.input_tokens);
+    println!("  Output tokens:  {}", totals.output_tokens);
+    println!("  Total tokens:   {}", totals.total_tokens);
     println!(
-        "  Reported cost: {}",
+        "  Reported cost:  {} (provider-reported)",
         usage::format_micros(totals.reported_cost_micros)
     );
     println!(
-        "  Estimated cost: {} (estimated — verify against the provider)",
+        "  Estimated cost: {} (estimated locally — may differ from the provider's bill)",
         usage::format_micros(totals.estimated_cost_micros)
     );
+    if totals.has_non_usd_reported {
+        println!(
+            "  NOTE: non-USD provider costs exist ({}) and are excluded from the USD total.",
+            totals.reported_currencies.join(", ")
+        );
+    }
     if let Some(attr) = &totals.coarsest_attribution {
         let a: usage::Attribution = attr.parse().unwrap_or(usage::Attribution::Unknown);
-        println!("  Attribution:   {}", a.label());
+        println!("  Attribution:    coarsest level present: {}", a.label());
     }
     if totals.has_inexact_attribution {
         println!("  NOTE: some usage is not exact per-key; it is not charged to one credential.");
+    }
+    if let Some(c) = connection {
+        println!(
+            "  Last sync:      {} (status: {})",
+            c.last_success_at.as_deref().unwrap_or("never"),
+            c.last_status
+        );
+        if c.stale {
+            println!(
+                "  WARNING: synced data is STALE — run `api-tracker provider sync {}`.",
+                c.provider
+            );
+        }
+    }
+    if limit == 0 || rows.is_empty() {
+        return;
+    }
+    println!();
+    let table_rows: Vec<Vec<String>> = rows
+        .iter()
+        .take(limit)
+        .map(|r| {
+            let attribution: usage::Attribution =
+                r.attribution.parse().unwrap_or(usage::Attribution::Unknown);
+            vec![
+                r.window_start
+                    .get(..10)
+                    .unwrap_or(&r.window_start)
+                    .to_string(),
+                r.model
+                    .clone()
+                    .or_else(|| r.line_item.clone())
+                    .unwrap_or_default(),
+                r.total_tokens.map(|t| t.to_string()).unwrap_or_default(),
+                r.reported_cost_micros
+                    .map(usage::format_micros)
+                    .unwrap_or_default(),
+                r.estimated_cost_micros
+                    .map(|m| format!("{} (est.)", usage::format_micros(m)))
+                    .unwrap_or_default(),
+                attribution.as_str().to_string(),
+                r.provider_api_key_id
+                    .clone()
+                    .or_else(|| r.provider_project_id.clone())
+                    .unwrap_or_default(),
+                r.source.clone(),
+            ]
+        })
+        .collect();
+    render::table(
+        &[
+            "WINDOW",
+            "MODEL/ITEM",
+            "TOKENS",
+            "REPORTED",
+            "ESTIMATED",
+            "ATTRIBUTION",
+            "PROVIDER KEY/PROJECT",
+            "SOURCE",
+        ],
+        &table_rows,
+    );
+    if rows.len() > limit {
+        println!(
+            "… {} more record(s); raise --limit to see them.",
+            rows.len() - limit
+        );
     }
 }
 
@@ -116,6 +243,12 @@ pub enum BudgetCmd {
         project: Option<String>,
         #[arg(long)]
         credential: Option<String>,
+    },
+    /// Show or set which cost source budgets consume:
+    /// best_available (default), provider_reported, or estimated.
+    Source {
+        /// New value; omit to show the current one.
+        value: Option<String>,
     },
 }
 
@@ -156,6 +289,21 @@ pub fn budget(ctx: &Ctx, cmd: BudgetCmd) -> Result<()> {
             };
             render::emit(ctx.json, &report, || print_budget(&report));
         }
+        BudgetCmd::Source { value } => match value {
+            Some(v) => {
+                let source: usage::CostSource = v.parse()?;
+                vault.set_budget_cost_source(source)?;
+                println!("Budgets now use the '{}' cost source.", source.as_str());
+            }
+            None => {
+                let source = vault.budget_cost_source()?;
+                println!("Budgets use the '{}' cost source.", source.as_str());
+                println!(
+                    "Options: best_available (provider-reported when present, else estimated), \
+                     provider_reported, estimated."
+                );
+            }
+        },
     }
     Ok(())
 }
@@ -169,13 +317,14 @@ fn print_budget(r: &budget::BudgetReport) {
             .unwrap_or_else(|| "(none set)".into())
     );
     println!(
-        "  Used:          {} ({})",
+        "  Used:          {} ({}; source setting: {})",
         usage::format_micros(r.used_micros),
         if r.used_is_estimated {
             "estimated"
         } else {
             "provider-reported"
-        }
+        },
+        r.cost_source
     );
     if let Some(rem) = r.remaining_micros {
         println!("  Remaining:     {}", usage::format_micros(rem));
