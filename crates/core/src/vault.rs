@@ -4619,6 +4619,36 @@ impl UnlockedVault {
         ))
     }
 
+    /// Send a test payload through one channel (no secrets, clearly a test).
+    pub fn notification_channel_test(
+        &self,
+        ident: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<String> {
+        let channel = crate::notify::get(&self.conn, ident)?;
+        let url = self.notification_channel_url(&channel.id)?;
+        let now = clock::now_rfc3339();
+        let payload = crate::notify::NotificationPayload {
+            source: "api-tracker",
+            kind: "test",
+            severity: "info",
+            title: "API Tracker test notification",
+            detail: "channel connectivity test — no alert condition exists",
+            recommended_action: "none",
+            observed_at: &now,
+        };
+        match crate::notify::deliver_webhook(http, url.expose(), &payload) {
+            Ok(detail) => {
+                crate::notify::record_delivery(&self.conn, &channel.id, None)?;
+                Ok(detail)
+            }
+            Err(e) => {
+                crate::notify::record_delivery(&self.conn, &channel.id, Some(&e.to_string()))?;
+                Err(e)
+            }
+        }
+    }
+
     /// Deliver open alerts at or above each channel's severity floor that
     /// were observed within the last hour (the monitor cadence). Payloads
     /// carry alert metadata only. Failures are recorded per channel and

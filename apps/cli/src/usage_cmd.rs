@@ -188,7 +188,12 @@ fn print_usage_report(
                     .clone()
                     .or_else(|| r.line_item.clone())
                     .unwrap_or_default(),
-                r.total_tokens.map(|t| t.to_string()).unwrap_or_default(),
+                match (r.total_tokens, r.quantity, r.unit.as_deref()) {
+                    // Non-token units are shown verbatim, never as tokens.
+                    (_, Some(q), Some(unit)) => format!("{q} {unit}"),
+                    (Some(t), _, _) => format!("{t} tokens"),
+                    _ => String::new(),
+                },
                 r.reported_cost_micros
                     .map(usage::format_micros)
                     .unwrap_or_default(),
@@ -208,7 +213,7 @@ fn print_usage_report(
         &[
             "WINDOW",
             "MODEL/ITEM",
-            "TOKENS",
+            "USAGE",
             "REPORTED",
             "ESTIMATED",
             "ATTRIBUTION",
