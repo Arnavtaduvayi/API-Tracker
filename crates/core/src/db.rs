@@ -16,10 +16,11 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial schema",
-    sql: r#"
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial schema",
+        sql: r#"
 CREATE TABLE vault_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -86,7 +87,161 @@ CREATE TABLE audit_events (
     detail        TEXT NOT NULL DEFAULT ''
 ) STRICT;
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "scanning, alerts, and documentation watches",
+        sql: r#"
+-- Local scan suppressions. suppression_key is a non-secret hash of
+-- (rule|path|redacted-preview); no credential value is stored here.
+CREATE TABLE scan_suppressions (
+    id              TEXT PRIMARY KEY,
+    suppression_key TEXT NOT NULL UNIQUE,
+    rule            TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+) STRICT;
+
+-- Local alerts with lifecycle. dedup_key keeps one open alert per condition.
+CREATE TABLE alerts (
+    id                 TEXT PRIMARY KEY,
+    kind               TEXT NOT NULL,
+    severity           TEXT NOT NULL,
+    dedup_key          TEXT NOT NULL,
+    title              TEXT NOT NULL,
+    detail             TEXT NOT NULL,
+    evidence           TEXT NOT NULL DEFAULT '',
+    confidence         TEXT NOT NULL,
+    recommended_action TEXT NOT NULL DEFAULT '',
+    project_id         TEXT,
+    credential_id      TEXT,
+    created_at         TEXT NOT NULL,
+    observed_at        TEXT NOT NULL,
+    acknowledged_at    TEXT,
+    resolved_at        TEXT
+) STRICT;
+
+CREATE UNIQUE INDEX idx_alerts_open_dedup ON alerts(dedup_key) WHERE resolved_at IS NULL;
+CREATE INDEX idx_alerts_open ON alerts(resolved_at);
+
+-- Watched official documentation URLs and their conditional-request state.
+CREATE TABLE doc_watches (
+    id              TEXT PRIMARY KEY,
+    provider        TEXT NOT NULL,
+    url             TEXT NOT NULL UNIQUE,
+    etag            TEXT,
+    last_modified   TEXT,
+    content_hash    TEXT,
+    last_checked_at TEXT,
+    last_changed_at TEXT,
+    last_status     TEXT NOT NULL DEFAULT 'never checked',
+    created_at      TEXT NOT NULL
+) STRICT;
+"#,
+    },
+    Migration {
+        version: 3,
+        name: "provider integrations: usage, pricing, permissions, activity, injection",
+        sql: r#"
+-- Monetary amounts are integer micro-USD (1 USD = 1_000_000) to avoid float
+-- rounding. Budgets are user-facing dollars stored the same way.
+ALTER TABLE projects ADD COLUMN monthly_budget_micros INTEGER;
+ALTER TABLE credentials ADD COLUMN monthly_budget_micros INTEGER;
+
+-- Provider connection state: which vault credential (if any) is the admin key
+-- used for usage sync, and the last sync result.
+CREATE TABLE provider_connections (
+    provider            TEXT PRIMARY KEY,
+    admin_credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    last_synced_at      TEXT,
+    last_status         TEXT NOT NULL DEFAULT 'never',
+    detail              TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Normalized usage snapshots. attribution records the precision honestly.
+CREATE TABLE usage_snapshots (
+    id                   TEXT PRIMARY KEY,
+    credential_id        TEXT REFERENCES credentials(id) ON DELETE CASCADE,
+    project_id           TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
+    model                TEXT,
+    window_start         TEXT NOT NULL,
+    window_end           TEXT NOT NULL,
+    request_count        INTEGER,
+    input_tokens         INTEGER,
+    output_tokens        INTEGER,
+    total_tokens         INTEGER,
+    credits              REAL,
+    reported_cost_micros INTEGER,
+    estimated_cost_micros INTEGER,
+    currency             TEXT NOT NULL DEFAULT 'USD',
+    source               TEXT NOT NULL,
+    attribution          TEXT NOT NULL,
+    collected_at         TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_usage_credential ON usage_snapshots(credential_id);
+CREATE INDEX idx_usage_project ON usage_snapshots(project_id);
+CREATE INDEX idx_usage_window ON usage_snapshots(window_start);
+
+-- Manual pricing overrides (bundled prices live in code with source + dates).
+CREATE TABLE pricing_overrides (
+    id                          TEXT PRIMARY KEY,
+    provider                    TEXT NOT NULL,
+    model                       TEXT NOT NULL,
+    unit                        TEXT NOT NULL,
+    input_price_per_m_micros    INTEGER,
+    output_price_per_m_micros   INTEGER,
+    currency                    TEXT NOT NULL DEFAULT 'USD',
+    note                        TEXT NOT NULL DEFAULT '',
+    created_at                  TEXT NOT NULL,
+    UNIQUE (provider, model)
+) STRICT;
+
+-- Normalized permissions with raw scopes preserved.
+CREATE TABLE credential_permissions (
+    credential_id TEXT PRIMARY KEY REFERENCES credentials(id) ON DELETE CASCADE,
+    raw_scopes    TEXT NOT NULL,
+    normalized    TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    precision     TEXT NOT NULL,
+    confidence    TEXT NOT NULL,
+    synced_at     TEXT NOT NULL
+) STRICT;
+
+-- Normalized local activity events feeding suspicious-activity rules.
+CREATE TABLE activity_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    credential_id TEXT,
+    project_id    TEXT,
+    detail        TEXT NOT NULL DEFAULT '',
+    measurements  TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Project credential -> environment-variable injection mappings.
+CREATE TABLE credential_env_mappings (
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    env_var       TEXT NOT NULL,
+    PRIMARY KEY (project_id, env_var)
+) STRICT;
+
+-- Local record of process-injection sessions (names only, never values).
+CREATE TABLE process_sessions (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    command       TEXT NOT NULL,
+    injected_vars TEXT NOT NULL,
+    exit_code     INTEGER
+) STRICT;
+"#,
+    },
+];
 
 /// Open (or create) the database file with hardened pragmas.
 pub fn open(path: &Path) -> Result<Connection> {

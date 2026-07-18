@@ -1,0 +1,233 @@
+//! Minimal HTTP client abstraction for provider connectors.
+//!
+//! Provider network calls go through the [`HttpClient`] trait so the request
+//! construction and response parsing in [`crate::connectors`] are fully
+//! testable offline with a [`MockHttpClient`] and scripted fixture responses.
+//! The real implementation ([`UreqClient`]) makes the request directly from
+//! the user's device with a short timeout. No credential value is ever logged
+//! here; request headers that carry secrets are passed through opaquely.
+
+use crate::error::{CoreError, Result};
+use std::cell::RefCell;
+use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpRequest {
+    pub method: Method,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+}
+
+impl HttpRequest {
+    pub fn get(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Get,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl HttpResponse {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    pub fn body_str(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    pub fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+}
+
+/// Abstracts the HTTP transport. Implementors must not log secret headers.
+pub trait HttpClient {
+    fn send(&self, req: &HttpRequest) -> Result<HttpResponse>;
+}
+
+/// The real client, backed by a blocking `ureq` agent with a short timeout.
+pub struct UreqClient {
+    agent: ureq::Agent,
+}
+
+impl Default for UreqClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl UreqClient {
+    pub fn new() -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(20)))
+            .user_agent("api-tracker/0.1 (+local)")
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+}
+
+impl HttpClient for UreqClient {
+    fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
+        // ureq 3.x uses typestate request builders, so GET and POST are built
+        // in separate branches rather than through a shared closure.
+        let result = match req.method {
+            Method::Get => {
+                let mut r = self.agent.get(&req.url);
+                for (k, v) in &req.headers {
+                    r = r.header(k, v);
+                }
+                r.call()
+            }
+            Method::Post => {
+                let mut r = self.agent.post(&req.url);
+                for (k, v) in &req.headers {
+                    r = r.header(k, v);
+                }
+                match &req.body {
+                    Some(bytes) => r.send(&bytes[..]),
+                    None => r.send_empty(),
+                }
+            }
+        };
+        let mut resp = match result {
+            Ok(resp) => resp,
+            // A non-2xx status is a value we want to inspect, not a hard error.
+            Err(ureq::Error::StatusCode(code)) => {
+                return Ok(HttpResponse {
+                    status: code,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                });
+            }
+            Err(e) => {
+                return Err(CoreError::InvalidInput(format!(
+                    "network request failed: {e}"
+                )));
+            }
+        };
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp
+            .body_mut()
+            .with_config()
+            .limit(4 * 1024 * 1024)
+            .read_to_vec()
+            .map_err(|e| CoreError::InvalidInput(format!("could not read response body: {e}")))?;
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+}
+
+/// A scripted client for tests: pops a queued response per call and records
+/// the requests it received for assertions.
+#[derive(Default)]
+pub struct MockHttpClient {
+    responses: RefCell<Vec<HttpResponse>>,
+    pub requests: RefCell<Vec<HttpRequest>>,
+}
+
+impl MockHttpClient {
+    pub fn new(responses: Vec<HttpResponse>) -> Self {
+        Self {
+            responses: RefCell::new(responses),
+            requests: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A single JSON 200 response.
+    pub fn json(body: &str) -> Self {
+        Self::new(vec![HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.as_bytes().to_vec(),
+        }])
+    }
+
+    /// A single response with a status and headers (e.g. GitHub scope header).
+    pub fn with(status: u16, headers: Vec<(String, String)>, body: &str) -> Self {
+        Self::new(vec![HttpResponse {
+            status,
+            headers,
+            body: body.as_bytes().to_vec(),
+        }])
+    }
+
+    pub fn last_request(&self) -> Option<HttpRequest> {
+        self.requests.borrow().last().cloned()
+    }
+}
+
+impl HttpClient for MockHttpClient {
+    fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
+        self.requests.borrow_mut().push(req.clone());
+        let mut responses = self.responses.borrow_mut();
+        if responses.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "mock: no more responses queued".into(),
+            ));
+        }
+        Ok(responses.remove(0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_pops_responses_and_records_requests() {
+        let mock = MockHttpClient::json(r#"{"ok":true}"#);
+        let req = HttpRequest::get("https://example.com/x").header("Authorization", "Bearer z");
+        let resp = mock.send(&req).unwrap();
+        assert!(resp.is_success());
+        assert_eq!(resp.body_str(), r#"{"ok":true}"#);
+        assert_eq!(mock.last_request().unwrap().url, "https://example.com/x");
+        // Exhausted queue errors rather than hanging.
+        assert!(mock.send(&req).is_err());
+    }
+
+    #[test]
+    fn response_header_lookup_is_case_insensitive() {
+        let resp = HttpResponse {
+            status: 200,
+            headers: vec![("X-OAuth-Scopes".into(), "repo, read:org".into())],
+            body: Vec::new(),
+        };
+        assert_eq!(resp.header("x-oauth-scopes"), Some("repo, read:org"));
+        assert_eq!(resp.header("missing"), None);
+    }
+}

@@ -64,6 +64,26 @@ To experiment without touching your real vault:
 API_TRACKER_DIR=/tmp/at-dev target/debug/api-tracker init
 ```
 
+## Adding a provider or detection pattern
+
+Providers are TOML manifests under `provider-manifests/` (embedded and
+validated at build time — see `crates/core/src/providers.rs`). To add one,
+copy an existing file and:
+
+- Fill the official links, `credential_types`, and expiration behavior.
+- List only **secret-bearing** environment variables in `env_vars` (never
+  URLs, org ids, or publishable keys — they cause scanner false positives).
+- Add `[[detection]]` patterns using **public** key prefixes/shapes only
+  (never a real secret); every regex must compile (a test enforces this).
+- Fill the `[capabilities]` matrix **honestly**, verified against the
+  provider's official documentation. Nothing is `implemented` until a real
+  connector exists; use `supported_not_implemented`, `unsupported`,
+  `manual_only`, plus `requires_admin_credential` and `attribution` as
+  applicable. Never present account/project-level usage as exact per-key.
+
+Then add the file to `MANIFEST_SOURCES` and run `cargo test -p api-tracker-core
+providers::` — the validation test will reject malformed manifests.
+
 ## Database migrations
 
 Migrations live in `crates/core/src/db.rs` and are append-only: never edit a

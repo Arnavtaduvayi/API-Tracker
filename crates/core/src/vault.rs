@@ -15,6 +15,7 @@
 //! authentication failure when unwrapping, so no separate password hash is
 //! kept. Every wrap is bound to AAD naming the vault/project it belongs to.
 
+use crate::alerts;
 use crate::audit;
 use crate::clock;
 use crate::crypto::{self, aad, KdfParams};
@@ -22,10 +23,12 @@ use crate::db;
 use crate::error::{CoreError, Result};
 use crate::model::{mask_value, Credential, Environment, Project};
 use crate::reuse::{self, ReuseMatch, ReuseWarning};
+use crate::scanner;
 use crate::secret::{SecretBytes, SecretString};
 use crate::session::{self, SessionKeys, SessionToken};
 use crate::settings::VaultSettings;
 use crate::status::{self, StatusInputs};
+use crate::usage;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -1408,6 +1411,25 @@ impl UnlockedVault {
                 params![disabled, row.id],
             )?;
             changed.push("manually_disabled");
+            // Record the exact disable/enable time so usage-after-disabled can
+            // compare against it (updated_at is bumped by any edit).
+            crate::activity::record(
+                &self.conn,
+                "credential_state",
+                if disabled {
+                    "credential_disabled"
+                } else {
+                    "credential_enabled"
+                },
+                Some(&row.id),
+                Some(&row.project_id),
+                if disabled {
+                    "credential marked disabled"
+                } else {
+                    "credential re-enabled"
+                },
+                "",
+            )?;
         }
         if let Some(revoked) = update.revoked {
             self.conn.execute(
@@ -1532,6 +1554,825 @@ impl UnlockedVault {
     pub fn recent_audit_events(&self, limit: u32) -> Result<Vec<audit::AuditEvent>> {
         audit::list(&self.conn, limit)
     }
+
+    // ------------------------------------------------------------------
+    // Milestone 2: repository scanning, monitoring, and doc watching
+    // ------------------------------------------------------------------
+
+    /// Run the detection engine over scan units, match each finding against
+    /// the vault (by keyed fingerprint), and drop suppressed findings.
+    fn scan_units(&self, units: Vec<crate::gitrepo::ScanUnit>) -> Result<Vec<scanner::Finding>> {
+        let suppressed = self.suppression_keys()?;
+        let mut out = Vec::new();
+        for unit in units {
+            let options = scanner::ScanOptions {
+                entropy: !scanner::skip_entropy_for(&unit.label),
+            };
+            for mut finding in scanner::scan_text(&unit.content, &unit.label, &options) {
+                if suppressed.contains(&finding.suppression_key) {
+                    continue;
+                }
+                finding.vault_match = self.match_finding(&finding)?;
+                out.push(finding);
+            }
+        }
+        Ok(out)
+    }
+
+    fn match_finding(&self, finding: &scanner::Finding) -> Result<Option<scanner::VaultMatch>> {
+        let fp = reuse::fingerprint(&self.fingerprint_key, &finding.secret)?;
+        let matches = self.find_reuse_matches(&fp, None)?;
+        let Some(primary) = matches.first() else {
+            return Ok(None);
+        };
+        // The value-bearing record (skip references) is the identity.
+        let root = matches.iter().find(|m| !m.is_reference).unwrap_or(primary);
+        let mut other_projects: Vec<String> = matches
+            .iter()
+            .filter(|m| m.project_id != root.project_id)
+            .map(|m| m.project_name.clone())
+            .collect();
+        other_projects.sort();
+        other_projects.dedup();
+        Ok(Some(scanner::VaultMatch {
+            credential_id: root.credential_id.clone(),
+            credential_name: root.credential_name.clone(),
+            project_id: root.project_id.clone(),
+            project_name: root.project_name.clone(),
+            other_projects,
+        }))
+    }
+
+    /// Scan a working-tree directory or single file.
+    pub fn scan_working_tree(&self, path: &std::path::Path) -> Result<Vec<scanner::Finding>> {
+        let units = crate::gitrepo::working_tree_units(path)?;
+        self.scan_units(units)
+    }
+
+    /// Scan the staged changes of a Git repository.
+    pub fn scan_staged(&self, repo: &std::path::Path) -> Result<Vec<scanner::Finding>> {
+        let root = crate::gitrepo::repo_root(repo)?;
+        let units = crate::gitrepo::staged_units(&root)?;
+        self.scan_units(units)
+    }
+
+    /// Scan Git history (last `n` commits, or all when `None`).
+    pub fn scan_history(
+        &self,
+        repo: &std::path::Path,
+        n: Option<usize>,
+    ) -> Result<Vec<scanner::Finding>> {
+        let root = crate::gitrepo::repo_root(repo)?;
+        let units = crate::gitrepo::history_added_units(&root, n)?;
+        self.scan_units(units)
+    }
+
+    /// Mark every credential matched by a scan finding as possibly exposed,
+    /// recording where. Returns the affected credential ids. Never touches
+    /// files or provider state.
+    pub fn mark_findings_exposed(&mut self, findings: &[scanner::Finding]) -> Result<Vec<String>> {
+        let mut affected = Vec::new();
+        for finding in findings {
+            if let Some(m) = &finding.vault_match {
+                if affected.contains(&m.credential_id) {
+                    continue;
+                }
+                let note = format!(
+                    "matched during a repository scan in {} (line {})",
+                    finding.file, finding.line
+                );
+                self.conn.execute(
+                    "UPDATE credentials SET possibly_exposed = 1, exposure_note = ?1,
+                     updated_at = ?2 WHERE id = ?3",
+                    params![note, clock::now_rfc3339(), m.credential_id],
+                )?;
+                audit::record(
+                    &self.conn,
+                    "credential_marked_exposed",
+                    Some(&m.project_id),
+                    Some(&m.credential_id),
+                    "source=repository_scan",
+                )?;
+                affected.push(m.credential_id.clone());
+            }
+        }
+        Ok(affected)
+    }
+
+    fn suppression_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT suppression_key FROM scan_suppressions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        Ok(set)
+    }
+
+    /// Record a local suppression for a finding (requires a reason).
+    pub fn add_suppression(
+        &self,
+        suppression_key: &str,
+        rule: &str,
+        path: &str,
+        reason: &str,
+    ) -> Result<()> {
+        if reason.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "a suppression reason is required".into(),
+            ));
+        }
+        self.conn.execute(
+            "INSERT INTO scan_suppressions (id, suppression_key, rule, path, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(suppression_key) DO UPDATE SET reason = excluded.reason",
+            params![
+                Uuid::new_v4().to_string(),
+                suppression_key,
+                rule,
+                path,
+                reason.trim(),
+                clock::now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_suppressions(&self) -> Result<Vec<Suppression>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT suppression_key, rule, path, reason, created_at
+             FROM scan_suppressions ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Suppression {
+                suppression_key: r.get(0)?,
+                rule: r.get(1)?,
+                path: r.get(2)?,
+                reason: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Run monitoring checks: generate/refresh alerts from credential status
+    /// and reuse, and auto-resolve conditions that no longer hold.
+    pub fn run_monitor(&self) -> Result<MonitorSummary> {
+        let now = clock::now_rfc3339();
+        let credentials = self.list_credentials(None)?;
+        let mut active_keys: Vec<String> = Vec::new();
+        let mut created = 0usize;
+
+        for cred in &credentials {
+            let mut new_alerts = crate::monitor::credential_alerts(cred, &now);
+            // Reuse alerts are computed from the STORED fingerprint, not by
+            // decrypting the value. This works for password-locked projects
+            // too (so their still-valid reuse alerts are not spuriously
+            // auto-resolved) and avoids decrypting every credential on every
+            // scheduled run.
+            if !cred.is_reference {
+                if let Some(row) = self.credential_row_by_id(&cred.id)? {
+                    let matches = self.find_reuse_matches(&row.fingerprint, Some(&cred.id))?;
+                    let warnings = reuse::classify(&cred.project_id, cred.environment, matches);
+                    new_alerts.extend(crate::monitor::reuse_alerts(cred, &warnings, &now));
+                }
+            }
+            // Activity-based rules (usage vs credential state): cost spikes
+            // and usage-after-disabled. These use stored usage snapshots.
+            let label = format!("{}/{}", cred.project_name, cred.name);
+            if let Some(a) = crate::activity::cost_spike_alert(&self.conn, &cred.id, &label)? {
+                new_alerts.push(a);
+            }
+            let disabled_since = crate::activity::last_disabled_at(&self.conn, &cred.id)?;
+            if let Some(a) = crate::activity::usage_after_disabled_alert(
+                &self.conn,
+                &cred.id,
+                &label,
+                cred.manually_disabled,
+                disabled_since.as_deref(),
+            )? {
+                new_alerts.push(a);
+            }
+            // Credential-level budget.
+            let creport = crate::budget::credential_report(&self.conn, &cred.id, &label)?;
+            if let Some(a) = crate::budget::over_budget_alert(&creport, Some(&cred.id)) {
+                new_alerts.push(a);
+            }
+
+            for alert in new_alerts {
+                active_keys.push(alert.dedup_key.clone());
+                if alerts::upsert(&self.conn, &alert)? {
+                    created += 1;
+                }
+            }
+        }
+
+        // Project-level budgets.
+        for project in self.list_projects(false)? {
+            let report = crate::budget::project_report(&self.conn, &project.id)?;
+            if let Some(alert) = crate::budget::over_budget_alert(&report, None) {
+                active_keys.push(alert.dedup_key.clone());
+                if alerts::upsert(&self.conn, &alert)? {
+                    created += 1;
+                }
+            }
+        }
+
+        let mut managed = crate::monitor::managed_credential_kinds();
+        managed.extend(crate::activity::managed_kinds());
+        let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
+        Ok(MonitorSummary {
+            checked: credentials.len(),
+            alerts_created: created,
+            alerts_resolved: resolved,
+            open_alerts: alerts::open_count(&self.conn)? as usize,
+        })
+    }
+
+    // --- Documentation watches ---
+
+    pub fn watch_docs(&self, provider: &str, url: &str) -> Result<crate::docwatch::DocWatch> {
+        crate::docwatch::add_watch(&self.conn, provider, url)
+    }
+
+    pub fn unwatch_docs(&self, url: &str) -> Result<bool> {
+        crate::docwatch::remove_watch(&self.conn, url)
+    }
+
+    pub fn list_doc_watches(&self) -> Result<Vec<crate::docwatch::DocWatch>> {
+        crate::docwatch::list(&self.conn)
+    }
+
+    pub fn list_doc_watches_for(&self, provider: &str) -> Result<Vec<crate::docwatch::DocWatch>> {
+        crate::docwatch::list_for_provider(&self.conn, provider)
+    }
+
+    /// Check one watched URL, and raise a `DocumentationChanged` alert if it
+    /// changed. Returns the check result and the refreshed watch.
+    pub fn check_doc_watch(
+        &self,
+        fetcher: &dyn crate::docwatch::DocFetcher,
+        url: &str,
+    ) -> Result<(crate::docwatch::CheckResult, crate::docwatch::DocWatch)> {
+        let (result, watch) = crate::docwatch::check_watch(&self.conn, fetcher, url)?;
+        if result == crate::docwatch::CheckResult::Changed {
+            let now = clock::now_rfc3339();
+            alerts::upsert(
+                &self.conn,
+                &alerts::NewAlert {
+                    kind: alerts::AlertKind::DocumentationChanged,
+                    severity: alerts::Severity::Info,
+                    dedup_key: format!("docchange:{url}"),
+                    title: format!("{} documentation changed", watch.provider),
+                    detail: format!(
+                        "the tracked content at {url} changed. A page change does not necessarily mean a breaking API change."
+                    ),
+                    evidence: format!("content hash differs; last changed {}", now),
+                    confidence: crate::providers::Confidence::Medium,
+                    recommended_action: "review the official page linked in this alert".into(),
+                    project_id: None,
+                    credential_id: None,
+                    observed_at: now,
+                },
+            )?;
+        }
+        Ok((result, watch))
+    }
+
+    // ------------------------------------------------------------------
+    // Milestone 3: provider connectors, usage, cost, permissions, activity
+    // ------------------------------------------------------------------
+
+    /// Decrypt a credential's value in-process (resolves references, respects
+    /// project locks). No reauth: the vault is already unlocked and the value
+    /// is used directly (a provider request), not revealed to the user.
+    fn decrypt_value(&self, selector: &str) -> Result<SecretString> {
+        let requested = self.resolve_credential(selector)?;
+        let root = match &requested.linked_credential_id {
+            Some(target) => self
+                .credential_row_by_id(target)?
+                .ok_or(CoreError::VaultCorrupted("reference target is missing"))?,
+            None => requested,
+        };
+        let ciphertext = root.ciphertext.as_deref().ok_or(CoreError::VaultCorrupted(
+            "credential is missing its ciphertext",
+        ))?;
+        let project = self.project_row_by_ident(&root.project_id)?;
+        let project_key = self.project_key_for_row(&project)?;
+        let plaintext = crypto::decrypt(
+            &project_key,
+            &aad::credential_value(&self.vault_id, &root.project_id, &root.id),
+            ciphertext,
+            "credential value",
+        )?;
+        let value = String::from_utf8(plaintext.expose().to_vec())
+            .map_err(|_| CoreError::VaultCorrupted("credential value is not valid UTF-8"))?;
+        Ok(SecretString::new(value))
+    }
+
+    fn connector_for(&self, provider: &str) -> Result<Box<dyn crate::connectors::Connector>> {
+        crate::connectors::for_provider(provider).ok_or_else(|| CoreError::Unsupported {
+            provider: provider.to_string(),
+            capability: "connector",
+            hint: "no connector is implemented for this provider".into(),
+        })
+    }
+
+    /// Validate a credential against its provider. Records the outcome
+    /// (last validated / marked invalid) and an audit event.
+    pub fn validate_credential(
+        &mut self,
+        selector: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<crate::connectors::ValidationResult> {
+        let cred = self.get_credential(selector)?;
+        let connector = self.connector_for(&cred.provider)?;
+        let value = self.decrypt_value(selector)?;
+        let result = connector.validate(http, &value)?;
+        self.update_credential(
+            &cred.id,
+            UpdateCredential {
+                mark_validated: Some(result.valid),
+                ..Default::default()
+            },
+        )?;
+        audit::record(
+            &self.conn,
+            "credential_validated",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("valid={}", result.valid),
+        )?;
+        Ok(result)
+    }
+
+    /// Fetch provider-side metadata for a credential (non-secret).
+    pub fn fetch_metadata(
+        &self,
+        selector: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<crate::connectors::FetchedMetadata> {
+        let cred = self.get_credential(selector)?;
+        let connector = self.connector_for(&cred.provider)?;
+        let value = self.decrypt_value(selector)?;
+        connector.fetch_metadata(http, &value)
+    }
+
+    /// Synchronize a credential's permissions (read-only) and store them.
+    pub fn sync_permissions(
+        &self,
+        selector: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<crate::permissions::StoredPermissions> {
+        let cred = self.get_credential(selector)?;
+        let connector = self.connector_for(&cred.provider)?;
+        let value = self.decrypt_value(selector)?;
+        let fetched = connector.fetch_permissions(http, &value)?;
+        let normalized = match cred.provider.as_str() {
+            "github" => crate::permissions::normalize_github(&fetched.raw_scopes),
+            _ => crate::permissions::NormalizedPermissions {
+                summary: "raw scopes only (no provider-specific normalization)".into(),
+                ..Default::default()
+            },
+        };
+        crate::permissions::store(
+            &self.conn,
+            &cred.id,
+            &fetched.raw_scopes,
+            &normalized,
+            &fetched.source,
+            &fetched.precision,
+            &fetched.confidence,
+        )?;
+        audit::record(
+            &self.conn,
+            "permissions_synced",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            "",
+        )?;
+        crate::permissions::load(&self.conn, &cred.id)?.ok_or(CoreError::VaultCorrupted(
+            "permissions vanished after store",
+        ))
+    }
+
+    pub fn get_permissions(
+        &self,
+        selector: &str,
+    ) -> Result<Option<crate::permissions::StoredPermissions>> {
+        let cred = self.get_credential(selector)?;
+        crate::permissions::load(&self.conn, &cred.id)
+    }
+
+    /// Set the admin credential used for a provider's usage sync.
+    pub fn provider_connect(&self, provider: &str, admin_selector: &str) -> Result<()> {
+        let provider = crate::providers::normalize(provider);
+        let cred = self.get_credential(admin_selector)?;
+        self.conn.execute(
+            "INSERT INTO provider_connections (provider, admin_credential_id, last_status)
+             VALUES (?1, ?2, 'connected')
+             ON CONFLICT(provider) DO UPDATE SET admin_credential_id = excluded.admin_credential_id",
+            params![provider, cred.id],
+        )?;
+        audit::record(
+            &self.conn,
+            "provider_connected",
+            None,
+            Some(&cred.id),
+            &format!("provider={provider}"),
+        )?;
+        Ok(())
+    }
+
+    /// Connection status for a provider.
+    pub fn provider_connection_status(&self, provider: &str) -> Result<ProviderConnection> {
+        let provider = crate::providers::normalize(provider);
+        let row = self
+            .conn
+            .query_row(
+                "SELECT admin_credential_id, last_synced_at, last_status, detail
+                 FROM provider_connections WHERE provider = ?1",
+                [&provider],
+                |r| {
+                    Ok(ProviderConnection {
+                        provider: provider.clone(),
+                        admin_credential_id: r.get(0)?,
+                        last_synced_at: r.get(1)?,
+                        last_status: r.get(2)?,
+                        detail: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row.unwrap_or(ProviderConnection {
+            provider,
+            admin_credential_id: None,
+            last_synced_at: None,
+            last_status: "never".into(),
+            detail: String::new(),
+        }))
+    }
+
+    /// Synchronize usage from a provider using its connected admin credential.
+    /// Records normalized snapshots (attribution as the connector reports it)
+    /// with a locally-estimated cost, and updates the connection status.
+    pub fn usage_sync(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+        since_days: u32,
+    ) -> Result<usize> {
+        let provider = crate::providers::normalize(provider);
+        let connector = self.connector_for(&provider)?;
+        let status = self.provider_connection_status(&provider)?;
+        let admin_id = status.admin_credential_id.ok_or_else(|| {
+            CoreError::InvalidInput(format!(
+                "no admin credential connected for {provider}; run `provider connect {provider} <credential>`"
+            ))
+        })?;
+        let admin_secret = self.decrypt_value(&admin_id)?;
+        let result = connector.fetch_usage(http, &admin_secret, since_days);
+        let now = clock::now_rfc3339();
+        let fetched = match result {
+            Ok(f) => f,
+            Err(e) => {
+                self.conn.execute(
+                    "UPDATE provider_connections SET last_synced_at = ?1, last_status = 'error',
+                     detail = ?2 WHERE provider = ?3",
+                    params![now, e.to_string(), provider],
+                )?;
+                return Err(e);
+            }
+        };
+        // Replace any previously-synced snapshots covering the re-reported
+        // range so re-syncing does not double-count. We delete non-manual rows
+        // for this provider whose window starts at or after the earliest bucket
+        // the provider just returned — the exact range being refreshed,
+        // independent of wall-clock. Manual snapshots are never touched.
+        if let Some(earliest) = fetched.snapshots.iter().map(|s| &s.window_start).min() {
+            self.conn.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source != 'manual' AND window_start >= ?2",
+                params![provider, earliest],
+            )?;
+        }
+        let mut count = 0;
+        for mut snap in fetched.snapshots {
+            snap.source = fetched.source.clone();
+            // Estimate cost when the model is known; org-level totals usually
+            // are not model-broken-down, so this is often absent (honest).
+            if let (Some(model), Some(inp), Some(out)) =
+                (&snap.model, snap.input_tokens, snap.output_tokens)
+            {
+                if let Some(est) =
+                    crate::pricing::estimate_token_cost(&self.conn, &provider, model, inp, out)?
+                {
+                    snap.estimated_cost_micros = Some(est.micros);
+                }
+            }
+            usage::record(&self.conn, &snap)?;
+            count += 1;
+        }
+        self.conn.execute(
+            "UPDATE provider_connections SET last_synced_at = ?1, last_status = 'ok',
+             detail = ?2 WHERE provider = ?3",
+            params![
+                now,
+                format!("{count} snapshot(s); {}", fetched.attribution.label()),
+                provider
+            ],
+        )?;
+        crate::activity::record(
+            &self.conn,
+            "provider_usage",
+            "usage_sync",
+            None,
+            None,
+            &format!("{provider}: {count} snapshot(s)"),
+            fetched.attribution.as_str(),
+        )?;
+        Ok(count)
+    }
+
+    /// Record a usage snapshot manually (user-supplied), attributed to a
+    /// credential/project, with a locally-estimated cost.
+    pub fn usage_record_manual(
+        &self,
+        credential_selector: &str,
+        model: Option<&str>,
+        input_tokens: i64,
+        output_tokens: i64,
+        window_start: &str,
+        window_end: &str,
+    ) -> Result<String> {
+        let cred = self.get_credential(credential_selector)?;
+        let mut snap = usage::NewUsageSnapshot::new(&cred.provider, window_start, window_end);
+        snap.credential_id = Some(cred.id.clone());
+        snap.project_id = Some(cred.project_id.clone());
+        snap.model = model.map(str::to_string);
+        snap.input_tokens = Some(input_tokens);
+        snap.output_tokens = Some(output_tokens);
+        snap.total_tokens = Some(input_tokens + output_tokens);
+        snap.source = "manual".into();
+        snap.attribution = usage::Attribution::ExactCredential;
+        if let Some(m) = model {
+            if let Some(est) = crate::pricing::estimate_token_cost(
+                &self.conn,
+                &cred.provider,
+                m,
+                input_tokens,
+                output_tokens,
+            )? {
+                snap.estimated_cost_micros = Some(est.micros);
+            }
+        }
+        usage::record(&self.conn, &snap)
+    }
+
+    pub fn usage_totals(
+        &self,
+        since: &str,
+        credential_selector: Option<&str>,
+        project: Option<&str>,
+    ) -> Result<usage::UsageTotals> {
+        let cred_id = match credential_selector {
+            Some(s) => Some(self.get_credential(s)?.id),
+            None => None,
+        };
+        let proj_id = match project {
+            Some(p) => Some(self.project_row_by_ident(p)?.id),
+            None => None,
+        };
+        usage::totals_since(&self.conn, since, cred_id.as_deref(), proj_id.as_deref())
+    }
+
+    pub fn set_project_budget_dollars(&self, project: &str, dollars: Option<&str>) -> Result<()> {
+        let project = self.project_row_by_ident(project)?;
+        let micros = match dollars {
+            Some(d) => Some(crate::pricing::dollars_to_micros(d)?),
+            None => None,
+        };
+        crate::budget::set_project_budget(&self.conn, &project.id, micros)
+    }
+
+    pub fn set_credential_budget_dollars(
+        &self,
+        selector: &str,
+        dollars: Option<&str>,
+    ) -> Result<()> {
+        let cred = self.get_credential(selector)?;
+        let micros = match dollars {
+            Some(d) => Some(crate::pricing::dollars_to_micros(d)?),
+            None => None,
+        };
+        crate::budget::set_credential_budget(&self.conn, &cred.id, micros)
+    }
+
+    pub fn project_budget_report(&self, project: &str) -> Result<crate::budget::BudgetReport> {
+        let project = self.project_row_by_ident(project)?;
+        crate::budget::project_report(&self.conn, &project.id)
+    }
+
+    pub fn credential_budget_report(&self, selector: &str) -> Result<crate::budget::BudgetReport> {
+        let cred = self.get_credential(selector)?;
+        crate::budget::credential_report(
+            &self.conn,
+            &cred.id,
+            &format!("{}/{}", cred.project_name, cred.name),
+        )
+    }
+
+    pub fn activity_list(
+        &self,
+        limit: u32,
+        credential_selector: Option<&str>,
+    ) -> Result<Vec<crate::activity::ActivityEvent>> {
+        let cred_id = match credential_selector {
+            Some(s) => Some(self.get_credential(s)?.id),
+            None => None,
+        };
+        crate::activity::list(&self.conn, limit, cred_id.as_deref())
+    }
+
+    pub fn pricing_catalog(&self) -> Result<Vec<crate::pricing::PricingRecord>> {
+        crate::pricing::catalog(&self.conn)
+    }
+
+    pub fn set_pricing_override(
+        &self,
+        provider: &str,
+        model: &str,
+        input_dollars_per_m: &str,
+        output_dollars_per_m: &str,
+        note: &str,
+    ) -> Result<()> {
+        crate::pricing::set_override(
+            &self.conn,
+            provider,
+            model,
+            crate::pricing::dollars_to_micros(input_dollars_per_m)?,
+            crate::pricing::dollars_to_micros(output_dollars_per_m)?,
+            note,
+        )
+    }
+
+    // --- Process injection ---
+
+    pub fn set_env_mapping(&self, project: &str, selector: &str, env_var: &str) -> Result<()> {
+        let project = self.project_row_by_ident(project)?;
+        let cred = self.get_credential(selector)?;
+        if cred.project_id != project.id {
+            return Err(CoreError::InvalidInput(
+                "the credential is not in that project".into(),
+            ));
+        }
+        crate::inject::set_mapping(&self.conn, &project.id, &cred.id, env_var)
+    }
+
+    pub fn remove_env_mapping(&self, project: &str, env_var: &str) -> Result<bool> {
+        let project = self.project_row_by_ident(project)?;
+        crate::inject::remove_mapping(&self.conn, &project.id, env_var)
+    }
+
+    pub fn list_env_mappings(&self, project: &str) -> Result<Vec<crate::inject::EnvMapping>> {
+        let project = self.project_row_by_ident(project)?;
+        crate::inject::list_mappings(&self.conn, &project.id)
+    }
+
+    /// Build the environment variables to inject for a project run. Only the
+    /// requested credentials of THAT project are decrypted — never unrelated
+    /// ones. `explicit` pairs (credential selector, env var) override/augment
+    /// the project's configured mappings. Returns the env pairs plus a started
+    /// process-session id; the caller spawns the child and calls
+    /// [`end_process_session`].
+    pub fn build_injection(
+        &self,
+        project: &str,
+        explicit: &[(String, String)],
+        command_label: &str,
+    ) -> Result<(Vec<(String, SecretString)>, String)> {
+        let project_row = self.project_row_by_ident(project)?;
+        // Resolve the set of (env_var -> credential_id) from config + explicit.
+        let mut wanted: Vec<(String, String)> = Vec::new(); // (env_var, credential_id)
+        for m in crate::inject::list_mappings(&self.conn, &project_row.id)? {
+            wanted.push((m.env_var, m.credential_id));
+        }
+        for (selector, env_var) in explicit {
+            if !crate::inject::valid_env_name(env_var) {
+                return Err(CoreError::InvalidInput(format!(
+                    "'{env_var}' is not a valid environment-variable name"
+                )));
+            }
+            let cred = self.get_credential(selector)?;
+            if cred.project_id != project_row.id {
+                return Err(CoreError::InvalidInput(format!(
+                    "credential '{selector}' is not in project '{}'; refusing to inject unrelated credentials",
+                    project_row.name
+                )));
+            }
+            // Explicit mapping wins over a configured one for the same var.
+            wanted.retain(|(v, _)| v != env_var);
+            wanted.push((env_var.clone(), cred.id));
+        }
+        if wanted.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "no credentials to inject; pass --credential/--env or configure mappings".into(),
+            ));
+        }
+        let mut env = Vec::new();
+        for (var, cred_id) in &wanted {
+            // Decrypt strictly within this project.
+            let cred = self
+                .credential_row_by_id(cred_id)?
+                .ok_or(CoreError::VaultCorrupted(
+                    "mapping references a missing credential",
+                ))?;
+            if cred.project_id != project_row.id {
+                return Err(CoreError::InvalidInput(
+                    "a mapping references a credential outside this project".into(),
+                ));
+            }
+            let value = self.decrypt_value(cred_id)?;
+            env.push((var.clone(), value));
+        }
+        let var_names: Vec<String> = env.iter().map(|(v, _)| v.clone()).collect();
+        let session =
+            crate::inject::start_session(&self.conn, &project_row.id, command_label, &var_names)?;
+        audit::record(
+            &self.conn,
+            "process_injection_started",
+            Some(&project_row.id),
+            None,
+            &format!("vars={}", var_names.join(",")),
+        )?;
+        crate::activity::record(
+            &self.conn,
+            "process_session",
+            "injection",
+            None,
+            Some(&project_row.id),
+            command_label,
+            &format!("vars={}", var_names.join(",")),
+        )?;
+        Ok((env, session))
+    }
+
+    pub fn end_process_session(&self, session_id: &str, exit_code: Option<i32>) -> Result<()> {
+        crate::inject::end_session(&self.conn, session_id, exit_code)
+    }
+
+    pub fn list_process_sessions(&self, limit: u32) -> Result<Vec<crate::inject::ProcessSession>> {
+        crate::inject::list_sessions(&self.conn, limit)
+    }
+}
+
+/// A provider connection's stored state.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderConnection {
+    pub provider: String,
+    pub admin_credential_id: Option<String>,
+    pub last_synced_at: Option<String>,
+    pub last_status: String,
+    pub detail: String,
+}
+
+/// Read suppression keys directly from a database connection, without
+/// unlocking the vault. Used by the pre-commit hook, which must run during a
+/// commit without prompting for the master password. Suppression keys carry
+/// no secret material.
+pub fn load_suppression_keys(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT suppression_key FROM scan_suppressions")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut set = HashSet::new();
+    for r in rows {
+        set.insert(r?);
+    }
+    Ok(set)
+}
+
+/// A stored scan suppression (no secret material).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Suppression {
+    pub suppression_key: String,
+    pub rule: String,
+    pub path: String,
+    pub reason: String,
+    pub created_at: String,
+}
+
+/// Summary of a monitoring run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorSummary {
+    pub checked: usize,
+    pub alerts_created: usize,
+    pub alerts_resolved: usize,
+    pub open_alerts: usize,
 }
 
 impl CredentialRow {

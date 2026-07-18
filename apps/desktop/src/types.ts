@@ -117,6 +117,205 @@ export interface ProviderInfo {
   common_env_vars: string[];
 }
 
+export type SupportLevel =
+  "implemented" | "supported_not_implemented" | "unsupported" | "manual_only";
+
+export type Attribution =
+  "not_applicable" | "account_level" | "provider_project_level" | "exact_credential";
+
+export interface CapabilityEntry {
+  support: SupportLevel;
+  requires_admin_credential: boolean;
+  attribution: Attribution;
+  note: string;
+}
+
+export interface Capabilities {
+  validate_credential: CapabilityEntry;
+  fetch_metadata: CapabilityEntry;
+  fetch_usage: CapabilityEntry;
+  read_permissions: CapabilityEntry;
+  change_permissions: CapabilityEntry;
+  create_credential: CapabilityEntry;
+  disable_credential: CapabilityEntry;
+  revoke_credential: CapabilityEntry;
+  rotate_credential: CapabilityEntry;
+  fetch_pricing: CapabilityEntry;
+}
+
+export interface DetectionPattern {
+  name: string;
+  regex: string;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface ProviderManifest {
+  id: string;
+  name: string;
+  description: string;
+  website: string;
+  api_docs_url: string;
+  auth_docs_url: string;
+  manage_url: string;
+  env_vars: string[];
+  credential_types: string[];
+  expiration: string;
+  watch_docs: string[];
+  detection: DetectionPattern[];
+  capabilities: Capabilities;
+}
+
+export interface VaultMatch {
+  credential_id: string;
+  credential_name: string;
+  project_id: string;
+  project_name: string;
+  other_projects: string[];
+}
+
+export interface Finding {
+  rule: string;
+  provider: string | null;
+  confidence: "low" | "medium" | "high";
+  file: string;
+  line: number;
+  redacted: string;
+  reason: string;
+  recommended: string;
+  suppression_key: string;
+  vault_match: VaultMatch | null;
+}
+
+export type HookState = "absent" | "installed" | "foreign" | "chained_into_foreign";
+
+export interface HookStatus {
+  repo: string;
+  hook_path: string;
+  state: HookState;
+}
+
+export type AlertKind =
+  | "expiring_soon"
+  | "expired"
+  | "stale"
+  | "unused"
+  | "reused_across_projects"
+  | "production_in_development"
+  | "possible_exposure"
+  | "provider_sync_failed"
+  | "documentation_changed";
+
+export interface Alert {
+  id: string;
+  kind: AlertKind;
+  severity: "info" | "low" | "medium" | "high" | "critical";
+  title: string;
+  detail: string;
+  evidence: string;
+  confidence: string;
+  recommended_action: string;
+  project_id: string | null;
+  credential_id: string | null;
+  created_at: string;
+  observed_at: string;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+}
+
+export interface MonitorSummary {
+  checked: number;
+  alerts_created: number;
+  alerts_resolved: number;
+  open_alerts: number;
+}
+
+export interface DocWatch {
+  id: string;
+  provider: string;
+  url: string;
+  etag: string | null;
+  last_modified: string | null;
+  content_hash: string | null;
+  last_checked_at: string | null;
+  last_changed_at: string | null;
+  last_status: string;
+  created_at: string;
+}
+
+export interface ValidationResult {
+  valid: boolean;
+  status: number;
+  detail: string;
+}
+
+export interface FetchedMetadata {
+  fields: [string, string][];
+  source: string;
+}
+
+export interface NormalizedPermissions {
+  read: string[];
+  write: string[];
+  admin: string[];
+  sensitive: string[];
+  summary: string;
+}
+
+export interface StoredPermissions {
+  credential_id: string;
+  raw_scopes: string[];
+  normalized: NormalizedPermissions;
+  source: string;
+  precision: string;
+  confidence: string;
+  synced_at: string;
+}
+
+export interface ProviderConnection {
+  provider: string;
+  admin_credential_id: string | null;
+  last_synced_at: string | null;
+  last_status: string;
+  detail: string;
+}
+
+export interface UsageTotals {
+  snapshots: number;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  reported_cost_micros: number;
+  estimated_cost_micros: number;
+  has_inexact_attribution: boolean;
+  coarsest_attribution: string | null;
+}
+
+export interface BudgetReport {
+  scope: string;
+  budget_micros: number | null;
+  period_start: string;
+  reported_cost_micros: number;
+  estimated_cost_micros: number;
+  used_micros: number;
+  used_is_estimated: boolean;
+  remaining_micros: number | null;
+  projected_period_end_micros: number;
+  over_budget: boolean;
+  attribution_note: string | null;
+}
+
+export interface ActivityEvent {
+  id: number;
+  at: string;
+  source: string;
+  kind: string;
+  credential_id: string | null;
+  project_id: string | null;
+  detail: string;
+  measurements: string;
+}
+
 export interface BackupInfo {
   path: string;
   vault_id: string;

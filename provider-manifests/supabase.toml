@@ -1,0 +1,43 @@
+# Supabase provider manifest.
+id = "supabase"
+name = "Supabase"
+description = "Supabase project API keys and personal/management access tokens."
+website = "https://supabase.com"
+api_docs_url = "https://supabase.com/docs/reference/api/introduction"
+auth_docs_url = "https://supabase.com/docs/guides/api/api-keys"
+manage_url = "https://supabase.com/dashboard/project/_/settings/api"
+# Secret-bearing variables only; SUPABASE_URL and the publishable anon key
+# are intentionally excluded to avoid false positives.
+env_vars = ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY", "SUPABASE_ACCESS_TOKEN"]
+credential_types = ["anon_key", "service_role_key", "publishable_key", "secret_key", "personal_access_token"]
+expiration = "Legacy anon/service_role JWT keys are long-lived; personal access tokens do not expire until revoked."
+watch_docs = [
+    "https://supabase.com/docs/guides/api/api-keys",
+    "https://supabase.com/docs/reference/api/introduction",
+]
+
+[[detection]]
+name = "supabase-personal-access-token"
+regex = "sbp_[A-Za-z0-9]{40,}"
+confidence = "high"
+
+[[detection]]
+name = "supabase-secret-key"
+regex = "sb_secret_[A-Za-z0-9_-]{20,}"
+confidence = "high"
+# Note: sb_publishable_ keys are intentionally NOT detected — they are the
+# modern client-safe key, designed to ship in client code (security relies on
+# row-level security, not on the key being secret). Flagging them would be a
+# false positive with the wrong remediation.
+
+[capabilities]
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "Validates a personal/management access token (sbp_...) via the Management API. Project anon/service keys are validated against the project REST URL, which API Tracker does not attempt (it reports this rather than marking such keys invalid)." }
+fetch_metadata = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Management API lists a project's API keys; requires a personal access token." }
+fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Management API exposes project usage; attribution is at project granularity." }
+read_permissions = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "A key's coarse privilege is fixed by its type and readable from the 'type' field via the Management API; there are no arbitrary per-key scopes." }
+change_permissions = { support = "unsupported", note = "A key's type/privilege cannot be changed; create a new key of the desired type instead." }
+create_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "POST /v1/projects/{ref}/api-keys creates a new-format project key; requires a personal access token." }
+disable_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Management API can disable the legacy anon+service_role keys together (not individually); new-format keys have no disable state." }
+revoke_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "DELETE /v1/projects/{ref}/api-keys/{id} permanently revokes a new-format key; requires a personal access token." }
+rotate_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "No single rotate endpoint; create a new key then delete the old one via the Management API." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

@@ -1,0 +1,120 @@
+name: Release
+
+# Builds CLI + desktop artifacts for macOS, Windows, and Linux when a version
+# tag (v*) is pushed, generates SHA-256 checksums, and attaches everything to a
+# GitHub Release. Artifacts are UNSIGNED (public alpha) — see
+# docs/PACKAGING.md for signing/notarization requirements.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cli:
+    name: CLI (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build CLI
+        run: cargo build --release -p api-tracker-cli --target ${{ matrix.target }}
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/api-tracker"
+          out="api-tracker-${{ matrix.target }}"
+          tar -czf "$out.tar.gz" -C "$(dirname "$bin")" api-tracker
+          shasum -a 256 "$out.tar.gz" > "$out.tar.gz.sha256"
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/api-tracker.exe"
+          out="api-tracker-${{ matrix.target }}"
+          cp "$bin" "api-tracker.exe"
+          7z a "$out.zip" api-tracker.exe
+          certutil -hashfile "$out.zip" SHA256 > "$out.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: |
+            api-tracker-*.tar.gz*
+            api-tracker-*.zip*
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+      # tauri-action builds the app and uploads the bundles to the release for
+      # the tag that triggered this workflow. Artifacts are unsigned.
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: apps/desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "API Tracker ${{ github.ref_name }} (alpha)"
+          releaseBody: "Unsigned public-alpha build. See docs/INSTALL.md and docs/PACKAGING.md."
+          releaseDraft: true
+          prerelease: true
+
+  cli-release:
+    name: Attach CLI artifacts + checksums
+    needs: cli
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist
+      - name: Combined checksums
+        run: (cd dist && sha256sum api-tracker-* > SHA256SUMS.txt) || true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          files: |
+            dist/api-tracker-*
+            dist/SHA256SUMS.txt

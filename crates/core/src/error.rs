@@ -61,6 +61,16 @@ pub enum CoreError {
     #[error("the vault database is damaged: {0}")]
     VaultCorrupted(&'static str),
 
+    #[error("{provider} does not support '{capability}' this way: {hint}")]
+    Unsupported {
+        provider: String,
+        capability: &'static str,
+        hint: String,
+    },
+
+    #[error("provider request failed: {0}")]
+    Provider(String),
+
     #[error("key derivation failed (unsupported KDF parameters)")]
     Kdf,
 
@@ -96,6 +106,8 @@ impl CoreError {
             CoreError::Crypto { .. } => "crypto_error",
             CoreError::BackupInvalid(_) => "backup_invalid",
             CoreError::VaultCorrupted(_) => "vault_corrupted",
+            CoreError::Unsupported { .. } => "unsupported",
+            CoreError::Provider(_) => "provider_error",
             CoreError::Kdf => "kdf_error",
             CoreError::Db(_) => "db_error",
             CoreError::Io(_) => "io_error",

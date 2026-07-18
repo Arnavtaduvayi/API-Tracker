@@ -3,10 +3,10 @@
 use crate::ctx::{self, Ctx};
 use crate::render;
 use anyhow::{bail, Result};
+use api_tracker_core::db;
 use api_tracker_core::session::{self, SessionToken};
 use api_tracker_core::settings::VaultSettings;
 use api_tracker_core::vault::{self};
-use api_tracker_core::{db, providers};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
@@ -216,39 +216,6 @@ pub fn settings(ctx: &Ctx, cmd: SettingsCmd) -> Result<()> {
             // the live session's TTL, not only on the next unlock.
             ctx.persist_session(&vault, &token)?;
             println!("{key} = {value}");
-        }
-    }
-    Ok(())
-}
-
-#[derive(Subcommand)]
-pub enum ProviderCmd {
-    /// List known providers (informational only; no network access).
-    List,
-}
-
-pub fn provider(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
-    match cmd {
-        ProviderCmd::List => {
-            render::emit(ctx.json, &providers::PROVIDERS, || {
-                let rows: Vec<Vec<String>> = providers::PROVIDERS
-                    .iter()
-                    .map(|p| {
-                        vec![
-                            p.id.to_owned(),
-                            p.name.to_owned(),
-                            p.common_env_vars.join(","),
-                            p.docs_url.to_owned(),
-                        ]
-                    })
-                    .collect();
-                render::table(&["ID", "NAME", "ENV VARS", "DOCS"], &rows);
-                println!();
-                println!(
-                    "Note: this catalog is informational. Provider API integrations \
-                     (usage, validation, rotation) are not implemented yet."
-                );
-            });
         }
     }
     Ok(())

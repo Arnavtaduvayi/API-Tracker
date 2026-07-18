@@ -26,7 +26,27 @@ integrations land.
 - Backups are single files encrypted under a separate backup password.
 - The CLI session splits state between an encrypted file (0600) and a token
   that exists only in the user's shell environment (ADR 0004).
-- No network I/O exists anywhere in the current code.
+- Repository scanning, git access, and the pre-commit hook run entirely
+  locally: no source code, diff, or finding ever leaves the machine. Scan
+  findings, alerts, and suppressions store no secret values (findings keep a
+  redacted preview and a non-secret suppression key; the raw value lives only
+  in a `#[serde(skip)]` in-memory buffer used for vault matching). ADR 0008.
+- Outbound network use is limited to two things, both direct from the device:
+  the **documentation watcher** (explicit user-selected official URLs,
+  conditional GETs, 8 MiB body cap, stores only validators/hash/timestamps,
+  no crawling); and **provider connectors** (validation, metadata, permission
+  reads, and usage sync) that send the credential only in a request header to
+  the provider's own official API endpoint. No secret is ever sent to an
+  API-Tracker-operated server. Connectors are built to the documented API
+  shapes and tested offline against fixtures.
+- **Secure process injection** (`run`) decrypts only the selected credentials
+  of one project and sets them in the child process's environment. It never
+  writes a `.env` or prints values, and it refuses credentials from other
+  projects. Caveat (documented, not a bug): once injected, the value lives in
+  the child process's environment — visible to that process and anything that
+  can read its environment (e.g. `/proc/<pid>/environ` on Linux, or malware
+  running as the user). Injection narrows exposure versus a committed `.env`;
+  it does not defeat an attacker already running as you.
 
 ## Adversaries and outcomes
 

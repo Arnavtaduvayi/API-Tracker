@@ -1,0 +1,37 @@
+# GitHub provider manifest (personal access tokens).
+id = "github"
+name = "GitHub"
+description = "GitHub personal access tokens (classic and fine-grained)."
+website = "https://github.com"
+api_docs_url = "https://docs.github.com/en/rest"
+auth_docs_url = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens"
+manage_url = "https://github.com/settings/tokens"
+env_vars = ["GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"]
+credential_types = ["classic_pat", "fine_grained_pat", "oauth_token", "app_installation_token"]
+expiration = "Personal access tokens may be given a user-chosen expiration; fine-grained tokens require one."
+watch_docs = [
+    "https://docs.github.com/en/rest/overview/api-versions",
+    "https://docs.github.com/en/rest/authentication/authenticating-to-the-rest-api",
+]
+
+[[detection]]
+name = "github-fine-grained-pat"
+regex = "github_pat_[A-Za-z0-9_]{80,}"
+confidence = "high"
+
+[[detection]]
+name = "github-token"
+regex = "gh[posru]_[A-Za-z0-9]{36,}"
+confidence = "high"
+
+[capabilities]
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated GET /user (or /rate_limit) confirms the token works." }
+fetch_metadata = { support = "implemented", attribution = "exact_credential", note = "GET / returns X-OAuth-Scopes and X-RateLimit headers for classic tokens." }
+fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "account_level", note = "The Enhanced Billing API reports metered usage at user/org/enterprise account level, never per token." }
+read_permissions = { support = "implemented", attribution = "exact_credential", note = "Classic tokens expose scopes via the X-OAuth-Scopes response header; fine-grained token permissions are not enumerable via the API." }
+change_permissions = { support = "manual_only", note = "Token scopes/permissions are edited on the token settings page." }
+create_credential = { support = "manual_only", note = "Personal access tokens are created in the web UI, not through the REST API." }
+disable_credential = { support = "unsupported", note = "There is no disable action for a personal access token." }
+revoke_credential = { support = "manual_only", note = "A user deletes their own token in the web UI; an org admin can revoke a member's fine-grained token that accesses org resources via the API." }
+rotate_credential = { support = "manual_only", note = "Regenerate the token in the web UI." }
+fetch_pricing = { support = "unsupported", note = "Not applicable to personal access tokens." }

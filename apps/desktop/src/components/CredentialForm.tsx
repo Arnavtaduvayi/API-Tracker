@@ -4,7 +4,12 @@
 
 import { useEffect, useState } from "react";
 import { api, isApiError } from "../api";
-import { ENVIRONMENTS, type Environment, type ProviderInfo, type ReuseWarning } from "../types";
+import {
+  ENVIRONMENTS,
+  type Environment,
+  type ProviderManifest,
+  type ReuseWarning,
+} from "../types";
 import { emptyToNull, toDateInput } from "../utils";
 
 export function CredentialForm(props: {
@@ -13,7 +18,7 @@ export function CredentialForm(props: {
   onDone: (id: string | null) => void;
 }) {
   const editing = props.editId !== undefined;
-  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [providers, setProviders] = useState<ProviderManifest[]>([]);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState("other");
   const [environment, setEnvironment] = useState<Environment>("development");

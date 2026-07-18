@@ -1,0 +1,98 @@
+# Installation & First-Run Guide
+
+API Tracker is a **local-first** desktop app + CLI. There is **no account**, no
+cloud service, and your secrets are never uploaded to an API Tracker server.
+This is an **alpha**: evaluate it carefully before storing highly sensitive
+production credentials, and read the [security limitations](../SECURITY.md).
+
+## Download
+
+Get artifacts from the project's
+[GitHub Releases](https://github.com/Arnavtaduvayi/API-Tracker/releases). Each
+release lists a `.dmg` / `.msi` / `.AppImage` / `.deb` for the desktop app and
+a standalone CLI archive per platform, plus a `SHA256SUMS.txt`.
+
+### Verify the download (recommended)
+
+```bash
+# macOS/Linux
+shasum -a 256 -c SHA256SUMS.txt      # or: sha256sum -c SHA256SUMS.txt
+```
+```powershell
+# Windows
+certutil -hashfile api-tracker-x86_64-pc-windows-msvc.zip SHA256
+```
+
+**These builds are unsigned (alpha).** You will see OS warnings:
+
+- **macOS**: right-click the app → *Open* → *Open* (bypasses Gatekeeper once),
+  or `xattr -dr com.apple.quarantine "API Tracker.app"`. Gatekeeper flags it
+  because it is not notarized.
+- **Windows**: SmartScreen → *More info* → *Run anyway*.
+- **Linux (AppImage)**: `chmod +x API_Tracker*.AppImage && ./API_Tracker*.AppImage`.
+
+## Install the CLI
+
+Unpack the archive and put `api-tracker` on your `PATH`:
+
+```bash
+tar -xzf api-tracker-<target>.tar.gz
+sudo mv api-tracker /usr/local/bin/      # or anywhere on PATH
+api-tracker --version
+```
+
+## First run
+
+Desktop: launch the app; it prompts you to create a vault and set a master
+password. CLI:
+
+```bash
+api-tracker init                         # create the encrypted vault
+eval "$(api-tracker unlock --print-export)"   # start a session
+api-tracker project create my-app --env production
+api-tracker key add --project my-app --name openai --provider openai \
+    --environment production             # the secret is prompted, hidden
+```
+
+The desktop app and CLI share the **same vault** (same data directory), so you
+can use both.
+
+> **Recovery:** your master password is never stored and cannot be recovered.
+> If you lose it, the vault is unrecoverable by design. Make encrypted backups
+> (`api-tracker backup create <path>` or the desktop Backup screen).
+
+## Where your data lives
+
+The vault database (`vault.db`), CLI session file, and WAL files live in the
+platform data directory; override with `--data-dir` or `API_TRACKER_DIR`.
+
+| OS | Default data directory |
+| --- | --- |
+| macOS | `~/Library/Application Support/api-tracker/` |
+| Linux | `~/.local/share/api-tracker/` (XDG `$XDG_DATA_HOME`) |
+| Windows | `%APPDATA%\api-tracker\` (roaming) |
+
+Only encrypted credential values live there; metadata (names, providers,
+notes) is stored unencrypted — treat the directory itself as sensitive. See
+[THREAT_MODEL.md](../THREAT_MODEL.md).
+
+## Backups
+
+Create encrypted backups regularly and store them off-machine:
+
+```bash
+api-tracker backup create ~/api-tracker-backup.json
+api-tracker backup verify ~/api-tracker-backup.json
+```
+
+Restoring needs **both** the backup password and the master password in effect
+when the backup was made. See [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md).
+
+## Uninstall
+
+1. Remove the app (drag to Trash on macOS / uninstall on Windows / remove the
+   `.AppImage` or `sudo apt remove api-tracker` on Linux) and delete the CLI
+   binary from your `PATH`.
+2. Delete the data directory (table above) to remove your vault. **This is
+   irreversible** — back up first if you may want the data later.
+3. Remove any exported `API_TRACKER_SESSION` from your shell profile.
