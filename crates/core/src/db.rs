@@ -490,6 +490,61 @@ CREATE TABLE access_grants (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 7,
+        name: "observability: units, first-seen, doc history, repo state, channels",
+        sql: r#"
+-- Non-token usage units (requests, credits, bytes, transactions, ...).
+-- quantity/unit carry what the provider reported, verbatim; the token and
+-- request columns remain for providers that use them.
+ALTER TABLE usage_snapshots ADD COLUMN quantity REAL;
+ALTER TABLE usage_snapshots ADD COLUMN unit TEXT;
+
+-- When a provider-side entity was FIRST seen locally (synced_at moves on
+-- every sync; first_seen_at does not). Backfilled from synced_at.
+ALTER TABLE provider_side_keys ADD COLUMN first_seen_at TEXT;
+ALTER TABLE provider_side_projects ADD COLUMN first_seen_at TEXT;
+UPDATE provider_side_keys SET first_seen_at = synced_at WHERE first_seen_at IS NULL;
+UPDATE provider_side_projects SET first_seen_at = synced_at WHERE first_seen_at IS NULL;
+
+-- Documentation-watch change history (validators/hashes only, no content).
+CREATE TABLE doc_watch_history (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    url        TEXT NOT NULL,
+    provider   TEXT NOT NULL DEFAULT '',
+    at         TEXT NOT NULL,
+    outcome    TEXT NOT NULL,
+    detail     TEXT NOT NULL DEFAULT ''
+) STRICT;
+CREATE INDEX idx_doc_history_url ON doc_watch_history(url);
+
+-- Incremental repository scanning: the last commit each registered repo
+-- was scanned at, so background checks only look at NEW commits.
+CREATE TABLE repo_scan_state (
+    repo_path         TEXT PRIMARY KEY,
+    last_scanned_commit TEXT NOT NULL,
+    last_scan_at      TEXT NOT NULL,
+    last_findings     INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+-- User-configured notification channels (webhooks). The URL may embed a
+-- user-chosen token, so it is encrypted under the vault key and masked for
+-- display. Payloads carry alert metadata only — alerts are secret-free by
+-- construction.
+CREATE TABLE notification_channels (
+    id              TEXT PRIMARY KEY,
+    name            TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    kind            TEXT NOT NULL DEFAULT 'webhook',
+    url_ciphertext  BLOB NOT NULL,
+    url_masked      TEXT NOT NULL,
+    min_severity    TEXT NOT NULL DEFAULT 'high',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    created_at      TEXT NOT NULL,
+    last_delivery_at TEXT,
+    last_error      TEXT NOT NULL DEFAULT ''
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

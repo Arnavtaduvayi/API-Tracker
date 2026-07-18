@@ -28,6 +28,12 @@ pub struct VaultSettings {
     /// destination rollback. Older versions are pruned; SQLite secure_delete
     /// overwrites the freed pages.
     pub rollback_window_days: u32,
+    /// Hours between documentation-watch checks when the monitor runs with
+    /// network access. 0 disables scheduled checks (manual only).
+    pub docwatch_interval_hours: u32,
+    /// Minutes between background monitor runs in the desktop app.
+    /// 0 disables the background timer (manual checks only).
+    pub monitor_interval_minutes: u32,
 }
 
 impl Default for VaultSettings {
@@ -40,11 +46,13 @@ impl Default for VaultSettings {
             clipboard_clear_seconds: 30,
             provider_stale_days: 3,
             rollback_window_days: 30,
+            docwatch_interval_hours: 24,
+            monitor_interval_minutes: 30,
         }
     }
 }
 
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 9] = [
     "auto_lock_minutes",
     "expiring_soon_days",
     "unused_days",
@@ -52,6 +60,8 @@ const KEYS: [&str; 7] = [
     "clipboard_clear_seconds",
     "provider_stale_days",
     "rollback_window_days",
+    "docwatch_interval_hours",
+    "monitor_interval_minutes",
 ];
 
 impl VaultSettings {
@@ -96,6 +106,8 @@ impl VaultSettings {
             "clipboard_clear_seconds" => Ok(self.clipboard_clear_seconds),
             "provider_stale_days" => Ok(self.provider_stale_days),
             "rollback_window_days" => Ok(self.rollback_window_days),
+            "docwatch_interval_hours" => Ok(self.docwatch_interval_hours),
+            "monitor_interval_minutes" => Ok(self.monitor_interval_minutes),
             other => Err(CoreError::InvalidInput(format!(
                 "unknown setting '{other}'"
             ))),
@@ -111,6 +123,8 @@ impl VaultSettings {
             "clipboard_clear_seconds" => self.clipboard_clear_seconds = value,
             "provider_stale_days" => self.provider_stale_days = value,
             "rollback_window_days" => self.rollback_window_days = value,
+            "docwatch_interval_hours" => self.docwatch_interval_hours = value,
+            "monitor_interval_minutes" => self.monitor_interval_minutes = value,
             other => {
                 return Err(CoreError::InvalidInput(format!(
                     "unknown setting '{other}'"

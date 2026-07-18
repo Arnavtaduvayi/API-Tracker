@@ -1683,7 +1683,7 @@ impl UnlockedVault {
     /// Mark every credential matched by a scan finding as possibly exposed,
     /// recording where. Returns the affected credential ids. Never touches
     /// files or provider state.
-    pub fn mark_findings_exposed(&mut self, findings: &[scanner::Finding]) -> Result<Vec<String>> {
+    pub fn mark_findings_exposed(&self, findings: &[scanner::Finding]) -> Result<Vec<String>> {
         let mut affected = Vec::new();
         for finding in findings {
             if let Some(m) = &finding.vault_match {
@@ -1859,6 +1859,29 @@ impl UnlockedVault {
             }
         }
 
+        // Incremental scan of registered repositories: only NEW commits
+        // since the last monitor run are examined (one `git rev-parse` per
+        // repo when nothing changed). Local-only, like all scanning.
+        let _ = self.scan_repos_incremental();
+
+        // Expanded explainable observability rules (request spikes, dormant
+        // activation, auth failures, first-seen provider entities, unusual
+        // model/time, destination drift, rotations needing attention,
+        // expired grants).
+        {
+            let labels: HashMap<String, String> = credentials
+                .iter()
+                .map(|c| (c.id.clone(), format!("{}/{}", c.project_name, c.name)))
+                .collect();
+            let label_of = |id: &str| labels.get(id).cloned().unwrap_or_else(|| id.to_string());
+            for alert in crate::observe::alerts(&self.conn, clock::now(), &label_of)? {
+                active_keys.push(alert.dedup_key.clone());
+                if alerts::upsert(&self.conn, &alert)? {
+                    created += 1;
+                }
+            }
+        }
+
         let mut managed = crate::monitor::managed_credential_kinds();
         managed.extend(crate::activity::managed_kinds());
         managed.extend([
@@ -1868,6 +1891,7 @@ impl UnlockedVault {
             alerts::AlertKind::RotationDue,
             alerts::AlertKind::RotationStuck,
         ]);
+        managed.extend(crate::observe::managed_kinds());
         let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
         Ok(MonitorSummary {
             checked: credentials.len(),
@@ -2016,6 +2040,13 @@ impl UnlockedVault {
         url: &str,
     ) -> Result<(crate::docwatch::CheckResult, crate::docwatch::DocWatch)> {
         let (result, watch) = crate::docwatch::check_watch(&self.conn, fetcher, url)?;
+        crate::docwatch::record_history(
+            &self.conn,
+            url,
+            &watch.provider,
+            &format!("{result:?}").to_lowercase(),
+            &watch.last_status,
+        )?;
         if result == crate::docwatch::CheckResult::Changed {
             let now = clock::now_rfc3339();
             alerts::upsert(
@@ -4178,6 +4209,287 @@ impl UnlockedVault {
     /// Recorded exports (metadata only; values are never stored).
     pub fn env_exports(&self, include_cleaned: bool) -> Result<Vec<crate::envgov::EnvExport>> {
         crate::envgov::list_exports(&self.conn, include_cleaned)
+    }
+
+    // ------------------------------------------------------------------
+    // Incremental repository monitoring (local Git only)
+    // ------------------------------------------------------------------
+
+    /// Scan only the commits added since the last monitor run, per
+    /// registered repository. First sight of a repo records its HEAD as the
+    /// baseline WITHOUT scanning history (on-demand `scan --history` covers
+    /// that explicitly). Findings are matched against the vault and marked
+    /// possibly exposed exactly like on-demand scans.
+    pub fn scan_repos_incremental(&self) -> Result<Vec<RepoScanReport>> {
+        let mut reports = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT path FROM project_repos ORDER BY path")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                paths.push(r?);
+            }
+        }
+        for path in paths {
+            let repo = std::path::Path::new(&path);
+            if !repo.exists() {
+                continue;
+            }
+            let Ok(head) = crate::gitrepo::head_commit(repo) else {
+                continue; // not a repo / no commits — nothing to monitor
+            };
+            let last: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT last_scanned_commit FROM repo_scan_state WHERE repo_path = ?1",
+                    [&path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let findings_count = match &last {
+                None => 0, // baseline only
+                Some(last) if last == &head => continue,
+                Some(last) => {
+                    let units = match crate::gitrepo::range_added_units(repo, last, &head) {
+                        Ok(units) => units,
+                        // History rewritten or range unreadable: re-baseline
+                        // rather than failing the whole monitor run.
+                        Err(_) => Vec::new(),
+                    };
+                    let mut findings = Vec::new();
+                    for unit in &units {
+                        let options = scanner::ScanOptions {
+                            entropy: !scanner::skip_entropy_for(&unit.label),
+                        };
+                        findings.extend(scanner::scan_text(&unit.content, &unit.label, &options));
+                    }
+                    let suppressions = load_suppression_keys(&self.conn)?;
+                    findings.retain(|f| !suppressions.contains(&f.suppression_key));
+                    for i in 0..findings.len() {
+                        findings[i].vault_match = self.match_finding(&findings[i])?;
+                    }
+                    let count = findings.len();
+                    if count > 0 {
+                        // Vault-matched findings mark the credential exposed
+                        // (same path as on-demand scans).
+                        let _ = self.mark_findings_exposed(&findings);
+                        audit::record(
+                            &self.conn,
+                            "background_scan_findings",
+                            None,
+                            None,
+                            &format!("repo={path} new_commits_findings={count}"),
+                        )?;
+                    }
+                    count
+                }
+            };
+            self.conn.execute(
+                "INSERT INTO repo_scan_state (repo_path, last_scanned_commit, last_scan_at, last_findings)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (repo_path) DO UPDATE SET
+                     last_scanned_commit = excluded.last_scanned_commit,
+                     last_scan_at = excluded.last_scan_at,
+                     last_findings = excluded.last_findings",
+                params![path, head, clock::now_rfc3339(), findings_count as i64],
+            )?;
+            reports.push(RepoScanReport {
+                repo_path: path,
+                head_commit: head,
+                findings: findings_count,
+                baseline_only: last.is_none(),
+            });
+        }
+        Ok(reports)
+    }
+
+    // ------------------------------------------------------------------
+    // Scheduled documentation checks + change history
+    // ------------------------------------------------------------------
+
+    /// Check every documentation watch that is due per the configured
+    /// interval. Failures preserve prior state (offline-safe); returns
+    /// (url, outcome) pairs for reporting.
+    pub fn check_due_doc_watches(
+        &self,
+        fetcher: &dyn crate::docwatch::DocFetcher,
+    ) -> Result<Vec<(String, String)>> {
+        let due = crate::docwatch::due_watches(&self.conn, self.settings.docwatch_interval_hours)?;
+        let mut out = Vec::new();
+        for url in due {
+            let outcome = match self.check_doc_watch(fetcher, &url) {
+                Ok((result, _)) => format!("{result:?}").to_lowercase(),
+                Err(e) => format!("error: {e}"),
+            };
+            out.push((url, outcome));
+        }
+        Ok(out)
+    }
+
+    pub fn doc_watch_history(
+        &self,
+        url: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::docwatch::HistoryEntry>> {
+        crate::docwatch::history(&self.conn, url, limit)
+    }
+
+    // ------------------------------------------------------------------
+    // Notification channels (user-configured webhooks; optional)
+    // ------------------------------------------------------------------
+
+    /// Configure a webhook channel. The URL is encrypted under the vault
+    /// key (it may embed a user-chosen token) and masked for display.
+    pub fn notification_channel_add(
+        &self,
+        name: &str,
+        url: &SecretString,
+        min_severity: &str,
+    ) -> Result<crate::notify::NotificationChannel> {
+        let url_trim = url.expose().trim();
+        if !url_trim.starts_with("https://") && !url_trim.starts_with("http://localhost") {
+            return Err(CoreError::InvalidInput(
+                "webhook URLs must be https (or http://localhost for testing)".into(),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let ciphertext = crypto::encrypt(
+            &self.vault_key,
+            &aad::notification_channel(&self.vault_id, &id),
+            url_trim.as_bytes(),
+        )?;
+        // Reuse the id we encrypted under: insert with that exact id.
+        self.conn
+            .execute(
+                "INSERT INTO notification_channels
+                 (id, name, kind, url_ciphertext, url_masked, min_severity, created_at)
+             VALUES (?1, ?2, 'webhook', ?3, ?4, ?5, ?6)",
+                params![
+                    id,
+                    name,
+                    ciphertext,
+                    mask_value(url_trim),
+                    min_severity,
+                    clock::now_rfc3339()
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(err, _)
+                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    CoreError::AlreadyExists {
+                        kind: "notification channel",
+                        ident: name.to_string(),
+                    }
+                }
+                other => other.into(),
+            })?;
+        audit::record(
+            &self.conn,
+            "notification_channel_added",
+            None,
+            None,
+            &format!("name={name} min_severity={min_severity}"),
+        )?;
+        crate::notify::get(&self.conn, &id)
+    }
+
+    pub fn notification_channels(&self) -> Result<Vec<crate::notify::NotificationChannel>> {
+        crate::notify::list(&self.conn)
+    }
+
+    pub fn notification_channel_remove(&self, ident: &str) -> Result<()> {
+        let channel = crate::notify::get(&self.conn, ident)?;
+        crate::notify::remove(&self.conn, &channel.id)?;
+        audit::record(
+            &self.conn,
+            "notification_channel_removed",
+            None,
+            None,
+            &format!("name={}", channel.name),
+        )?;
+        Ok(())
+    }
+
+    pub fn notification_channel_enable(&self, ident: &str, enabled: bool) -> Result<()> {
+        let channel = crate::notify::get(&self.conn, ident)?;
+        crate::notify::set_enabled(&self.conn, &channel.id, enabled)
+    }
+
+    fn notification_channel_url(&self, id: &str) -> Result<SecretString> {
+        let ciphertext = crate::notify::url_ciphertext(&self.conn, id)?;
+        let plaintext = crypto::decrypt(
+            &self.vault_key,
+            &aad::notification_channel(&self.vault_id, id),
+            &ciphertext,
+            "notification channel URL",
+        )?;
+        Ok(SecretString::new(
+            String::from_utf8(plaintext.expose().to_vec())
+                .map_err(|_| CoreError::VaultCorrupted("channel URL is not valid UTF-8"))?,
+        ))
+    }
+
+    /// Deliver open alerts at or above each channel's severity floor that
+    /// were observed within the last hour (the monitor cadence). Payloads
+    /// carry alert metadata only. Failures are recorded per channel and
+    /// never fail the caller.
+    pub fn deliver_notifications(&self, http: &dyn crate::http::HttpClient) -> Result<usize> {
+        let channels: Vec<_> = crate::notify::list(&self.conn)?
+            .into_iter()
+            .filter(|c| c.enabled)
+            .collect();
+        if channels.is_empty() {
+            return Ok(0);
+        }
+        let hour_ago = clock::to_rfc3339(clock::now() - time::Duration::hours(1));
+        let open = alerts::list(&self.conn, false)?;
+        let mut delivered = 0usize;
+        for channel in &channels {
+            let floor = crate::notify::severity_rank(&channel.min_severity);
+            let url = match self.notification_channel_url(&channel.id) {
+                Ok(url) => url,
+                Err(e) => {
+                    let _ = crate::notify::record_delivery(
+                        &self.conn,
+                        &channel.id,
+                        Some(&e.to_string()),
+                    );
+                    continue;
+                }
+            };
+            let mut channel_error: Option<String> = None;
+            for alert in &open {
+                if alert.observed_at < hour_ago {
+                    continue;
+                }
+                // Stored severities are already lowercase strings.
+                if crate::notify::severity_rank(&alert.severity) < floor {
+                    continue;
+                }
+                let payload = crate::notify::NotificationPayload {
+                    source: "api-tracker",
+                    kind: &alert.kind,
+                    severity: &alert.severity,
+                    title: &alert.title,
+                    detail: &alert.detail,
+                    recommended_action: &alert.recommended_action,
+                    observed_at: &alert.observed_at,
+                };
+                match crate::notify::deliver_webhook(http, url.expose(), &payload) {
+                    Ok(_) => delivered += 1,
+                    Err(e) => {
+                        channel_error = Some(e.to_string());
+                        break; // one failure: stop hammering this channel
+                    }
+                }
+            }
+            let _ =
+                crate::notify::record_delivery(&self.conn, &channel.id, channel_error.as_deref());
+        }
+        Ok(delivered)
     }
 
     // ------------------------------------------------------------------
@@ -6856,6 +7168,15 @@ impl std::fmt::Debug for GrantInjection {
             )
             .finish()
     }
+}
+
+/// Result of one repository's incremental background scan.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoScanReport {
+    pub repo_path: String,
+    pub head_commit: String,
+    pub findings: usize,
+    pub baseline_only: bool,
 }
 
 /// One event in a credential's merged lifecycle timeline (metadata only).

@@ -6,6 +6,9 @@ website = "https://supabase.com"
 api_docs_url = "https://supabase.com/docs/reference/api/introduction"
 auth_docs_url = "https://supabase.com/docs/guides/api/api-keys"
 manage_url = "https://supabase.com/dashboard/project/_/settings/api"
+changelog_url = "https://supabase.com/changelog"
+pricing_url = "https://supabase.com/pricing"
+permissions_docs_url = "https://supabase.com/docs/guides/api/api-keys"
 # Secret-bearing variables only; SUPABASE_URL and the publishable anon key
 # are intentionally excluded to avoid false positives.
 env_vars = ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY", "SUPABASE_ACCESS_TOKEN"]
