@@ -367,9 +367,11 @@ impl Connector for Anthropic {
         admin_secret: &SecretString,
         since_days: u32,
     ) -> Result<FetchedUsage> {
-        let start = unix_days_ago(since_days);
+        // Anthropic's usage API wants an RFC-3339 `starting_at`, not a Unix
+        // timestamp (unlike OpenAI's `start_time`).
+        let start_iso = crate::clock::to_rfc3339(unix_to_time(unix_days_ago(since_days)));
         let url = format!(
-            "https://api.anthropic.com/v1/organizations/usage_report/messages?starting_at={start}&bucket_width=1d"
+            "https://api.anthropic.com/v1/organizations/usage_report/messages?starting_at={start_iso}&bucket_width=1d"
         );
         let req = HttpRequest::get(url)
             .header("x-api-key", admin_secret.expose())
@@ -523,9 +525,20 @@ impl Connector for Supabase {
     }
 
     fn validate(&self, http: &dyn HttpClient, secret: &SecretString) -> Result<ValidationResult> {
-        // Validates a Supabase personal access token (sbp_...) via the
-        // Management API. Project anon/service keys are validated differently
-        // (against the project URL), which this connector does not attempt.
+        // Only a Supabase personal/management access token (sbp_...) can be
+        // validated via the Management API. Project anon/service/sb_secret_
+        // keys are validated against the *project* REST URL, which this
+        // connector does not have — so we do NOT test them (and must not mark
+        // them invalid) and instead report the limitation.
+        if !secret.expose().trim_start().starts_with("sbp_") {
+            return Err(CoreError::Unsupported {
+                provider: "supabase".into(),
+                capability: "validate_credential",
+                hint: "only a personal access token (sbp_...) can be validated here; project \
+                       anon/service keys are validated against your project's REST URL"
+                    .into(),
+            });
+        }
         let resp = http.send(&Self::projects_request(secret))?;
         let detail = if resp.is_success() {
             let n = parse_json(&resp.body)
@@ -668,6 +681,45 @@ mod tests {
             .fetch_usage(&mock, &SecretString::from(FAKE), 7)
             .unwrap_err();
         assert!(matches!(err, CoreError::Provider(_)));
+    }
+
+    #[test]
+    fn anthropic_usage_sends_rfc3339_starting_at() {
+        let mock = MockHttpClient::json(r#"{"data":[]}"#);
+        Anthropic
+            .fetch_usage(&mock, &SecretString::from(FAKE), 7)
+            .unwrap();
+        let url = mock.last_request().unwrap().url;
+        // Must be an RFC-3339 datetime, not a bare Unix integer.
+        assert!(url.contains("starting_at="));
+        let value = url
+            .split("starting_at=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        assert!(
+            value.contains('T') && value.ends_with('Z'),
+            "starting_at was '{value}'"
+        );
+    }
+
+    #[test]
+    fn supabase_does_not_reject_project_keys_as_invalid() {
+        let mock = MockHttpClient::json("[]");
+        // A service_role JWT is not a PAT — validating it must not return
+        // valid=false (which would mark it invalid); it reports Unsupported.
+        let err = Supabase
+            .validate(&mock, &SecretString::from("eyJhbGciOiJI-service-role-jwt"))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Unsupported { .. }));
+        // A PAT (sbp_) is validated normally.
+        let mock = MockHttpClient::json("[]");
+        let r = Supabase
+            .validate(&mock, &SecretString::from("sbp_FAKE0000"))
+            .unwrap();
+        assert!(r.valid);
     }
 
     #[test]

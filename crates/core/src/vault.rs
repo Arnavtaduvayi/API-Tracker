@@ -1411,6 +1411,25 @@ impl UnlockedVault {
                 params![disabled, row.id],
             )?;
             changed.push("manually_disabled");
+            // Record the exact disable/enable time so usage-after-disabled can
+            // compare against it (updated_at is bumped by any edit).
+            crate::activity::record(
+                &self.conn,
+                "credential_state",
+                if disabled {
+                    "credential_disabled"
+                } else {
+                    "credential_enabled"
+                },
+                Some(&row.id),
+                Some(&row.project_id),
+                if disabled {
+                    "credential marked disabled"
+                } else {
+                    "credential re-enabled"
+                },
+                "",
+            )?;
         }
         if let Some(revoked) = update.revoked {
             self.conn.execute(
@@ -1730,12 +1749,13 @@ impl UnlockedVault {
             if let Some(a) = crate::activity::cost_spike_alert(&self.conn, &cred.id, &label)? {
                 new_alerts.push(a);
             }
+            let disabled_since = crate::activity::last_disabled_at(&self.conn, &cred.id)?;
             if let Some(a) = crate::activity::usage_after_disabled_alert(
                 &self.conn,
                 &cred.id,
                 &label,
                 cred.manually_disabled,
-                &cred.updated_at,
+                disabled_since.as_deref(),
             )? {
                 new_alerts.push(a);
             }
@@ -2030,6 +2050,18 @@ impl UnlockedVault {
                 return Err(e);
             }
         };
+        // Replace any previously-synced snapshots covering the re-reported
+        // range so re-syncing does not double-count. We delete non-manual rows
+        // for this provider whose window starts at or after the earliest bucket
+        // the provider just returned — the exact range being refreshed,
+        // independent of wall-clock. Manual snapshots are never touched.
+        if let Some(earliest) = fetched.snapshots.iter().map(|s| &s.window_start).min() {
+            self.conn.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source != 'manual' AND window_start >= ?2",
+                params![provider, earliest],
+            )?;
+        }
         let mut count = 0;
         for mut snap in fetched.snapshots {
             snap.source = fetched.source.clone();
@@ -2232,6 +2264,11 @@ impl UnlockedVault {
             wanted.push((m.env_var, m.credential_id));
         }
         for (selector, env_var) in explicit {
+            if !crate::inject::valid_env_name(env_var) {
+                return Err(CoreError::InvalidInput(format!(
+                    "'{env_var}' is not a valid environment-variable name"
+                )));
+            }
             let cred = self.get_credential(selector)?;
             if cred.project_id != project_row.id {
                 return Err(CoreError::InvalidInput(format!(

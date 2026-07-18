@@ -21,7 +21,9 @@ pub struct EnvMapping {
     pub env_var: String,
 }
 
-fn valid_env_name(name: &str) -> bool {
+/// A POSIX-ish environment variable name: starts with a letter or `_`, then
+/// letters/digits/`_`. Rejects shell metacharacters.
+pub fn valid_env_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()

@@ -41,9 +41,12 @@ pub fn normalize_github(raw: &[String]) -> NormalizedPermissions {
             || lower == "gist"
             || lower.starts_with("write:")
             || lower == "public_repo"
-            || lower.starts_with("manage_");
+            || lower.starts_with("manage_")
+            // `user` grants write to profile; `user:follow` follows/unfollows.
+            || lower == "user"
+            || lower == "user:follow";
         let is_read = lower.starts_with("read:")
-            || lower.starts_with("user")
+            || lower == "user:email"
             || lower == "notifications"
             || lower == "read_org";
 

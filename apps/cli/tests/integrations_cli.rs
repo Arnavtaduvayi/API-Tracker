@@ -111,6 +111,42 @@ fn run_injects_exactly_one_credential_and_never_writes_it() {
 }
 
 #[test]
+fn run_does_not_leak_vault_password_to_child() {
+    let v = TestVault::new();
+    v.add_key("web", "openai", "openai", FAKE_OPENAI);
+
+    // The child records whether it can see API Tracker's own master password
+    // in its environment. It must not — env_remove strips it before spawn.
+    let out_file = v._dir.path().join("child-pw.txt");
+    let script = format!(
+        "printf '%s' \"${{API_TRACKER_PASSWORD:-<absent>}}\" > {}",
+        out_file.display()
+    );
+    v.cmd()
+        .args([
+            "run",
+            "--project",
+            "web",
+            "--credential",
+            "web/openai",
+            "--env",
+            "OPENAI_API_KEY",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ])
+        .assert()
+        .success();
+
+    let seen = std::fs::read_to_string(&out_file).unwrap();
+    assert_eq!(
+        seen, "<absent>",
+        "child must not inherit the vault master password"
+    );
+}
+
+#[test]
 fn run_refuses_credential_from_another_project() {
     let v = TestVault::new();
     v.add_key("web", "openai", "openai", FAKE_OPENAI);

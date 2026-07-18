@@ -132,14 +132,14 @@ pub fn lookup(conn: &Connection, provider: &str, model: &str) -> Result<Option<P
     {
         return Ok(Some(b));
     }
-    // 3. Prefix bundled (dated/variant model ids).
-    if let Some(b) = bundled()
+    // 3. Substring bundled fallback for dated/variant model ids — pick the
+    //    MOST SPECIFIC (longest) matching model so `gpt-4o-mini-2024-07-18`
+    //    resolves to `gpt-4o-mini`, not the shorter `gpt-4o`.
+    let best = bundled()
         .into_iter()
-        .find(|r| r.provider == provider && model_l.contains(&r.model))
-    {
-        return Ok(Some(b));
-    }
-    Ok(None)
+        .filter(|r| r.provider == provider && model_l.contains(&r.model))
+        .max_by_key(|r| r.model.len());
+    Ok(best)
 }
 
 fn load_override(conn: &Connection, provider: &str, model: &str) -> Result<Option<PricingRecord>> {
@@ -260,9 +260,15 @@ pub fn dollars_to_micros(dollars: &str) -> Result<i64> {
     let value: f64 = cleaned
         .parse()
         .map_err(|_| CoreError::InvalidInput(format!("'{dollars}' is not a dollar amount")))?;
-    if value < 0.0 {
+    if !value.is_finite() || value < 0.0 {
+        return Err(CoreError::InvalidInput(format!(
+            "'{dollars}' is not a valid amount"
+        )));
+    }
+    // Cap at $1 trillion so the micro-USD value stays well within i64.
+    if value > 1e12 {
         return Err(CoreError::InvalidInput(
-            "amount must not be negative".into(),
+            "amount is unreasonably large".into(),
         ));
     }
     Ok((value * MICROS_PER_USD as f64).round() as i64)

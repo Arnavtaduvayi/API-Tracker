@@ -56,6 +56,17 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
     let program = &args.command[0];
     let mut cmd = std::process::Command::new(program);
     cmd.args(&args.command[1..]);
+    // Do NOT leak API Tracker's own secret environment (the master password
+    // or session token) into the child. It inherits the rest of the parent
+    // environment plus only the credentials we inject.
+    for var in [
+        crate::ctx::ENV_PASSWORD,
+        crate::ctx::ENV_SESSION,
+        crate::ctx::ENV_PROJECT_PASSWORD,
+        crate::ctx::ENV_BACKUP_PASSWORD,
+    ] {
+        cmd.env_remove(var);
+    }
     for (name, value) in &env {
         // The secret is set on the child's environment only.
         cmd.env(name, value.expose());
@@ -72,7 +83,11 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
             bail!("failed to run '{program}': {e}");
         }
     };
-    vault.end_process_session(&session, code)?;
+    // Best-effort session bookkeeping — never lose the child's exit code if
+    // the DB write fails.
+    if let Err(e) = vault.end_process_session(&session, code) {
+        eprintln!("warning: could not record process session end: {e}");
+    }
     eprintln!("Child process {summary}.");
     std::process::exit(code.unwrap_or(1));
 }

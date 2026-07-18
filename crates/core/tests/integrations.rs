@@ -144,6 +144,14 @@ fn usage_sync_records_account_level_snapshots() {
         totals.coarsest_attribution.as_deref(),
         Some("provider_account")
     );
+
+    // Re-syncing the same window must not double-count: prior synced snapshots
+    // are replaced, so totals stay put rather than doubling.
+    let mock = MockHttpClient::json(fixture);
+    vault.usage_sync("openai", &mock, 7).unwrap();
+    let totals =
+        usage::totals_since(vault.connection(), "2000-01-01T00:00:00Z", None, None).unwrap();
+    assert_eq!(totals.input_tokens, 1000, "re-sync double-counted usage");
 }
 
 #[test]

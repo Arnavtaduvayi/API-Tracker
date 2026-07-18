@@ -146,18 +146,38 @@ pub fn cost_spike_alert(
     }
 }
 
+/// The time a credential was last marked disabled, from the recorded
+/// `credential_disabled` activity event (more precise than `updated_at`, which
+/// any edit bumps). `None` when we have no recorded disable time.
+pub fn last_disabled_at(conn: &Connection, credential_id: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT at FROM activity_events
+             WHERE credential_id = ?1 AND kind = 'credential_disabled'
+             ORDER BY id DESC LIMIT 1",
+            [credential_id],
+            |r| r.get::<_, String>(0),
+        )
+        .ok())
+}
+
 /// Usage-after-disabled rule: a credential marked disabled still has usage in
-/// a window that starts on/after it was disabled.
+/// a window that starts on/after the recorded disable time. `disabled_since`
+/// is the recorded disable time; if unknown (`None`), the rule is skipped
+/// rather than guessing, to avoid false positives.
 pub fn usage_after_disabled_alert(
     conn: &Connection,
     credential_id: &str,
     label: &str,
     disabled: bool,
-    disabled_since: &str,
+    disabled_since: Option<&str>,
 ) -> Result<Option<NewAlert>> {
     if !disabled {
         return Ok(None);
     }
+    let Some(disabled_since) = disabled_since else {
+        return Ok(None);
+    };
     let count: i64 = conn.query_row(
         "SELECT count(*) FROM usage_snapshots WHERE credential_id = ?1 AND window_start >= ?2",
         params![credential_id, disabled_since],
@@ -236,8 +256,14 @@ mod tests {
         let conn = mem();
         snap(&conn, "c1", "2026-07-10T00:00:00Z", 5_000_000);
         // Disabled before the usage window: flagged.
-        let a = usage_after_disabled_alert(&conn, "c1", "web/openai", true, "2026-07-01T00:00:00Z")
-            .unwrap();
+        let a = usage_after_disabled_alert(
+            &conn,
+            "c1",
+            "web/openai",
+            true,
+            Some("2026-07-01T00:00:00Z"),
+        )
+        .unwrap();
         assert!(a.is_some());
         // Not disabled: no alert.
         assert!(usage_after_disabled_alert(
@@ -245,7 +271,7 @@ mod tests {
             "c1",
             "web/openai",
             false,
-            "2026-07-01T00:00:00Z"
+            Some("2026-07-01T00:00:00Z")
         )
         .unwrap()
         .is_none());
@@ -255,9 +281,15 @@ mod tests {
             "c1",
             "web/openai",
             true,
-            "2026-07-20T00:00:00Z"
+            Some("2026-07-20T00:00:00Z")
         )
         .unwrap()
         .is_none());
+        // Unknown disable time: skipped, not guessed.
+        assert!(
+            usage_after_disabled_alert(&conn, "c1", "web/openai", true, None)
+                .unwrap()
+                .is_none()
+        );
     }
 }
