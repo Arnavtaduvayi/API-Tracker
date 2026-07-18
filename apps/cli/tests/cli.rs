@@ -459,8 +459,16 @@ fn link_to_rejects_flags_that_would_be_ignored() {
     vault
         .cmd()
         .args([
-            "key", "add", "--project", "spinoff", "--name", "ref", "--link-to", "main/src",
-            "--expires", "2030-01-01",
+            "key",
+            "add",
+            "--project",
+            "spinoff",
+            "--name",
+            "ref",
+            "--link-to",
+            "main/src",
+            "--expires",
+            "2030-01-01",
         ])
         .assert()
         .failure()
