@@ -1,3 +1,86 @@
+//! api-tracker: local-first encrypted API credential manager (CLI).
+//!
+//! Uses the same vault, database, and business rules as the desktop app via
+//! `api-tracker-core`. All output redacts credential values; the single
+//! deliberate exception is `key reveal`, which requires reauthentication.
+
+mod backup_cmd;
+mod ctx;
+mod key_cmd;
+mod project_cmd;
+mod render;
+mod vault_cmd;
+
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "api-tracker",
+    version,
+    about = "Local-first encrypted vault for organizing API credentials across projects",
+    propagate_version = true
+)]
+struct Cli {
+    /// Vault data directory (defaults to the platform data dir; the
+    /// API_TRACKER_DIR environment variable also overrides it).
+    #[arg(long, global = true, value_name = "DIR")]
+    data_dir: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of tables.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create a new encrypted vault and set the master password.
+    Init,
+    /// Unlock the vault and start a shell session.
+    Unlock(vault_cmd::UnlockArgs),
+    /// End the current session (lock the vault for the CLI).
+    Lock,
+    /// Check vault health: paths, schema, integrity, session state.
+    Doctor,
+    /// Show or change vault settings (auto-lock, status thresholds).
+    #[command(subcommand)]
+    Settings(vault_cmd::SettingsCmd),
+    /// Informational provider catalog.
+    #[command(subcommand)]
+    Provider(vault_cmd::ProviderCmd),
+    /// Manage projects (folders of credentials).
+    #[command(subcommand)]
+    Project(project_cmd::ProjectCmd),
+    /// Manage credentials.
+    #[command(subcommand)]
+    Key(key_cmd::KeyCmd),
+    /// Encrypted vault backups.
+    #[command(subcommand)]
+    Backup(backup_cmd::BackupCmd),
+}
+
 fn main() {
-    println!("Hello, world!");
+    let cli = Cli::parse();
+    if let Err(err) = run(cli) {
+        eprintln!("error: {err:#}");
+        std::process::exit(1);
+    }
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
+    let ctx = ctx::Ctx::new(cli.data_dir, cli.json)?;
+    match cli.command {
+        Commands::Init => vault_cmd::init(&ctx),
+        Commands::Unlock(args) => vault_cmd::unlock(&ctx, args),
+        Commands::Lock => vault_cmd::lock(&ctx),
+        Commands::Doctor => vault_cmd::doctor(&ctx),
+        Commands::Settings(cmd) => vault_cmd::settings(&ctx, cmd),
+        Commands::Provider(cmd) => vault_cmd::provider(&ctx, cmd),
+        Commands::Project(cmd) => project_cmd::run(&ctx, cmd),
+        Commands::Key(cmd) => key_cmd::run(&ctx, cmd),
+        Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
+    }
 }
