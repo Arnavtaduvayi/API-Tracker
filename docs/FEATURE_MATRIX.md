@@ -3,7 +3,8 @@
 A definitive audit of product requirements against the **actual code**, not
 prior session reports. Every claim below was verified by inspecting the
 modules and tests named. Last audited: 2026-07-18, at `main` commit `e7c1edf`
-(post-`v0.2.0-alpha-openai`), updated during the `.env`-governance milestone.
+(post-`v0.2.0-alpha-openai`), updated during the `.env`-governance and
+rotation/permissions/temporary-credentials milestones.
 
 Classifications:
 
@@ -22,15 +23,15 @@ Classifications:
 | 2 | Secret-manager synchronization | Partially implemented (this milestone) |
 | 3 | Offline access | Fully implemented |
 | 4 | Token-based cost estimation | Partially implemented |
-| 5 | Permission visibility and changes | Provider-limited (visibility); changes manual by design |
+| 5 | Permission visibility and changes | Provider-limited (visibility complete for GitHub+Supabase; changes route through rotation/dashboard by design) |
 | 6 | Request/activity tracking + suspicious-activity alerts | Partially implemented |
 | 7 | Duplicate credentials across projects | Fully implemented |
 | 8 | `.env` governance | Fully implemented (this milestone) |
 | 9 | Provider/API catalog | Fully implemented |
 | 10 | Documentation-change notifications | Partially implemented |
 | 11 | Git hooks and history scanning | Fully implemented (desktop partial) |
-| 12 | Temporary local access | Partially implemented |
-| 13 | Provider-issued temporary credentials | Not implemented |
+| 12 | Temporary local access | Fully implemented |
+| 13 | Provider-issued temporary credentials | Provider-limited (expiry recorded where reported; none issuable via API) |
 | 14 | Credential version history | Fully implemented (this milestone) |
 | 15 | Provider-account metadata | Partially implemented (OpenAI-first) |
 | 16 | Provider-account password handling | Intentionally excluded (metadata only) |
@@ -144,22 +145,22 @@ override editor.
 
 ## 5. Permission visibility and changes — Provider-limited
 
-**What works.** GitHub classic-PAT scopes read exactly per credential from
-the `X-OAuth-Scopes` header, normalized into read/write/admin/sensitive with
-confidence labels (`crates/core/src/permissions.rs`); fine-grained tokens
-honestly report "not API-readable". Both CLI (`key permissions [--sync]`) and
-desktop (CredentialDetail) expose it.
+**What works.** GitHub classic-PAT scopes read exactly from the
+`X-OAuth-Scopes` header; Supabase key privilege read locally from the
+documented key format (prefixes + legacy JWT role claim) — both normalized
+into read/write/admin/sensitive with confidence labels. `key
+permissions-diff` shows a before/after diff against a fresh provider read
+without storing; permission snapshots land in the audit trail/timeline.
 
-**Changes are manual everywhere by design.** No initial provider offers a
-safe, documented per-key scope change; every manifest marks
-`change_permissions` as `manual_only` or `unsupported`, and the product
-surfaces the official management link instead of pretending. This is the
-honest ceiling, not a gap.
+**Changes are replacement-shaped by design.** No provider offers a
+documented per-key scope edit; the product links the dashboard where
+editing exists (GitHub/Stripe) and otherwise routes the change through the
+rotation workflow (create with desired scope → deploy → verify → revoke
+old). Nothing pretends scopes are mutable. This is the honest ceiling.
 
-**Missing.** Only GitHub has a permission *reader*; Supabase's
-`read_permissions` is `supported_not_implemented`.
-
-**Owning milestone.** Provider-depth milestone (Supabase permission read).
+**Missing.** Anthropic has no per-key permission concept (honestly
+`unsupported`); fine-grained GitHub token permissions remain
+non-enumerable.
 
 ## 6. Request/activity tracking + suspicious-activity alerts — Partially implemented
 
@@ -258,32 +259,40 @@ suppression-list view (CLI has both). Extensive tests across core and CLI.
 suppression list in the desktop UI.
 **Owning milestone.** Desktop-parity milestone.
 
-## 12. Temporary local access — Partially implemented
+## 12. Temporary local access — Fully implemented
 
-**What works.** `api-tracker run` injects selected project credentials into a
-child process (no `.env`, no printing, cross-project refusal, API Tracker's
-own secrets stripped from the child, zeroized buffers, names-only session
-records); configured mappings; desktop clipboard auto-clear on copy.
-This milestone adds temporary `.env` exports with TTL and automatic cleanup.
+**What works.** Access grants (`access grant/list/end`, `run --grant`)
+bound injection with an expiry window, one-time/max-launch counts (atomic
+consumption), per-process kill timers (exit 124), credential subsets, PID-
+tracked termination (`access end --kill`), advisory budget warnings, and
+audit records — all explicitly labeled LOCAL controls (ending a grant never
+claims provider revocation). Plus the existing `run` injection guarantees
+and TTL'd `.env` exports. Desktop: grants screen (creation/end; PIDs
+surfaced with CLI kill guidance).
 
-**What is missing.** Desktop has no run/mapping/session UI. Process-session
-records are written but `list_process_sessions` has no CLI/desktop surface.
-No timed reveal grant (deliberate: reveal is one-shot + reauth).
+**Remaining.** A `sessions` listing surface for non-grant runs is still
+CLI-absent (grant sessions are visible through their grants).
 
-**Acceptance criteria.** A `sessions` listing surface; desktop mapping/run
-parity (or a documented decision that `run` stays CLI-only).
-**Owning milestone.** Desktop-parity milestone.
+## 13. Provider-issued temporary credentials — Provider-limited
 
-## 13. Provider-issued temporary credentials — Not implemented
+**What works.** Provider-REPORTED expiration is recorded in its own column
+(`provider_expires_at`) from GitHub's official token-expiration header and
+drives the status engine with a "provider-reported" source label. Provider-
+CREATED test keys (`key test-create`: OpenAI service accounts, Supabase
+secret keys) come with three-way enforcement labeling: PROVIDER-ENFORCED
+(project isolation/attribution), NOT provider-enforced (the local TTL
+reminder — the key stays valid until revoked), ADVISORY-ONLY (budget
+warnings). Confirmed, reauthenticated `key provider-revoke` closes the
+loop.
 
-Only user-entered expiration dates exist (labeled as such in the status
-engine). No acquisition/refresh/renewal of short-lived provider tokens
-(STS-style), no TTL field on provider-side key metadata, no
-temporary-vs-static credential type distinction.
+**The honest ceiling.** None of the five providers can ISSUE short-lived
+credentials via API. API Tracker states this rather than hiding a permanent
+key behind a timer (which the spec explicitly forbids as simulated
+security).
 
-**Acceptance criteria.** A credential type for provider-issued short-lived
-tokens with provider-reported expiry, refresh workflows where officially
-supported (e.g. AWS STS), and honest labeling where not.
+**Acceptance criteria for more.** A provider whose official API issues
+expiring tokens (e.g. AWS STS if AWS becomes a provider, GitHub App
+installation tokens if App auth is added).
 **Owning milestone.** Provider-depth milestone.
 
 ## 14. Credential version history — Fully implemented (this milestone)

@@ -113,9 +113,24 @@ Implemented and tested today:
   handling, retry, and **rollback** to retained previous versions — never
   an automatic write, never an automatic revoke.
 - **Credential version history** — replacing a value retains the previous
-  versions encrypted (bounded, purged with the credential) so destination
-  rollback restores real material; `key versions` lists them masked after
-  reauthentication.
+  versions encrypted (bounded by count and a configurable rollback window,
+  purged with the credential) so destination rollback restores real
+  material; `key versions` lists them masked after reauthentication and
+  `key history` shows the full merged lifecycle timeline.
+- **Safe credential rotation** — a durable, restart-recoverable workflow:
+  dry-run plan, reauthenticated approval, replacement via official provider
+  APIs (OpenAI service-account keys, Supabase secret keys) or a guided
+  manual path (Anthropic/GitHub/Stripe), destination sync + verification,
+  live validation, a grace period with continued-use detection from per-key
+  usage data, disable where supported, and revocation only after
+  verification. Rollback where safe; honest "irreversible" errors where
+  not. Schedules raise due alerts — nothing destructive ever runs
+  unattended.
+- **Temporary access** — local grants bound what `run` injects (expiry,
+  one-time/max launches, per-process kill timers, SIGTERM termination),
+  clearly labeled as local controls; provider-reported expirations (GitHub
+  header) recorded and driving status; provider-created test keys with
+  explicit provider-enforced vs local vs advisory labeling.
 - **Pre-commit hook** — `hooks install` blocks commits containing
   high-confidence secrets; it runs without unlocking the vault and preserves
   any existing hook.
@@ -247,6 +262,22 @@ api-tracker destination attach my-app/openai-main ci --secret-name OPENAI_API_KE
 api-tracker sync plan my-app/openai-main              # dry run
 api-tracker sync run <plan-id>                        # confirm + reauth
 api-tracker key versions my-app/openai-main
+
+# Rotate a credential safely (dry run first, everything confirmed + reauthed)
+api-tracker rotation plan my-app/openai-main --grace-minutes 60
+api-tracker rotation approve <rotation-id>
+api-tracker rotation advance <rotation-id>      # repeat until completed
+api-tracker rotation schedule set my-app/openai-main --every-days 90
+
+# Temporary local access (bounds what THIS machine injects; not provider-side)
+api-tracker access grant --project my-app --one-time --ttl-minutes 30
+api-tracker run --grant <grant-id> -- npm test
+api-tracker access end <grant-id> --kill
+
+# Lifecycle, permissions, test keys
+api-tracker key history my-app/openai-main
+api-tracker key permissions-diff my-app/gh-token
+api-tracker key test-create --project my-app --provider openai     --provider-project proj_abc --name probe --ttl-minutes 240
 
 # Run a command with exactly one credential injected (never written to disk)
 api-tracker run --project my-app --credential my-app/openai-main \

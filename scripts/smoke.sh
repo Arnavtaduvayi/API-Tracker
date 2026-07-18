@@ -237,6 +237,26 @@ check $? "sync plan is a dry run and never shows values"
 "$BIN" destination remove smoke-ci --yes >/dev/null 2>&1
 check $? "destination remove works with reauthentication via env"
 
+echo "-- rotation and temporary access (offline) --"
+ROT_OUT=$("$BIN" rotation plan smoke-dev/main-key --grace-minutes 5 2>&1)
+echo "$ROT_OUT" | grep -q "Dry run" && ! echo "$ROT_OUT" | grep -qF "$FAKE_KEY"
+check $? "rotation plan is a dry run and never shows values"
+ROT_ID=$("$BIN" rotation plan smoke-dev/main-key --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+"$BIN" rotation cancel "$ROT_ID" --yes >/dev/null 2>&1
+check $? "an untouched rotation can be cancelled (reauth via env)"
+"$BIN" rotation schedule set smoke-dev/main-key --every-days 30 >/dev/null 2>&1 && bad "schedule allowed without a completed rotation" || ok "scheduling is refused before a completed manual rotation"
+GRANT_ID=$("$BIN" access grant --project smoke-dev --one-time --ttl-minutes 5 --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+[ -n "$GRANT_ID" ]; check $? "a one-time access grant is created"
+GRANT_CHILD=$("$BIN" run --grant "$GRANT_ID" -- /usr/bin/env 2>/dev/null)
+echo "$GRANT_CHILD" | grep -qF "SMOKE_INJECTED_KEY=$FAKE_KEY"
+check $? "run --grant injects under the grant"
+"$BIN" run --grant "$GRANT_ID" -- /usr/bin/true >/dev/null 2>&1 && bad "one-time grant allowed a second launch" || ok "a one-time grant refuses a second launch"
+"$BIN" access end "$GRANT_ID" --yes 2>/dev/null | grep -q "stays valid"
+check $? "ending a grant states the provider credential stays valid"
+HIST_OUT=$("$BIN" key history smoke-dev/main-key 2>&1)
+echo "$HIST_OUT" | grep -q "credential_created" && ! echo "$HIST_OUT" | grep -qF "$FAKE_KEY"
+check $? "key history shows the lifecycle without values"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

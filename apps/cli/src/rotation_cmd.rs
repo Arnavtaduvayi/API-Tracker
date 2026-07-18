@@ -16,7 +16,12 @@ pub enum RotationCmd {
     /// Build a rotation dry run (writes nothing anywhere).
     Plan(PlanArgs),
     /// Approve a planned rotation (reauthentication required).
-    Approve { rotation: String },
+    Approve {
+        rotation: String,
+        /// Confirm non-interactively.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Advance a rotation as far as it can go (reauthentication required).
     Advance(AdvanceArgs),
     /// Provide the manually created replacement key (stdin or hidden prompt).
@@ -124,7 +129,7 @@ pub enum ScheduleCmd {
 pub fn run(ctx: &Ctx, cmd: RotationCmd) -> Result<()> {
     match cmd {
         RotationCmd::Plan(args) => plan(ctx, args),
-        RotationCmd::Approve { rotation } => approve(ctx, &rotation),
+        RotationCmd::Approve { rotation, yes } => approve(ctx, &rotation, yes),
         RotationCmd::Advance(args) => advance(ctx, args, None),
         RotationCmd::ProvideKey(args) => provide_key(ctx, args),
         RotationCmd::Show { rotation } => show(ctx, &rotation),
@@ -217,7 +222,7 @@ fn plan(ctx: &Ctx, args: PlanArgs) -> Result<()> {
     Ok(())
 }
 
-fn approve(ctx: &Ctx, rotation: &str) -> Result<()> {
+fn approve(ctx: &Ctx, rotation: &str, yes: bool) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
     let view = vault.rotation_get(rotation)?;
     print_rotation(&view);
@@ -225,9 +230,8 @@ fn approve(ctx: &Ctx, rotation: &str) -> Result<()> {
     if !ctx::confirm(
         "Approve this rotation? Subsequent steps will create a replacement, update \
          destinations, and eventually disable/revoke the OLD key.",
-        false,
-    )? && !ctx.json
-    {
+        yes,
+    )? {
         bail!("not approved");
     }
     let password = ctx::master_password()?;
