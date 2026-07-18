@@ -1013,12 +1013,7 @@ fn env_import(
     keys: Option<Vec<String>>,
 ) -> CmdResult<Vec<api_tracker_core::vault::EnvImportOutcome>> {
     with_vault(&state, |vault| {
-        vault.env_import(
-            &project,
-            std::path::Path::new(&file),
-            keys.as_deref(),
-            None,
-        )
+        vault.env_import(&project, std::path::Path::new(&file), keys.as_deref(), None)
     })
 }
 
@@ -1160,9 +1155,7 @@ fn destination_remove(
     password: String,
 ) -> CmdResult<api_tracker_core::destinations::Destination> {
     let password = SecretString::new(password);
-    with_vault(&state, |vault| {
-        vault.destination_remove(&ident, &password)
-    })
+    with_vault(&state, |vault| vault.destination_remove(&ident, &password))
 }
 
 #[tauri::command]

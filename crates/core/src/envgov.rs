@@ -327,7 +327,9 @@ fn mask_assignment(line: &str) -> String {
         return line.to_string();
     }
     let Some(eq) = line.find('=') else {
-        return line.to_string();
+        // A non-comment line without '=' (malformed) may be a bare pasted
+        // secret; mask it whole rather than risk printing it.
+        return mask_value(trimmed);
     };
     let value = line[eq + 1..]
         .trim()
@@ -336,6 +338,33 @@ fn mask_assignment(line: &str) -> String {
         return line.to_string();
     }
     format!("{}={}", &line[..eq], mask_value(value))
+}
+
+/// Create `path` fresh with owner-only permissions, failing if it already
+/// exists (`create_new` closes the check-then-write race for exports that
+/// must not clobber).
+pub fn write_new(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            CoreError::InvalidInput(format!(
+                "{} already exists; pass the overwrite flag to replace it",
+                path.display()
+            ))
+        } else {
+            CoreError::Io(e)
+        }
+    })?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Write `content` to `path` atomically with owner-only permissions: write
@@ -670,6 +699,25 @@ mod tests {
         assert!(!diff.contains("1234567890abcdefgh"));
         assert!(diff.contains("- SECRET_KEY=sk-t…gh"));
         assert!(diff.contains("  A=1"));
+    }
+
+    #[test]
+    fn diff_masks_bare_lines_without_assignments() {
+        // A hand-pasted bare token (no KEY=) is a malformed line; the diff
+        // must mask it rather than print it.
+        let old = "GOOD=1\nsk-test-FAKE-bare-token-1234567890abcdef\n";
+        let diff = render_diff(".env", old, "GOOD=1\n");
+        assert!(!diff.contains("bare-token-1234567890abcdef"), "{diff}");
+    }
+
+    #[test]
+    fn write_new_refuses_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        write_new(&path, "A=1\n").unwrap();
+        let err = write_new(&path, "A=2\n").unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "A=1\n");
     }
 
     #[test]

@@ -19,12 +19,44 @@ pub enum Method {
     Delete,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpRequest {
     pub method: Method,
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
+}
+
+/// Requests carry bearer tokens and (for destinations) plaintext secret
+/// bodies; Debug redacts both so a stray `{:?}` can never leak them.
+impl std::fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let headers: Vec<(&str, &str)> = self
+            .headers
+            .iter()
+            .map(|(k, v)| {
+                let lower = k.to_ascii_lowercase();
+                if lower == "authorization"
+                    || lower == "x-amz-security-token"
+                    || lower.contains("api-key")
+                    || lower.contains("token")
+                {
+                    (k.as_str(), "[redacted]")
+                } else {
+                    (k.as_str(), v.as_str())
+                }
+            })
+            .collect();
+        f.debug_struct("HttpRequest")
+            .field("method", &self.method)
+            .field("url", &self.url)
+            .field("headers", &headers)
+            .field(
+                "body",
+                &self.body.as_ref().map(|b| format!("[{} bytes]", b.len())),
+            )
+            .finish()
+    }
 }
 
 impl HttpRequest {
@@ -102,6 +134,10 @@ impl UreqClient {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .user_agent("api-tracker/0.1 (+local)")
+            // Non-2xx responses are VALUES here, with their bodies intact:
+            // adapters parse error bodies (e.g. AWS `__type`) to decide
+            // create-on-missing and to report honest errors.
+            .http_status_as_error(false)
             .build();
         Self {
             agent: config.into(),
@@ -151,7 +187,7 @@ impl HttpClient for UreqClient {
         };
         let mut resp = match result {
             Ok(resp) => resp,
-            // A non-2xx status is a value we want to inspect, not a hard error.
+            // Unreachable with http_status_as_error(false); kept as a net.
             Err(ureq::Error::StatusCode(code)) => {
                 return Ok(HttpResponse {
                     status: code,

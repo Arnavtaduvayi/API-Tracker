@@ -370,6 +370,20 @@ pub struct Attachment {
     pub drift: String,
 }
 
+/// A conservative secret-name shape every implemented destination accepts
+/// (GitHub: alphanumeric/underscore; Vercel: env-var names; AWS and the
+/// keychain are broader). Also keeps names inert inside URL paths.
+pub fn valid_secret_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && name
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic() || c == '_')
+            .unwrap_or(false)
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub fn attach(
     conn: &Connection,
     credential_id: &str,
@@ -377,10 +391,11 @@ pub fn attach(
     secret_name: &str,
     environment: &str,
 ) -> Result<()> {
-    if secret_name.trim().is_empty() {
-        return Err(CoreError::InvalidInput(
-            "secret name must not be empty".into(),
-        ));
+    if !valid_secret_name(secret_name) {
+        return Err(CoreError::InvalidInput(format!(
+            "'{secret_name}' is not a valid secret name (letters, digits, '_', starting with \
+             a letter or '_')"
+        )));
     }
     conn.execute(
         "INSERT INTO credential_destinations (credential_id, destination_id, secret_name, environment)
@@ -639,6 +654,7 @@ impl DestinationAdapter for MacKeychainDestination<'_> {
 
     fn read(&self, secret_name: &str) -> Result<Option<SecretString>> {
         check_name(secret_name)?;
+        check_name(&self.account)?;
         let (code, out, _err) = self.runner.run(
             "security",
             &[
@@ -651,8 +667,16 @@ impl DestinationAdapter for MacKeychainDestination<'_> {
             ],
             None,
         )?;
-        if code != 0 {
+        // 44 = errSecItemNotFound. Anything else nonzero (locked keychain,
+        // denied prompt) is an ERROR, not "absent" — conflating them would
+        // record false `missing` drift for a present secret.
+        if code == 44 {
             return Ok(Some(SecretString::new(String::new()))); // absent
+        }
+        if code != 0 {
+            return Err(CoreError::Provider(format!(
+                "security find-generic-password failed (exit {code}); is the keychain locked?"
+            )));
         }
         let value = String::from_utf8_lossy(&out)
             .trim_end_matches('\n')
@@ -662,6 +686,7 @@ impl DestinationAdapter for MacKeychainDestination<'_> {
 
     fn exists(&self, secret_name: &str) -> Result<Option<bool>> {
         check_name(secret_name)?;
+        check_name(&self.account)?;
         let (code, _out, _err) = self.runner.run(
             "security",
             &[
@@ -673,11 +698,18 @@ impl DestinationAdapter for MacKeychainDestination<'_> {
             ],
             None,
         )?;
-        Ok(Some(code == 0))
+        match code {
+            0 => Ok(Some(true)),
+            44 => Ok(Some(false)),
+            other => Err(CoreError::Provider(format!(
+                "security find-generic-password failed (exit {other}); is the keychain locked?"
+            ))),
+        }
     }
 
     fn delete(&self, secret_name: &str) -> Result<()> {
         check_name(secret_name)?;
+        check_name(&self.account)?;
         let (code, _out, err) = self.runner.run(
             "security",
             &[
@@ -1459,6 +1491,36 @@ mod tests {
         assert!(String::from_utf8_lossy(stdin.as_ref().unwrap())
             .contains("sk-test-FAKE-keychain-value"));
         assert!(!args.iter().any(|a| a.contains("sk-test-FAKE")));
+    }
+
+    #[test]
+    fn keychain_distinguishes_not_found_from_errors() {
+        // exit 44 = errSecItemNotFound -> absent; other nonzero -> error
+        // (a locked keychain must not be recorded as `missing` drift).
+        let runner = ScriptedRunner {
+            calls: RefCell::new(Vec::new()),
+            results: RefCell::new(vec![
+                (44, Vec::new(), Vec::new()),
+                (1, Vec::new(), b"keychain locked".to_vec()),
+            ]),
+        };
+        let dest = MacKeychainDestination {
+            runner: &runner,
+            account: "api-tracker".into(),
+        };
+        assert_eq!(dest.exists("MISSING_KEY").unwrap(), Some(false));
+        assert!(dest.exists("ANY_KEY").is_err());
+    }
+
+    #[test]
+    fn attach_rejects_unsafe_secret_names() {
+        assert!(valid_secret_name("OPENAI_API_KEY"));
+        assert!(valid_secret_name("_private"));
+        assert!(!valid_secret_name("has/slash"));
+        assert!(!valid_secret_name("has space"));
+        assert!(!valid_secret_name("1starts-with-digit"));
+        assert!(!valid_secret_name("query?injection"));
+        assert!(!valid_secret_name(""));
     }
 
     #[test]

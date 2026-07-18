@@ -517,32 +517,40 @@ fn sync_plan_writes_verifies_and_handles_partial_failure_with_retry() {
     assert!(write_steps.iter().all(|s| s.rollback_available));
 
     // Dry run changed nothing: no HTTP client was ever invoked so far.
-    // Execute: GitHub succeeds (public key + 201), Vercel fails with 403.
+    // Execute per destination (deterministic order): GitHub succeeds
+    // (public key + 201 + existence check), then Vercel fails with 403.
     use base64::Engine;
     let pk = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
-    let http = MockHttpClient::new(vec![
-        // ci (github): public key, then PUT created
+    let gh_http = MockHttpClient::new(vec![
         MockHttpClient::json_response(&format!(r#"{{"key_id":"k1","key":"{pk}"}}"#)),
         api_tracker_core::http::HttpResponse {
             status: 204,
             headers: vec![],
             body: Vec::new(),
         },
-        // ci verification: existence check
         MockHttpClient::json_response(r#"{"name":"STRIPE_SECRET_KEY"}"#),
-        // site (vercel): 403
-        api_tracker_core::http::HttpResponse {
-            status: 403,
-            headers: vec![],
-            body: br#"{"error":{"code":"forbidden"}}"#.to_vec(),
-        },
     ]);
     let wrong = SecretString::from("not-the-master-password");
     assert!(vault
-        .sync_plan_execute(&plan.id, None, &wrong, &http, &NullRunner)
+        .sync_plan_execute(&plan.id, None, &wrong, &gh_http, &NullRunner)
         .is_err());
+    let after_gh = vault
+        .sync_plan_execute(&plan.id, Some("ci"), &master_pw(), &gh_http, &NullRunner)
+        .unwrap();
+    assert_eq!(after_gh.status, "planned", "site is still pending");
+    let vercel_http = MockHttpClient::new(vec![api_tracker_core::http::HttpResponse {
+        status: 403,
+        headers: vec![],
+        body: br#"{"error":{"code":"forbidden"}}"#.to_vec(),
+    }]);
     let executed = vault
-        .sync_plan_execute(&plan.id, None, &master_pw(), &http, &NullRunner)
+        .sync_plan_execute(
+            &plan.id,
+            Some("site"),
+            &master_pw(),
+            &vercel_http,
+            &NullRunner,
+        )
         .unwrap();
     assert_eq!(executed.status, "partially_failed");
     let gh_step = executed
@@ -656,6 +664,177 @@ fn stale_plans_are_refused_and_rollback_restores_the_old_version() {
     let attachments = vault.destination_attachments(Some(&cred.id)).unwrap();
     assert_eq!(attachments[0].last_synced_version, Some(2));
     assert_eq!(attachments[0].drift, "rolled_back");
+}
+
+#[test]
+fn rollback_matches_destination_names_and_refuses_when_nothing_rolled_back() {
+    let (_dir, _paths, mut vault) = new_vault();
+    add_project(&mut vault, "app");
+    let (cred, _) = add_key(
+        &mut vault,
+        "app",
+        "stripe-live",
+        FAKE_STRIPE,
+        Environment::Production,
+    );
+    vault
+        .destination_add(
+            "github_actions",
+            "ci",
+            serde_json::json!({"owner": "octo", "repo": "app"}),
+            Some(&SecretString::from(
+                "ghp_FAKE0000000000000000000000000000000000",
+            )),
+        )
+        .unwrap();
+    vault
+        .destination_attach(&cred.id, "ci", "STRIPE_KEY", "production")
+        .unwrap();
+    vault
+        .replace_credential_value(
+            &cred.id,
+            &master_pw(),
+            SecretString::from("sk_test_FAKEFAKEFAKEFAKEFAKEFAKE02"),
+        )
+        .unwrap();
+    let plan = vault.sync_plan_create(&cred.id, "").unwrap();
+
+    // Nothing executed yet: rollback must refuse and NOT mark the plan.
+    let http = MockHttpClient::new(vec![]);
+    let err = vault
+        .sync_plan_rollback(&plan.id, None, &master_pw(), &http, &NullRunner)
+        .unwrap_err();
+    assert!(err.to_string().contains("nothing was rolled back"));
+    assert_ne!(vault.sync_plan_get(&plan.id).unwrap().status, "rolled_back");
+
+    // Execute, then roll back filtered by destination NAME (not id).
+    use base64::Engine;
+    let pk = base64::engine::general_purpose::STANDARD.encode([9u8; 32]);
+    let http = MockHttpClient::new(vec![
+        MockHttpClient::json_response(&format!(r#"{{"key_id":"k1","key":"{pk}"}}"#)),
+        api_tracker_core::http::HttpResponse {
+            status: 204,
+            headers: vec![],
+            body: Vec::new(),
+        },
+        MockHttpClient::json_response(r#"{"name":"STRIPE_KEY"}"#),
+    ]);
+    vault
+        .sync_plan_execute(&plan.id, None, &master_pw(), &http, &NullRunner)
+        .unwrap();
+    let http = MockHttpClient::new(vec![
+        MockHttpClient::json_response(&format!(r#"{{"key_id":"k1","key":"{pk}"}}"#)),
+        api_tracker_core::http::HttpResponse {
+            status: 204,
+            headers: vec![],
+            body: Vec::new(),
+        },
+    ]);
+    let rolled = vault
+        .sync_plan_rollback(&plan.id, Some("ci"), &master_pw(), &http, &NullRunner)
+        .unwrap();
+    assert_eq!(rolled.status, "rolled_back");
+    assert_eq!(rolled.steps[0].status, "rolled_back");
+}
+
+#[test]
+fn export_paths_are_absolute_and_ttl_is_capped() {
+    let (_dir, _paths, mut vault) = new_vault();
+    let repo = tempfile::tempdir().unwrap();
+    add_project(&mut vault, "app");
+    let (cred, _) = add_key(
+        &mut vault,
+        "app",
+        "openai-main",
+        FAKE_OPENAI,
+        Environment::Development,
+    );
+    vault
+        .set_env_mapping("app", &cred.id, "OPENAI_API_KEY")
+        .unwrap();
+    // Absurd TTLs are rejected before anything is written.
+    let err = vault
+        .env_export(
+            "app",
+            &repo.path().join(".env"),
+            None,
+            &master_pw(),
+            false,
+            Some(u64::MAX),
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("ten years"));
+    assert!(!repo.path().join(".env").exists());
+
+    // A relative target is recorded as an absolute path.
+    let prev = std::env::current_dir().unwrap();
+    std::env::set_current_dir(repo.path()).unwrap();
+    let report = vault
+        .env_export(
+            "app",
+            std::path::Path::new(".env"),
+            None,
+            &master_pw(),
+            false,
+            None,
+        )
+        .unwrap();
+    std::env::set_current_dir(prev).unwrap();
+    assert!(
+        std::path::Path::new(&report.path).is_absolute(),
+        "recorded export path must be absolute: {}",
+        report.path
+    );
+}
+
+#[test]
+fn reexport_refuses_files_modified_since_export() {
+    let (_dir, _paths, mut vault) = new_vault();
+    let repo = tempfile::tempdir().unwrap();
+    add_project(&mut vault, "app");
+    let (cred, _) = add_key(
+        &mut vault,
+        "app",
+        "openai-main",
+        FAKE_OPENAI,
+        Environment::Development,
+    );
+    vault
+        .set_env_mapping("app", &cred.id, "OPENAI_API_KEY")
+        .unwrap();
+    let target = repo.path().join(".env");
+    vault
+        .env_export("app", &target, None, &master_pw(), false, None)
+        .unwrap();
+    // The user (or something else) edits the exported file.
+    let mut content = std::fs::read_to_string(&target).unwrap();
+    content.push_str("EXTRA=manual-edit\n");
+    std::fs::write(&target, &content).unwrap();
+
+    let v2 = "sk-proj-FAKE00000000000000000000000000000002";
+    vault
+        .replace_credential_value(&cred.id, &master_pw(), SecretString::from(v2))
+        .unwrap();
+    let plan = vault.sync_plan_create(&cred.id, "").unwrap();
+    let http = MockHttpClient::new(vec![]);
+    let executed = vault
+        .sync_plan_execute(&plan.id, None, &master_pw(), &http, &NullRunner)
+        .unwrap();
+    let reexport = executed
+        .steps
+        .iter()
+        .find(|s| s.action == "reexport")
+        .unwrap();
+    assert_eq!(reexport.status, "failed");
+    assert!(
+        reexport.detail.contains("changed since"),
+        "{}",
+        reexport.detail
+    );
+    // The modified file was NOT touched.
+    assert!(std::fs::read_to_string(&target)
+        .unwrap()
+        .contains("EXTRA=manual-edit"));
 }
 
 #[test]

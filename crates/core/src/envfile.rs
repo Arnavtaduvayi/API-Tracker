@@ -3,7 +3,8 @@
 //! Parsing is purely textual — content is never executed, interpolated, or
 //! shell-expanded. The document model preserves comments, blank lines,
 //! ordering, quoting style, `export` prefixes, and the file's dominant line
-//! ending, so an unmodified document round-trips byte-for-byte. Values are
+//! ending, so an unmodified document round-trips byte-for-byte (files with
+//! MIXED line endings are normalized to the dominant one). Values are
 //! held in [`SecretString`] (redacted `Debug`/`Display`/`Serialize`, zeroized
 //! on drop); previews expose only masked values.
 
@@ -158,7 +159,9 @@ fn render_entry(entry: &EnvEntry) -> String {
     out.push('=');
     let value = entry.value.expose();
     match entry.quoting {
-        Quoting::Single if !value.contains('\'') => {
+        // Control characters (a multi-line value, say) cannot survive
+        // single quotes; fall through to double quoting, which escapes.
+        Quoting::Single if !value.contains('\'') && !value.chars().any(|c| c.is_control()) => {
             out.push('\'');
             out.push_str(value);
             out.push('\'');
@@ -167,7 +170,10 @@ fn render_entry(entry: &EnvEntry) -> String {
         // back to double quoting.
         Quoting::Bare
             if !value.is_empty()
-                && !value.contains(|c: char| c.is_whitespace() || c == '#' || c == '"')
+                && !value.starts_with('\'')
+                && !value.contains(|c: char| {
+                    c.is_whitespace() || c == '#' || c == '"' || c.is_control()
+                })
                 && value.trim() == value =>
         {
             out.push_str(value);
@@ -544,6 +550,33 @@ mod tests {
     fn empty_document_round_trips() {
         let doc = EnvDocument::parse("");
         assert_eq!(doc.render(), "");
+    }
+
+    #[test]
+    fn set_value_round_trips_hostile_values_regardless_of_prior_quoting() {
+        // A multi-line value replacing a single-quoted entry must not
+        // corrupt the file (unterminated quote + value tail on its own line).
+        let mut doc = EnvDocument::parse("KEY='old'\n");
+        doc.set("KEY", SecretString::from("line1\nline2=looks-like-entry"));
+        let rendered = doc.render();
+        let reparsed = EnvDocument::parse(&rendered);
+        assert_eq!(
+            reparsed.get("KEY").unwrap().value.expose(),
+            "line1\nline2=looks-like-entry"
+        );
+        assert!(
+            reparsed.get("line2").is_none(),
+            "no phantom entry: {rendered}"
+        );
+
+        // A bare value starting with a single quote must not be emitted bare
+        // (it would re-parse with the quotes stripped or vanish).
+        let mut doc = EnvDocument::parse("");
+        doc.set("A", SecretString::from("'til-dawn"));
+        doc.set("B", SecretString::from("'wrapped'"));
+        let reparsed = EnvDocument::parse(&doc.render());
+        assert_eq!(reparsed.get("A").unwrap().value.expose(), "'til-dawn");
+        assert_eq!(reparsed.get("B").unwrap().value.expose(), "'wrapped'");
     }
 
     #[test]

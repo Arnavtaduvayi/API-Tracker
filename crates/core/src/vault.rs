@@ -3969,17 +3969,34 @@ impl UnlockedVault {
                 "no mapped variables to export; configure mappings first".into(),
             ));
         }
-        if path.exists() && !overwrite {
-            return Err(CoreError::InvalidInput(format!(
-                "{} already exists; pass the overwrite flag to replace it",
-                path.display()
-            )));
+        // Ten years, in minutes: anything longer is a typo, and absurd
+        // values would overflow the expiry timestamp.
+        const MAX_TTL_MINUTES: u64 = 10 * 365 * 24 * 60;
+        if ttl_minutes.is_some_and(|ttl| ttl > MAX_TTL_MINUTES) {
+            return Err(CoreError::InvalidInput(
+                "--ttl is larger than ten years; pick a realistic lifetime".into(),
+            ));
         }
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from("."));
+        // Canonicalize so the recorded path is absolute: re-export and
+        // cleanup must never resolve it against a different working
+        // directory later.
+        let parent = parent.canonicalize().map_err(|e| {
+            CoreError::InvalidInput(format!("cannot access {}: {e}", parent.display()))
+        })?;
+        let path = &parent.join(path.file_name().ok_or_else(|| {
+            CoreError::InvalidInput("the export target must be a file path".into())
+        })?);
+        if path.exists() && !overwrite {
+            return Err(CoreError::InvalidInput(format!(
+                "{} already exists; pass the overwrite flag to replace it",
+                path.display()
+            )));
+        }
         let file_name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -4003,7 +4020,14 @@ impl UnlockedVault {
             var_names.push(mapping.env_var.clone());
         }
         let content = doc.render();
-        crate::envgov::atomic_write(path, &content)?;
+        if overwrite {
+            crate::envgov::atomic_write(path, &content)?;
+        } else {
+            // No-clobber create: closes the race between the exists() check
+            // above and the write (a file appearing in between is an error,
+            // not silently replaced).
+            crate::envgov::write_new(path, &content)?;
+        }
         let expires_at = ttl_minutes.map(|minutes| {
             clock::rfc3339_after(std::time::Duration::from_secs(minutes.saturating_mul(60)))
         });
@@ -4689,6 +4713,19 @@ impl UnlockedVault {
             ) {
                 continue;
             }
+            if step.action == crate::syncplan::ACTION_MANUAL {
+                // A manual step cannot be executed programmatically; mark it
+                // skipped (with the reason) instead of failing forever.
+                crate::syncplan::update_step(
+                    &self.conn,
+                    plan_id,
+                    &step.destination_id,
+                    &step.secret_name,
+                    crate::syncplan::STEP_SKIPPED,
+                    "manual step — perform it by hand, then verify with `destination drift`",
+                )?;
+                continue;
+            }
             let outcome = self.execute_step(&stored, step, &cred, &value, http, runner);
             match outcome {
                 Ok(detail) => crate::syncplan::update_step(
@@ -4819,12 +4856,13 @@ impl UnlockedVault {
         credential_id: &str,
         value: &SecretString,
     ) -> Result<String> {
-        let (path, project_id): (String, String) = self
+        let (path, project_id, recorded_hash): (String, String, String) = self
             .conn
             .query_row(
-                "SELECT path, project_id FROM env_exports WHERE id = ?1 AND cleaned_at IS NULL",
+                "SELECT path, project_id, content_hash FROM env_exports
+                 WHERE id = ?1 AND cleaned_at IS NULL",
                 [export_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?
             .ok_or(CoreError::NotFound {
@@ -4839,6 +4877,13 @@ impl UnlockedVault {
             )));
         }
         let content = std::fs::read_to_string(&path)?;
+        if crate::envgov::content_hash(&content) != recorded_hash {
+            return Err(CoreError::InvalidInput(format!(
+                "{} changed since it was exported; refusing to rewrite it — \
+                 re-export explicitly (`env export --overwrite`) if intended",
+                path.display()
+            )));
+        }
         let mut doc = crate::envfile::EnvDocument::parse(&content);
         let vars: Vec<String> = self
             .conn
@@ -4890,9 +4935,14 @@ impl UnlockedVault {
                     kind: "credential",
                     ident: stored.credential_id.clone(),
                 })?;
+        let mut rolled_back_any = false;
         for step in &stored.steps {
             if let Some(only) = only_destination {
-                if step.destination_id != only {
+                let matches_dest = step.destination_id == only
+                    || crate::destinations::get(&self.conn, &step.destination_id)
+                        .map(|d| d.name.eq_ignore_ascii_case(only))
+                        .unwrap_or(false);
+                if !matches_dest {
                     continue;
                 }
             }
@@ -4924,14 +4974,17 @@ impl UnlockedVault {
                 _ => Ok("nothing to roll back".into()),
             };
             match outcome {
-                Ok(detail) => crate::syncplan::update_step(
-                    &self.conn,
-                    plan_id,
-                    &step.destination_id,
-                    &step.secret_name,
-                    crate::syncplan::STEP_ROLLED_BACK,
-                    &format!("rolled back to v{from_version}: {detail}"),
-                )?,
+                Ok(detail) => {
+                    rolled_back_any = true;
+                    crate::syncplan::update_step(
+                        &self.conn,
+                        plan_id,
+                        &step.destination_id,
+                        &step.secret_name,
+                        crate::syncplan::STEP_ROLLED_BACK,
+                        &format!("rolled back to v{from_version}: {detail}"),
+                    )?
+                }
                 Err(e) => crate::syncplan::update_step(
                     &self.conn,
                     plan_id,
@@ -4941,6 +4994,15 @@ impl UnlockedVault {
                     &format!("rollback failed: {e}"),
                 )?,
             }
+        }
+        // Never report a rollback that did not happen: the plan status only
+        // changes when at least one step actually rolled back.
+        if !rolled_back_any {
+            return Err(CoreError::InvalidInput(
+                "no executed step matched — nothing was rolled back (check the \
+                 --destination filter and step statuses)"
+                    .into(),
+            ));
         }
         crate::syncplan::update_plan_status(
             &self.conn,
