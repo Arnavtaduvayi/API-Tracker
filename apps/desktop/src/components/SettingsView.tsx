@@ -28,9 +28,19 @@ const FIELDS: { key: keyof VaultSettings; label: string; hint: string }[] = [
     label: "Clear the clipboard after copying (seconds, 0 disables)",
     hint: "Best-effort: other apps may have read the clipboard meanwhile.",
   },
+  {
+    key: "monitor_interval_minutes",
+    label: "Background monitor interval (minutes, 0 disables)",
+    hint: "Runs the alert checks, due documentation checks, and webhook delivery while the vault is unlocked.",
+  },
+  {
+    key: "docwatch_interval_hours",
+    label: "Documentation check interval (hours, 0 disables)",
+    hint: "How often watched documentation pages are re-checked when monitoring runs with network access.",
+  },
 ];
 
-export function SettingsView(props: { dataDir: string }) {
+export function SettingsView(props: { dataDir: string; onSaved?: () => void }) {
   const [settings, setSettings] = useState<VaultSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -50,6 +60,7 @@ export function SettingsView(props: { dataDir: string }) {
     try {
       await api.settingsSet(settings);
       setNotice("Settings saved.");
+      props.onSaved?.();
     } catch (err) {
       setError(isApiError(err) ? err.message : String(err));
     }

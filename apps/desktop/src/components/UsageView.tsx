@@ -43,9 +43,12 @@ export function UsageView() {
       })
       .catch((e) => setError(isApiError(e) ? e.message : String(e)));
     // Connection freshness for connected providers (stale-data warnings).
-    api
-      .providerConnectionStatus("openai")
-      .then((s) => setConnections(s.connected ? [s] : []))
+    Promise.all(
+      ["openai", "anthropic"].map((p) => api.providerConnectionStatus(p).catch(() => null)),
+    )
+      .then((list) =>
+        setConnections(list.filter((s): s is ProviderConnection => s !== null && s.connected)),
+      )
       .catch(() => setConnections([]));
   }, []);
 
@@ -207,7 +210,7 @@ export function UsageView() {
             <tr>
               <th>Window</th>
               <th>Model / line item</th>
-              <th>Tokens</th>
+              <th>Amount</th>
               <th>Reported</th>
               <th>Estimated</th>
               <th>Attribution</th>
@@ -220,7 +223,14 @@ export function UsageView() {
               <tr key={r.id}>
                 <td>{r.window_start.slice(0, 10)}</td>
                 <td>{r.model ?? r.line_item ?? "—"}</td>
-                <td>{r.total_tokens?.toLocaleString() ?? "—"}</td>
+                <td>
+                  {/* Non-token units are shown verbatim, never as tokens. */}
+                  {r.quantity != null && r.unit != null
+                    ? `${r.quantity.toLocaleString()} ${r.unit}`
+                    : r.total_tokens != null
+                      ? `${r.total_tokens.toLocaleString()} tokens`
+                      : "—"}
+                </td>
                 <td>
                   {r.reported_cost_micros != null
                     ? `${formatMicros(r.reported_cost_micros)} ${r.currency !== "USD" ? r.currency : ""}`

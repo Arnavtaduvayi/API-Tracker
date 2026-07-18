@@ -16,6 +16,7 @@ import type {
   CredentialVersionInfo,
   Destination,
   DestinationKindInfo,
+  DocHistoryEntry,
   DocWatch,
   EnvExampleProposal,
   EnvExport,
@@ -28,7 +29,9 @@ import type {
   Finding,
   GrantEndResult,
   HookStatus,
+  MonitorFullReport,
   MonitorSummary,
+  NotificationChannel,
   PermissionsPreview,
   Project,
   ProviderConnection,
@@ -97,6 +100,7 @@ export const api = {
   hookRemove: (path: string) => call<HookStatus>("hook_remove", { path }),
 
   monitorRun: () => call<MonitorSummary>("monitor_run"),
+  monitorRunFull: () => call<MonitorFullReport>("monitor_run_full"),
   alertsList: (includeResolved: boolean) => call<Alert[]>("alerts_list", { includeResolved }),
   alertAcknowledge: (id: string) => call<Alert>("alert_acknowledge", { id }),
   alertResolve: (id: string) => call<Alert>("alert_resolve", { id }),
@@ -106,6 +110,18 @@ export const api = {
   docWatchRemove: (url: string) => call<boolean>("doc_watch_remove", { url }),
   docWatchList: () => call<DocWatch[]>("doc_watch_list"),
   docWatchCheck: (url: string) => call<DocWatch>("doc_watch_check", { url }),
+  docWatchHistory: (url: string | null, limit: number) =>
+    call<DocHistoryEntry[]>("doc_watch_history", { url, limit }),
+
+  notificationChannelAdd: (name: string, url: string, minSeverity: string) =>
+    call<NotificationChannel>("notification_channel_add", { name, url, minSeverity }),
+  notificationChannels: () => call<NotificationChannel[]>("notification_channels"),
+  notificationChannelRemove: (ident: string) =>
+    call<void>("notification_channel_remove", { ident }),
+  notificationChannelEnable: (ident: string, enabled: boolean) =>
+    call<void>("notification_channel_enable", { ident, enabled }),
+  notificationChannelTest: (ident: string) =>
+    call<string>("notification_channel_test", { ident }),
 
   projectList: (includeArchived: boolean) =>
     call<Project[]>("project_list", { includeArchived }),

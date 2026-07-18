@@ -51,6 +51,31 @@ export function statusSeverity(status: Status): "ok" | "warn" | "bad" {
   }
 }
 
+/** Alert severity -> ordinal rank (mirrors notify::severity_rank in core). */
+export function severityRank(severity: string): number {
+  switch (severity) {
+    case "critical":
+      return 4;
+    case "high":
+      return 3;
+    case "medium":
+      return 2;
+    case "low":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/** Highest severity among alerts (empty input -> null). */
+export function topSeverity(severities: string[]): string | null {
+  let top: string | null = null;
+  for (const s of severities) {
+    if (top === null || severityRank(s) > severityRank(top)) top = s;
+  }
+  return top;
+}
+
 /** Empty string -> null (for optional date fields sent to the backend). */
 export function emptyToNull(value: string): string | null {
   const trimmed = value.trim();

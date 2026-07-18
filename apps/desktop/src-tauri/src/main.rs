@@ -73,6 +73,24 @@ fn with_vault<T>(
     state: &AppState,
     f: impl FnOnce(&mut UnlockedVault) -> Result<T, CoreError>,
 ) -> CmdResult<T> {
+    with_vault_impl(state, true, f)
+}
+
+/// Like `with_vault`, but does NOT count as user activity. Background work
+/// (the periodic monitor timer) must use this, or it would keep refreshing
+/// the activity clock and defeat inactivity auto-lock.
+fn with_vault_background<T>(
+    state: &AppState,
+    f: impl FnOnce(&mut UnlockedVault) -> Result<T, CoreError>,
+) -> CmdResult<T> {
+    with_vault_impl(state, false, f)
+}
+
+fn with_vault_impl<T>(
+    state: &AppState,
+    touch_activity: bool,
+    f: impl FnOnce(&mut UnlockedVault) -> Result<T, CoreError>,
+) -> CmdResult<T> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     let auto_lock_minutes = match slot.vault.as_ref() {
         None => return Err(locked_err()),
@@ -84,7 +102,9 @@ fn with_vault<T>(
         slot.vault = None; // drop -> keys zeroized
         return Err(locked_err());
     }
-    slot.last_activity = Instant::now();
+    if touch_activity {
+        slot.last_activity = Instant::now();
+    }
     let vault = slot.vault.as_mut().expect("checked above");
     f(vault).map_err(Into::into)
 }
@@ -231,6 +251,55 @@ fn monitor_run(state: State<'_, AppState>) -> CmdResult<api_tracker_core::vault:
     with_vault(&state, |vault| vault.run_monitor())
 }
 
+/// Local monitoring plus the network phases, mirroring the CLI's
+/// `monitor run`: due documentation checks and webhook notification
+/// delivery are best-effort and never fail the run (offline-safe).
+#[derive(Serialize)]
+struct FullMonitorReport {
+    summary: api_tracker_core::vault::MonitorSummary,
+    doc_checks: usize,
+    delivered: usize,
+    /// Severities of alerts created by this run (severities only — titles
+    /// could name credentials and this feeds OS notifications).
+    new_alert_severities: Vec<String>,
+}
+
+/// Runs as background work: it enforces auto-lock but does not refresh the
+/// activity clock, so a periodic timer cannot keep the vault open forever.
+#[tauri::command]
+fn monitor_run_full(state: State<'_, AppState>) -> CmdResult<FullMonitorReport> {
+    with_vault_background(&state, |vault| {
+        let before: std::collections::HashSet<String> =
+            api_tracker_core::alerts::list(vault.connection(), false)?
+                .into_iter()
+                .map(|a| a.id)
+                .collect();
+        let summary = vault.run_monitor()?;
+        let fetcher = HttpFetcher::new();
+        let doc_checks = vault
+            .check_due_doc_watches(&fetcher)
+            .map(|results| results.len())
+            .unwrap_or(0);
+        let http = UreqClient::new();
+        let delivered = vault.deliver_notifications(&http).unwrap_or(0);
+        let new_alert_severities = if summary.alerts_created > 0 {
+            api_tracker_core::alerts::list(vault.connection(), false)?
+                .into_iter()
+                .filter(|a| !before.contains(&a.id))
+                .map(|a| a.severity)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(FullMonitorReport {
+            summary,
+            doc_checks,
+            delivered,
+            new_alert_severities,
+        })
+    })
+}
+
 #[tauri::command]
 fn alerts_list(
     state: State<'_, AppState>,
@@ -286,6 +355,69 @@ fn doc_watch_check(state: State<'_, AppState>, url: String) -> CmdResult<DocWatc
     with_vault(&state, |vault| {
         let (_result, watch) = vault.check_doc_watch(&fetcher, &url)?;
         Ok(watch)
+    })
+}
+
+/// Documentation-check history (validators and outcomes only — never page
+/// content).
+#[tauri::command]
+fn doc_watch_history(
+    state: State<'_, AppState>,
+    url: Option<String>,
+    limit: u32,
+) -> CmdResult<Vec<api_tracker_core::docwatch::HistoryEntry>> {
+    with_vault(&state, |vault| {
+        vault.doc_watch_history(url.as_deref(), limit)
+    })
+}
+
+// --- Notification channels (user-configured webhooks) ---
+
+/// The URL may embed a user-chosen token, so it is wrapped in a
+/// SecretString immediately, stored encrypted, and never logged or
+/// returned; the frontend only ever sees the masked form.
+#[tauri::command]
+fn notification_channel_add(
+    state: State<'_, AppState>,
+    name: String,
+    url: String,
+    min_severity: String,
+) -> CmdResult<api_tracker_core::notify::NotificationChannel> {
+    let url = SecretString::new(url);
+    with_vault(&state, |vault| {
+        vault.notification_channel_add(&name, &url, &min_severity)
+    })
+}
+
+#[tauri::command]
+fn notification_channels(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::notify::NotificationChannel>> {
+    with_vault(&state, |vault| vault.notification_channels())
+}
+
+#[tauri::command]
+fn notification_channel_remove(state: State<'_, AppState>, ident: String) -> CmdResult<()> {
+    with_vault(&state, |vault| vault.notification_channel_remove(&ident))
+}
+
+#[tauri::command]
+fn notification_channel_enable(
+    state: State<'_, AppState>,
+    ident: String,
+    enabled: bool,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.notification_channel_enable(&ident, enabled)
+    })
+}
+
+/// Send a clearly-labeled test payload through one channel (network).
+#[tauri::command]
+fn notification_channel_test(state: State<'_, AppState>, ident: String) -> CmdResult<String> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        vault.notification_channel_test(&ident, &http)
     })
 }
 
@@ -1656,6 +1788,7 @@ fn main() {
             hook_install,
             hook_remove,
             monitor_run,
+            monitor_run_full,
             alerts_list,
             alert_acknowledge,
             alert_resolve,
@@ -1663,6 +1796,12 @@ fn main() {
             doc_watch_remove,
             doc_watch_list,
             doc_watch_check,
+            doc_watch_history,
+            notification_channel_add,
+            notification_channels,
+            notification_channel_remove,
+            notification_channel_enable,
+            notification_channel_test,
             credential_validate,
             credential_metadata,
             credential_permissions,

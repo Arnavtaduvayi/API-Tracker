@@ -2,10 +2,22 @@
 // unlocked → main navigation) plus a simple view router. The backend
 // enforces auto-lock; this component reacts to `vault_locked` errors and
 // polls the status so the UI locks visibly too.
+//
+// While unlocked, a single background timer runs the full monitor (local
+// checks + due documentation checks + webhook delivery) every
+// `monitor_interval_minutes` and raises a native notification for new
+// alerts of medium severity or above. The timer is disarmed on lock and
+// re-armed when the setting changes — one timer, no polling storms.
 
 import { useCallback, useEffect, useState } from "react";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { api, isApiError } from "./api";
 import { setVaultLockedHandler } from "./api";
+import { severityRank, topSeverity } from "./utils";
 import type { VaultStatus } from "./types";
 import { VaultSetup } from "./components/VaultSetup";
 import { VaultUnlock } from "./components/VaultUnlock";
@@ -26,6 +38,7 @@ import { DestinationsView } from "./components/DestinationsView";
 import { SyncView } from "./components/SyncView";
 import { RotationView } from "./components/RotationView";
 import { AccessView } from "./components/AccessView";
+import { NotifyView } from "./components/NotifyView";
 
 export type View =
   | { name: "projects" }
@@ -44,17 +57,41 @@ export type View =
   | { name: "rotation" }
   | { name: "access" }
   | { name: "alerts" }
+  | { name: "notify" }
   | { name: "usage" }
   | { name: "settings" }
   | { name: "backup" };
 
 type VaultState = "loading" | "missing" | "locked" | "unlocked";
 
+/** Native notification for freshly created alerts of medium+ severity. */
+async function notifyNewAlerts(severities: string[]) {
+  const notable = severities.filter((s) => severityRank(s) >= severityRank("medium"));
+  const top = topSeverity(notable);
+  if (notable.length === 0 || !top) return;
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+    if (granted) {
+      // Alert counts and severities only — titles could name credentials.
+      sendNotification({
+        title: "API Tracker",
+        body: `${notable.length} new alert(s) — top severity: ${top}. Open Alerts for details.`,
+      });
+    }
+  } catch {
+    // Notifications are best-effort; never surface an error for them.
+  }
+}
+
 export default function App() {
   const [vaultState, setVaultState] = useState<VaultState>("loading");
   const [dataDir, setDataDir] = useState("");
   const [view, setView] = useState<View>({ name: "projects" });
   const [fatal, setFatal] = useState<string | null>(null);
+  const [monitorMinutes, setMonitorMinutes] = useState(0);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -75,6 +112,46 @@ export default function App() {
     const timer = setInterval(() => void refreshStatus(), 30_000);
     return () => clearInterval(timer);
   }, [refreshStatus]);
+
+  // --- Background monitoring (one timer, armed only while unlocked) ---
+
+  const reloadMonitorInterval = useCallback(async () => {
+    try {
+      const settings = await api.settingsGet();
+      setMonitorMinutes(settings.monitor_interval_minutes);
+    } catch {
+      setMonitorMinutes(0); // locked or unreadable: keep the timer disarmed
+    }
+  }, []);
+
+  useEffect(() => {
+    if (vaultState === "unlocked") {
+      void reloadMonitorInterval();
+    } else {
+      setMonitorMinutes(0);
+    }
+  }, [vaultState, reloadMonitorInterval]);
+
+  const runBackgroundMonitor = useCallback(async () => {
+    try {
+      // One passive command: the backend diffs open alerts around the run
+      // and reports the new severities, so this timer needs no extra
+      // calls and never counts as user activity (auto-lock still works).
+      const report = await api.monitorRunFull();
+      if (report.summary.alerts_created > 0) {
+        await notifyNewAlerts(report.new_alert_severities);
+      }
+    } catch {
+      // Locked meanwhile, or a transient failure: the next tick (or a
+      // manual "Run checks now") covers it. Never disturb the user.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (vaultState !== "unlocked" || monitorMinutes <= 0) return;
+    const timer = setInterval(() => void runBackgroundMonitor(), monitorMinutes * 60_000);
+    return () => clearInterval(timer);
+  }, [vaultState, monitorMinutes, runBackgroundMonitor]);
 
   const lockNow = async () => {
     await api.vaultLock();
@@ -130,6 +207,9 @@ export default function App() {
         </button>
         <button className="link" onClick={() => setView({ name: "alerts" })}>
           Alerts
+        </button>
+        <button className="link" onClick={() => setView({ name: "notify" })}>
+          Notifications
         </button>
         <button className="link" onClick={() => setView({ name: "usage" })}>
           Usage
@@ -207,8 +287,11 @@ export default function App() {
       {view.name === "rotation" && <RotationView />}
       {view.name === "access" && <AccessView />}
       {view.name === "alerts" && <AlertsView />}
+      {view.name === "notify" && <NotifyView />}
       {view.name === "usage" && <UsageView />}
-      {view.name === "settings" && <SettingsView dataDir={dataDir} />}
+      {view.name === "settings" && (
+        <SettingsView dataDir={dataDir} onSaved={() => void reloadMonitorInterval()} />
+      )}
       {view.name === "backup" && <BackupView onRestored={() => void refreshStatus()} />}
     </div>
   );
