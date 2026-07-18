@@ -702,7 +702,7 @@ fn provider_catalog_is_honest_about_capabilities() {
         .success()
         .stdout(predicate::str::contains("openai"))
         .stdout(predicate::str::contains("anthropic"))
-        .stdout(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("Capability support varies"));
 }
 
 #[test]

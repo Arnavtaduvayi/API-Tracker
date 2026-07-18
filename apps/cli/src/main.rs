@@ -11,7 +11,9 @@ mod key_cmd;
 mod project_cmd;
 mod provider_cmd;
 mod render;
+mod run_cmd;
 mod scan_cmd;
+mod usage_cmd;
 mod vault_cmd;
 
 use clap::{Parser, Subcommand};
@@ -73,6 +75,20 @@ enum Commands {
     /// View and manage local alerts.
     #[command(subcommand)]
     Alerts(alerts_cmd::AlertsCmd),
+    /// Usage synchronization and reports.
+    #[command(subcommand)]
+    Usage(usage_cmd::UsageCmd),
+    /// Set and view budgets.
+    #[command(subcommand)]
+    Budget(usage_cmd::BudgetCmd),
+    /// View local activity events.
+    #[command(subcommand)]
+    Activity(usage_cmd::ActivityCmd),
+    /// Configure credential -> environment-variable mappings for `run`.
+    #[command(subcommand)]
+    Mapping(usage_cmd::MappingCmd),
+    /// Run a command with credentials injected into its environment.
+    Run(run_cmd::RunArgs),
     /// Encrypted vault backups.
     #[command(subcommand)]
     Backup(backup_cmd::BackupCmd),
@@ -102,6 +118,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Suppress(cmd) => scan_cmd::suppress(&ctx, cmd),
         Commands::Monitor => alerts_cmd::monitor_run(&ctx),
         Commands::Alerts(cmd) => alerts_cmd::alerts(&ctx, cmd),
+        Commands::Usage(cmd) => usage_cmd::usage(&ctx, cmd),
+        Commands::Budget(cmd) => usage_cmd::budget(&ctx, cmd),
+        Commands::Activity(cmd) => usage_cmd::activity(&ctx, cmd),
+        Commands::Mapping(cmd) => usage_cmd::mapping(&ctx, cmd),
+        Commands::Run(args) => run_cmd::run(&ctx, args),
         Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
     }
 }

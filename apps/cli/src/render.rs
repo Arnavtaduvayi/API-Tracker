@@ -228,6 +228,27 @@ pub fn print_capabilities(caps: &Capabilities) {
     table(&["CAPABILITY", "STATUS", "NOTE"], &rows);
 }
 
+pub fn print_permissions(p: &api_tracker_core::permissions::StoredPermissions) {
+    println!(
+        "Permissions (source: {}, confidence: {}):",
+        p.source, p.confidence
+    );
+    println!("  Summary:   {}", p.normalized.summary);
+    if !p.raw_scopes.is_empty() {
+        println!("  Raw scopes: {}", p.raw_scopes.join(", "));
+    }
+    let show = |label: &str, list: &[String]| {
+        if !list.is_empty() {
+            println!("  {label}: {}", list.join(", "));
+        }
+    };
+    show("Read      ", &p.normalized.read);
+    show("Write     ", &p.normalized.write);
+    show("Admin     ", &p.normalized.admin);
+    show("Sensitive ", &p.normalized.sensitive);
+    println!("  Synced:    {}", p.synced_at);
+}
+
 pub fn print_reuse_warnings(warnings: &[ReuseWarning]) {
     if warnings.is_empty() {
         return;

@@ -89,7 +89,7 @@ fn provider_catalog_commands() {
         .success()
         .stdout(predicate::str::contains("openai"))
         .stdout(predicate::str::contains("anthropic"))
-        .stdout(predicate::str::contains("not implemented yet"));
+        .stdout(predicate::str::contains("Capability support varies"));
 
     v.cmd_no_password()
         .args(["provider", "show", "stripe"])

@@ -33,6 +33,17 @@ pub enum KeyCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Validate a credential against its provider (network request).
+    Validate { key: String },
+    /// Fetch provider-side metadata for a credential (network request).
+    Metadata { key: String },
+    /// Show (and optionally sync) a credential's permissions.
+    Permissions {
+        key: String,
+        /// Fetch permissions from the provider now (network request).
+        #[arg(long)]
+        sync: bool,
+    },
 }
 
 #[derive(Args)]
@@ -195,6 +206,45 @@ pub fn run(ctx: &Ctx, cmd: KeyCmd) -> Result<()> {
             }
             vault.delete_credential(&credential.id)?;
             println!("Deleted credential '{label}'.");
+            Ok(())
+        }
+        KeyCmd::Validate { key } => {
+            let (mut vault, _token) = ctx.unlocked()?;
+            let http = api_tracker_core::http::UreqClient::new();
+            let result = vault.validate_credential(&key, &http)?;
+            render::emit(ctx.json, &result, || {
+                println!(
+                    "{}: {}",
+                    if result.valid { "VALID" } else { "INVALID" },
+                    result.detail
+                );
+            });
+            Ok(())
+        }
+        KeyCmd::Metadata { key } => {
+            let (vault, _token) = ctx.unlocked()?;
+            let http = api_tracker_core::http::UreqClient::new();
+            let meta = vault.fetch_metadata(&key, &http)?;
+            render::emit(ctx.json, &meta, || {
+                println!("Provider metadata ({}):", meta.source);
+                for (k, v) in &meta.fields {
+                    println!("  {k}: {v}");
+                }
+            });
+            Ok(())
+        }
+        KeyCmd::Permissions { key, sync } => {
+            let (vault, _token) = ctx.unlocked()?;
+            let stored = if sync {
+                let http = api_tracker_core::http::UreqClient::new();
+                Some(vault.sync_permissions(&key, &http)?)
+            } else {
+                vault.get_permissions(&key)?
+            };
+            match stored {
+                Some(p) => render::emit(ctx.json, &p, || render::print_permissions(&p)),
+                None => println!("No permissions synced yet. Re-run with --sync."),
+            }
             Ok(())
         }
     }

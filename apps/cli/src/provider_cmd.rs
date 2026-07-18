@@ -5,6 +5,7 @@ use crate::ctx::Ctx;
 use crate::render;
 use anyhow::{bail, Result};
 use api_tracker_core::docwatch::{CheckResult, HttpFetcher};
+use api_tracker_core::http::UreqClient;
 use api_tracker_core::providers;
 use clap::Subcommand;
 
@@ -18,6 +19,20 @@ pub enum ProviderCmd {
     Docs { provider: String },
     /// Show a provider's capability matrix (honest support levels).
     Capabilities { provider: String },
+    /// Connect a provider by naming the vault credential to use as its admin
+    /// key for usage sync.
+    Connect {
+        provider: String,
+        credential: String,
+    },
+    /// Sync usage from a connected provider (network request).
+    Sync {
+        provider: String,
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
+    /// Show a provider's connection status.
+    ConnectionStatus { provider: String },
     /// Watch an official documentation URL for changes.
     WatchDocs {
         provider: String,
@@ -62,8 +77,8 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 render::table(&["ID", "NAME", "SECRET ENV VARS", "PATTERNS"], &rows);
                 println!();
                 println!(
-                    "Provider API connectors (validation, usage, permissions) are not \
-                     implemented yet; see `provider capabilities <id>` for honest status."
+                    "Capability support varies per provider — see `provider capabilities <id>` \
+                     for honest, per-capability status."
                 );
             });
         }
@@ -90,9 +105,55 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
         ProviderCmd::Capabilities { provider } => {
             let m = find(&provider)?;
             render::emit(ctx.json, &m.capabilities, || {
-                println!("Capabilities for {} (nothing is implemented yet):", m.name);
+                println!("Capabilities for {} (honest support levels):", m.name);
                 println!();
                 render::print_capabilities(&m.capabilities);
+            });
+        }
+        ProviderCmd::Connect {
+            provider,
+            credential,
+        } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            vault.provider_connect(&m.id, &credential)?;
+            println!(
+                "Connected {} using '{credential}' as its admin key for usage sync.",
+                m.name
+            );
+        }
+        ProviderCmd::Sync { provider, days } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            let http = UreqClient::new();
+            let n = vault.usage_sync(&m.id, &http, days)?;
+            let status = vault.provider_connection_status(&m.id)?;
+            println!(
+                "Synced {n} usage snapshot(s) for {}. {}",
+                m.name, status.detail
+            );
+        }
+        ProviderCmd::ConnectionStatus { provider } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            let status = vault.provider_connection_status(&m.id)?;
+            render::emit(ctx.json, &status, || {
+                println!("Provider:     {}", m.name);
+                println!(
+                    "Admin key:    {}",
+                    status
+                        .admin_credential_id
+                        .as_deref()
+                        .unwrap_or("(not connected)")
+                );
+                println!(
+                    "Last synced:  {}",
+                    status.last_synced_at.as_deref().unwrap_or("never")
+                );
+                println!("Last status:  {}", status.last_status);
+                if !status.detail.is_empty() {
+                    println!("Detail:       {}", status.detail);
+                }
             });
         }
         ProviderCmd::WatchDocs { provider, url } => {
