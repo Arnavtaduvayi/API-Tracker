@@ -1,0 +1,68 @@
+# Secrets and environment variables
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# API Tracker vault data and backups
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.vault
+*.backup
+*.bak
+api-tracker-data/
+vault-data/
+
+# Rust
+target/
+**/target/
+
+# Node and frontend
+node_modules/
+dist/
+build/
+.next/
+.vite/
+
+# Tauri
+src-tauri/target/
+*.app
+*.dmg
+*.msi
+*.AppImage
+*.deb
+
+# Logs
+*.log
+logs/
+
+# Testing and coverage
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# IDE and editor state
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Local Claude/Fable configuration
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Temporary files
+tmp/
+temp/
+.cache/
