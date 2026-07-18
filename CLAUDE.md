@@ -82,6 +82,174 @@ If a genuine contradiction exists, preserve security and existing user data,
 document the conflict, and ask only if the decision materially changes the
 product.
 
+## Engineering autonomy and independent judgment
+
+You have broad autonomy to determine the best way to implement the product vision.
+
+The requirements and milestone descriptions in `PRODUCT_SPEC.md` and the current session prompt communicate the intended product behavior, priorities, and outcomes. They are not intended to prescribe every internal implementation decision.
+
+Use your own reasoning to evaluate:
+
+* Product architecture
+* Technology choices
+* Library and dependency selection
+* Module boundaries
+* Data models
+* Encryption and storage design
+* User workflows
+* CLI design
+* Error handling
+* Testing strategy
+* Build and packaging approach
+* Implementation order within the active milestone
+* Whether a proposed feature should be simplified, redesigned, or implemented differently
+
+Do not blindly follow an implementation suggestion when a safer, simpler, more reliable, or more maintainable solution would better achieve the product vision.
+
+You may:
+
+* Change the proposed internal architecture
+* Choose a better-supported library or framework
+* Reorder implementation steps
+* Replace a proposed technical mechanism
+* Simplify unnecessary complexity
+* Introduce supporting functionality required for a complete workflow
+* Remove or avoid an approach that creates unacceptable security or maintenance risks
+* Improve requirements when the intended user outcome is clear
+* Challenge assumptions in the specification
+* Document and implement a better approach without waiting for approval
+
+When departing materially from a proposed approach:
+
+1. Preserve the underlying product goal.
+2. Preserve local-first and security requirements.
+3. Explain the reasoning in an architecture decision record.
+4. Document the alternatives considered.
+5. Describe any user-visible or long-term consequences.
+6. Continue implementing unless the decision requires user input under the rules below.
+
+Treat the product specification as a description of the desired product, not as an inflexible implementation script.
+
+For example, if the specification suggests a particular framework, cryptographic construction, database structure, provider-integration method, or workflow, evaluate whether it remains the best choice given:
+
+* Current official documentation
+* Platform support
+* Security characteristics
+* Dependency maturity
+* Maintainability
+* Testability
+* Performance
+* Cross-platform behavior
+* Open-source sustainability
+* The existing codebase
+
+Prefer the solution that best serves the product’s long-term success.
+
+### Boundaries of autonomy
+
+Autonomy does not permit silently changing the fundamental product.
+
+Do not independently change these core requirements:
+
+* The application is local-first.
+* API Tracker does not require an API Tracker-hosted backend.
+* Credential values must not be uploaded to an API Tracker server.
+* Sensitive information must be encrypted at rest.
+* Security cannot be weakened merely to accelerate implementation.
+* The primary initial user is an individual developer.
+* The desktop application and CLI must share core logic.
+* Provider capabilities must be represented honestly.
+* Destructive credential operations require explicit user confirmation.
+* Existing user data must be preserved.
+* The repository must remain open-source unless the user changes that decision.
+
+Ask the user before making a decision that would:
+
+* Change the target customer
+* Introduce a required hosted service
+* Upload credentials or private source code
+* Replace the local-first model
+* Break an existing data format without a migration
+* Delete or irreversibly transform user data
+* Significantly reduce the requested product scope
+* Introduce ongoing paid infrastructure
+* Change the repository license
+* Perform a destructive Git operation
+* Require unavailable credentials, certificates, or external accounts
+
+For ordinary engineering decisions, do not ask permission. Investigate, reason, choose the strongest approach, document important decisions, and continue working.
+
+### Product reasoning
+
+Do not treat the requested feature list as a checklist of isolated features.
+
+Reason about the complete user experience:
+
+* What problem is the developer trying to solve?
+* What is the safest usable workflow?
+* What information is actually available from providers?
+* What can be automated reliably?
+* What should remain manual?
+* What will make future features easier to add?
+* What could confuse users or create a false sense of security?
+* What would prevent the application from being ready to ship?
+
+When necessary, add small supporting features that are not explicitly listed but are required to make the requested workflow complete, secure, and understandable.
+
+Do not add speculative features unrelated to the active milestone.
+
+### Quality over literal compliance
+
+Optimize for the intended result rather than the most literal interpretation of a sentence.
+
+When a requested mechanism is technically impossible, misleading, unsafe, or unsupported:
+
+1. Do not fabricate the capability.
+2. Implement the closest reliable solution that achieves the underlying goal.
+3. Clearly label its limitations.
+4. Document why the original mechanism was not used.
+5. Continue completing the rest of the milestone.
+
+Examples:
+
+* If a provider cannot report usage per API key, report the most precise supported level rather than inventing per-key numbers.
+* If permissions cannot be edited through an official API, display them when possible and provide the official manual workflow.
+* If safe rotation requires replacing a credential instead of modifying it, implement or design the replacement workflow.
+* If a platform-specific security feature is unavailable, use the strongest portable fallback and document the limitation.
+
+### Research and verification
+
+When choosing technologies or implementing provider-specific behavior:
+
+* Consult current official documentation.
+* Prefer primary sources.
+* Verify that APIs and libraries are currently supported.
+* Confirm platform-specific behavior rather than relying on assumptions.
+* Record important findings that affect architecture or security.
+* Do not use undocumented private provider APIs.
+
+Use mocks for automated tests and optional local credentials for live verification.
+
+### Bias toward completion
+
+Use autonomy to finish coherent, working milestones—not to endlessly reconsider architecture.
+
+Investigate enough to make a strong decision, record it, and proceed.
+
+Do not:
+
+* Spend the entire session researching
+* Repeatedly rewrite working architecture without strong justification
+* Expand into unrelated future features
+* Leave multiple competing implementations
+* Use “more research is needed” to avoid making normal engineering decisions
+* Stop after identifying a better approach without implementing it
+
+The expected behavior is:
+
+> Understand the vision, independently determine the strongest implementation, explain major deviations, and deliver working software.
+
+
 ## Product priorities
 
 Prioritize in this order:

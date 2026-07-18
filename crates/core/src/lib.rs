@@ -1,0 +1,38 @@
+//! api-tracker-core: shared security-sensitive core for the API Tracker
+//! desktop application and CLI.
+//!
+//! This crate owns the encrypted vault, the SQLite database and migrations,
+//! the project and credential models, credential status evaluation, reuse
+//! detection, encrypted backups, and the CLI session mechanism. The desktop
+//! app and the CLI must both go through this crate so that they share exactly
+//! the same vault format and business rules.
+//!
+//! Security invariants enforced here:
+//! - Credential values only exist in plaintext inside [`secret::SecretString`]
+//!   buffers, which redact themselves in `Debug`/`Display`/`Serialize` output
+//!   and zeroize their memory on drop.
+//! - All ciphertext is produced with XChaCha20-Poly1305 (authenticated
+//!   encryption) and bound to contextual associated data (vault, project and
+//!   credential identifiers plus a schema version).
+//! - Passwords are never stored; they are stretched with Argon2id and used
+//!   only to wrap random keys.
+//! - This crate performs no network I/O and no logging of secret material.
+
+#![forbid(unsafe_code)]
+
+pub mod audit;
+pub mod backup;
+pub mod clock;
+pub mod crypto;
+pub mod db;
+pub mod error;
+pub mod model;
+pub mod providers;
+pub mod reuse;
+pub mod secret;
+pub mod session;
+pub mod settings;
+pub mod status;
+pub mod vault;
+
+pub use error::{CoreError, Result};

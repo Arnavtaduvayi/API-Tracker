@@ -1,0 +1,204 @@
+//! SQLite storage with versioned migrations.
+//!
+//! The schema version is tracked in SQLite's `user_version` pragma. Each
+//! migration runs inside a transaction; the version is only bumped when the
+//! whole migration succeeds. Migrations are append-only: existing entries
+//! must never be edited once released.
+
+use crate::error::Result;
+use rusqlite::Connection;
+use std::path::Path;
+use std::time::Duration;
+
+pub struct Migration {
+    pub version: i64,
+    pub name: &'static str,
+    pub sql: &'static str,
+}
+
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "initial schema",
+    sql: r#"
+CREATE TABLE vault_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE projects (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    description         TEXT NOT NULL DEFAULT '',
+    notes               TEXT NOT NULL DEFAULT '',
+    environments        TEXT NOT NULL DEFAULT '[]',
+    archived            INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    wrapped_project_key BLOB NOT NULL,
+    key_wrap_mode       TEXT NOT NULL CHECK (key_wrap_mode IN ('vault', 'vault+password')),
+    project_kdf_params  TEXT,
+    project_salt        BLOB
+) STRICT;
+
+CREATE TABLE project_repos (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path       TEXT NOT NULL,
+    PRIMARY KEY (project_id, path)
+) STRICT;
+
+CREATE TABLE credentials (
+    id                   TEXT PRIMARY KEY,
+    project_id           TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
+    name                 TEXT NOT NULL COLLATE NOCASE,
+    environment          TEXT NOT NULL DEFAULT 'development',
+    credential_type      TEXT NOT NULL DEFAULT 'api_key',
+    ciphertext           BLOB,
+    linked_credential_id TEXT REFERENCES credentials(id),
+    fingerprint          BLOB NOT NULL,
+    masked_value         TEXT NOT NULL,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    key_created_at       TEXT,
+    expires_at           TEXT,
+    last_validated_at    TEXT,
+    last_used_at         TEXT,
+    docs_url             TEXT NOT NULL DEFAULT '',
+    notes                TEXT NOT NULL DEFAULT '',
+    manually_disabled    INTEGER NOT NULL DEFAULT 0,
+    revoked              INTEGER NOT NULL DEFAULT 0,
+    marked_invalid       INTEGER NOT NULL DEFAULT 0,
+    possibly_exposed     INTEGER NOT NULL DEFAULT 0,
+    exposure_note        TEXT NOT NULL DEFAULT '',
+    UNIQUE (project_id, name),
+    CHECK ((ciphertext IS NULL) != (linked_credential_id IS NULL))
+) STRICT;
+
+CREATE INDEX idx_credentials_fingerprint ON credentials(fingerprint);
+CREATE INDEX idx_credentials_project ON credentials(project_id);
+
+CREATE TABLE audit_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,
+    event         TEXT NOT NULL,
+    project_id    TEXT,
+    credential_id TEXT,
+    detail        TEXT NOT NULL DEFAULT ''
+) STRICT;
+"#,
+}];
+
+/// Open (or create) the database file with hardened pragmas.
+pub fn open(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    configure(&conn)?;
+    Ok(conn)
+}
+
+fn configure(conn: &Connection) -> Result<()> {
+    // WAL for safe concurrent access from the desktop app and CLI.
+    conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))?;
+    conn.pragma_update(None, "foreign_keys", 1)?;
+    // Overwrite deleted rows so removed (encrypted) data does not linger.
+    conn.pragma_update(None, "secure_delete", 1)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    Ok(())
+}
+
+pub fn user_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+}
+
+pub fn migrate(conn: &mut Connection) -> Result<()> {
+    migrate_with(conn, MIGRATIONS)
+}
+
+pub fn migrate_with(conn: &mut Connection, migrations: &[Migration]) -> Result<()> {
+    for migration in migrations {
+        let current = user_version(conn)?;
+        if migration.version <= current {
+            continue;
+        }
+        let tx = conn.transaction()?;
+        tx.execute_batch(migration.sql)?;
+        tx.pragma_update(None, "user_version", migration.version)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
+/// The schema version this build reads and writes.
+pub fn current_schema_version() -> i64 {
+    MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn migrations_apply_and_record_version() {
+        let mut conn = mem();
+        migrate(&mut conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), current_schema_version());
+        for table in ["vault_meta", "projects", "project_repos", "credentials", "audit_events"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing table {table}");
+        }
+    }
+
+    #[test]
+    fn migrations_are_idempotent() {
+        let mut conn = mem();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), current_schema_version());
+    }
+
+    #[test]
+    fn migrations_apply_incrementally() {
+        let mut conn = mem();
+        let steps = [
+            Migration { version: 1, name: "one", sql: "CREATE TABLE a (x INTEGER);" },
+            Migration { version: 2, name: "two", sql: "CREATE TABLE b (y INTEGER);" },
+        ];
+        migrate_with(&mut conn, &steps[..1]).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 1);
+        migrate_with(&mut conn, &steps).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 2);
+        conn.execute("INSERT INTO a (x) VALUES (1)", []).unwrap();
+        conn.execute("INSERT INTO b (y) VALUES (1)", []).unwrap();
+    }
+
+    #[test]
+    fn failed_migration_rolls_back() {
+        let mut conn = mem();
+        let steps = [Migration {
+            version: 1,
+            name: "broken",
+            sql: "CREATE TABLE ok_table (x INTEGER); CREATE TABLE bad syntax error;",
+        }];
+        assert!(migrate_with(&mut conn, &steps).is_err());
+        assert_eq!(user_version(&conn).unwrap(), 0);
+        let count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='ok_table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "partial migration must roll back");
+    }
+}
