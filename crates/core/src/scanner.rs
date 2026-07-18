@@ -118,7 +118,8 @@ fn env_var_index() -> &'static [(String, String)] {
 }
 
 /// Placeholder values that should never be treated as real secrets.
-fn is_placeholder(value: &str) -> bool {
+/// Public so `.env` governance can exclude placeholders from import.
+pub fn is_placeholder_value(value: &str) -> bool {
     let v = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
     if v.len() < 8 {
         return true;
@@ -327,7 +328,7 @@ pub fn scan_text(content: &str, file: &str, options: &ScanOptions) -> Vec<Findin
 
         // 2/3. Assignment-based detection.
         if let Some((name, value)) = split_assignment(line) {
-            if is_placeholder(&value) || is_publishable_value(&value) {
+            if is_placeholder_value(&value) || is_publishable_value(&value) {
                 continue;
             }
             // Already caught by a provider pattern on this line? Skip.

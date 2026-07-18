@@ -15,6 +15,8 @@ use std::time::Duration;
 pub enum Method {
     Get,
     Post,
+    Put,
+    Delete,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +35,20 @@ impl HttpRequest {
             headers: Vec::new(),
             body: None,
         }
+    }
+
+    pub fn with_method(method: Method, url: impl Into<String>) -> Self {
+        Self {
+            method,
+            url: url.into(),
+            headers: Vec::new(),
+            body: None,
+        }
+    }
+
+    pub fn body(mut self, bytes: Vec<u8>) -> Self {
+        self.body = Some(bytes);
+        self
     }
 
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
@@ -95,8 +111,8 @@ impl UreqClient {
 
 impl HttpClient for UreqClient {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
-        // ureq 3.x uses typestate request builders, so GET and POST are built
-        // in separate branches rather than through a shared closure.
+        // ureq 3.x uses typestate request builders, so each method is built
+        // in its own branch rather than through a shared closure.
         let result = match req.method {
             Method::Get => {
                 let mut r = self.agent.get(&req.url);
@@ -114,6 +130,23 @@ impl HttpClient for UreqClient {
                     Some(bytes) => r.send(&bytes[..]),
                     None => r.send_empty(),
                 }
+            }
+            Method::Put => {
+                let mut r = self.agent.put(&req.url);
+                for (k, v) in &req.headers {
+                    r = r.header(k, v);
+                }
+                match &req.body {
+                    Some(bytes) => r.send(&bytes[..]),
+                    None => r.send_empty(),
+                }
+            }
+            Method::Delete => {
+                let mut r = self.agent.delete(&req.url);
+                for (k, v) in &req.headers {
+                    r = r.header(k, v);
+                }
+                r.call()
             }
         };
         let mut resp = match result {

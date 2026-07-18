@@ -10,6 +10,11 @@ pub fn now() -> OffsetDateTime {
     OffsetDateTime::now_utc()
 }
 
+/// RFC 3339 timestamp `duration` from now (used for export expiries).
+pub fn rfc3339_after(duration: std::time::Duration) -> String {
+    to_rfc3339(now() + duration)
+}
+
 pub fn to_rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339)
         .expect("RFC 3339 formatting of a valid timestamp cannot fail")
