@@ -184,7 +184,7 @@ npx tauri dev            # or run it in development mode
 
 ```bash
 bash scripts/demo.sh --keep   # isolated demo vault, fake credentials only
-bash scripts/smoke.sh         # automated end-to-end smoke test (47 checks)
+bash scripts/smoke.sh         # automated end-to-end smoke test
 ```
 
 The demo builds a throwaway vault with a development project, a

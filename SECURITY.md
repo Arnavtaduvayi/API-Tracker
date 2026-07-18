@@ -33,8 +33,14 @@ versions, and use only fake credentials in reproductions.
 - Duplicate detection uses a *keyed* fingerprint (BLAKE3 keyed hash with a
   vault-specific wrapped key), so database access alone does not enable
   offline guess-confirmation of credential values.
-- No telemetry, no analytics, no crash reporting, no network requests of
-  any kind in the current version.
+- No telemetry, no analytics, no crash reporting, and no API-Tracker-operated
+  server. The only network traffic the app can produce is direct traffic from
+  your device to endpoints you explicitly configure: official provider APIs
+  (validation, metadata, usage/cost sync, confirmed rotation steps),
+  destination APIs you add (e.g. GitHub Actions, AWS Secrets Manager),
+  official documentation pages you watch, and webhook URLs you configure.
+  Nothing is sent anywhere without an explicit user-configured reason, and
+  alert webhook payloads carry metadata only — never secret values.
 
 ## What this does NOT protect against
 
