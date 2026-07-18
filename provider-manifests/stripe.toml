@@ -30,8 +30,8 @@ regex = "sk_test_[A-Za-z0-9]{24,}"
 confidence = "medium"
 
 [capabilities]
-validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/balance confirms the secret key works." }
-fetch_metadata = { support = "manual_only", note = "For standard accounts, key metadata is visible only in the Developers Dashboard, not via a public API." }
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated GET /v1/balance confirms the secret key works." }
+fetch_metadata = { support = "implemented", attribution = "exact_credential", note = "GET /v1/balance reports the key's live/test mode and balance currencies; richer key metadata is dashboard-only." }
 fetch_usage = { support = "manual_only", attribution = "exact_credential", note = "Stripe is a payments provider, not a metered API; per-key request logs are viewable (and filterable by key) only in the dashboard." }
 read_permissions = { support = "manual_only", note = "Restricted-key permissions are visible on the dashboard, not through the API." }
 change_permissions = { support = "manual_only", note = "Restricted-key permissions are edited on the dashboard." }

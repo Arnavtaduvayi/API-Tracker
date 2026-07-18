@@ -26,6 +26,10 @@ pub enum AlertKind {
     PossibleExposure,
     ProviderSyncFailed,
     DocumentationChanged,
+    OverBudget,
+    CostSpike,
+    UsageAfterDisabled,
+    CredentialActivated,
 }
 
 impl AlertKind {
@@ -40,6 +44,10 @@ impl AlertKind {
             AlertKind::PossibleExposure => "possible_exposure",
             AlertKind::ProviderSyncFailed => "provider_sync_failed",
             AlertKind::DocumentationChanged => "documentation_changed",
+            AlertKind::OverBudget => "over_budget",
+            AlertKind::CostSpike => "cost_spike",
+            AlertKind::UsageAfterDisabled => "usage_after_disabled",
+            AlertKind::CredentialActivated => "credential_activated",
         }
     }
 }

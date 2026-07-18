@@ -140,6 +140,107 @@ CREATE TABLE doc_watches (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 3,
+        name: "provider integrations: usage, pricing, permissions, activity, injection",
+        sql: r#"
+-- Monetary amounts are integer micro-USD (1 USD = 1_000_000) to avoid float
+-- rounding. Budgets are user-facing dollars stored the same way.
+ALTER TABLE projects ADD COLUMN monthly_budget_micros INTEGER;
+ALTER TABLE credentials ADD COLUMN monthly_budget_micros INTEGER;
+
+-- Provider connection state: which vault credential (if any) is the admin key
+-- used for usage sync, and the last sync result.
+CREATE TABLE provider_connections (
+    provider            TEXT PRIMARY KEY,
+    admin_credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    last_synced_at      TEXT,
+    last_status         TEXT NOT NULL DEFAULT 'never',
+    detail              TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Normalized usage snapshots. attribution records the precision honestly.
+CREATE TABLE usage_snapshots (
+    id                   TEXT PRIMARY KEY,
+    credential_id        TEXT REFERENCES credentials(id) ON DELETE CASCADE,
+    project_id           TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    provider             TEXT NOT NULL,
+    model                TEXT,
+    window_start         TEXT NOT NULL,
+    window_end           TEXT NOT NULL,
+    request_count        INTEGER,
+    input_tokens         INTEGER,
+    output_tokens        INTEGER,
+    total_tokens         INTEGER,
+    credits              REAL,
+    reported_cost_micros INTEGER,
+    estimated_cost_micros INTEGER,
+    currency             TEXT NOT NULL DEFAULT 'USD',
+    source               TEXT NOT NULL,
+    attribution          TEXT NOT NULL,
+    collected_at         TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_usage_credential ON usage_snapshots(credential_id);
+CREATE INDEX idx_usage_project ON usage_snapshots(project_id);
+CREATE INDEX idx_usage_window ON usage_snapshots(window_start);
+
+-- Manual pricing overrides (bundled prices live in code with source + dates).
+CREATE TABLE pricing_overrides (
+    id                          TEXT PRIMARY KEY,
+    provider                    TEXT NOT NULL,
+    model                       TEXT NOT NULL,
+    unit                        TEXT NOT NULL,
+    input_price_per_m_micros    INTEGER,
+    output_price_per_m_micros   INTEGER,
+    currency                    TEXT NOT NULL DEFAULT 'USD',
+    note                        TEXT NOT NULL DEFAULT '',
+    created_at                  TEXT NOT NULL,
+    UNIQUE (provider, model)
+) STRICT;
+
+-- Normalized permissions with raw scopes preserved.
+CREATE TABLE credential_permissions (
+    credential_id TEXT PRIMARY KEY REFERENCES credentials(id) ON DELETE CASCADE,
+    raw_scopes    TEXT NOT NULL,
+    normalized    TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    precision     TEXT NOT NULL,
+    confidence    TEXT NOT NULL,
+    synced_at     TEXT NOT NULL
+) STRICT;
+
+-- Normalized local activity events feeding suspicious-activity rules.
+CREATE TABLE activity_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    credential_id TEXT,
+    project_id    TEXT,
+    detail        TEXT NOT NULL DEFAULT '',
+    measurements  TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Project credential -> environment-variable injection mappings.
+CREATE TABLE credential_env_mappings (
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    env_var       TEXT NOT NULL,
+    PRIMARY KEY (project_id, env_var)
+) STRICT;
+
+-- Local record of process-injection sessions (names only, never values).
+CREATE TABLE process_sessions (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    started_at    TEXT NOT NULL,
+    ended_at      TEXT,
+    command       TEXT NOT NULL,
+    injected_vars TEXT NOT NULL,
+    exit_code     INTEGER
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

@@ -30,9 +30,9 @@ regex = "sk-ant-[A-Za-z0-9_-]{20,}"
 confidence = "medium"
 
 [capabilities]
-validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
 fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Admin API lists API keys with id, name, status and workspace; requires an admin key." }
-fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Admin Usage & Cost API requires an admin key and reports at organization/workspace granularity." }
+fetch_usage = { support = "implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Admin Usage & Cost API requires an admin key and reports at organization/workspace granularity." }
 read_permissions = { support = "unsupported", note = "Keys are scoped by workspace membership, not by API-readable per-key scopes." }
 change_permissions = { support = "unsupported", note = "Per-key permissions cannot be changed through a public API." }
 create_credential = { support = "manual_only", note = "API keys can only be created in the console, not through the Admin API." }

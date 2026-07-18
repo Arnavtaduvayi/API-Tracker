@@ -20,18 +20,25 @@
 
 #![forbid(unsafe_code)]
 
+pub mod activity;
 pub mod alerts;
 pub mod audit;
 pub mod backup;
+pub mod budget;
 pub mod clock;
+pub mod connectors;
 pub mod crypto;
 pub mod db;
 pub mod docwatch;
 pub mod error;
 pub mod gitrepo;
 pub mod hooks;
+pub mod http;
+pub mod inject;
 pub mod model;
 pub mod monitor;
+pub mod permissions;
+pub mod pricing;
 pub mod providers;
 pub mod reuse;
 pub mod scanner;
@@ -39,6 +46,7 @@ pub mod secret;
 pub mod session;
 pub mod settings;
 pub mod status;
+pub mod usage;
 pub mod vault;
 
 pub use error::{CoreError, Result};

@@ -34,9 +34,9 @@ regex = "sk-[A-Za-z0-9]{32,}"
 confidence = "medium"
 
 [capabilities]
-validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
 fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Admin API lists project API keys with id, name and creation time; requires an organization admin key." }
-fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Usage API (admin key) can group token/request metrics by api_key_id (exact per key); the Costs API reports dollar spend only at project granularity, so cost is never exact per key." }
+fetch_usage = { support = "implemented", requires_admin_credential = true, attribution = "account_level", note = "API Tracker syncs organization-level token/request totals (admin key). The provider can group by api_key_id, but API Tracker does not map provider key ids to vault credentials, so usage is reported at account level, never as exact per-key." }
 read_permissions = { support = "manual_only", note = "The API does not return a key's endpoint scopes; per-key permission tiers are viewable only in the dashboard." }
 change_permissions = { support = "manual_only", note = "A key's endpoint scopes can be changed only in the dashboard, not via API." }
 create_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Admin API can create service-account keys within a project; user project keys are dashboard-only." }

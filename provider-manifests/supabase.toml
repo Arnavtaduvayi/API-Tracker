@@ -31,8 +31,8 @@ confidence = "high"
 # false positive with the wrong remediation.
 
 [capabilities]
-validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated request to the project REST endpoint confirms a key works; the Management API validates a personal access token." }
-fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Management API lists a project's API keys; requires a personal access token." }
+validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated request to the project REST endpoint confirms a key works; the Management API validates a personal access token." }
+fetch_metadata = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Management API lists a project's API keys; requires a personal access token." }
 fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Management API exposes project usage; attribution is at project granularity." }
 read_permissions = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "A key's coarse privilege is fixed by its type and readable from the 'type' field via the Management API; there are no arbitrary per-key scopes." }
 change_permissions = { support = "unsupported", note = "A key's type/privilege cannot be changed; create a new key of the desired type instead." }

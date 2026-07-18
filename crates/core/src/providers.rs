@@ -305,17 +305,15 @@ mod tests {
             assert!(!m.name.is_empty());
             assert!(!m.api_docs_url.is_empty(), "{} missing api docs", m.id);
             assert!(!m.manage_url.is_empty(), "{} missing manage url", m.id);
-            // Capability matrix is exhaustive (10 entries) and none claims to
-            // be implemented yet.
+            // Capability matrix is exhaustive (10 entries).
             assert_eq!(m.capabilities.entries().len(), 10);
-            for (name, entry) in m.capabilities.entries() {
-                assert_ne!(
-                    entry.support,
-                    SupportLevel::Implemented,
-                    "{}/{name} must not claim implementation in this milestone",
-                    m.id
-                );
-            }
+            // Credential validation is implemented for every provider.
+            assert_eq!(
+                m.capabilities.validate_credential.support,
+                SupportLevel::Implemented,
+                "{} must implement validation",
+                m.id
+            );
         }
     }
 
