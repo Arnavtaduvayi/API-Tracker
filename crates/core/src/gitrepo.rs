@@ -144,7 +144,7 @@ fn parse_log_added_lines(log: &str) -> Vec<ScanUnit> {
                 }
             }
             units.push(ScanUnit {
-                label: format!("commit {}:{}", &commit.get(..8).unwrap_or(commit), file),
+                label: format!("commit {}:{}", commit.get(..8).unwrap_or(commit), file),
                 content: lines.join("\n"),
             });
             buffer.clear();
