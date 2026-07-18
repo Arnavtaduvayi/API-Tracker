@@ -103,6 +103,12 @@ export interface VaultSettings {
   unused_days: number;
   stale_days: number;
   clipboard_clear_seconds: number;
+  provider_stale_days: number;
+  rollback_window_days: number;
+  /** Hours between scheduled documentation checks. 0 = manual only. */
+  docwatch_interval_hours: number;
+  /** Minutes between background monitor runs in the desktop app. 0 = off. */
+  monitor_interval_minutes: number;
 }
 
 export interface VaultStatus {
@@ -162,6 +168,12 @@ export interface ProviderManifest {
   env_vars: string[];
   credential_types: string[];
   expiration: string;
+  /** Official changelog / release-notes page ("" when none is declared). */
+  changelog_url: string;
+  /** Official pricing documentation ("" when none is declared). */
+  pricing_url: string;
+  /** Official permission/scope documentation ("" when none is declared). */
+  permissions_docs_url: string;
   watch_docs: string[];
   detection: DetectionPattern[];
   capabilities: Capabilities;
@@ -229,6 +241,43 @@ export interface MonitorSummary {
   alerts_created: number;
   alerts_resolved: number;
   open_alerts: number;
+}
+
+/** Monitor run including the best-effort network phases (CLI parity). */
+export interface MonitorFullReport {
+  summary: MonitorSummary;
+  /** Documentation watches that were due and got checked. */
+  doc_checks: number;
+  /** Webhook notifications delivered. */
+  delivered: number;
+  /** Severities of alerts created by this run (severities only). */
+  new_alert_severities: string[];
+}
+
+/**
+ * A user-configured webhook channel. The URL may embed a token, so only the
+ * masked form ever reaches the frontend; delivery payloads carry alert
+ * metadata only, never secret values.
+ */
+export interface NotificationChannel {
+  id: string;
+  name: string;
+  kind: string;
+  url_masked: string;
+  min_severity: "info" | "low" | "medium" | "high" | "critical";
+  enabled: boolean;
+  created_at: string;
+  last_delivery_at: string | null;
+  last_error: string;
+}
+
+/** One documentation-check history entry (validators/outcomes only). */
+export interface DocHistoryEntry {
+  url: string;
+  provider: string;
+  at: string;
+  outcome: string;
+  detail: string;
 }
 
 export interface DocWatch {
@@ -343,6 +392,10 @@ export interface UsageSnapshot {
   provider_project_id: string | null;
   provider_api_key_id: string | null;
   line_item: string | null;
+  /** Non-token quantity, verbatim from the provider (with `unit`). */
+  quantity: number | null;
+  /** Unit for `quantity` (e.g. "requests", "events") — rendered verbatim. */
+  unit: string | null;
 }
 
 export interface UsageTotals {

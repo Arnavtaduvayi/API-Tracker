@@ -1683,7 +1683,7 @@ impl UnlockedVault {
     /// Mark every credential matched by a scan finding as possibly exposed,
     /// recording where. Returns the affected credential ids. Never touches
     /// files or provider state.
-    pub fn mark_findings_exposed(&mut self, findings: &[scanner::Finding]) -> Result<Vec<String>> {
+    pub fn mark_findings_exposed(&self, findings: &[scanner::Finding]) -> Result<Vec<String>> {
         let mut affected = Vec::new();
         for finding in findings {
             if let Some(m) = &finding.vault_match {
@@ -1859,6 +1859,72 @@ impl UnlockedVault {
             }
         }
 
+        // Incremental scan of registered repositories: only NEW commits
+        // since the last monitor run are examined (one `git rev-parse` per
+        // repo when nothing changed). Local-only, like all scanning.
+        // Findings (vault-matched or not) raise an alert; silent coverage
+        // gaps are not acceptable in a security tool.
+        let _ = self.prune_observability_state();
+        let mut repos_scanned = 0usize;
+        let mut repo_findings = 0usize;
+        if let Ok(reports) = self.scan_repos_incremental() {
+            for report in &reports {
+                repos_scanned += 1;
+                repo_findings += report.findings;
+                if report.findings > 0 {
+                    let alert = alerts::NewAlert {
+                        kind: alerts::AlertKind::PossibleExposure,
+                        severity: alerts::Severity::High,
+                        dedup_key: format!(
+                            "repo_scan_findings:{}:{}",
+                            report.repo_path, report.head_commit
+                        ),
+                        title: format!(
+                            "likely secret(s) in new commits: {}",
+                            report.repo_path
+                        ),
+                        detail: format!(
+                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect.",
+                            report.findings, report.head_commit, report.repo_path
+                        ),
+                        evidence: format!(
+                            "repo={} head={} findings={}",
+                            report.repo_path, report.head_commit, report.findings
+                        ),
+                        confidence: crate::providers::Confidence::Medium,
+                        recommended_action:
+                            "inspect the findings; rotate anything real and scrub history"
+                                .into(),
+                        project_id: None,
+                        credential_id: None,
+                        observed_at: now.clone(),
+                    };
+                    active_keys.push(alert.dedup_key.clone());
+                    if alerts::upsert(&self.conn, &alert)? {
+                        created += 1;
+                    }
+                }
+            }
+        }
+
+        // Expanded explainable observability rules (request spikes, dormant
+        // activation, auth failures, first-seen provider entities, unusual
+        // model/time, destination drift, rotations needing attention,
+        // expired grants).
+        {
+            let labels: HashMap<String, String> = credentials
+                .iter()
+                .map(|c| (c.id.clone(), format!("{}/{}", c.project_name, c.name)))
+                .collect();
+            let label_of = |id: &str| labels.get(id).cloned().unwrap_or_else(|| id.to_string());
+            for alert in crate::observe::alerts(&self.conn, clock::now(), &label_of)? {
+                active_keys.push(alert.dedup_key.clone());
+                if alerts::upsert(&self.conn, &alert)? {
+                    created += 1;
+                }
+            }
+        }
+
         let mut managed = crate::monitor::managed_credential_kinds();
         managed.extend(crate::activity::managed_kinds());
         managed.extend([
@@ -1868,8 +1934,11 @@ impl UnlockedVault {
             alerts::AlertKind::RotationDue,
             alerts::AlertKind::RotationStuck,
         ]);
+        managed.extend(crate::observe::managed_kinds());
         let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
         Ok(MonitorSummary {
+            repos_scanned,
+            repo_findings,
             checked: credentials.len(),
             alerts_created: created,
             alerts_resolved: resolved,
@@ -2016,6 +2085,19 @@ impl UnlockedVault {
         url: &str,
     ) -> Result<(crate::docwatch::CheckResult, crate::docwatch::DocWatch)> {
         let (result, watch) = crate::docwatch::check_watch(&self.conn, fetcher, url)?;
+        let outcome = match result {
+            crate::docwatch::CheckResult::FirstCapture => "first_capture",
+            crate::docwatch::CheckResult::Unchanged => "unchanged",
+            crate::docwatch::CheckResult::Changed => "changed",
+            crate::docwatch::CheckResult::Failed => "failed",
+        };
+        crate::docwatch::record_history(
+            &self.conn,
+            url,
+            &watch.provider,
+            outcome,
+            &watch.last_status,
+        )?;
         if result == crate::docwatch::CheckResult::Changed {
             let now = clock::now_rfc3339();
             alerts::upsert(
@@ -2220,12 +2302,13 @@ impl UnlockedVault {
                 "the administrative key must not be empty".into(),
             ));
         }
-        if provider != crate::openai::PROVIDER {
+        if provider != crate::openai::PROVIDER && provider != crate::anthropic::PROVIDER {
             return Err(CoreError::Unsupported {
                 provider,
                 capability: "admin_connection",
-                hint: "a dedicated administrative connection is only implemented for OpenAI; \
-                       use `provider connect <provider> --credential <vault credential>`"
+                hint: "a dedicated administrative connection is implemented for OpenAI and \
+                       Anthropic; use `provider connect <provider> --credential <vault \
+                       credential>` otherwise"
                     .into(),
             });
         }
@@ -2233,6 +2316,9 @@ impl UnlockedVault {
         // `http: None` (explicit user opt-out, e.g. offline setup) stores the
         // key unvalidated and says so.
         let detail = match http {
+            Some(http) if provider == crate::anthropic::PROVIDER => {
+                crate::anthropic::validate_admin_key(http, admin_key)?
+            }
             Some(http) => crate::openai::validate_admin_key(http, admin_key)?,
             None => "stored without validation (verification was skipped)".to_string(),
         };
@@ -2513,6 +2599,8 @@ impl UnlockedVault {
         let admin_secret = self.provider_admin_secret(&provider)?;
         let result = if provider == crate::openai::PROVIDER {
             self.openai_sync(http, &admin_secret, from, to)
+        } else if provider == crate::anthropic::PROVIDER {
+            self.anthropic_sync(http, &admin_secret, from, to)
         } else {
             self.legacy_connector_sync(&provider, http, &admin_secret, from, to)
         };
@@ -2734,10 +2822,12 @@ impl UnlockedVault {
         }
         for p in &side_projects {
             tx.execute(
-                "INSERT INTO provider_side_projects (provider, project_id, name, status, synced_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO provider_side_projects
+                 (provider, project_id, name, status, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                  ON CONFLICT(provider, project_id) DO UPDATE SET
-                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at",
+                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_projects.first_seen_at, excluded.first_seen_at)",
                 params![provider, p.id, p.name, p.status, now],
             )?;
         }
@@ -2745,12 +2835,13 @@ impl UnlockedVault {
             tx.execute(
                 "INSERT INTO provider_side_keys
                  (provider, api_key_id, provider_project_id, name, redacted_value,
-                  created_at, last_used_at, synced_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  created_at, last_used_at, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
                  ON CONFLICT(provider, api_key_id) DO UPDATE SET
                  provider_project_id = excluded.provider_project_id, name = excluded.name,
                  redacted_value = excluded.redacted_value, created_at = excluded.created_at,
-                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at",
+                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_keys.first_seen_at, excluded.first_seen_at)",
                 params![
                     provider,
                     k.id,
@@ -2762,6 +2853,187 @@ impl UnlockedVault {
                     now
                 ],
             )?;
+        }
+        let (from_s, to_s) = (clock::to_rfc3339(from), clock::to_rfc3339(to));
+        let mut checkpoint_kinds = vec!["usage"];
+        if costs_ok {
+            checkpoint_kinds.push("costs");
+        }
+        for kind in checkpoint_kinds {
+            tx.execute(
+                "INSERT INTO provider_sync_state (provider, kind, window_start, window_end, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider, kind) DO UPDATE SET
+                 window_start = excluded.window_start, window_end = excluded.window_end,
+                 synced_at = excluded.synced_at",
+                params![provider, kind, from_s, to_s, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(SyncReport {
+            provider: provider.to_string(),
+            usage_rows: usage_count,
+            cost_rows: cost_count,
+            window_start: from_s,
+            window_end: to_s,
+            notes,
+        })
+    }
+
+    /// The Anthropic Admin API sync engine: per-key daily usage (grouped
+    /// api_key_id × workspace_id × model), workspace-level cost report
+    /// (cents-denominated, converted with guards), workspace + key
+    /// metadata, and provider-reported key expirations. Mirrors the
+    /// fetch-all-then-replace semantics of `openai_sync`.
+    fn anthropic_sync(
+        &self,
+        http: &dyn crate::http::HttpClient,
+        admin_secret: &SecretString,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> Result<SyncReport> {
+        use crate::anthropic;
+        let provider = anthropic::PROVIDER;
+        let mut notes = Vec::new();
+
+        let mut usage_rows = anthropic::fetch_usage(http, admin_secret, from, to)?;
+        let (mut cost_rows, costs_ok) = match anthropic::fetch_costs(http, admin_secret, from, to) {
+            Ok(rows) => (rows, true),
+            Err(e) => {
+                notes.push(format!("provider-reported costs are unavailable: {e}"));
+                (Vec::new(), false)
+            }
+        };
+
+        // Provider-side metadata is best-effort.
+        let mut side_projects = Vec::new();
+        let mut side_keys: Vec<crate::openai::ProviderSideKey> = Vec::new();
+        let mut key_expiries: Vec<(String, Option<String>)> = Vec::new();
+        match anthropic::fetch_workspaces(http, admin_secret) {
+            Ok(workspaces) => side_projects = workspaces,
+            Err(e) => notes.push(format!("workspace metadata unavailable: {e}")),
+        }
+        let mut key_expiry_known = false;
+        match anthropic::fetch_api_keys(http, admin_secret) {
+            Ok(keys) => {
+                key_expiry_known = true;
+                for (key, expires_at) in keys {
+                    // None is meaningful too: a removed/extended expiry must
+                    // clear the stale local value.
+                    key_expiries.push((key.id.clone(), expires_at));
+                    side_keys.push(key);
+                }
+            }
+            Err(e) => notes.push(format!("API-key metadata unavailable: {e}")),
+        }
+
+        // Confirmed links upgrade rows to exact local attribution; cost
+        // rows carry no key dimension (documented) and stay coarse.
+        let links = self.provider_key_link_map(provider)?;
+        for row in usage_rows.iter_mut() {
+            if let Some(key_id) = &row.provider_api_key_id {
+                if let Some((credential_id, project_id)) = links.get(key_id) {
+                    row.credential_id = Some(credential_id.clone());
+                    row.project_id = Some(project_id.clone());
+                    row.attribution = usage::Attribution::ExactCredential;
+                }
+            }
+            if row.provider_account_id.is_none() {
+                row.provider_account_id = self.provider_org_label(provider)?;
+            }
+        }
+        for row in cost_rows.iter_mut() {
+            if row.provider_account_id.is_none() {
+                row.provider_account_id = self.provider_org_label(provider)?;
+            }
+        }
+        for row in usage_rows.iter_mut() {
+            if let (Some(model), Some(inp), Some(out)) =
+                (&row.model, row.input_tokens, row.output_tokens)
+            {
+                if let Some(est) =
+                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
+                {
+                    row.estimated_cost_micros = Some(est.micros);
+                }
+            }
+        }
+
+        let usage_count = usage_rows.len();
+        let cost_count = cost_rows.len();
+        let now = clock::now_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        if let (Some(min_start), Some(max_end)) = (
+            usage_rows.iter().map(|s| s.window_start.clone()).min(),
+            usage_rows.iter().map(|s| s.window_end.clone()).max(),
+        ) {
+            tx.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source != 'manual' AND source != ?2
+                 AND window_start >= ?3 AND window_start < ?4",
+                params![provider, anthropic::COSTS_SOURCE, min_start, max_end],
+            )?;
+        }
+        if let (Some(min_start), Some(max_end)) = (
+            cost_rows.iter().map(|s| s.window_start.clone()).min(),
+            cost_rows.iter().map(|s| s.window_end.clone()).max(),
+        ) {
+            tx.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source = ?2
+                 AND window_start >= ?3 AND window_start < ?4",
+                params![provider, anthropic::COSTS_SOURCE, min_start, max_end],
+            )?;
+        }
+        for row in usage_rows.iter().chain(cost_rows.iter()) {
+            usage::record(&tx, row)?;
+        }
+        for p in &side_projects {
+            tx.execute(
+                "INSERT INTO provider_side_projects
+                 (provider, project_id, name, status, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(provider, project_id) DO UPDATE SET
+                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_projects.first_seen_at, excluded.first_seen_at)",
+                params![provider, p.id, p.name, p.status, now],
+            )?;
+        }
+        for k in &side_keys {
+            tx.execute(
+                "INSERT INTO provider_side_keys
+                 (provider, api_key_id, provider_project_id, name, redacted_value,
+                  created_at, last_used_at, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                 ON CONFLICT(provider, api_key_id) DO UPDATE SET
+                 provider_project_id = excluded.provider_project_id, name = excluded.name,
+                 redacted_value = excluded.redacted_value, created_at = excluded.created_at,
+                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_keys.first_seen_at, excluded.first_seen_at)",
+                params![
+                    provider,
+                    k.id,
+                    k.provider_project_id,
+                    k.name,
+                    k.redacted_value,
+                    k.created_at,
+                    k.last_used_at,
+                    now
+                ],
+            )?;
+        }
+        // Provider-reported key expirations flow onto LINKED credentials
+        // (recorded verbatim from the provider, never invented; a listing
+        // WITHOUT an expiry clears any stale local value).
+        if key_expiry_known {
+            for (key_id, expiry) in &key_expiries {
+                if let Some((credential_id, _)) = links.get(key_id) {
+                    tx.execute(
+                        "UPDATE credentials SET provider_expires_at = ?1 WHERE id = ?2",
+                        params![expiry, credential_id],
+                    )?;
+                }
+            }
         }
         let (from_s, to_s) = (clock::to_rfc3339(from), clock::to_rfc3339(to));
         let mut checkpoint_kinds = vec!["usage"];
@@ -4178,6 +4450,381 @@ impl UnlockedVault {
     /// Recorded exports (metadata only; values are never stored).
     pub fn env_exports(&self, include_cleaned: bool) -> Result<Vec<crate::envgov::EnvExport>> {
         crate::envgov::list_exports(&self.conn, include_cleaned)
+    }
+
+    // ------------------------------------------------------------------
+    // Incremental repository monitoring (local Git only)
+    // ------------------------------------------------------------------
+
+    /// Scan only the commits added since the last monitor run, per
+    /// registered repository. First sight of a repo records its HEAD as the
+    /// baseline WITHOUT scanning history (on-demand `scan --history` covers
+    /// that explicitly). Findings are matched against the vault and marked
+    /// possibly exposed exactly like on-demand scans.
+    pub fn scan_repos_incremental(&self) -> Result<Vec<RepoScanReport>> {
+        let mut reports = Vec::new();
+        let mut paths: Vec<String> = Vec::new();
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT path FROM project_repos ORDER BY path")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            for r in rows {
+                paths.push(r?);
+            }
+        }
+        for path in paths {
+            let repo = std::path::Path::new(&path);
+            if !repo.exists() {
+                continue;
+            }
+            let Ok(head) = crate::gitrepo::head_commit(repo) else {
+                continue; // not a repo / no commits — nothing to monitor
+            };
+            let last: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT last_scanned_commit FROM repo_scan_state WHERE repo_path = ?1",
+                    [&path],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let findings_count = match &last {
+                None => 0, // baseline only
+                Some(last) if last == &head => continue,
+                Some(last) => {
+                    // History rewritten or range unreadable: re-baseline
+                    // rather than failing the whole monitor run — but say
+                    // so, because commits in the unread range were NOT
+                    // scanned.
+                    let (units, range_ok) =
+                        match crate::gitrepo::range_added_units(repo, last, &head) {
+                            Ok(units) => (units, true),
+                            Err(_) => (Vec::new(), false),
+                        };
+                    if !range_ok {
+                        let _ = alerts::upsert(
+                            &self.conn,
+                            &alerts::NewAlert {
+                                kind: alerts::AlertKind::PossibleExposure,
+                                severity: alerts::Severity::Medium,
+                                dedup_key: format!("repo_rebaselined:{path}:{head}"),
+                                title: format!("repository re-baselined: {path}"),
+                                detail: format!(
+                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --history` if secrets may have landed there."
+                                ),
+                                evidence: format!("last={last} head={head}"),
+                                confidence: crate::providers::Confidence::Medium,
+                                recommended_action:
+                                    "run an explicit history scan of this repository".into(),
+                                project_id: None,
+                                credential_id: None,
+                                observed_at: clock::now_rfc3339(),
+                            },
+                        );
+                    }
+                    let mut findings = Vec::new();
+                    for unit in &units {
+                        let options = scanner::ScanOptions {
+                            entropy: !scanner::skip_entropy_for(&unit.label),
+                        };
+                        findings.extend(scanner::scan_text(&unit.content, &unit.label, &options));
+                    }
+                    let suppressions = load_suppression_keys(&self.conn)?;
+                    findings.retain(|f| !suppressions.contains(&f.suppression_key));
+                    let matches: Vec<_> = findings
+                        .iter()
+                        .map(|f| self.match_finding(f))
+                        .collect::<Result<_>>()?;
+                    for (finding, matched) in findings.iter_mut().zip(matches) {
+                        finding.vault_match = matched;
+                    }
+                    let count = findings.len();
+                    if count > 0 {
+                        // Vault-matched findings mark the credential exposed
+                        // (same path as on-demand scans).
+                        let _ = self.mark_findings_exposed(&findings);
+                        audit::record(
+                            &self.conn,
+                            "background_scan_findings",
+                            None,
+                            None,
+                            &format!("repo={path} new_commits_findings={count}"),
+                        )?;
+                    }
+                    count
+                }
+            };
+            self.conn.execute(
+                "INSERT INTO repo_scan_state (repo_path, last_scanned_commit, last_scan_at, last_findings)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (repo_path) DO UPDATE SET
+                     last_scanned_commit = excluded.last_scanned_commit,
+                     last_scan_at = excluded.last_scan_at,
+                     last_findings = excluded.last_findings",
+                params![path, head, clock::now_rfc3339(), findings_count as i64],
+            )?;
+            reports.push(RepoScanReport {
+                repo_path: path,
+                head_commit: head,
+                findings: findings_count,
+                baseline_only: last.is_none(),
+            });
+        }
+        Ok(reports)
+    }
+
+    // ------------------------------------------------------------------
+    // Scheduled documentation checks + change history
+    // ------------------------------------------------------------------
+
+    /// Check every documentation watch that is due per the configured
+    /// interval. Failures preserve prior state (offline-safe); returns
+    /// (url, outcome) pairs for reporting.
+    pub fn check_due_doc_watches(
+        &self,
+        fetcher: &dyn crate::docwatch::DocFetcher,
+    ) -> Result<Vec<(String, String)>> {
+        let due = crate::docwatch::due_watches(&self.conn, self.settings.docwatch_interval_hours)?;
+        let mut out = Vec::new();
+        for url in due {
+            let outcome = match self.check_doc_watch(fetcher, &url) {
+                Ok((crate::docwatch::CheckResult::FirstCapture, _)) => "first_capture".to_string(),
+                Ok((crate::docwatch::CheckResult::Unchanged, _)) => "unchanged".to_string(),
+                Ok((crate::docwatch::CheckResult::Changed, _)) => "changed".to_string(),
+                Ok((crate::docwatch::CheckResult::Failed, _)) => "failed".to_string(),
+                Err(e) => format!("error: {e}"),
+            };
+            out.push((url, outcome));
+        }
+        Ok(out)
+    }
+
+    /// Sweep bookkeeping rows that would otherwise grow forever: doc-watch
+    /// history beyond 200 entries per URL, and scan state for repository
+    /// paths no longer registered on any project.
+    fn prune_observability_state(&self) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM doc_watch_history WHERE id IN (
+                 SELECT id FROM (
+                     SELECT id, ROW_NUMBER() OVER (
+                         PARTITION BY url ORDER BY id DESC) AS rn
+                     FROM doc_watch_history)
+                 WHERE rn > 200)",
+            [],
+        )?;
+        self.conn.execute(
+            "DELETE FROM repo_scan_state WHERE repo_path NOT IN (
+                 SELECT DISTINCT path FROM project_repos)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn doc_watch_history(
+        &self,
+        url: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::docwatch::HistoryEntry>> {
+        crate::docwatch::history(&self.conn, url, limit)
+    }
+
+    // ------------------------------------------------------------------
+    // Notification channels (user-configured webhooks; optional)
+    // ------------------------------------------------------------------
+
+    /// Configure a webhook channel. The URL is encrypted under the vault
+    /// key (it may embed a user-chosen token) and masked for display.
+    pub fn notification_channel_add(
+        &self,
+        name: &str,
+        url: &SecretString,
+        min_severity: &str,
+    ) -> Result<crate::notify::NotificationChannel> {
+        let url_trim = url.expose().trim();
+        crate::notify::validate_webhook_url(url_trim)?;
+        if !matches!(
+            min_severity,
+            "info" | "low" | "medium" | "high" | "critical"
+        ) {
+            return Err(CoreError::InvalidInput(format!(
+                "'{min_severity}' is not a severity (info/low/medium/high/critical)"
+            )));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let ciphertext = crypto::encrypt(
+            &self.vault_key,
+            &aad::notification_channel(&self.vault_id, &id),
+            url_trim.as_bytes(),
+        )?;
+        // Reuse the id we encrypted under: insert with that exact id.
+        self.conn
+            .execute(
+                "INSERT INTO notification_channels
+                 (id, name, kind, url_ciphertext, url_masked, min_severity, created_at)
+             VALUES (?1, ?2, 'webhook', ?3, ?4, ?5, ?6)",
+                params![
+                    id,
+                    name,
+                    ciphertext,
+                    mask_value(url_trim),
+                    min_severity,
+                    clock::now_rfc3339()
+                ],
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(err, _)
+                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    CoreError::AlreadyExists {
+                        kind: "notification channel",
+                        ident: name.to_string(),
+                    }
+                }
+                other => other.into(),
+            })?;
+        audit::record(
+            &self.conn,
+            "notification_channel_added",
+            None,
+            None,
+            &format!("name={name} min_severity={min_severity}"),
+        )?;
+        crate::notify::get(&self.conn, &id)
+    }
+
+    pub fn notification_channels(&self) -> Result<Vec<crate::notify::NotificationChannel>> {
+        crate::notify::list(&self.conn)
+    }
+
+    pub fn notification_channel_remove(&self, ident: &str) -> Result<()> {
+        let channel = crate::notify::get(&self.conn, ident)?;
+        crate::notify::remove(&self.conn, &channel.id)?;
+        audit::record(
+            &self.conn,
+            "notification_channel_removed",
+            None,
+            None,
+            &format!("name={}", channel.name),
+        )?;
+        Ok(())
+    }
+
+    pub fn notification_channel_enable(&self, ident: &str, enabled: bool) -> Result<()> {
+        let channel = crate::notify::get(&self.conn, ident)?;
+        crate::notify::set_enabled(&self.conn, &channel.id, enabled)
+    }
+
+    fn notification_channel_url(&self, id: &str) -> Result<SecretString> {
+        let ciphertext = crate::notify::url_ciphertext(&self.conn, id)?;
+        let plaintext = crypto::decrypt(
+            &self.vault_key,
+            &aad::notification_channel(&self.vault_id, id),
+            &ciphertext,
+            "notification channel URL",
+        )?;
+        Ok(SecretString::new(
+            String::from_utf8(plaintext.expose().to_vec())
+                .map_err(|_| CoreError::VaultCorrupted("channel URL is not valid UTF-8"))?,
+        ))
+    }
+
+    /// Send a test payload through one channel (no secrets, clearly a test).
+    pub fn notification_channel_test(
+        &self,
+        ident: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<String> {
+        let channel = crate::notify::get(&self.conn, ident)?;
+        let url = self.notification_channel_url(&channel.id)?;
+        let now = clock::now_rfc3339();
+        let payload = crate::notify::NotificationPayload {
+            source: "api-tracker",
+            kind: "test",
+            severity: "info",
+            title: "API Tracker test notification",
+            detail: "channel connectivity test — no alert condition exists",
+            recommended_action: "none",
+            observed_at: &now,
+        };
+        match crate::notify::deliver_webhook(http, url.expose(), &payload) {
+            Ok(detail) => {
+                crate::notify::record_delivery(&self.conn, &channel.id, None)?;
+                Ok(detail)
+            }
+            Err(e) => {
+                crate::notify::record_delivery(&self.conn, &channel.id, Some(&e.to_string()))?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Deliver open alerts at or above each channel's severity floor that
+    /// were observed within the last hour (the monitor cadence). Payloads
+    /// carry alert metadata only. Failures are recorded per channel and
+    /// never fail the caller.
+    pub fn deliver_notifications(&self, http: &dyn crate::http::HttpClient) -> Result<usize> {
+        let channels: Vec<_> = crate::notify::list(&self.conn)?
+            .into_iter()
+            .filter(|c| c.enabled)
+            .collect();
+        if channels.is_empty() {
+            return Ok(0);
+        }
+        let hour_ago = clock::to_rfc3339(clock::now() - time::Duration::hours(1));
+        let open = alerts::list(&self.conn, false)?;
+        let mut delivered = 0usize;
+        for channel in &channels {
+            let floor = crate::notify::severity_rank(&channel.min_severity);
+            let url = match self.notification_channel_url(&channel.id) {
+                Ok(url) => url,
+                Err(e) => {
+                    let _ = crate::notify::record_delivery(
+                        &self.conn,
+                        &channel.id,
+                        Some(&e.to_string()),
+                    );
+                    continue;
+                }
+            };
+            let mut channel_error: Option<String> = None;
+            for alert in &open {
+                if alert.observed_at < hour_ago {
+                    continue;
+                }
+                // Stored severities are already lowercase strings.
+                if crate::notify::severity_rank(&alert.severity) < floor {
+                    continue;
+                }
+                let payload = crate::notify::NotificationPayload {
+                    source: "api-tracker",
+                    kind: &alert.kind,
+                    severity: &alert.severity,
+                    title: &alert.title,
+                    detail: &alert.detail,
+                    recommended_action: &alert.recommended_action,
+                    observed_at: &alert.observed_at,
+                };
+                match crate::notify::deliver_webhook(http, url.expose(), &payload) {
+                    Ok(_) => {
+                        delivered += 1;
+                        crate::notify::mark_delivered(
+                            &self.conn,
+                            &channel.id,
+                            &alert.id,
+                            &alert.severity,
+                        )?;
+                    }
+                    Err(e) => {
+                        channel_error = Some(e.to_string());
+                        break; // one failure: stop hammering this channel
+                    }
+                }
+            }
+            let _ =
+                crate::notify::record_delivery(&self.conn, &channel.id, channel_error.as_deref());
+        }
+        Ok(delivered)
     }
 
     // ------------------------------------------------------------------
@@ -6858,6 +7505,15 @@ impl std::fmt::Debug for GrantInjection {
     }
 }
 
+/// Result of one repository's incremental background scan.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoScanReport {
+    pub repo_path: String,
+    pub head_commit: String,
+    pub findings: usize,
+    pub baseline_only: bool,
+}
+
 /// One event in a credential's merged lifecycle timeline (metadata only).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineEvent {
@@ -6999,6 +7655,10 @@ pub struct Suppression {
 /// Summary of a monitoring run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MonitorSummary {
+    /// Registered repositories examined this run (incremental).
+    pub repos_scanned: usize,
+    /// Findings in newly scanned commits across those repositories.
+    pub repo_findings: usize,
     pub checked: usize,
     pub alerts_created: usize,
     pub alerts_resolved: usize,

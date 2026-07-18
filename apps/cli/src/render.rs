@@ -19,8 +19,23 @@ pub fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce()) {
     }
 }
 
+/// Strip control characters (incl. ANSI escape introducers) from a cell.
+/// Provider-controlled strings (key names, event types, units) reach the
+/// terminal through here; a compromised provider account must not be able
+/// to inject escape sequences.
+fn sanitize_cell(cell: &str) -> String {
+    cell.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
 /// Minimal fixed-width table.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) {
+    let rows: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| row.iter().map(|c| sanitize_cell(c)).collect())
+        .collect();
+    let rows = &rows;
     let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {

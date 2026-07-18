@@ -4,8 +4,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, isApiError } from "../api";
-import type { CapabilityEntry, DocWatch, ProviderManifest, SupportLevel } from "../types";
+import type {
+  CapabilityEntry,
+  DocHistoryEntry,
+  DocWatch,
+  ProviderManifest,
+  SupportLevel,
+} from "../types";
+import { formatTimestamp } from "../utils";
 import { ProviderConnectionPanel } from "./ProviderConnectionPanel";
+
+/** Providers with a dedicated administrative connection + usage sync. */
+const ADMIN_CONNECTION_PROVIDERS = ["openai", "anthropic"];
 
 const SUPPORT_LABEL: Record<SupportLevel, string> = {
   implemented: "implemented",
@@ -39,6 +49,7 @@ function statusText(entry: CapabilityEntry): string {
 export function ProviderDetail(props: { id: string; onBack: () => void }) {
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
   const [watches, setWatches] = useState<DocWatch[]>([]);
+  const [history, setHistory] = useState<DocHistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -46,6 +57,10 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
     try {
       const all = await api.docWatchList();
       setWatches(all.filter((w) => w.provider === props.id));
+      // Check history is stored per URL; the provider column lets us
+      // filter client-side without a dedicated backend query.
+      const entries = await api.docWatchHistory(null, 500);
+      setHistory(entries.filter((h) => h.provider === props.id).slice(0, 50));
     } catch (e) {
       setError(isApiError(e) ? e.message : String(e));
     }
@@ -123,6 +138,36 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
             {m.manage_url}
           </button>
         </dd>
+        {m.changelog_url && (
+          <>
+            <dt>Changelog</dt>
+            <dd>
+              <button className="link" onClick={() => open(m.changelog_url)}>
+                {m.changelog_url}
+              </button>
+            </dd>
+          </>
+        )}
+        {m.pricing_url && (
+          <>
+            <dt>Pricing docs</dt>
+            <dd>
+              <button className="link" onClick={() => open(m.pricing_url)}>
+                {m.pricing_url}
+              </button>
+            </dd>
+          </>
+        )}
+        {m.permissions_docs_url && (
+          <>
+            <dt>Permissions docs</dt>
+            <dd>
+              <button className="link" onClick={() => open(m.permissions_docs_url)}>
+                {m.permissions_docs_url}
+              </button>
+            </dd>
+          </>
+        )}
         <dt>Secret env vars</dt>
         <dd className="mono">{m.env_vars.join(", ") || "—"}</dd>
         <dt>Key types</dt>
@@ -131,7 +176,7 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
         <dd>{m.expiration || "—"}</dd>
       </dl>
 
-      {m.id === "openai" && <ProviderConnectionPanel provider={m.id} />}
+      {ADMIN_CONNECTION_PROVIDERS.includes(m.id) && <ProviderConnectionPanel provider={m.id} />}
 
       <h2>Capabilities</h2>
       <p className="muted">Honest support declarations for this provider.</p>
@@ -203,6 +248,41 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
                     unwatch
                   </button>
                 </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <h2>Docs change history</h2>
+      <p className="muted">
+        Recorded outcomes of documentation checks for this provider&apos;s watched pages
+        (validators and outcomes only — page content is never stored). A change does not
+        necessarily mean a breaking API change.
+      </p>
+      {history.length === 0 ? (
+        <p className="muted">No checks recorded yet.</p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>URL</th>
+              <th>Outcome</th>
+              <th>Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {history.map((h, i) => (
+              <tr key={`${h.url}-${h.at}-${i}`}>
+                <td>{formatTimestamp(h.at)}</td>
+                <td>
+                  <button className="link" onClick={() => open(h.url)}>
+                    {h.url}
+                  </button>
+                </td>
+                <td>{h.outcome}</td>
+                <td className="muted">{h.detail}</td>
               </tr>
             ))}
           </tbody>

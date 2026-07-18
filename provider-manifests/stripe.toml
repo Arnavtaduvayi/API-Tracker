@@ -6,6 +6,9 @@ website = "https://stripe.com"
 api_docs_url = "https://docs.stripe.com/api"
 auth_docs_url = "https://docs.stripe.com/keys"
 manage_url = "https://dashboard.stripe.com/apikeys"
+changelog_url = "https://docs.stripe.com/changelog"
+pricing_url = "https://stripe.com/pricing"
+permissions_docs_url = "https://docs.stripe.com/keys#limit-access"
 env_vars = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY", "STRIPE_RESTRICTED_KEY"]
 credential_types = ["secret_key", "restricted_key", "publishable_key"]
 expiration = "Keys do not expire by default; an optional expiration can be set on secret keys. They remain valid until rolled/revoked."
@@ -32,7 +35,7 @@ confidence = "medium"
 [capabilities]
 validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated GET /v1/balance confirms the secret key works." }
 fetch_metadata = { support = "implemented", attribution = "exact_credential", note = "GET /v1/balance reports the key's live/test mode and balance currencies; richer key metadata is dashboard-only." }
-fetch_usage = { support = "manual_only", attribution = "exact_credential", note = "Stripe is a payments provider, not a metered API; per-key request logs are viewable (and filterable by key) only in the dashboard." }
+fetch_usage = { support = "implemented", attribution = "account_level", note = "Account activity syncs from the official Events API (daily event counts by family, 30-day retention) — recorded in EVENTS, not tokens. Per-key request logs remain dashboard-only; Stripe offers no API for them." }
 read_permissions = { support = "manual_only", note = "Restricted-key permissions are visible on the dashboard, not through the API." }
 change_permissions = { support = "manual_only", note = "Restricted-key permissions are edited on the dashboard." }
 create_credential = { support = "manual_only", note = "Standard-account keys are created on the dashboard; programmatic creation exists only via the v2 IAM API for approved Stripe Apps." }

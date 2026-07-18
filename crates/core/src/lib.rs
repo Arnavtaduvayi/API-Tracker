@@ -23,6 +23,7 @@
 pub mod access;
 pub mod activity;
 pub mod alerts;
+pub mod anthropic;
 pub mod audit;
 pub mod backup;
 pub mod budget;
@@ -41,6 +42,8 @@ pub mod http;
 pub mod inject;
 pub mod model;
 pub mod monitor;
+pub mod notify;
+pub mod observe;
 pub mod openai;
 pub mod permissions;
 pub mod pricing;

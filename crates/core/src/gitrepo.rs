@@ -103,6 +103,33 @@ pub fn staged_units(repo: &Path) -> Result<Vec<ScanUnit>> {
 
 /// Added lines across the last `n` commits (or all history when `n` is None),
 /// as scan units labelled `commit <short>:<file>`.
+/// The current HEAD commit hash of a repository.
+pub fn head_commit(repo: &Path) -> Result<String> {
+    let out = run_git(repo, &["rev-parse", "HEAD"])?;
+    if !out.status.success() {
+        return Err(CoreError::InvalidInput(
+            "could not read the repository HEAD (no commits yet?)".into(),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Added lines from the commits in `old..new` only (incremental scanning).
+pub fn range_added_units(repo: &Path, old: &str, new: &str) -> Result<Vec<ScanUnit>> {
+    // Both endpoints are commit hashes we recorded/resolved ourselves.
+    let range = format!("{old}..{new}");
+    let out = run_git(
+        repo,
+        &["log", "-p", "--no-color", "-U0", "--no-merges", &range],
+    )?;
+    if !out.status.success() {
+        return Err(CoreError::InvalidInput(
+            "could not read the Git commit range (was history rewritten?)".into(),
+        ));
+    }
+    Ok(parse_log_added_lines(&String::from_utf8_lossy(&out.stdout)))
+}
+
 pub fn history_added_units(repo: &Path, n: Option<usize>) -> Result<Vec<ScanUnit>> {
     let count = n.map(|c| format!("-n{c}"));
     let mut args: Vec<&str> = vec!["log", "-p", "--no-color", "-U0", "--no-merges"];

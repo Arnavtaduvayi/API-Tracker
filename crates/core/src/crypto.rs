@@ -208,6 +208,10 @@ pub mod aad {
     pub fn destination_auth(vault_id: &str, destination_id: &str) -> String {
         format!("api-tracker:v1:destination-auth:{vault_id}:{destination_id}")
     }
+    /// A notification channel's webhook URL (may embed a user token).
+    pub fn notification_channel(vault_id: &str, channel_id: &str) -> String {
+        format!("api-tracker:v1:notification-channel:{vault_id}:{channel_id}")
+    }
 }
 
 #[cfg(test)]

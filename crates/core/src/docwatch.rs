@@ -178,6 +178,100 @@ fn content_hash(bytes: &[u8]) -> String {
     hex::encode(blake3::hash(bytes).as_bytes())
 }
 
+/// Record a check outcome in the local change history (validators and
+/// outcomes only — never page content).
+pub fn record_history(
+    conn: &rusqlite::Connection,
+    url: &str,
+    provider: &str,
+    outcome: &str,
+    detail: &str,
+) -> crate::error::Result<()> {
+    conn.execute(
+        "INSERT INTO doc_watch_history (url, provider, at, outcome, detail)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![url, provider, crate::clock::now_rfc3339(), outcome, detail],
+    )?;
+    Ok(())
+}
+
+/// One history entry (metadata only).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HistoryEntry {
+    pub url: String,
+    pub provider: String,
+    pub at: String,
+    pub outcome: String,
+    pub detail: String,
+}
+
+pub fn history(
+    conn: &rusqlite::Connection,
+    url: Option<&str>,
+    limit: u32,
+) -> crate::error::Result<Vec<HistoryEntry>> {
+    let mut out = Vec::new();
+    let mut push_rows = |stmt: &mut rusqlite::Statement<'_>,
+                         params: &[&dyn rusqlite::ToSql]|
+     -> crate::error::Result<()> {
+        let rows = stmt.query_map(params, |r| {
+            Ok(HistoryEntry {
+                url: r.get(0)?,
+                provider: r.get(1)?,
+                at: r.get(2)?,
+                outcome: r.get(3)?,
+                detail: r.get(4)?,
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(())
+    };
+    match url {
+        Some(u) => {
+            let mut stmt = conn.prepare(
+                "SELECT url, provider, at, outcome, detail FROM doc_watch_history
+                 WHERE url = ?1 ORDER BY id DESC LIMIT ?2",
+            )?;
+            push_rows(&mut stmt, &[&u, &limit])?;
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT url, provider, at, outcome, detail FROM doc_watch_history
+                 ORDER BY id DESC LIMIT ?1",
+            )?;
+            push_rows(&mut stmt, &[&limit])?;
+        }
+    }
+    Ok(out)
+}
+
+/// Watch URLs whose last check is older than `interval_hours` (or never
+/// checked). Conservative scheduling input for the monitor.
+pub fn due_watches(
+    conn: &rusqlite::Connection,
+    interval_hours: u32,
+) -> crate::error::Result<Vec<String>> {
+    if interval_hours == 0 {
+        return Ok(Vec::new());
+    }
+    let cutoff = crate::clock::to_rfc3339(
+        crate::clock::now() - time::Duration::hours(i64::from(interval_hours)),
+    );
+    let mut stmt = conn.prepare(
+        "SELECT url FROM doc_watches
+         WHERE last_checked_at IS NULL OR last_checked_at < ?1
+         ORDER BY last_checked_at",
+    )?;
+    let rows = stmt.query_map([&cutoff], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Check one watched URL and persist the new state. Returns the outcome and
 /// the refreshed watch. Failures preserve prior validators/hash.
 pub fn check_watch(

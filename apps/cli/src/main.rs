@@ -76,7 +76,11 @@ enum Commands {
     #[command(subcommand)]
     Suppress(scan_cmd::SuppressCmd),
     /// Run local monitoring checks and generate alerts.
-    Monitor,
+    Monitor {
+        /// Skip network phases (due doc checks, webhook delivery).
+        #[arg(long)]
+        offline: bool,
+    },
     /// View and manage local alerts.
     #[command(subcommand)]
     Alerts(alerts_cmd::AlertsCmd),
@@ -112,6 +116,9 @@ enum Commands {
     /// Encrypted vault backups.
     #[command(subcommand)]
     Backup(backup_cmd::BackupCmd),
+    /// User-configured webhook notification channels.
+    #[command(subcommand)]
+    Notify(alerts_cmd::NotifyCmd),
 }
 
 fn main() {
@@ -136,7 +143,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Scan(args) => scan_cmd::scan(&ctx, args),
         Commands::Hooks(cmd) => scan_cmd::hooks(&ctx, cmd),
         Commands::Suppress(cmd) => scan_cmd::suppress(&ctx, cmd),
-        Commands::Monitor => alerts_cmd::monitor_run(&ctx),
+        Commands::Monitor { offline } => alerts_cmd::monitor_run(&ctx, offline),
         Commands::Alerts(cmd) => alerts_cmd::alerts(&ctx, cmd),
         Commands::Usage(cmd) => usage_cmd::usage(&ctx, cmd),
         Commands::Budget(cmd) => usage_cmd::budget(&ctx, cmd),
@@ -149,5 +156,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Rotation(cmd) => rotation_cmd::run(&ctx, cmd),
         Commands::Access(cmd) => access_cmd::run(&ctx, cmd),
         Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
+        Commands::Notify(cmd) => alerts_cmd::notify(&ctx, cmd),
     }
 }

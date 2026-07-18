@@ -36,6 +36,15 @@ pub enum AlertKind {
     CredentialActivated,
     RotationDue,
     RotationStuck,
+    RotationAttention,
+    RequestSpike,
+    RepeatedAuthFailure,
+    NewProviderProject,
+    NewProviderKey,
+    UnusualModel,
+    UnusualTimePattern,
+    DestinationDrift,
+    AccessGrantExpired,
 }
 
 impl AlertKind {
@@ -60,6 +69,15 @@ impl AlertKind {
             AlertKind::CredentialActivated => "credential_activated",
             AlertKind::RotationDue => "rotation_due",
             AlertKind::RotationStuck => "rotation_stuck",
+            AlertKind::RotationAttention => "rotation_attention",
+            AlertKind::RequestSpike => "request_spike",
+            AlertKind::RepeatedAuthFailure => "repeated_auth_failure",
+            AlertKind::NewProviderProject => "new_provider_project",
+            AlertKind::NewProviderKey => "new_provider_key",
+            AlertKind::UnusualModel => "unusual_model",
+            AlertKind::UnusualTimePattern => "unusual_time_pattern",
+            AlertKind::DestinationDrift => "destination_drift",
+            AlertKind::AccessGrantExpired => "access_grant_expired",
         }
     }
 }

@@ -6,6 +6,9 @@ website = "https://www.anthropic.com"
 api_docs_url = "https://docs.anthropic.com/en/api"
 auth_docs_url = "https://docs.anthropic.com/en/api/overview"
 manage_url = "https://console.anthropic.com/settings/keys"
+changelog_url = "https://docs.anthropic.com/en/release-notes/api"
+pricing_url = "https://www.anthropic.com/pricing"
+permissions_docs_url = "https://docs.anthropic.com/en/api/administration-api"
 env_vars = ["ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY"]
 credential_types = ["api_key", "admin_key"]
 expiration = "Keys can be given an expiration at creation (presets or custom) or 'Never'; otherwise they remain valid until deactivated."
@@ -31,8 +34,8 @@ confidence = "medium"
 
 [capabilities]
 validate_credential = { support = "implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
-fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Admin API lists API keys with id, name, status and workspace; requires an admin key." }
-fetch_usage = { support = "implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Admin Usage & Cost API requires an admin key and reports at organization/workspace granularity." }
+fetch_metadata = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Workspace and API-key metadata (ids, names, status, partial hints, provider-reported expirations) sync via the Admin API." }
+fetch_usage = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Daily token usage syncs grouped by provider API-key id, workspace, and model (per-key grouping is officially supported). Rows are exact-credential ONLY for key ids you explicitly linked; others stay at provider-key/workspace/account level. Provider-reported costs sync at workspace granularity — the cost API has no per-key grouping, and cost is never divided among keys." }
 read_permissions = { support = "unsupported", note = "Keys are scoped by workspace membership, not by API-readable per-key scopes." }
 change_permissions = { support = "unsupported", note = "Per-key permissions cannot be changed through a public API." }
 create_credential = { support = "manual_only", note = "API keys can only be created in the console, not through the Admin API." }

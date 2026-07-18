@@ -6,6 +6,9 @@ website = "https://supabase.com"
 api_docs_url = "https://supabase.com/docs/reference/api/introduction"
 auth_docs_url = "https://supabase.com/docs/guides/api/api-keys"
 manage_url = "https://supabase.com/dashboard/project/_/settings/api"
+changelog_url = "https://supabase.com/changelog"
+pricing_url = "https://supabase.com/pricing"
+permissions_docs_url = "https://supabase.com/docs/guides/api/api-keys"
 # Secret-bearing variables only; SUPABASE_URL and the publishable anon key
 # are intentionally excluded to avoid false positives.
 env_vars = ["SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SECRET_KEY", "SUPABASE_ACCESS_TOKEN"]
@@ -33,7 +36,7 @@ confidence = "high"
 [capabilities]
 validate_credential = { support = "implemented", attribution = "exact_credential", note = "Validates a personal/management access token (sbp_...) via the Management API. Project anon/service keys are validated against the project REST URL, which API Tracker does not attempt (it reports this rather than marking such keys invalid)." }
 fetch_metadata = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Management API lists a project's API keys; requires a personal access token." }
-fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Management API exposes project usage; attribution is at project granularity." }
+fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Management API's analytics endpoints (usage.api-counts etc.) return loosely-typed rows with undocumented units at tight rate limits; API Tracker does not store data whose units it cannot preserve honestly. Project request-count sync may come once the response shape is documented." }
 read_permissions = { support = "implemented", attribution = "exact_credential", note = "A key's coarse privilege is fixed by its type, which the key format itself declares (documented prefixes; legacy JWTs carry a role claim). API Tracker reads that self-description locally; there are no arbitrary per-key scopes." }
 change_permissions = { support = "unsupported", note = "A key's type/privilege cannot be changed; create a new key of the desired type instead." }
 create_credential = { support = "implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "API Tracker creates new-format secret keys via the Management API; requires a personal access token." }

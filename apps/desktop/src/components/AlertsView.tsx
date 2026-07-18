@@ -57,9 +57,12 @@ export function AlertsView() {
     setError(null);
     setNotice(null);
     try {
-      const summary = await api.monitorRun();
+      const report = await api.monitorRunFull();
+      const summary = report.summary;
       setNotice(
-        `Checked ${summary.checked} credential(s): ${summary.alerts_created} new, ${summary.alerts_resolved} resolved, ${summary.open_alerts} open.`,
+        `Checked ${summary.checked} credential(s): ${summary.alerts_created} new, ` +
+          `${summary.alerts_resolved} resolved, ${summary.open_alerts} open. ` +
+          `Documentation checks: ${report.doc_checks} · webhook deliveries: ${report.delivered}.`,
       );
       await reload();
       const highNew = (await api.alertsList(false)).filter(

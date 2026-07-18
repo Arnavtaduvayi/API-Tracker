@@ -108,6 +108,13 @@ pub enum ProviderCmd {
     },
     /// Show documentation-watch status.
     DocsStatus { provider: Option<String> },
+    /// Show the documentation change history (validators only).
+    DocsHistory {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value_t = 30)]
+        limit: u32,
+    },
 }
 
 fn find(provider: &str) -> Result<&'static providers::ProviderManifest> {
@@ -521,6 +528,21 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
             if ctx.json {
                 render::emit(true, &results, || {});
             }
+        }
+        ProviderCmd::DocsHistory { url, limit } => {
+            let (vault, _t) = ctx.unlocked()?;
+            let history = vault.doc_watch_history(url.as_deref(), limit)?;
+            render::emit(ctx.json, &history, || {
+                if history.is_empty() {
+                    println!("No documentation checks recorded yet.");
+                    return;
+                }
+                let rows: Vec<Vec<String>> = history
+                    .iter()
+                    .map(|h| vec![h.at.clone(), h.outcome.clone(), h.url.clone()])
+                    .collect();
+                render::table(&["AT", "OUTCOME", "URL"], &rows);
+            });
         }
         ProviderCmd::DocsStatus { provider } => {
             let (vault, _t) = ctx.unlocked()?;

@@ -257,6 +257,22 @@ HIST_OUT=$("$BIN" key history smoke-dev/main-key 2>&1)
 echo "$HIST_OUT" | grep -q "credential_created" && ! echo "$HIST_OUT" | grep -qF "$FAKE_KEY"
 check $? "key history shows the lifecycle without values"
 
+echo "-- observability (offline) --"
+"$BIN" monitor --offline >/dev/null 2>&1
+check $? "monitor runs fully offline with --offline"
+FAKE_HOOK_TOKEN="FAKE-webhook-token-000001"
+printf 'https://hooks.example.invalid/T0/%s' "$FAKE_HOOK_TOKEN" | "$BIN" notify add --name smoke-hook --url-stdin >/dev/null 2>&1
+check $? "a webhook notification channel is created (URL via stdin)"
+NOTIFY_LIST=$("$BIN" notify list 2>&1)
+echo "$NOTIFY_LIST" | grep -q "smoke-hook" && ! echo "$NOTIFY_LIST" | grep -qF "$FAKE_HOOK_TOKEN"
+check $? "channel listings mask the webhook URL"
+grep -rqF "$FAKE_HOOK_TOKEN" "$API_TRACKER_DIR" && bad "webhook URL stored in plaintext" || ok "webhook URL exists nowhere in plaintext on disk"
+printf 'http://insecure.example.invalid/hook' | "$BIN" notify add --name smoke-bad --url-stdin >/dev/null 2>&1 && bad "an http webhook URL was accepted" || ok "non-https webhook URLs are refused"
+"$BIN" notify remove smoke-hook >/dev/null 2>&1
+check $? "a channel can be removed"
+"$BIN" provider docs-history >/dev/null 2>&1
+check $? "documentation change history is queryable"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

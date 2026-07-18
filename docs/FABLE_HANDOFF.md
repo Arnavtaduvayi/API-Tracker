@@ -4,8 +4,7 @@ This document hands the repository off to a fresh session. **"Verified"**
 means exercised by a passing test or a manual end-to-end run this session;
 **"planned"** means designed/labeled but not yet implemented.
 
-_Last updated for the rotation/permissions/temporary-credentials milestone
-wrap-up._
+_Last updated for the cross-provider observability milestone wrap-up._
 
 ---
 
@@ -15,18 +14,25 @@ wrap-up._
   provider integrations, OpenAI usage/cost sync, `.env` governance +
   destinations + sync plans), tagged `v0.1.0-alpha-core` and
   `v0.2.0-alpha-openai`.
-- **This milestone's branch:** `feat/rotation-permissions-temporary` —
-  durable credential rotation (state machine, migration v6), provider
-  lifecycle actions (OpenAI/Supabase create+revoke, Anthropic
-  disable/archive), scheduled-rotation intent, temporary local access
-  grants, provider-reported expiration, provider-created test keys,
-  permission diffs, lifecycle timelines — core + CLI + desktop + docs +
-  tests. Read `docs/decisions/0013-rotation-permissions-temporary.md`
-  FIRST; it records the design and the honesty decisions.
-- An adversarial review of this milestone produced 3 high / 11 medium
-  findings (wrong-key revocation via stale links + blind 404-success,
-  `--json` confirmation bypass, concurrency/idempotency holes, rollback
-  honesty) — ALL fixed with regression tests; see the review-fix commit.
+- **This milestone's branch:** `feat/cross-provider-observability`
+  (migration v7) — Anthropic per-key sync engine (usage grouped by
+  api_key_id × workspace × model; CENTS-denominated cost report; key
+  expirations onto linked credentials; admin connections for Anthropic),
+  GitHub billing usage (fine-grained tokens, account level), Stripe Events
+  activity, non-token units first-class, 16 explainable rules, incremental
+  repo monitoring, webhook notification channels (encrypted, https-only,
+  once-per-alert delivery), doc-watch intervals + history, desktop
+  background monitor timer. Read
+  `docs/decisions/0014-cross-provider-observability.md` FIRST.
+- The prior rotation milestone (migration v6, ADR 0013) is merged in
+  `main`. This milestone's adversarial review produced 2 medium / 6 low /
+  4 info findings (webhook re-delivery flapping, migration alert flood,
+  localhost URL bypass, redirect header forwarding, silent re-baselines) —
+  ALL fixed with regression tests.
+- Research note: Anthropic docs moved to platform.claude.com; Supabase's
+  `usage.api` endpoint is GONE from the Management API (analytics
+  endpoints are untyped — deliberately not stored); GitHub billing usage
+  documents fine-grained tokens only.
 
 ## 2. What this milestone added
 
@@ -76,7 +82,7 @@ records the design and its reasoning. Summary:
   end-to-end tests. All green with `API_TRACKER_INSECURE_FAST_KDF=1`.
 - `cargo fmt --check`, `cargo +1.97.0 clippy --workspace --all-targets -- -D warnings`: clean.
 - Frontend: `tsc --noEmit`, eslint, vitest, `vite build`, prettier: clean.
-- **Smoke test: 76 checks** (`bash scripts/smoke.sh`) — 15 new checks cover
+- **Smoke test: 83 checks** (`bash scripts/smoke.sh`) — 15 new checks cover
   env preview/import/example/export permissions/cleanup and destination
   add/attach/plan (offline, encrypted-at-rest asserted).
 - An adversarial security review ran over the milestone diff; findings were

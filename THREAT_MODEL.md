@@ -114,6 +114,13 @@ integrations land.
   overwriting freed pages — best-effort secure deletion, not a guarantee
   against forensic recovery of previously-checkpointed WAL frames.
 
+- **Webhook notification channels** are user-configured outbound requests
+  (https-only). The URL may embed a token the user chose to put there, so
+  it is encrypted under the vault key and masked everywhere; payloads carry
+  alert metadata only (alerts are secret-free by construction). Delivering
+  to a user-chosen URL is the same egress posture as provider syncs — the
+  tool acts for its local user and never for a third party.
+
 ## Adversaries and outcomes
 
 | Adversary | Outcome |

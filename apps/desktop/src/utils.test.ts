@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { driftSeverity, emptyToNull, statusLabel, statusSeverity, toDateInput } from "./utils";
+import {
+  driftSeverity,
+  emptyToNull,
+  severityRank,
+  statusLabel,
+  statusSeverity,
+  toDateInput,
+  topSeverity,
+} from "./utils";
 
 describe("toDateInput", () => {
   it("extracts the date part from RFC 3339", () => {
@@ -32,6 +40,24 @@ describe("emptyToNull", () => {
     expect(emptyToNull("")).toBeNull();
     expect(emptyToNull("   ")).toBeNull();
     expect(emptyToNull("2030-01-01")).toBe("2030-01-01");
+  });
+});
+
+describe("severityRank", () => {
+  it("mirrors core's ordering and treats unknown severities as info", () => {
+    expect(severityRank("critical")).toBeGreaterThan(severityRank("high"));
+    expect(severityRank("high")).toBeGreaterThan(severityRank("medium"));
+    expect(severityRank("medium")).toBeGreaterThan(severityRank("low"));
+    expect(severityRank("low")).toBeGreaterThan(severityRank("info"));
+    expect(severityRank("nonsense")).toBe(severityRank("info"));
+  });
+});
+
+describe("topSeverity", () => {
+  it("picks the highest severity", () => {
+    expect(topSeverity(["low", "critical", "medium"])).toBe("critical");
+    expect(topSeverity(["medium", "high"])).toBe("high");
+    expect(topSeverity([])).toBeNull();
   });
 });
 

@@ -5,6 +5,35 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — cross-provider observability
+- **Anthropic per-key sync engine**: daily usage grouped by API-key id ×
+  workspace × model via the Admin API (officially supported grouping),
+  cents-denominated cost report converted with guards at workspace level,
+  workspace/key metadata with provider-reported expirations flowing onto
+  linked credentials, dedicated admin connections for Anthropic.
+- **GitHub billing usage** (fine-grained token, account level, units
+  verbatim) and **Stripe Events activity** (daily event families, 30-day
+  retention) — non-token units (`quantity`/`unit`) are first-class and
+  never coerced into tokens. Supabase's undocumented analytics units are
+  honestly declined.
+- **16 explainable suspicious-activity rules** (new: request spikes,
+  dormant-credential activation, repeated auth failures, new provider
+  project/key, first model use, unusual local session hour, destination
+  drift, rotation attention, expired grants) with evidence, windows,
+  attribution notes, and confidence.
+- **Incremental repository monitoring**: registered repos baselined, only
+  new commits scanned on monitor runs, findings through the standard
+  suppression/vault-match/exposure path.
+- **Notifications**: desktop background monitor timer
+  (`monitor_interval_minutes`), medium+ native notifications, and
+  user-configured **webhook channels** (encrypted https URLs, severity
+  floors, metadata-only payloads, per-channel failure records; `notify`
+  command group). No hosted relay.
+- **Documentation monitoring**: check intervals, change history
+  (`provider docs-history`), changelog/pricing/permission URLs in every
+  manifest.
+- Database migration v7.
+
 ### Added — rotation, permission management, and temporary credentials
 - **Durable rotation workflows** (`rotation` command group, desktop
   Rotation screen): dry-run plan → reauthenticated approval → replacement

@@ -163,6 +163,15 @@ pub struct ProviderManifest {
     /// General expiration behavior, human-readable.
     #[serde(default)]
     pub expiration: String,
+    /// Official changelog / release-notes page.
+    #[serde(default)]
+    pub changelog_url: String,
+    /// Official pricing documentation.
+    #[serde(default)]
+    pub pricing_url: String,
+    /// Official permission/scope documentation.
+    #[serde(default)]
+    pub permissions_docs_url: String,
     /// Official documentation URLs the user may watch for changes.
     #[serde(default)]
     pub watch_docs: Vec<String>,
