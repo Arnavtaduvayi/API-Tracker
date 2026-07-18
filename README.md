@@ -39,16 +39,37 @@ Implemented and tested today:
   to one encrypted value instead of a duplicate copy.
 - **Encrypted backups** — create/verify/restore a single password-protected
   backup file; restore never silently overwrites a vault.
+- **Provider catalog** — version-controlled TOML manifests for OpenAI,
+  Anthropic, GitHub, Stripe, and Supabase, each with official links and an
+  **honest capability matrix** (support level + admin-credential + attribution
+  granularity). No provider network connector is implemented yet; every
+  capability is labeled accordingly (see `docs/decisions/0008-...`).
+- **Local repository scanning** — working-tree, staged, and Git-history scans
+  detect secrets via provider key patterns, known secret env-var names, and
+  calibrated entropy. Findings are redacted, show file/line/provider/
+  confidence, are matched against your vault (marking matches possibly
+  exposed), and can be suppressed with a required reason. Nothing leaves the
+  machine.
+- **Pre-commit hook** — `hooks install` blocks commits containing
+  high-confidence secrets; it runs without unlocking the vault and preserves
+  any existing hook.
+- **Local monitoring + alerts** — `monitor` evaluates expiry, staleness,
+  unused, reuse, production-in-development, and exposure conditions into an
+  acknowledge/resolve alert lifecycle, with native desktop notifications.
+- **Documentation watcher** — watch official provider docs URLs; conditional
+  HTTP (ETag/Last-Modified) + content hashing detect changes and raise an
+  alert. Requests go directly from your device; only validators, a hash, and
+  timestamps are stored — never the page content.
 - **Desktop app and CLI share one vault** — both are thin frontends over the
   same Rust core crate and the same SQLite database.
 - **Auto-lock** — configurable inactivity lock for the desktop app and CLI
   sessions.
 
 Not implemented yet (planned, see `docs/PRODUCT_SPEC.md`): provider API
-integrations (validation, usage, cost, permissions), repository secret
-scanning and Git hooks, documentation-change watching, alerts/notifications,
-usage dashboards, packaged installers/signing. The provider catalog in this
-version is informational only and makes no capability claims.
+connectors (validation, usage, cost, permission changes), usage/cost
+dashboards, and packaged/signed installers. The documentation watcher is the
+only outbound network component; provider connectors remain future work and
+the catalog marks nothing as implemented.
 
 ## Install and build
 
@@ -94,6 +115,24 @@ api-tracker key reveal my-app/openai-main   # asks for the master password again
 
 api-tracker backup create ~/api-tracker-backup.json
 api-tracker backup verify ~/api-tracker-backup.json
+
+# Provider catalog
+api-tracker provider list
+api-tracker provider capabilities openai       # honest support matrix
+api-tracker provider docs anthropic
+
+# Scan a repository and install the pre-commit hook
+api-tracker scan --staged ~/code/my-app        # or --history N, or a dir
+api-tracker hooks install ~/code/my-app        # blocks high-confidence secrets
+api-tracker suppress add <suppression-key> --reason "test fixture"
+
+# Monitoring, alerts, and documentation watches
+api-tracker monitor                            # evaluate and raise alerts
+api-tracker alerts list
+api-tracker alerts acknowledge <id> && api-tracker alerts resolve <id>
+api-tracker provider watch-docs openai         # watch official docs pages
+api-tracker provider check-docs openai         # conditional request, direct
+
 api-tracker lock
 ```
 

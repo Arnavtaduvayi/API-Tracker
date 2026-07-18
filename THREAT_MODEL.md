@@ -26,7 +26,16 @@ integrations land.
 - Backups are single files encrypted under a separate backup password.
 - The CLI session splits state between an encrypted file (0600) and a token
   that exists only in the user's shell environment (ADR 0004).
-- No network I/O exists anywhere in the current code.
+- Repository scanning, git access, and the pre-commit hook run entirely
+  locally: no source code, diff, or finding ever leaves the machine. Scan
+  findings, alerts, and suppressions store no secret values (findings keep a
+  redacted preview and a non-secret suppression key; the raw value lives only
+  in a `#[serde(skip)]` in-memory buffer used for vault matching). ADR 0008.
+- The **only** outbound network component is the documentation watcher: it
+  contacts explicit user-selected official URLs with conditional GETs, caps
+  the body at 8 MiB, stores only validators/hash/timestamps (never page
+  content), and preserves prior state on failure. It does not crawl, follow
+  links to other content, or bypass access controls.
 
 ## Adversaries and outcomes
 
