@@ -131,6 +131,21 @@ npx tauri build          # bundles the app (unsigned)
 npx tauri dev            # or run it in development mode
 ```
 
+## Try it in two minutes (no real keys needed)
+
+```bash
+bash scripts/demo.sh --keep   # isolated demo vault, fake credentials only
+bash scripts/smoke.sh         # automated end-to-end smoke test (47 checks)
+```
+
+The demo builds a throwaway vault with a development project, a
+password-locked production project, credentials in every interesting state
+(active, expired, expiring soon, unused, reused across projects), synthetic
+usage with an over-budget alert, an encrypted verified backup, and a secure
+process-injection run — then prints the exact commands to explore it from
+the CLI and desktop app. Your real vault is never touched. See
+[docs/DEMO.md](docs/DEMO.md).
+
 ## CLI quick start
 
 ```bash
