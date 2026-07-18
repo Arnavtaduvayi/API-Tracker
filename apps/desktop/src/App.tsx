@@ -16,6 +16,10 @@ import { CredentialForm } from "./components/CredentialForm";
 import { CredentialDetail } from "./components/CredentialDetail";
 import { SettingsView } from "./components/SettingsView";
 import { BackupView } from "./components/BackupView";
+import { ProviderCatalog } from "./components/ProviderCatalog";
+import { ProviderDetail } from "./components/ProviderDetail";
+import { ScanView } from "./components/ScanView";
+import { AlertsView } from "./components/AlertsView";
 
 export type View =
   | { name: "projects" }
@@ -25,6 +29,10 @@ export type View =
   | { name: "credential"; id: string }
   | { name: "credential-new"; project: string }
   | { name: "credential-edit"; id: string }
+  | { name: "providers" }
+  | { name: "provider"; id: string }
+  | { name: "scan" }
+  | { name: "alerts" }
   | { name: "settings" }
   | { name: "backup" };
 
@@ -87,6 +95,15 @@ export default function App() {
         <button className="link" onClick={() => setView({ name: "projects" })}>
           Projects
         </button>
+        <button className="link" onClick={() => setView({ name: "providers" })}>
+          Providers
+        </button>
+        <button className="link" onClick={() => setView({ name: "scan" })}>
+          Scan
+        </button>
+        <button className="link" onClick={() => setView({ name: "alerts" })}>
+          Alerts
+        </button>
         <button className="link" onClick={() => setView({ name: "backup" })}>
           Backup
         </button>
@@ -147,6 +164,14 @@ export default function App() {
           onEdit={() => setView({ name: "credential-edit", id: view.id })}
         />
       )}
+      {view.name === "providers" && (
+        <ProviderCatalog onOpen={(id) => setView({ name: "provider", id })} />
+      )}
+      {view.name === "provider" && (
+        <ProviderDetail id={view.id} onBack={() => setView({ name: "providers" })} />
+      )}
+      {view.name === "scan" && <ScanView />}
+      {view.name === "alerts" && <AlertsView />}
       {view.name === "settings" && <SettingsView dataDir={dataDir} />}
       {view.name === "backup" && <BackupView onRestored={() => void refreshStatus()} />}
     </div>

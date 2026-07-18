@@ -4,12 +4,17 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  Alert,
   ApiError,
   BackupInfo,
   Credential,
+  DocWatch,
   Environment,
+  Finding,
+  HookStatus,
+  MonitorSummary,
   Project,
-  ProviderInfo,
+  ProviderManifest,
   ReuseWarning,
   VaultSettings,
   VaultStatus,
@@ -46,7 +51,28 @@ export const api = {
 
   settingsGet: () => call<VaultSettings>("settings_get"),
   settingsSet: (settings: VaultSettings) => call<void>("settings_set", { settings }),
-  providersList: () => call<ProviderInfo[]>("providers_list"),
+  providersList: () => call<ProviderManifest[]>("providers_list"),
+  providerGet: (id: string) => call<ProviderManifest>("provider_get", { id }),
+
+  scanPath: (path: string, mode: "working" | "staged" | "history", markExposed: boolean) =>
+    call<Finding[]>("scan_path", { path, mode, markExposed }),
+  suppressionAdd: (suppressionKey: string, path: string, reason: string) =>
+    call<void>("suppression_add", { suppressionKey, path, reason }),
+  hookStatus: (path: string) => call<HookStatus>("hook_status", { path }),
+  hookInstall: (path: string, force: boolean) =>
+    call<HookStatus>("hook_install", { path, force }),
+  hookRemove: (path: string) => call<HookStatus>("hook_remove", { path }),
+
+  monitorRun: () => call<MonitorSummary>("monitor_run"),
+  alertsList: (includeResolved: boolean) => call<Alert[]>("alerts_list", { includeResolved }),
+  alertAcknowledge: (id: string) => call<Alert>("alert_acknowledge", { id }),
+  alertResolve: (id: string) => call<Alert>("alert_resolve", { id }),
+
+  docWatchAdd: (provider: string, url: string) =>
+    call<DocWatch>("doc_watch_add", { provider, url }),
+  docWatchRemove: (url: string) => call<boolean>("doc_watch_remove", { url }),
+  docWatchList: () => call<DocWatch[]>("doc_watch_list"),
+  docWatchCheck: (url: string) => call<DocWatch>("doc_watch_check", { url }),
 
   projectList: (includeArchived: boolean) =>
     call<Project[]>("project_list", { includeArchived }),
