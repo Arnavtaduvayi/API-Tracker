@@ -99,6 +99,8 @@ export const api = {
     source: string;
     name: string;
     environment: Environment;
+    docsUrl: string;
+    notes: string;
   }) => call<Credential>("credential_add_reference", args),
   credentialUpdate: (
     selector: string,

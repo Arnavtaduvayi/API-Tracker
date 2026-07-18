@@ -205,6 +205,28 @@ fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
     let environment: Environment = args.environment.parse()?;
 
     if let Some(source) = args.link_to {
+        // A reference inherits its provider, type, dates, and value from the
+        // source. Reject flags that would be silently ignored so the user is
+        // not misled into thinking they applied.
+        let ignored = [
+            ("--provider", args.provider != "other"),
+            ("--environment", false), // environment does apply to references
+            ("--key-created", args.key_created.is_some()),
+            ("--expires", args.expires.is_some()),
+            ("--allow-duplicate", args.allow_duplicate),
+        ];
+        let offenders: Vec<&str> = ignored
+            .iter()
+            .filter(|(_, set)| *set)
+            .map(|(name, _)| *name)
+            .collect();
+        if !offenders.is_empty() {
+            bail!(
+                "these flags do not apply to a reference (a reference inherits them from its \
+                 source): {}. Remove them, or omit --link-to to store a separate credential.",
+                offenders.join(", ")
+            );
+        }
         let credential = vault.add_credential_reference(AddReference {
             project: args.project,
             source,

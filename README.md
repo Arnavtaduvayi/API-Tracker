@@ -107,8 +107,12 @@ Useful details:
   and `API_TRACKER_BACKUP_PASSWORD` replace interactive prompts, and
   `--value-stdin` feeds secrets on stdin. Prefer sessions interactively:
   environment variables are visible to other processes you run.
-- `--json` on any command emits machine-readable output.
-- `api-tracker doctor` checks vault health without unlocking anything.
+- `--json` makes the inspection commands (`doctor`, `settings show`,
+  `provider list`, `project list`/`show`, `key list`/`show`/`status`, and the
+  `key add`/`project create` results) emit machine-readable output. Purely
+  action commands (`lock`, `archive`, `remove`, …) print a plain status line.
+- `api-tracker doctor` checks vault health without unlocking anything (it
+  reads only unencrypted metadata: counts, schema version, integrity).
 
 ## Security in one paragraph
 

@@ -58,12 +58,29 @@ integrations land.
 
 ## Known trade-offs and open items
 
-- **Metadata is not encrypted.** Searching, listing, and `doctor` work on a
-  locked vault by design (and the schema stays simple), at the cost that a
-  database thief learns names/providers/notes. A future full-database
-  encryption layer (e.g., SQLCipher or app-level metadata encryption) is a
-  candidate ADR; users who consider metadata sensitive should treat the data
-  directory itself as secret material.
+- **Metadata is not encrypted.** Project and credential names, providers,
+  environments, notes, repository paths, timestamps, masked values, and
+  fingerprints are stored as plaintext columns. Reading *credential values*
+  still requires unlocking the vault (they are encrypted), but a database
+  thief learns all the metadata, and `doctor` deliberately reports
+  project/credential counts without unlocking. Listing and revealing
+  credentials themselves DO require the master password. A future
+  full-database encryption layer (e.g., SQLCipher or app-level metadata
+  encryption) is a candidate ADR; users who consider metadata sensitive
+  should treat the data directory itself as secret material.
+- **Reuse fingerprints cross the project-password boundary within an
+  unlocked vault.** The keyed fingerprint is available as soon as the vault
+  is unlocked with the master password (the fingerprint key is wrapped by the
+  vault key, not by any project password). So a holder of the master password
+  — but not a given project's password — can still: (a) confirm a *guessed*
+  value is present in a password-locked project via the reuse check, and
+  (b) see a locked project named as a "shared with" match when listing an
+  unlocked project that holds the same value. The locked project's actual
+  credential *values* remain encrypted and unreadable without its password
+  (reveal/copy stay blocked). This is an equality/existence leak across the
+  intra-vault boundary, weaker than the "needs both" guarantee ADR 0003
+  states for value confidentiality; ADR 0005 documents it. Treat the master
+  password as sufficient to learn value-equality across all projects.
 - Audit events are plaintext rows in the same database and are not
   tamper-evident.
 - The session file's expiry timestamp is plaintext; an attacker with write

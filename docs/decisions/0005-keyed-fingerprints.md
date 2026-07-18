@@ -43,3 +43,18 @@ Each warning carries the affected records, a message, and a recommendation
 - Fingerprints reveal *equality* of values to someone holding an unlocked
   vault — that is exactly their purpose and does not weaken confidentiality
   at rest.
+- **The fingerprint key is scoped to the whole vault, not to each project.**
+  It is unwrapped as soon as the vault is unlocked with the master password,
+  so reuse detection works across projects the master-password holder has
+  not separately unlocked. This means value-equality (not the value itself)
+  leaks across the project-password boundary: a master-password holder can
+  confirm a guessed value exists inside a password-locked project, and a
+  locked project can appear as a "shared with" match when listing an
+  unlocked one. Reveal/copy of the locked project's values remain blocked
+  (that needs the project password), so *confidentiality of the value* still
+  requires both secrets — only *equality/existence* leaks. This is a
+  deliberate trade-off for this milestone: per-project fingerprint keys would
+  make cross-project reuse detection impossible for locked projects (the
+  whole point of the feature). It is disclosed in THREAT_MODEL.md. A future
+  option is to compute reuse matches only over currently-unlocked projects,
+  at the cost of missing reuse involving locked ones.

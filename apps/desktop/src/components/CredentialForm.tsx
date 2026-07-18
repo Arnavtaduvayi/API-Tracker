@@ -84,6 +84,8 @@ export function CredentialForm(props: {
       source,
       name,
       environment,
+      docsUrl,
+      notes,
     });
     setValue("");
     props.onDone(created.id);

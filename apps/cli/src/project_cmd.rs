@@ -75,6 +75,20 @@ fn parse_envs(raw: &[String]) -> Result<Vec<Environment>> {
     raw.iter().map(|s| Ok(s.parse::<Environment>()?)).collect()
 }
 
+/// Unlocking/locking a project only persists via a session token; in
+/// per-command password mode the state would evaporate on exit, so refuse
+/// with clear guidance instead of claiming success.
+fn require_session(token: &Option<api_tracker_core::session::SessionToken>) -> Result<()> {
+    if token.is_none() {
+        bail!(
+            "this changes per-session project state, which requires an active session. \
+             Run `api-tracker unlock`, export API_TRACKER_SESSION, then retry \
+             (it does not work with API_TRACKER_PASSWORD alone)."
+        );
+    }
+    Ok(())
+}
+
 pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
     match cmd {
         ProjectCmd::Create(args) => {
@@ -173,6 +187,7 @@ pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
                 ctx.persist_session(&vault, &token)?;
                 println!("Project '{}' is now password-locked.", current.name);
             } else {
+                require_session(&token)?;
                 vault.lock_project(&project)?;
                 ctx.persist_session(&vault, &token)?;
                 println!("Project '{}' locked for this session.", current.name);
@@ -187,6 +202,7 @@ pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
                     current.name
                 );
             }
+            require_session(&token)?;
             let password = ctx::project_password()?;
             let project = vault.unlock_project(&project, &password)?;
             ctx.persist_session(&vault, &token)?;

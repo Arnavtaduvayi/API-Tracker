@@ -230,7 +230,16 @@ pub fn evaluate(
         });
     }
 
-    let freshest_activity = match (inputs.last_used_at, inputs.last_validated_at) {
+    // A failed validation (marked_invalid) is recorded in last_validated_at
+    // but is NOT evidence that the credential works, so it must not count as
+    // fresh activity — otherwise it would produce a contradictory
+    // "active, no action needed" finding alongside the "invalid" one.
+    let validation_activity = if inputs.marked_invalid {
+        None
+    } else {
+        inputs.last_validated_at
+    };
+    let freshest_activity = match (inputs.last_used_at, validation_activity) {
         (Some(u), Some(v)) => Some(u.max(v)),
         (Some(u), None) => Some(u),
         (None, Some(v)) => Some(v),

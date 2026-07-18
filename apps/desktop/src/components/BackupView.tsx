@@ -5,6 +5,7 @@
 import { useState } from "react";
 import { api, isApiError } from "../api";
 import type { BackupInfo } from "../types";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export function BackupView(props: { onRestored: () => void }) {
   const [mode, setMode] = useState<"create" | "verify" | "restore">("create");
@@ -18,6 +19,7 @@ export function BackupView(props: { onRestored: () => void }) {
   const [info, setInfo] = useState<BackupInfo | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmForce, setConfirmForce] = useState(false);
 
   const reset = () => {
     setError(null);
@@ -25,9 +27,37 @@ export function BackupView(props: { onRestored: () => void }) {
     setNotice(null);
   };
 
+  const doRestore = async () => {
+    reset();
+    setBusy(true);
+    try {
+      const result = await api.backupRestore(path, backupPassword, forceRestore);
+      setInfo(result);
+      setNotice(
+        "Backup restored. The vault is now locked; unlock it with the master password from when the backup was created.",
+      );
+      setBackupPassword("");
+      props.onRestored();
+    } catch (err) {
+      setError(isApiError(err) ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     reset();
+    if (mode === "restore") {
+      // Replacing an existing vault needs an explicit in-app confirmation
+      // (native window.confirm does not work under the macOS webview).
+      if (forceRestore) {
+        setConfirmForce(true);
+        return;
+      }
+      await doRestore();
+      return;
+    }
     setBusy(true);
     try {
       if (mode === "create") {
@@ -40,25 +70,10 @@ export function BackupView(props: { onRestored: () => void }) {
         setNotice(
           "Backup created. Restoring will require BOTH this backup password and the master password in use when the backup was made.",
         );
-      } else if (mode === "verify") {
+      } else {
         const result = await api.backupVerify(path, backupPassword);
         setInfo(result);
         setNotice("The backup decrypts and validates correctly.");
-      } else {
-        if (
-          forceRestore &&
-          !window.confirm(
-            "Replace the current vault with the backup? The existing database is renamed aside, and the vault will lock.",
-          )
-        ) {
-          return;
-        }
-        const result = await api.backupRestore(path, backupPassword, forceRestore);
-        setInfo(result);
-        setNotice(
-          "Backup restored. The vault is now locked; unlock it with the master password from when the backup was created.",
-        );
-        props.onRestored();
       }
       setMasterPassword("");
       setBackupPassword("");
@@ -185,6 +200,19 @@ export function BackupView(props: { onRestored: () => void }) {
         Losing both the backup password and the master password makes a backup permanently
         unreadable. There is no recovery bypass.
       </p>
+      {confirmForce && (
+        <ConfirmDialog
+          title="Replace the current vault?"
+          body="The existing database is renamed aside (not deleted), and the vault will lock. You will unlock the restored vault with the master password from when the backup was created."
+          confirmLabel="Replace and restore"
+          danger
+          onConfirm={() => {
+            setConfirmForce(false);
+            void doRestore();
+          }}
+          onCancel={() => setConfirmForce(false)}
+        />
+      )}
     </div>
   );
 }

@@ -118,6 +118,12 @@ fn restrict_dir_permissions(_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Restrict the vault data directory to the current user (0700 on Unix).
+/// Exposed so backup restore applies the same protection as vault creation.
+pub fn restrict_data_dir_permissions(dir: &std::path::Path) -> Result<()> {
+    restrict_dir_permissions(dir)
+}
+
 /// Create a brand-new vault. Fails if one already exists (never silently
 /// overwrites).
 pub fn create_vault(paths: &VaultPaths, master_password: &SecretString) -> Result<UnlockedVault> {
@@ -1474,16 +1480,20 @@ impl UnlockedVault {
             &aad::credential_value(&self.vault_id, &row.project_id, &row.id),
             new_value.expose().trim().as_bytes(),
         )?;
+        let masked = mask_value(new_value.expose());
+        let now = clock::now_rfc3339();
         self.conn.execute(
             "UPDATE credentials SET ciphertext = ?1, fingerprint = ?2, masked_value = ?3,
              updated_at = ?4 WHERE id = ?5",
-            params![
-                ciphertext,
-                fp,
-                mask_value(new_value.expose()),
-                clock::now_rfc3339(),
-                row.id
-            ],
+            params![ciphertext, fp, masked, now, row.id],
+        )?;
+        // References carry a copy of the source's fingerprint and mask so they
+        // can display and participate in reuse detection without decrypting;
+        // keep them consistent with the new value.
+        self.conn.execute(
+            "UPDATE credentials SET fingerprint = ?1, masked_value = ?2, updated_at = ?3
+             WHERE linked_credential_id = ?4",
+            params![fp, masked, now, row.id],
         )?;
         audit::record(
             &self.conn,

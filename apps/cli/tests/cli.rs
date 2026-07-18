@@ -428,6 +428,47 @@ fn session_unlock_use_lock_cycle() {
 }
 
 #[test]
+fn project_unlock_without_a_session_is_rejected_not_silently_dropped() {
+    // In env-password mode there is no session to persist the unlocked key
+    // into, so `project unlock` must error instead of claiming success and
+    // then leaving the credential unreachable.
+    let vault = TestVault::new();
+    vault.add_project("secure");
+    vault.add_key("secure", "api", FAKE_KEY_1, "production");
+    vault
+        .cmd()
+        .env("API_TRACKER_PROJECT_PASSWORD", PROJECT_PW)
+        .args(["project", "lock", "secure"])
+        .assert()
+        .success();
+    vault
+        .cmd()
+        .env("API_TRACKER_PROJECT_PASSWORD", PROJECT_PW)
+        .args(["project", "unlock", "secure"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("session"));
+}
+
+#[test]
+fn link_to_rejects_flags_that_would_be_ignored() {
+    let vault = TestVault::new();
+    vault.add_project("main");
+    vault.add_project("spinoff");
+    vault.add_key("main", "src", FAKE_KEY_1, "production");
+    vault
+        .cmd()
+        .args([
+            "key", "add", "--project", "spinoff", "--name", "ref", "--link-to", "main/src",
+            "--expires", "2030-01-01",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("do not apply to a reference"))
+        .stderr(predicate::str::contains("--expires"));
+}
+
+#[test]
 fn project_password_lock_via_session() {
     let vault = TestVault::new();
     vault.add_project("secure");

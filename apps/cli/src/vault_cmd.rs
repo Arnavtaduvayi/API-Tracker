@@ -208,10 +208,13 @@ pub fn settings(ctx: &Ctx, cmd: SettingsCmd) -> Result<()> {
             });
         }
         SettingsCmd::Set { key, value } => {
-            let (mut vault, _token) = ctx.unlocked()?;
+            let (mut vault, token) = ctx.unlocked()?;
             let mut settings = vault.settings().clone();
             settings.set_field(&key, value)?;
             vault.update_settings(settings.clone())?;
+            // Re-persist the session so a changed auto-lock takes effect on
+            // the live session's TTL, not only on the next unlock.
+            ctx.persist_session(&vault, &token)?;
             println!("{key} = {value}");
         }
     }

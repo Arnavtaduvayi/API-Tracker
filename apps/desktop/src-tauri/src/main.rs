@@ -342,6 +342,8 @@ fn credential_add_reference(
     source: String,
     name: String,
     environment: Environment,
+    docs_url: String,
+    notes: String,
 ) -> CmdResult<Credential> {
     with_vault(&state, |vault| {
         vault.add_credential_reference(AddReference {
@@ -349,8 +351,8 @@ fn credential_add_reference(
             source,
             name,
             environment,
-            docs_url: String::new(),
-            notes: String::new(),
+            docs_url,
+            notes,
         })
     })
 }
@@ -530,19 +532,21 @@ fn backup_restore(
     force: bool,
 ) -> CmdResult<backup::BackupInfo> {
     let backup_password = SecretString::new(backup_password);
-    // Lock first: the restored vault requires a fresh unlock with its own
-    // master password.
-    {
-        let mut slot = state.slot.lock().expect("vault state mutex poisoned");
-        slot.vault = None;
-    }
-    backup::restore_backup(
+    let info = backup::restore_backup(
         std::path::Path::new(&path),
         &backup_password,
         &state.paths(),
         force,
-    )
-    .map_err(Into::into)
+    )?;
+    // Only after a successful restore: drop the old in-memory session. The
+    // restored vault requires a fresh unlock with its own master password.
+    // (On failure we leave the current session intact so the user is not
+    // bounced to the unlock screen for a restore that never happened.)
+    {
+        let mut slot = state.slot.lock().expect("vault state mutex poisoned");
+        slot.vault = None;
+    }
+    Ok(info)
 }
 
 fn main() {

@@ -352,14 +352,23 @@ pub fn restore_backup(
             .data_dir
             .join(format!("vault.db.replaced-{timestamp}"));
         std::fs::rename(&db_path, &aside)?;
+        // Move the WAL/SHM sidecars alongside the renamed database instead of
+        // deleting them: a live connection may hold committed-but-uncheckpointed
+        // transactions in the WAL, and SQLite associates `<db>-wal`/`<db>-shm`
+        // with the database by name, so the aside copy stays complete and
+        // openable. (Deleting them would silently discard those transactions.)
         for suffix in ["-wal", "-shm"] {
             let side = target.data_dir.join(format!("vault.db{suffix}"));
             if side.exists() {
-                std::fs::remove_file(&side)?;
+                let aside_side = target
+                    .data_dir
+                    .join(format!("vault.db.replaced-{timestamp}{suffix}"));
+                std::fs::rename(&side, &aside_side)?;
             }
         }
     }
     std::fs::create_dir_all(&target.data_dir)?;
+    crate::vault::restrict_data_dir_permissions(&target.data_dir)?;
     let mut conn = db::open(&db_path)?;
     db::migrate(&mut conn)?;
     {

@@ -426,6 +426,92 @@ fn intentional_references_share_one_encrypted_value() {
 }
 
 #[test]
+fn replacing_a_source_value_keeps_references_consistent() {
+    let (_dir, _paths, mut vault) = new_vault();
+    add_project(&mut vault, "main");
+    add_project(&mut vault, "spinoff");
+    add_key(
+        &mut vault,
+        "main",
+        "shared",
+        FAKE_KEY_1,
+        Environment::Production,
+    );
+    vault
+        .add_credential_reference(AddReference {
+            project: "spinoff".into(),
+            source: "main/shared".into(),
+            name: "borrowed".into(),
+            environment: Environment::Production,
+            docs_url: String::new(),
+            notes: String::new(),
+        })
+        .unwrap();
+
+    // Rotate the source value.
+    vault
+        .replace_credential_value("main/shared", &master_pw(), SecretString::from(FAKE_KEY_2))
+        .unwrap();
+
+    // The reference now reveals the new value...
+    assert_eq!(
+        vault
+            .reveal_credential("spinoff/borrowed", &master_pw())
+            .unwrap()
+            .expose(),
+        FAKE_KEY_2
+    );
+    // ...and its mask and reuse status track the new value, not the old one.
+    let reference = vault.get_credential("spinoff/borrowed").unwrap();
+    assert_eq!(reference.masked_value, "FAKE…02");
+    let source = vault.get_credential("main/shared").unwrap();
+    assert_eq!(source.status.primary, Status::SharedAcrossProjects);
+    // The retired old value is no longer reported as in use anywhere.
+    let stale_warnings = vault
+        .check_reuse(
+            "main",
+            Environment::Production,
+            &SecretString::from(FAKE_KEY_1),
+        )
+        .unwrap();
+    assert!(
+        stale_warnings.is_empty(),
+        "the old value must no longer match any record"
+    );
+}
+
+#[test]
+fn failed_validation_does_not_produce_a_contradictory_active_finding() {
+    let (_dir, _paths, mut vault) = new_vault();
+    add_project(&mut vault, "app");
+    let (cred, _) = add_key(
+        &mut vault,
+        "app",
+        "key",
+        FAKE_KEY_1,
+        Environment::Development,
+    );
+    let updated = vault
+        .update_credential(
+            &cred.id,
+            UpdateCredential {
+                mark_validated: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(updated.status.primary, Status::Invalid);
+    assert!(
+        !updated
+            .status
+            .findings
+            .iter()
+            .any(|f| f.status == Status::Active),
+        "a failed validation must not also report the credential as active"
+    );
+}
+
+#[test]
 fn reference_reveal_requires_source_project_unlocked() {
     let (_dir, _paths, mut vault) = new_vault();
     add_project(&mut vault, "vault-locked");

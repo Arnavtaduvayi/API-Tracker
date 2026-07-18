@@ -7,6 +7,7 @@ import { api, isApiError } from "../api";
 import type { Credential } from "../types";
 import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
+import { PromptDialog } from "./ConfirmDialog";
 
 type SensitiveAction = "reveal" | "copy" | "delete";
 
@@ -23,6 +24,7 @@ export function CredentialDetail(props: {
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [newValue, setNewValue] = useState("");
   const [replacePassword, setReplacePassword] = useState("");
+  const [exposurePromptOpen, setExposurePromptOpen] = useState(false);
   const revealTimer = useRef<number | null>(null);
 
   const reload = useCallback(async () => {
@@ -65,6 +67,8 @@ export function CredentialDetail(props: {
     setNotice(null);
     if (action === "reveal") {
       const value = await api.credentialReveal(props.id, password);
+      // Cancel any previous auto-hide timer before starting a new one.
+      if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
       setRevealed(value);
       // Hide the plaintext automatically after 30 seconds.
       revealTimer.current = window.setTimeout(hideRevealed, 30_000);
@@ -76,6 +80,10 @@ export function CredentialDetail(props: {
           : "Copied to the clipboard.",
       );
     } else if (action === "delete") {
+      // Verify the master password before the destructive action — the core
+      // delete command itself does not re-check, so the reauth must happen
+      // here (throws on a wrong password, aborting the delete).
+      await api.reauth(password);
       const projectId = credential?.project_id ?? null;
       await api.credentialDelete(props.id);
       props.onBack(projectId);
@@ -194,18 +202,7 @@ export function CredentialDetail(props: {
             Clear exposure flag
           </button>
         ) : (
-          <button
-            onClick={() => {
-              const note =
-                window.prompt("Where might it have been exposed? (optional note)") ?? "";
-              void mark(
-                { possiblyExposed: true, exposureNote: note },
-                "Flagged as possibly exposed.",
-              );
-            }}
-          >
-            Flag possibly exposed
-          </button>
+          <button onClick={() => setExposurePromptOpen(true)}>Flag possibly exposed</button>
         )}
       </p>
 
@@ -307,6 +304,23 @@ export function CredentialDetail(props: {
           actionLabel={action === "delete" ? "Delete permanently" : "Confirm"}
           onConfirm={confirmAction}
           onClose={() => setAction(null)}
+        />
+      )}
+
+      {exposurePromptOpen && (
+        <PromptDialog
+          title="Flag as possibly exposed"
+          body="Optionally note where it may have been exposed (e.g. 'found in an old gist')."
+          placeholder="optional note"
+          confirmLabel="Flag"
+          onConfirm={(note) => {
+            setExposurePromptOpen(false);
+            void mark(
+              { possiblyExposed: true, exposureNote: note },
+              "Flagged as possibly exposed.",
+            );
+          }}
+          onCancel={() => setExposurePromptOpen(false)}
         />
       )}
     </div>

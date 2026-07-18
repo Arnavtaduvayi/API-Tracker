@@ -170,6 +170,63 @@ fn restore_refuses_to_overwrite_without_force_and_preserves_old_vault_with_force
 }
 
 #[test]
+fn force_restore_preserves_a_still_open_vault_including_uncheckpointed_wal() {
+    // Reproduces the data-loss case: a concurrent connection (e.g. the
+    // desktop app) holds committed-but-uncheckpointed transactions in the
+    // WAL. Force-restore must keep the aside copy fully openable.
+    let (dir, paths, mut vault) = new_vault();
+    add_project(&mut vault, "live-project");
+    add_key(
+        &mut vault,
+        "live-project",
+        "api",
+        FAKE_KEY_1,
+        Environment::Development,
+    );
+    let backup_path = dir.path().join("b.json");
+    backup::create_backup(&vault, &backup_path, &backup_pw(), false).unwrap();
+
+    // Keep the vault OPEN across the restore (its WAL may be uncheckpointed).
+    backup::restore_backup(&backup_path, &backup_pw(), &paths, true).unwrap();
+    drop(vault);
+
+    // The aside database must still be a complete, openable vault.
+    let aside = std::fs::read_dir(&paths.data_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| {
+            n.starts_with("vault.db.replaced-") && !n.ends_with("-wal") && !n.ends_with("-shm")
+        })
+        .expect("aside database exists");
+    let aside_paths = VaultPaths::new(dir.path().join("reopen"));
+    std::fs::create_dir_all(&aside_paths.data_dir).unwrap();
+    std::fs::copy(paths.data_dir.join(&aside), aside_paths.db_path()).unwrap();
+    for suffix in ["-wal", "-shm"] {
+        let src = paths.data_dir.join(format!("{aside}{suffix}"));
+        if src.exists() {
+            std::fs::copy(
+                &src,
+                aside_paths.db_path().with_extension(format!("db{suffix}")),
+            )
+            .unwrap();
+        }
+    }
+    let reopened = vault::unlock_vault(&aside_paths, &master_pw()).unwrap();
+    let names: Vec<String> = reopened
+        .list_projects(true)
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["live-project".to_owned()],
+        "aside vault must retain its data"
+    );
+}
+
+#[test]
 fn session_roundtrip_and_wrong_token() {
     let (_dir, paths, mut vault) = new_vault();
     add_project(&mut vault, "locked");
