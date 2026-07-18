@@ -65,6 +65,33 @@ integrations land.
   running as the user). Injection narrows exposure versus a committed `.env`;
   it does not defeat an attacker already running as you.
 
+- **`.env` governance** parses environment files purely textually (nothing
+  is executed or interpolated), previews and findings are always masked, and
+  import never modifies the source file. An explicit **export** writes a
+  plaintext file deliberately: it requires master-password
+  reauthentication, uses an atomic 0600 write, refuses Git-tracked targets,
+  verifies `.gitignore`, warns in the file itself, records a redacted audit
+  event, and (for temporary exports) is swept by cleanup with a
+  content-hash check. An exported file is still plaintext on disk — that
+  trade-off is the user's explicit choice, made loudly.
+- **Credential version history** retains prior values encrypted under the
+  same project key (AAD-bound to the version number, bounded retention,
+  purged with the credential). A compromised master password therefore
+  exposes recent *old* values as well as current ones; old values are
+  normally revoked at the provider after rotation, and the history is what
+  makes destination rollback real instead of aspirational.
+- **Destinations** (macOS Keychain, AWS Secrets Manager, GitHub Actions,
+  Vercel) receive values only through an explicitly executed sync-plan step
+  or an explicit export — never automatically. Destination administrative
+  credentials (IAM keys, PATs, tokens) are encrypted under the vault key,
+  masked in every listing, write-only (replace/remove, no reveal), and
+  reauthentication-gated for removal. Their blast radius is real: an IAM
+  key that can write secrets or a repo-admin PAT is elevated material —
+  scope them minimally at the issuer. Once a value is written to a
+  destination, its safety is governed by that destination's access model
+  (GitHub/Vercel never return values; AWS read-back is used for
+  verification). Keychain writes pass the secret via stdin, never argv.
+
 ## Adversaries and outcomes
 
 | Adversary | Outcome |

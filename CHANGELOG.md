@@ -5,6 +5,45 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — `.env` governance, destinations, and synchronization plans
+- **`.env` governance**: `env discover` (variants + Git
+  tracked/ignored/untracked/in-history status), lossless non-executing
+  parsing (comments/order/quoting/line endings preserved; malformed and
+  duplicate detection), `env preview` (masked classification against
+  provider manifests, the scanner, the vault, and mappings), selective
+  `env import` into the encrypted vault with automatic injection mappings
+  (duplicates mapped or referenced, never copied), `env example`
+  generation (names only, diff-previewed), `env drift` (diverged values,
+  unmapped secrets, production-in-dev files, copied values, template gaps),
+  and a guided `env migrate` that removes plaintext only after verifying
+  every secret resolves from the vault.
+- **Explicit `.env` export**: reauthentication-gated, atomic 0600 writes,
+  never overwrites without a flag, refuses Git-tracked targets, verifies
+  `.gitignore`, warns inside the file, records a redacted audit event, and
+  supports temporary exports (`--ttl`) with hash-checked `env cleanup`.
+- **Credential version history**: replacing a value retains prior versions
+  encrypted (AAD-bound to the version number; bounded; purged on delete);
+  `key versions` lists them masked after reauthentication.
+- **Destinations** (separate from provider connectors) with an explicit
+  per-kind capability matrix (read/write/delete/versioning/rollback/
+  validation): macOS Keychain (secret via stdin, never argv), AWS Secrets
+  Manager (SigV4 verified against the official test vector), GitHub Actions
+  repository secrets (libsodium sealed box), Vercel environment variables,
+  plus the built-in vault/mapping/export kinds. Destination admin
+  credentials are stored encrypted and write-only; `destination
+  kinds/add/remove/test/attach/detach/attachments/drift`.
+- **Synchronization plans**: `sync plan` (dry run by default) shows old/new
+  versions (masked), every destination, planned action, validation method,
+  rollback availability, and affected projects; `sync run` executes after
+  confirmation + reauthentication with per-destination rollout,
+  verification (fingerprint read-back or existence), partial-failure
+  handling, and retry; `sync rollback` restores the retained previous
+  version; stale plans refuse to run. Nothing is ever written or revoked
+  automatically.
+- Desktop: Env files, Destinations, and Sync plans screens; CLI/desktop
+  share all logic through the core crate. Smoke test grew to 68 checks.
+- Database migration v5; PUT/DELETE support in the HTTP layer.
+
 ### Added — real OpenAI usage & cost synchronization
 - **Administrative OpenAI connection**: `provider connect openai` stores an
   OpenAI Admin API key encrypted under the vault key (validated before
