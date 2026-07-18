@@ -1509,10 +1509,13 @@ impl UnlockedVault {
         )?;
         let masked = mask_value(new_value.expose());
         let now = clock::now_rfc3339();
+        // Retain the outgoing value as an encrypted version so destination
+        // synchronization can roll back (see docs/decisions/0012).
+        let retained = self.retain_credential_version(&row, &project_key, "value replaced")?;
         self.conn.execute(
             "UPDATE credentials SET ciphertext = ?1, fingerprint = ?2, masked_value = ?3,
-             updated_at = ?4 WHERE id = ?5",
-            params![ciphertext, fp, masked, now, row.id],
+             updated_at = ?4, value_version = ?5 WHERE id = ?6",
+            params![ciphertext, fp, masked, now, retained + 1, row.id],
         )?;
         // References carry a copy of the source's fingerprint and mask so they
         // can display and participate in reuse detection without decrypting;
@@ -3352,6 +3355,1716 @@ impl UnlockedVault {
     pub fn list_process_sessions(&self, limit: u32) -> Result<Vec<crate::inject::ProcessSession>> {
         crate::inject::list_sessions(&self.conn, limit)
     }
+
+    // ------------------------------------------------------------------
+    // Credential version history (docs/decisions/0012)
+    // ------------------------------------------------------------------
+
+    fn value_version_of(&self, credential_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT value_version FROM credentials WHERE id = ?1",
+            [credential_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Retain `row`'s current value as an encrypted version row (AAD-bound to
+    /// the version number). Returns the retained version number. Old versions
+    /// beyond the retention window are pruned.
+    fn retain_credential_version(
+        &self,
+        row: &CredentialRow,
+        project_key: &SecretBytes,
+        reason: &str,
+    ) -> Result<i64> {
+        const KEEP_VERSIONS: i64 = 10;
+        let version = self.value_version_of(&row.id)?;
+        let ciphertext = row.ciphertext.as_deref().ok_or(CoreError::VaultCorrupted(
+            "credential is missing its ciphertext",
+        ))?;
+        let plaintext = crypto::decrypt(
+            project_key,
+            &aad::credential_value(&self.vault_id, &row.project_id, &row.id),
+            ciphertext,
+            "credential value",
+        )?;
+        let versioned = crypto::encrypt(
+            project_key,
+            &aad::credential_version(&self.vault_id, &row.project_id, &row.id, version),
+            plaintext.expose(),
+        )?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO credential_versions
+             (credential_id, version, ciphertext, masked_value, fingerprint, created_at, reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.id,
+                version,
+                versioned,
+                row.masked_value,
+                row.fingerprint,
+                clock::now_rfc3339(),
+                reason,
+            ],
+        )?;
+        self.conn.execute(
+            "DELETE FROM credential_versions WHERE credential_id = ?1 AND version <= ?2",
+            params![row.id, version - KEEP_VERSIONS],
+        )?;
+        Ok(version)
+    }
+
+    /// List retained versions (masked values only). Reauthentication-gated:
+    /// history is sensitive metadata about rotation cadence.
+    pub fn credential_version_history(
+        &self,
+        selector: &str,
+        master_password: &SecretString,
+    ) -> Result<Vec<CredentialVersionInfo>> {
+        self.verify_master_password(master_password)?;
+        let row = self.resolve_credential(selector)?;
+        let current_version = self.value_version_of(&row.id)?;
+        let mut out = vec![CredentialVersionInfo {
+            version: current_version,
+            masked_value: row.masked_value.clone(),
+            created_at: row.updated_at.clone(),
+            reason: "current value".into(),
+            current: true,
+        }];
+        let mut stmt = self.conn.prepare(
+            "SELECT version, masked_value, created_at, reason FROM credential_versions
+             WHERE credential_id = ?1 ORDER BY version DESC",
+        )?;
+        let rows = stmt.query_map([&row.id], |r| {
+            Ok(CredentialVersionInfo {
+                version: r.get(0)?,
+                masked_value: r.get(1)?,
+                created_at: r.get(2)?,
+                reason: r.get(3)?,
+                current: false,
+            })
+        })?;
+        for r in rows {
+            out.push(r?);
+        }
+        audit::record(
+            &self.conn,
+            "credential_versions_viewed",
+            Some(&row.project_id),
+            Some(&row.id),
+            "",
+        )?;
+        Ok(out)
+    }
+
+    /// Decrypt a retained version's value (for destination rollback). The
+    /// caller is responsible for reauthentication.
+    fn decrypt_credential_version(
+        &self,
+        credential_id: &str,
+        version: i64,
+    ) -> Result<SecretString> {
+        let row = self
+            .credential_row_by_id(credential_id)?
+            .ok_or(CoreError::NotFound {
+                kind: "credential",
+                ident: credential_id.to_string(),
+            })?;
+        if self.value_version_of(credential_id)? == version {
+            let project = self.project_row_by_ident(&row.project_id)?;
+            let project_key = self.project_key_for_row(&project)?;
+            let ciphertext = row.ciphertext.as_deref().ok_or(CoreError::VaultCorrupted(
+                "credential is missing its ciphertext",
+            ))?;
+            let plaintext = crypto::decrypt(
+                &project_key,
+                &aad::credential_value(&self.vault_id, &row.project_id, &row.id),
+                ciphertext,
+                "credential value",
+            )?;
+            return Ok(SecretString::new(
+                String::from_utf8(plaintext.expose().to_vec()).map_err(|_| {
+                    CoreError::VaultCorrupted("credential value is not valid UTF-8")
+                })?,
+            ));
+        }
+        let ciphertext: Vec<u8> = self
+            .conn
+            .query_row(
+                "SELECT ciphertext FROM credential_versions
+                 WHERE credential_id = ?1 AND version = ?2",
+                params![credential_id, version],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(CoreError::NotFound {
+                kind: "credential version",
+                ident: format!("{credential_id}@v{version}"),
+            })?;
+        let project = self.project_row_by_ident(&row.project_id)?;
+        let project_key = self.project_key_for_row(&project)?;
+        let plaintext = crypto::decrypt(
+            &project_key,
+            &aad::credential_version(&self.vault_id, &row.project_id, credential_id, version),
+            &ciphertext,
+            "credential version",
+        )?;
+        Ok(SecretString::new(
+            String::from_utf8(plaintext.expose().to_vec())
+                .map_err(|_| CoreError::VaultCorrupted("credential value is not valid UTF-8"))?,
+        ))
+    }
+
+    // ------------------------------------------------------------------
+    // .env governance (docs/decisions/0012)
+    // ------------------------------------------------------------------
+
+    /// Discover environment files across a project's registered repositories
+    /// (or an explicit path).
+    pub fn env_discover(
+        &self,
+        project: Option<&str>,
+        path: Option<&std::path::Path>,
+    ) -> Result<Vec<crate::envgov::EnvFileInfo>> {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Some(path) = path {
+            roots.push(path.to_path_buf());
+        }
+        if let Some(project) = project {
+            let row = self.project_row_by_ident(project)?;
+            let model = self.project_model(&row)?;
+            roots.extend(model.repo_paths.iter().map(PathBuf::from));
+        }
+        if roots.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "no repositories to search; register one on the project or pass a path".into(),
+            ));
+        }
+        let mut out = Vec::new();
+        for root in roots {
+            out.extend(crate::envgov::discover(&root)?);
+        }
+        Ok(out)
+    }
+
+    /// Preview a `.env` file: classified variables, masked values only.
+    pub fn env_preview(
+        &self,
+        project: &str,
+        file: &std::path::Path,
+    ) -> Result<Vec<crate::envgov::VarPreview>> {
+        let project_row = self.project_row_by_ident(project)?;
+        let content = std::fs::read_to_string(file)?;
+        let doc = crate::envfile::EnvDocument::parse(&content);
+        let label = file.to_string_lossy();
+        let findings = scanner::scan_text(&content, &label, &scanner::ScanOptions::default());
+        let mappings: HashMap<String, String> =
+            crate::inject::list_mappings(&self.conn, &project_row.id)?
+                .into_iter()
+                .map(|m| (m.env_var, m.credential_name))
+                .collect();
+        let mut out = Vec::new();
+        for entry in doc.entries() {
+            let finding = findings.iter().find(|f| f.line == entry.line);
+            let value = &entry.value;
+            let is_placeholder = scanner::is_placeholder_value(value.expose());
+            let vault_credential = if value.expose().trim().is_empty() {
+                None
+            } else {
+                let fp = reuse::fingerprint(&self.fingerprint_key, value)?;
+                self.find_reuse_matches(&fp, None)?
+                    .first()
+                    .map(|m| format!("{}/{}", m.project_name, m.credential_name))
+            };
+            out.push(crate::envgov::VarPreview {
+                key: entry.key.clone(),
+                line: entry.line,
+                masked: entry.masked(),
+                provider: finding.and_then(|f| f.provider.clone()),
+                looks_secret: finding.is_some(),
+                is_placeholder,
+                vault_credential,
+                mapped_credential: mappings.get(&entry.key).cloned(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Import selected variables from a `.env` file into the vault and map
+    /// them for injection. Never modifies the file.
+    pub fn env_import(
+        &mut self,
+        project: &str,
+        file: &std::path::Path,
+        select: Option<&[String]>,
+        environment: Option<Environment>,
+    ) -> Result<Vec<EnvImportOutcome>> {
+        let project_row = self.project_row_by_ident(project)?;
+        let content = std::fs::read_to_string(file)?;
+        let doc = crate::envfile::EnvDocument::parse(&content);
+        let file_name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if crate::envgov::classify_file_name(&file_name)
+            == Some(crate::envgov::EnvFileClass::Template)
+        {
+            return Err(CoreError::InvalidInput(format!(
+                "'{file_name}' is a template file (names only); import a values file instead"
+            )));
+        }
+        let environment = environment
+            .or_else(|| crate::envgov::environment_from_name(&file_name))
+            .unwrap_or(Environment::Development);
+        let label = file.to_string_lossy();
+        let findings = scanner::scan_text(&content, &label, &scanner::ScanOptions::default());
+        let mut outcomes = Vec::new();
+        let selected: Option<HashSet<&str>> =
+            select.map(|keys| keys.iter().map(|k| k.as_str()).collect());
+        let entries: Vec<_> = doc.entries().cloned().collect();
+        for entry in &entries {
+            let key = entry.key.as_str();
+            let finding = findings.iter().find(|f| f.line == entry.line);
+            let wanted = match &selected {
+                Some(keys) => keys.contains(key),
+                // Default selection: values the scanner flags as likely
+                // secrets (placeholders and empties never qualify).
+                None => finding.is_some(),
+            };
+            if !wanted {
+                continue;
+            }
+            if entry.value.expose().trim().is_empty() {
+                outcomes.push(EnvImportOutcome {
+                    key: entry.key.clone(),
+                    action: "skipped".into(),
+                    credential: None,
+                    note: "empty value".into(),
+                });
+                continue;
+            }
+            if scanner::is_placeholder_value(entry.value.expose()) {
+                outcomes.push(EnvImportOutcome {
+                    key: entry.key.clone(),
+                    action: "skipped".into(),
+                    credential: None,
+                    note: "placeholder value".into(),
+                });
+                continue;
+            }
+            let fp = reuse::fingerprint(&self.fingerprint_key, &entry.value)?;
+            let matches = self.find_reuse_matches(&fp, None)?;
+            if let Some(m) = matches.iter().find(|m| m.project_id == project_row.id) {
+                // Same value already stored in this project: map, don't copy.
+                crate::inject::set_mapping(&self.conn, &project_row.id, &m.credential_id, key)?;
+                outcomes.push(EnvImportOutcome {
+                    key: entry.key.clone(),
+                    action: "mapped_existing".into(),
+                    credential: Some(m.credential_name.clone()),
+                    note: "value already stored in this project; mapped for injection".into(),
+                });
+                continue;
+            }
+            if let Some(m) = matches.first() {
+                outcomes.push(EnvImportOutcome {
+                    key: entry.key.clone(),
+                    action: "skipped".into(),
+                    credential: Some(format!("{}/{}", m.project_name, m.credential_name)),
+                    note: "value already stored in another project; add a reference with \
+                           `key add --link-to` instead of a second copy"
+                        .into(),
+                });
+                continue;
+            }
+            let provider = finding
+                .and_then(|f| f.provider.clone())
+                .unwrap_or_else(|| "other".to_string());
+            let base_name = entry.key.to_ascii_lowercase().replace('_', "-");
+            let mut name = base_name.clone();
+            let mut n = 1;
+            while self
+                .ensure_credential_name_free(&project_row.id, &name, None)
+                .is_err()
+            {
+                n += 1;
+                name = format!("{base_name}-{n}");
+            }
+            let (credential, _warnings) = self.add_credential(AddCredential {
+                project: project_row.id.clone(),
+                provider,
+                name: name.clone(),
+                value: entry.value.clone(),
+                environment,
+                credential_type: None,
+                key_created_at: None,
+                expires_at: None,
+                docs_url: String::new(),
+                notes: format!("Imported from {file_name}"),
+            })?;
+            crate::inject::set_mapping(&self.conn, &project_row.id, &credential.id, key)?;
+            outcomes.push(EnvImportOutcome {
+                key: entry.key.clone(),
+                action: "imported".into(),
+                credential: Some(name),
+                note: "stored encrypted and mapped for injection".into(),
+            });
+        }
+        audit::record(
+            &self.conn,
+            "env_imported",
+            Some(&project_row.id),
+            None,
+            &format!(
+                "file={file_name} imported={}",
+                outcomes
+                    .iter()
+                    .filter(|o| o.action == "imported" || o.action == "mapped_existing")
+                    .count()
+            ),
+        )?;
+        Ok(outcomes)
+    }
+
+    /// Detect drift between a project's `.env` files, its vault credentials,
+    /// and its injection mappings.
+    pub fn env_drift(&self, project: &str) -> Result<Vec<crate::envgov::DriftFinding>> {
+        use crate::envgov::{DriftFinding, DriftKind, EnvFileClass};
+        let project_row = self.project_row_by_ident(project)?;
+        let model = self.project_model(&project_row)?;
+        let mappings = crate::inject::list_mappings(&self.conn, &project_row.id)?;
+        let mut findings = Vec::new();
+        // fingerprint -> (file rel path, key) occurrences across all files
+        let mut value_sites: HashMap<Vec<u8>, Vec<(String, String)>> = HashMap::new();
+        let mut seen_vars: HashSet<String> = HashSet::new();
+        let mut template_vars: HashSet<String> = HashSet::new();
+
+        for repo in &model.repo_paths {
+            let root = std::path::Path::new(repo);
+            for info in crate::envgov::discover(root)? {
+                let file_path = std::path::Path::new(&info.path);
+                let content = std::fs::read_to_string(file_path).unwrap_or_default();
+                let doc = crate::envfile::EnvDocument::parse(&content);
+                if info.class == EnvFileClass::Template {
+                    for entry in doc.entries() {
+                        template_vars.insert(entry.key.clone());
+                    }
+                    continue;
+                }
+                let findings_in_file =
+                    scanner::scan_text(&content, &info.rel_path, &scanner::ScanOptions::default());
+                for entry in doc.entries() {
+                    seen_vars.insert(entry.key.clone());
+                    if entry.value.expose().trim().is_empty()
+                        || scanner::is_placeholder_value(entry.value.expose())
+                    {
+                        continue;
+                    }
+                    let fp = reuse::fingerprint(&self.fingerprint_key, &entry.value)?;
+                    value_sites
+                        .entry(fp.clone())
+                        .or_default()
+                        .push((info.rel_path.clone(), entry.key.clone()));
+                    let matches = self.find_reuse_matches(&fp, None)?;
+                    let mapping = mappings.iter().find(|m| m.env_var == entry.key);
+                    match (mapping, matches.is_empty()) {
+                        (Some(mapping), _) => {
+                            // Mapped variable: does the file's value still
+                            // match the mapped credential's current value?
+                            let mapped_fp: Vec<u8> = self.conn.query_row(
+                                "SELECT fingerprint FROM credentials WHERE id = ?1",
+                                [&mapping.credential_id],
+                                |r| r.get(0),
+                            )?;
+                            if mapped_fp != fp {
+                                findings.push(DriftFinding {
+                                    kind: DriftKind::ValueDiffersFromVault,
+                                    file: info.rel_path.clone(),
+                                    key: entry.key.clone(),
+                                    credential: Some(mapping.credential_name.clone()),
+                                    detail: format!(
+                                        "the value in {} does not match vault credential '{}'",
+                                        info.rel_path, mapping.credential_name
+                                    ),
+                                    recommendation:
+                                        "choose the source of truth: re-import the file value or \
+                                         re-export the vault value"
+                                            .into(),
+                                });
+                            }
+                        }
+                        (None, true) => {
+                            let is_secret = findings_in_file.iter().any(|f| f.line == entry.line);
+                            if is_secret {
+                                findings.push(DriftFinding {
+                                    kind: DriftKind::UnmappedSecret,
+                                    file: info.rel_path.clone(),
+                                    key: entry.key.clone(),
+                                    credential: None,
+                                    detail: format!(
+                                        "{} holds a likely secret that is not in the vault",
+                                        info.rel_path
+                                    ),
+                                    recommendation:
+                                        "import it (`api-tracker env import`) and remove the \
+                                         plaintext copy"
+                                            .into(),
+                                });
+                            }
+                        }
+                        (None, false) => {
+                            // Known value, but no mapping for this variable.
+                            let m = &matches[0];
+                            if m.environment == Environment::Production
+                                && matches!(
+                                    info.environment,
+                                    Some(Environment::Development) | Some(Environment::Test)
+                                )
+                            {
+                                findings.push(DriftFinding {
+                                    kind: DriftKind::ProductionValueInDevFile,
+                                    file: info.rel_path.clone(),
+                                    key: entry.key.clone(),
+                                    credential: Some(m.credential_name.clone()),
+                                    detail: format!(
+                                        "production credential '{}' appears in {}",
+                                        m.credential_name, info.rel_path
+                                    ),
+                                    recommendation:
+                                        "use a separate development credential; rotate the \
+                                         production key if it was shared"
+                                            .into(),
+                                });
+                            }
+                        }
+                    }
+                    // Production credential in a dev-classified file also
+                    // applies when the variable IS mapped.
+                    if let Some(mapping) = mapping {
+                        let env: String = self.conn.query_row(
+                            "SELECT environment FROM credentials WHERE id = ?1",
+                            [&mapping.credential_id],
+                            |r| r.get(0),
+                        )?;
+                        if env == Environment::Production.as_str()
+                            && matches!(
+                                info.environment,
+                                Some(Environment::Development) | Some(Environment::Test)
+                            )
+                        {
+                            findings.push(DriftFinding {
+                                kind: DriftKind::ProductionValueInDevFile,
+                                file: info.rel_path.clone(),
+                                key: entry.key.clone(),
+                                credential: Some(mapping.credential_name.clone()),
+                                detail: format!(
+                                    "production credential '{}' is written into {}",
+                                    mapping.credential_name, info.rel_path
+                                ),
+                                recommendation: "keep production values out of development \
+                                                 files; use `api-tracker run` instead"
+                                    .into(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for (_fp, sites) in value_sites.iter().filter(|(_, s)| s.len() > 1) {
+            let files: HashSet<&str> = sites.iter().map(|(f, _)| f.as_str()).collect();
+            if files.len() > 1 {
+                findings.push(crate::envgov::DriftFinding {
+                    kind: DriftKind::SameValueInMultipleFiles,
+                    file: sites[0].0.clone(),
+                    key: sites[0].1.clone(),
+                    credential: None,
+                    detail: format!(
+                        "the same value appears in {} files: {}",
+                        files.len(),
+                        sites
+                            .iter()
+                            .map(|(f, k)| format!("{f} ({k})"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    recommendation: "issue separate credentials per environment so one leak \
+                                     does not compromise every environment"
+                        .into(),
+                });
+            }
+        }
+        for var in &template_vars {
+            if !seen_vars.contains(var) && !mappings.iter().any(|m| &m.env_var == var) {
+                findings.push(crate::envgov::DriftFinding {
+                    kind: DriftKind::MissingExpectedVariable,
+                    file: String::new(),
+                    key: var.clone(),
+                    credential: None,
+                    detail: format!(
+                        "'{var}' is listed in a template (.env.example) but is neither mapped \
+                         nor present in any values file"
+                    ),
+                    recommendation: "add the credential to the vault and map it, or remove it \
+                                     from the template"
+                        .into(),
+                });
+            }
+        }
+        for mapping in &mappings {
+            if !seen_vars.contains(&mapping.env_var) {
+                findings.push(crate::envgov::DriftFinding {
+                    kind: DriftKind::MappingNotInFiles,
+                    file: String::new(),
+                    key: mapping.env_var.clone(),
+                    credential: Some(mapping.credential_name.clone()),
+                    detail: format!(
+                        "mapping '{}' is not written in any .env file",
+                        mapping.env_var
+                    ),
+                    recommendation: "expected when the project runs via `api-tracker run` — \
+                                     no action needed; otherwise export explicitly"
+                        .into(),
+                });
+            }
+        }
+        Ok(findings)
+    }
+
+    /// Explicit, reauthentication-gated export of mapped credentials to a
+    /// physical `.env` file. Atomic, owner-only permissions, never silently
+    /// overwrites, `.gitignore`-checked, redacted audit trail.
+    #[allow(clippy::too_many_arguments)]
+    pub fn env_export(
+        &mut self,
+        project: &str,
+        path: &std::path::Path,
+        vars: Option<&[String]>,
+        master_password: &SecretString,
+        overwrite: bool,
+        ttl_minutes: Option<u64>,
+    ) -> Result<EnvExportReport> {
+        self.verify_master_password(master_password)?;
+        let project_row = self.project_row_by_ident(project)?;
+        let mappings = crate::inject::list_mappings(&self.conn, &project_row.id)?;
+        let selected: Vec<_> = match vars {
+            Some(names) => {
+                let mut chosen = Vec::new();
+                for name in names {
+                    let m = mappings
+                        .iter()
+                        .find(|m| &m.env_var == name)
+                        .ok_or_else(|| {
+                            CoreError::InvalidInput(format!(
+                                "no mapping for '{name}' in project '{}'",
+                                project_row.name
+                            ))
+                        })?;
+                    chosen.push(m.clone());
+                }
+                chosen
+            }
+            None => mappings.clone(),
+        };
+        if selected.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "no mapped variables to export; configure mappings first".into(),
+            ));
+        }
+        // Ten years, in minutes: anything longer is a typo, and absurd
+        // values would overflow the expiry timestamp.
+        const MAX_TTL_MINUTES: u64 = 10 * 365 * 24 * 60;
+        if ttl_minutes.is_some_and(|ttl| ttl > MAX_TTL_MINUTES) {
+            return Err(CoreError::InvalidInput(
+                "--ttl is larger than ten years; pick a realistic lifetime".into(),
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        // Canonicalize so the recorded path is absolute: re-export and
+        // cleanup must never resolve it against a different working
+        // directory later.
+        let parent = parent.canonicalize().map_err(|e| {
+            CoreError::InvalidInput(format!("cannot access {}: {e}", parent.display()))
+        })?;
+        let path = &parent.join(path.file_name().ok_or_else(|| {
+            CoreError::InvalidInput("the export target must be a file path".into())
+        })?);
+        if path.exists() && !overwrite {
+            return Err(CoreError::InvalidInput(format!(
+                "{} already exists; pass the overwrite flag to replace it",
+                path.display()
+            )));
+        }
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let git_status = crate::envgov::gitignore_protects(&parent, &file_name);
+        if git_status == crate::envgov::GitStatus::Tracked {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is tracked by Git; exporting secrets into a tracked file would commit \
+                 them. Untrack it (git rm --cached) and gitignore it first",
+                path.display()
+            )));
+        }
+        let mut doc = crate::envfile::EnvDocument::parse(
+            "# Written by `api-tracker env export`. This file contains PLAINTEXT secrets.\n\
+             # Prefer `api-tracker run`, which injects credentials without a file.\n",
+        );
+        let mut var_names = Vec::new();
+        for mapping in &selected {
+            let value = self.decrypt_value(&mapping.credential_id)?;
+            doc.set(&mapping.env_var, value);
+            var_names.push(mapping.env_var.clone());
+        }
+        let content = doc.render();
+        if overwrite {
+            crate::envgov::atomic_write(path, &content)?;
+        } else {
+            // No-clobber create: closes the race between the exists() check
+            // above and the write (a file appearing in between is an error,
+            // not silently replaced).
+            crate::envgov::write_new(path, &content)?;
+        }
+        let expires_at = ttl_minutes.map(|minutes| {
+            clock::rfc3339_after(std::time::Duration::from_secs(minutes.saturating_mul(60)))
+        });
+        let export_id = crate::envgov::record_export(
+            &self.conn,
+            &project_row.id,
+            path,
+            &var_names,
+            &crate::envgov::content_hash(&content),
+            expires_at.as_deref(),
+        )?;
+        audit::record(
+            &self.conn,
+            "env_exported",
+            Some(&project_row.id),
+            None,
+            &format!(
+                "path={} vars={} temporary={}",
+                path.display(),
+                var_names.join(","),
+                expires_at.is_some()
+            ),
+        )?;
+        let mut warnings =
+            vec!["the exported file contains plaintext secrets; delete it when done".to_string()];
+        if git_status == crate::envgov::GitStatus::Untracked {
+            warnings.push(format!(
+                "{} is NOT covered by .gitignore — add it before committing anything",
+                path.display()
+            ));
+        }
+        Ok(EnvExportReport {
+            export_id,
+            path: path.to_string_lossy().into_owned(),
+            var_names,
+            git_status,
+            expires_at,
+            warnings,
+        })
+    }
+
+    /// Remove expired temporary exports (`all` removes every recorded
+    /// export). Files modified since export are skipped unless `force`.
+    pub fn env_cleanup(&self, all: bool, force: bool) -> Result<Vec<crate::envgov::CleanupResult>> {
+        let results =
+            crate::envgov::cleanup_exports(&self.conn, all, force, &clock::now_rfc3339())?;
+        for result in &results {
+            if result.outcome == crate::envgov::CleanupOutcome::Removed {
+                audit::record(
+                    &self.conn,
+                    "env_export_cleaned",
+                    None,
+                    None,
+                    &format!("path={}", result.path),
+                )?;
+            }
+        }
+        Ok(results)
+    }
+
+    /// Recorded exports (metadata only; values are never stored).
+    pub fn env_exports(&self, include_cleaned: bool) -> Result<Vec<crate::envgov::EnvExport>> {
+        crate::envgov::list_exports(&self.conn, include_cleaned)
+    }
+
+    // ------------------------------------------------------------------
+    // Destinations (docs/decisions/0012)
+    // ------------------------------------------------------------------
+
+    /// Configure a destination. `auth` (a token, or JSON for AWS) is
+    /// encrypted under the vault key and is write-only thereafter.
+    pub fn destination_add(
+        &self,
+        kind: &str,
+        name: &str,
+        config: serde_json::Value,
+        auth: Option<&SecretString>,
+    ) -> Result<crate::destinations::Destination> {
+        let info = crate::destinations::kind_info(kind)?;
+        if matches!(
+            info.capabilities.write,
+            crate::destinations::DestSupport::PlatformUnavailable
+        ) {
+            return Err(CoreError::Unsupported {
+                provider: kind.to_string(),
+                capability: "destination",
+                hint: format!("{} is not available on this platform", info.name),
+            });
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "destination name must not be empty".into(),
+            ));
+        }
+        // Encrypt after the id is known (the AAD binds vault + destination).
+        let id = crate::destinations::insert(&self.conn, kind, name, &config, None, None)?;
+        if let Some(auth) = auth {
+            if auth.expose().trim().is_empty() {
+                return Err(CoreError::InvalidInput(
+                    "the destination credential must not be empty".into(),
+                ));
+            }
+            let ciphertext = crypto::encrypt(
+                &self.vault_key,
+                &aad::destination_auth(&self.vault_id, &id),
+                auth.expose().as_bytes(),
+            )?;
+            self.conn.execute(
+                "UPDATE destinations SET auth_ciphertext = ?1, auth_masked = ?2 WHERE id = ?3",
+                params![ciphertext, mask_value(auth.expose()), id],
+            )?;
+        }
+        audit::record(
+            &self.conn,
+            "destination_added",
+            None,
+            None,
+            &format!("kind={kind} name={name}"),
+        )?;
+        crate::destinations::get(&self.conn, &id)
+    }
+
+    /// Remove a destination. Reauthentication-gated: it may hold an
+    /// administrative credential and drop deployed-secret bookkeeping.
+    pub fn destination_remove(
+        &self,
+        ident: &str,
+        master_password: &SecretString,
+    ) -> Result<crate::destinations::Destination> {
+        self.verify_master_password(master_password)?;
+        let dest = crate::destinations::get(&self.conn, ident)?;
+        crate::destinations::remove(&self.conn, &dest.id)?;
+        audit::record(
+            &self.conn,
+            "destination_removed",
+            None,
+            None,
+            &format!("kind={} name={}", dest.kind, dest.name),
+        )?;
+        Ok(dest)
+    }
+
+    pub fn destination_list(&self) -> Result<Vec<crate::destinations::Destination>> {
+        crate::destinations::list(&self.conn)
+    }
+
+    pub fn destination_get(&self, ident: &str) -> Result<crate::destinations::Destination> {
+        crate::destinations::get(&self.conn, ident)
+    }
+
+    fn destination_auth_secret(
+        &self,
+        dest: &crate::destinations::Destination,
+    ) -> Result<Option<SecretString>> {
+        let Some(ciphertext) = crate::destinations::auth_ciphertext(&self.conn, &dest.id)? else {
+            return Ok(None);
+        };
+        let plaintext = crypto::decrypt(
+            &self.vault_key,
+            &aad::destination_auth(&self.vault_id, &dest.id),
+            &ciphertext,
+            "destination credential",
+        )?;
+        Ok(Some(SecretString::new(
+            String::from_utf8(plaintext.expose().to_vec()).map_err(|_| {
+                CoreError::VaultCorrupted("destination credential is not valid UTF-8")
+            })?,
+        )))
+    }
+
+    /// Build the runtime adapter for a configured destination.
+    fn destination_adapter<'a>(
+        &self,
+        dest: &crate::destinations::Destination,
+        http: &'a dyn crate::http::HttpClient,
+        runner: &'a dyn crate::destinations::CommandRunner,
+    ) -> Result<Box<dyn crate::destinations::DestinationAdapter + 'a>> {
+        use crate::destinations as d;
+        let cfg = |key: &str| -> Option<String> {
+            dest.config
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        let auth = self.destination_auth_secret(dest)?;
+        let need_auth = || {
+            auth.clone().ok_or_else(|| {
+                CoreError::InvalidInput(format!(
+                    "destination '{}' has no stored credential; re-add it with one",
+                    dest.name
+                ))
+            })
+        };
+        match dest.kind.as_str() {
+            "macos_keychain" => {
+                if !cfg!(target_os = "macos") {
+                    return Err(CoreError::Unsupported {
+                        provider: dest.kind.clone(),
+                        capability: "destination",
+                        hint: "the macOS Keychain is only available on macOS".into(),
+                    });
+                }
+                Ok(Box::new(d::MacKeychainDestination {
+                    runner,
+                    account: cfg("account").unwrap_or_else(|| "api-tracker".to_string()),
+                }))
+            }
+            "aws_secrets_manager" => {
+                let region = cfg("region").ok_or_else(|| {
+                    CoreError::InvalidInput("AWS destination config needs a region".into())
+                })?;
+                Ok(Box::new(d::AwsSecretsManagerDestination {
+                    http,
+                    creds: d::AwsCredentials::from_json(&need_auth()?)?,
+                    region,
+                }))
+            }
+            "github_actions" => Ok(Box::new(d::GithubActionsDestination {
+                http,
+                token: need_auth()?,
+                owner: cfg("owner").ok_or_else(|| {
+                    CoreError::InvalidInput("GitHub destination config needs owner".into())
+                })?,
+                repo: cfg("repo").ok_or_else(|| {
+                    CoreError::InvalidInput("GitHub destination config needs repo".into())
+                })?,
+            })),
+            "vercel" => {
+                let targets = dest
+                    .config
+                    .get("targets")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| {
+                        vec![
+                            "production".to_string(),
+                            "preview".to_string(),
+                            "development".to_string(),
+                        ]
+                    });
+                Ok(Box::new(d::VercelDestination {
+                    http,
+                    token: need_auth()?,
+                    project_id: cfg("project_id").ok_or_else(|| {
+                        CoreError::InvalidInput("Vercel destination config needs project_id".into())
+                    })?,
+                    team_id: cfg("team_id"),
+                    targets,
+                }))
+            }
+            other => Err(CoreError::Unsupported {
+                provider: other.to_string(),
+                capability: "destination",
+                hint: "this destination kind has no runtime adapter".into(),
+            }),
+        }
+    }
+
+    /// Verify a destination's authentication/reachability.
+    pub fn destination_test(
+        &self,
+        ident: &str,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<String> {
+        let dest = crate::destinations::get(&self.conn, ident)?;
+        let adapter = self.destination_adapter(&dest, http, runner)?;
+        match adapter.test() {
+            Ok(detail) => {
+                crate::destinations::record_test(&self.conn, &dest.id, None)?;
+                Ok(detail)
+            }
+            Err(e) => {
+                crate::destinations::record_test(&self.conn, &dest.id, Some(&e.to_string()))?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Attach a credential to a destination under a secret name.
+    pub fn destination_attach(
+        &self,
+        credential: &str,
+        destination: &str,
+        secret_name: &str,
+        environment: &str,
+    ) -> Result<()> {
+        let cred = self.resolve_credential(credential)?;
+        let dest = crate::destinations::get(&self.conn, destination)?;
+        crate::destinations::attach(&self.conn, &cred.id, &dest.id, secret_name, environment)?;
+        audit::record(
+            &self.conn,
+            "destination_attached",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("destination={} secret={secret_name}", dest.name),
+        )?;
+        Ok(())
+    }
+
+    pub fn destination_detach(
+        &self,
+        credential: &str,
+        destination: &str,
+        secret_name: Option<&str>,
+    ) -> Result<usize> {
+        let cred = self.resolve_credential(credential)?;
+        let dest = crate::destinations::get(&self.conn, destination)?;
+        let n = crate::destinations::detach(&self.conn, &cred.id, &dest.id, secret_name)?;
+        if n > 0 {
+            audit::record(
+                &self.conn,
+                "destination_detached",
+                Some(&cred.project_id),
+                Some(&cred.id),
+                &format!("destination={}", dest.name),
+            )?;
+        }
+        Ok(n)
+    }
+
+    pub fn destination_attachments(
+        &self,
+        credential: Option<&str>,
+    ) -> Result<Vec<crate::destinations::Attachment>> {
+        match credential {
+            Some(selector) => {
+                let cred = self.resolve_credential(selector)?;
+                crate::destinations::attachments_for_credential(&self.conn, &cred.id)
+            }
+            None => crate::destinations::all_attachments(&self.conn),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Synchronization plans (docs/decisions/0012)
+    // ------------------------------------------------------------------
+
+    fn validation_for_kind(kind: &str) -> (String, bool) {
+        match crate::destinations::kind_info(kind) {
+            Ok(info) => {
+                let validation = match (info.capabilities.read, info.capabilities.validation) {
+                    (crate::destinations::DestSupport::Implemented, _) => {
+                        "value read-back and fingerprint comparison".to_string()
+                    }
+                    (_, crate::destinations::DestSupport::Implemented) => {
+                        "existence check (the destination never returns values)".to_string()
+                    }
+                    _ => "none available".to_string(),
+                };
+                let writable = matches!(
+                    info.capabilities.write,
+                    crate::destinations::DestSupport::Implemented
+                );
+                (validation, writable)
+            }
+            Err(_) => ("none available".to_string(), false),
+        }
+    }
+
+    /// Generate (but do not execute) a synchronization plan for a
+    /// credential's current value. This is the dry run every rollout starts
+    /// from.
+    pub fn sync_plan_create(
+        &self,
+        credential: &str,
+        note: &str,
+    ) -> Result<crate::syncplan::SyncPlan> {
+        let cred = self.resolve_credential(credential)?;
+        if cred.linked_credential_id.is_some() {
+            return Err(CoreError::InvalidInput(
+                "this record is a reference; plan against the credential it points to".into(),
+            ));
+        }
+        let to_version = self.value_version_of(&cred.id)?;
+        let from_version: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT MAX(version) FROM credential_versions WHERE credential_id = ?1",
+                [&cred.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let mut steps = Vec::new();
+        let mut manual_steps = Vec::new();
+        for attachment in crate::destinations::attachments_for_credential(&self.conn, &cred.id)? {
+            let (validation, writable) = Self::validation_for_kind(&attachment.destination_kind);
+            let action =
+                if writable {
+                    crate::syncplan::ACTION_WRITE
+                } else {
+                    manual_steps.push(format!(
+                    "update '{}' at destination '{}' by hand (kind '{}' has no implemented write)",
+                    attachment.secret_name, attachment.destination_name, attachment.destination_kind
+                ));
+                    crate::syncplan::ACTION_MANUAL
+                };
+            steps.push(crate::syncplan::SyncStep {
+                destination_id: attachment.destination_id,
+                destination_name: attachment.destination_name,
+                destination_kind: attachment.destination_kind,
+                secret_name: attachment.secret_name,
+                environment: attachment.environment,
+                action: action.to_string(),
+                status: crate::syncplan::STEP_PLANNED.to_string(),
+                detail: String::new(),
+                validation,
+                rollback_available: from_version.is_some() && writable,
+                executed_at: None,
+                verified_at: None,
+                rolled_back_at: None,
+            });
+        }
+        // Injection mappings resolve the vault value at run time: include an
+        // informational no-op step so the plan is complete and honest.
+        let mapping_count: i64 = self.conn.query_row(
+            "SELECT count(*) FROM credential_env_mappings WHERE credential_id = ?1",
+            [&cred.id],
+            |r| r.get(0),
+        )?;
+        if mapping_count > 0 {
+            steps.push(crate::syncplan::SyncStep {
+                destination_id: "env_mapping".into(),
+                destination_name: "local environment mappings".into(),
+                destination_kind: "env_mapping".into(),
+                secret_name: format!("{mapping_count} mapping(s)"),
+                environment: String::new(),
+                action: crate::syncplan::ACTION_NONE.into(),
+                status: crate::syncplan::STEP_PLANNED.into(),
+                detail: "`api-tracker run` always injects the current vault value".into(),
+                validation: "not needed (resolved at injection time)".into(),
+                rollback_available: false,
+                executed_at: None,
+                verified_at: None,
+                rolled_back_at: None,
+            });
+        }
+        // Live exported .env files that carry a variable mapped to this
+        // credential must be re-exported.
+        for export in crate::envgov::list_exports(&self.conn, false)? {
+            let vars: Vec<&str> = export.var_names.split(',').collect();
+            let mapped: Vec<String> = self
+                .conn
+                .prepare(
+                    "SELECT env_var FROM credential_env_mappings
+                     WHERE credential_id = ?1 AND project_id = ?2",
+                )?
+                .query_map(params![cred.id, export.project_id], |r| {
+                    r.get::<_, String>(0)
+                })?
+                .collect::<std::result::Result<_, _>>()?;
+            if mapped.iter().any(|v| vars.contains(&v.as_str())) {
+                steps.push(crate::syncplan::SyncStep {
+                    destination_id: format!("env_export:{}", export.id),
+                    destination_name: export.path.clone(),
+                    destination_kind: "env_export".into(),
+                    secret_name: mapped.join(","),
+                    environment: String::new(),
+                    action: crate::syncplan::ACTION_REEXPORT.into(),
+                    status: crate::syncplan::STEP_PLANNED.into(),
+                    detail: "re-write the exported file with the new value".into(),
+                    validation: "file content hash comparison".into(),
+                    rollback_available: from_version.is_some(),
+                    executed_at: None,
+                    verified_at: None,
+                    rolled_back_at: None,
+                });
+            }
+        }
+        let plan_id = crate::syncplan::insert_plan(
+            &self.conn,
+            &cred.id,
+            from_version,
+            to_version,
+            note,
+            &steps,
+        )?;
+        audit::record(
+            &self.conn,
+            "sync_plan_created",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("plan={plan_id} steps={}", steps.len()),
+        )?;
+        self.sync_plan_get(&plan_id)
+    }
+
+    /// Load a plan with display fields and affected projects recomputed.
+    pub fn sync_plan_get(&self, plan_id: &str) -> Result<crate::syncplan::SyncPlan> {
+        let stored = crate::syncplan::load_plan(&self.conn, plan_id)?;
+        self.hydrate_plan(stored)
+    }
+
+    fn hydrate_plan(
+        &self,
+        stored: crate::syncplan::StoredPlan,
+    ) -> Result<crate::syncplan::SyncPlan> {
+        let cred =
+            self.credential_row_by_id(&stored.credential_id)?
+                .ok_or(CoreError::NotFound {
+                    kind: "credential",
+                    ident: stored.credential_id.clone(),
+                })?;
+        let project = self.project_row_by_ident(&cred.project_id)?;
+        let mut affected: Vec<String> = vec![project.name.clone()];
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT p.name FROM credentials c JOIN projects p ON p.id = c.project_id
+             WHERE c.linked_credential_id = ?1",
+        )?;
+        let rows = stmt.query_map([&cred.id], |r| r.get::<_, String>(0))?;
+        for r in rows {
+            let name = r?;
+            if !affected.contains(&name) {
+                affected.push(name);
+            }
+        }
+        let from_masked: Option<String> = match stored.from_version {
+            Some(v) => self
+                .conn
+                .query_row(
+                    "SELECT masked_value FROM credential_versions
+                     WHERE credential_id = ?1 AND version = ?2",
+                    params![stored.credential_id, v],
+                    |r| r.get(0),
+                )
+                .optional()?,
+            None => None,
+        };
+        let mut manual_steps = Vec::new();
+        let steps: Vec<crate::syncplan::SyncStep> = stored
+            .steps
+            .into_iter()
+            .map(|s| {
+                let (name, kind) =
+                    if let Some(export_id) = s.destination_id.strip_prefix("env_export:") {
+                        let path: Option<String> = self
+                            .conn
+                            .query_row(
+                                "SELECT path FROM env_exports WHERE id = ?1",
+                                [export_id],
+                                |r| r.get(0),
+                            )
+                            .optional()
+                            .ok()
+                            .flatten();
+                        (
+                            path.unwrap_or_else(|| s.destination_id.clone()),
+                            "env_export".to_string(),
+                        )
+                    } else if s.destination_id == "env_mapping" {
+                        (
+                            "local environment mappings".to_string(),
+                            "env_mapping".to_string(),
+                        )
+                    } else {
+                        match crate::destinations::get(&self.conn, &s.destination_id) {
+                            Ok(d) => (d.name, d.kind),
+                            Err(_) => (
+                                format!("{} (removed)", s.destination_id),
+                                "removed".to_string(),
+                            ),
+                        }
+                    };
+                let (validation, writable) = Self::validation_for_kind(&kind);
+                if s.action == crate::syncplan::ACTION_MANUAL {
+                    manual_steps.push(format!(
+                        "update '{}' at destination '{name}' by hand",
+                        s.secret_name
+                    ));
+                }
+                crate::syncplan::SyncStep {
+                    destination_id: s.destination_id,
+                    destination_name: name,
+                    destination_kind: kind.clone(),
+                    secret_name: s.secret_name,
+                    environment: s.environment,
+                    action: s.action.clone(),
+                    status: s.status,
+                    detail: s.detail,
+                    validation: match (s.action.as_str(), kind.as_str()) {
+                        ("none", _) => "not needed (resolved at injection time)".to_string(),
+                        ("reexport", _) => "file content hash comparison".to_string(),
+                        _ => validation,
+                    },
+                    rollback_available: stored.from_version.is_some()
+                        && writable
+                        && s.action == crate::syncplan::ACTION_WRITE
+                        || (s.action == crate::syncplan::ACTION_REEXPORT
+                            && stored.from_version.is_some()),
+                    executed_at: s.executed_at,
+                    verified_at: s.verified_at,
+                    rolled_back_at: s.rolled_back_at,
+                }
+            })
+            .collect();
+        let current_version = self.value_version_of(&stored.credential_id)?;
+        let status = if stored.status == crate::syncplan::PLAN_PLANNED
+            && current_version != stored.to_version
+        {
+            crate::syncplan::PLAN_STALE.to_string()
+        } else {
+            stored.status
+        };
+        Ok(crate::syncplan::SyncPlan {
+            id: stored.id,
+            credential_id: stored.credential_id,
+            credential_name: cred.name,
+            project_name: project.name,
+            from_version: stored.from_version,
+            from_masked,
+            to_version: stored.to_version,
+            to_masked: cred.masked_value,
+            created_at: stored.created_at,
+            status,
+            note: stored.note,
+            affected_projects: affected,
+            manual_steps,
+            steps,
+        })
+    }
+
+    pub fn sync_plans(
+        &self,
+        credential: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::syncplan::SyncPlan>> {
+        let credential_id = match credential {
+            Some(selector) => Some(self.resolve_credential(selector)?.id),
+            None => None,
+        };
+        let stored = crate::syncplan::list_plans(&self.conn, credential_id.as_deref(), limit)?;
+        stored.into_iter().map(|p| self.hydrate_plan(p)).collect()
+    }
+
+    /// Execute a plan's pending (or previously failed — retry) steps.
+    /// Reauthentication-gated; never runs automatically.
+    pub fn sync_plan_execute(
+        &mut self,
+        plan_id: &str,
+        only_destination: Option<&str>,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<crate::syncplan::SyncPlan> {
+        self.verify_master_password(master_password)?;
+        let stored = crate::syncplan::load_plan(&self.conn, plan_id)?;
+        let current_version = self.value_version_of(&stored.credential_id)?;
+        if current_version != stored.to_version {
+            crate::syncplan::update_plan_status(&self.conn, plan_id, crate::syncplan::PLAN_STALE)?;
+            return Err(CoreError::InvalidInput(format!(
+                "the credential changed since this plan was created (now v{current_version}, \
+                 plan targets v{}); generate a new plan",
+                stored.to_version
+            )));
+        }
+        let value = self.decrypt_credential_version(&stored.credential_id, stored.to_version)?;
+        let cred =
+            self.credential_row_by_id(&stored.credential_id)?
+                .ok_or(CoreError::NotFound {
+                    kind: "credential",
+                    ident: stored.credential_id.clone(),
+                })?;
+        for step in &stored.steps {
+            if let Some(only) = only_destination {
+                let matches_dest = step.destination_id == only
+                    || crate::destinations::get(&self.conn, &step.destination_id)
+                        .map(|d| d.name.eq_ignore_ascii_case(only))
+                        .unwrap_or(false);
+                if !matches_dest {
+                    continue;
+                }
+            }
+            if !matches!(
+                step.status.as_str(),
+                crate::syncplan::STEP_PLANNED | crate::syncplan::STEP_FAILED
+            ) {
+                continue;
+            }
+            if step.action == crate::syncplan::ACTION_MANUAL {
+                // A manual step cannot be executed programmatically; mark it
+                // skipped (with the reason) instead of failing forever.
+                crate::syncplan::update_step(
+                    &self.conn,
+                    plan_id,
+                    &step.destination_id,
+                    &step.secret_name,
+                    crate::syncplan::STEP_SKIPPED,
+                    "manual step — perform it by hand, then verify with `destination drift`",
+                )?;
+                continue;
+            }
+            let outcome = self.execute_step(&stored, step, &cred, &value, http, runner);
+            match outcome {
+                Ok(detail) => crate::syncplan::update_step(
+                    &self.conn,
+                    plan_id,
+                    &step.destination_id,
+                    &step.secret_name,
+                    crate::syncplan::STEP_EXECUTED,
+                    &detail,
+                )?,
+                Err(e) => crate::syncplan::update_step(
+                    &self.conn,
+                    plan_id,
+                    &step.destination_id,
+                    &step.secret_name,
+                    crate::syncplan::STEP_FAILED,
+                    &e.to_string(),
+                )?,
+            }
+        }
+        let refreshed = crate::syncplan::load_plan(&self.conn, plan_id)?;
+        let any_failed = refreshed
+            .steps
+            .iter()
+            .any(|s| s.status == crate::syncplan::STEP_FAILED);
+        let all_done = refreshed.steps.iter().all(|s| {
+            matches!(
+                s.status.as_str(),
+                crate::syncplan::STEP_EXECUTED | crate::syncplan::STEP_SKIPPED
+            )
+        });
+        let status = if any_failed {
+            crate::syncplan::PLAN_PARTIAL
+        } else if all_done {
+            crate::syncplan::PLAN_EXECUTED
+        } else {
+            crate::syncplan::PLAN_PLANNED
+        };
+        crate::syncplan::update_plan_status(&self.conn, plan_id, status)?;
+        audit::record(
+            &self.conn,
+            "sync_plan_executed",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("plan={plan_id} status={status}"),
+        )?;
+        self.sync_plan_get(plan_id)
+    }
+
+    fn execute_step(
+        &self,
+        plan: &crate::syncplan::StoredPlan,
+        step: &crate::syncplan::StoredStep,
+        cred: &CredentialRow,
+        value: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<String> {
+        match step.action.as_str() {
+            crate::syncplan::ACTION_NONE => {
+                Ok("no write needed; mappings resolve the current value".into())
+            }
+            crate::syncplan::ACTION_MANUAL => Err(CoreError::Unsupported {
+                provider: step.destination_id.clone(),
+                capability: "write",
+                hint: "this step must be performed by hand".into(),
+            }),
+            crate::syncplan::ACTION_REEXPORT => {
+                let export_id = step
+                    .destination_id
+                    .strip_prefix("env_export:")
+                    .ok_or_else(|| CoreError::VaultCorrupted("malformed re-export step"))?;
+                self.rewrite_export(export_id, &cred.id, value)
+            }
+            crate::syncplan::ACTION_WRITE => {
+                let dest = crate::destinations::get(&self.conn, &step.destination_id)?;
+                let adapter = self.destination_adapter(&dest, http, runner)?;
+                let receipt = adapter.write(&step.secret_name, value)?;
+                // Verify: read-back where supported, else existence.
+                let drift = match adapter.read(&step.secret_name)? {
+                    Some(stored_value) if !stored_value.expose().is_empty() => {
+                        let stored_fp = reuse::fingerprint(&self.fingerprint_key, &stored_value)?;
+                        if stored_fp == cred.fingerprint {
+                            "in_sync"
+                        } else {
+                            "drifted"
+                        }
+                    }
+                    _ => match adapter.exists(&step.secret_name)? {
+                        Some(true) => "present_unverifiable",
+                        Some(false) => "missing",
+                        None => "unknown",
+                    },
+                };
+                crate::destinations::record_sync(
+                    &self.conn,
+                    &cred.id,
+                    &dest.id,
+                    &step.secret_name,
+                    plan.to_version,
+                    drift,
+                )?;
+                crate::syncplan::mark_step_verified(
+                    &self.conn,
+                    &plan.id,
+                    &step.destination_id,
+                    &step.secret_name,
+                )?;
+                if drift == "drifted" {
+                    return Err(CoreError::Provider(format!(
+                        "wrote '{}' but the read-back value does not match",
+                        step.secret_name
+                    )));
+                }
+                Ok(format!("{receipt}; verification: {drift}"))
+            }
+            other => Err(CoreError::InvalidInput(format!(
+                "unknown step action '{other}'"
+            ))),
+        }
+    }
+
+    /// Re-write one recorded export file with the given value substituted
+    /// for this credential's mapped variables.
+    fn rewrite_export(
+        &self,
+        export_id: &str,
+        credential_id: &str,
+        value: &SecretString,
+    ) -> Result<String> {
+        let (path, project_id, recorded_hash): (String, String, String) = self
+            .conn
+            .query_row(
+                "SELECT path, project_id, content_hash FROM env_exports
+                 WHERE id = ?1 AND cleaned_at IS NULL",
+                [export_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?
+            .ok_or(CoreError::NotFound {
+                kind: "export",
+                ident: export_id.to_string(),
+            })?;
+        let path = PathBuf::from(path);
+        if !path.exists() {
+            return Err(CoreError::InvalidInput(format!(
+                "{} no longer exists; clean up the export record",
+                path.display()
+            )));
+        }
+        let content = std::fs::read_to_string(&path)?;
+        if crate::envgov::content_hash(&content) != recorded_hash {
+            return Err(CoreError::InvalidInput(format!(
+                "{} changed since it was exported; refusing to rewrite it — \
+                 re-export explicitly (`env export --overwrite`) if intended",
+                path.display()
+            )));
+        }
+        let mut doc = crate::envfile::EnvDocument::parse(&content);
+        let vars: Vec<String> = self
+            .conn
+            .prepare(
+                "SELECT env_var FROM credential_env_mappings
+                 WHERE credential_id = ?1 AND project_id = ?2",
+            )?
+            .query_map(params![credential_id, project_id], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut updated = 0;
+        for var in &vars {
+            if doc.get(var).is_some() {
+                doc.set(var, value.clone());
+                updated += 1;
+            }
+        }
+        let rendered = doc.render();
+        crate::envgov::atomic_write(&path, &rendered)?;
+        self.conn.execute(
+            "UPDATE env_exports SET content_hash = ?1 WHERE id = ?2",
+            params![crate::envgov::content_hash(&rendered), export_id],
+        )?;
+        Ok(format!(
+            "re-exported {updated} variable(s) into {}",
+            path.display()
+        ))
+    }
+
+    /// Roll executed steps back to the plan's `from_version` where supported.
+    pub fn sync_plan_rollback(
+        &mut self,
+        plan_id: &str,
+        only_destination: Option<&str>,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<crate::syncplan::SyncPlan> {
+        self.verify_master_password(master_password)?;
+        let stored = crate::syncplan::load_plan(&self.conn, plan_id)?;
+        let from_version = stored.from_version.ok_or_else(|| {
+            CoreError::InvalidInput("this plan has no previous version to roll back to".into())
+        })?;
+        let old_value = self.decrypt_credential_version(&stored.credential_id, from_version)?;
+        let cred =
+            self.credential_row_by_id(&stored.credential_id)?
+                .ok_or(CoreError::NotFound {
+                    kind: "credential",
+                    ident: stored.credential_id.clone(),
+                })?;
+        let mut rolled_back_any = false;
+        for step in &stored.steps {
+            if let Some(only) = only_destination {
+                let matches_dest = step.destination_id == only
+                    || crate::destinations::get(&self.conn, &step.destination_id)
+                        .map(|d| d.name.eq_ignore_ascii_case(only))
+                        .unwrap_or(false);
+                if !matches_dest {
+                    continue;
+                }
+            }
+            if step.status != crate::syncplan::STEP_EXECUTED {
+                continue;
+            }
+            let outcome: Result<String> = match step.action.as_str() {
+                crate::syncplan::ACTION_WRITE => {
+                    let dest = crate::destinations::get(&self.conn, &step.destination_id)?;
+                    let adapter = self.destination_adapter(&dest, http, runner)?;
+                    let receipt = adapter.write(&step.secret_name, &old_value)?;
+                    crate::destinations::record_sync(
+                        &self.conn,
+                        &cred.id,
+                        &dest.id,
+                        &step.secret_name,
+                        from_version,
+                        "rolled_back",
+                    )?;
+                    Ok(receipt)
+                }
+                crate::syncplan::ACTION_REEXPORT => {
+                    let export_id = step
+                        .destination_id
+                        .strip_prefix("env_export:")
+                        .ok_or_else(|| CoreError::VaultCorrupted("malformed re-export step"))?;
+                    self.rewrite_export(export_id, &cred.id, &old_value)
+                }
+                _ => Ok("nothing to roll back".into()),
+            };
+            match outcome {
+                Ok(detail) => {
+                    rolled_back_any = true;
+                    crate::syncplan::update_step(
+                        &self.conn,
+                        plan_id,
+                        &step.destination_id,
+                        &step.secret_name,
+                        crate::syncplan::STEP_ROLLED_BACK,
+                        &format!("rolled back to v{from_version}: {detail}"),
+                    )?
+                }
+                Err(e) => crate::syncplan::update_step(
+                    &self.conn,
+                    plan_id,
+                    &step.destination_id,
+                    &step.secret_name,
+                    crate::syncplan::STEP_FAILED,
+                    &format!("rollback failed: {e}"),
+                )?,
+            }
+        }
+        // Never report a rollback that did not happen: the plan status only
+        // changes when at least one step actually rolled back.
+        if !rolled_back_any {
+            return Err(CoreError::InvalidInput(
+                "no executed step matched — nothing was rolled back (check the \
+                 --destination filter and step statuses)"
+                    .into(),
+            ));
+        }
+        crate::syncplan::update_plan_status(
+            &self.conn,
+            plan_id,
+            crate::syncplan::PLAN_ROLLED_BACK,
+        )?;
+        audit::record(
+            &self.conn,
+            "sync_plan_rolled_back",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("plan={plan_id} to_version={from_version}"),
+        )?;
+        self.sync_plan_get(plan_id)
+    }
+
+    /// Check every attachment (optionally one credential's) for drift.
+    pub fn destination_drift_check(
+        &self,
+        credential: Option<&str>,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<Vec<crate::destinations::Attachment>> {
+        let attachments = self.destination_attachments(credential)?;
+        for attachment in &attachments {
+            let Ok(dest) = crate::destinations::get(&self.conn, &attachment.destination_id) else {
+                continue;
+            };
+            let Ok(adapter) = self.destination_adapter(&dest, http, runner) else {
+                continue;
+            };
+            let cred_fp: Vec<u8> = self.conn.query_row(
+                "SELECT fingerprint FROM credentials WHERE id = ?1",
+                [&attachment.credential_id],
+                |r| r.get(0),
+            )?;
+            let drift = match adapter.read(&attachment.secret_name) {
+                Ok(Some(value)) if !value.expose().is_empty() => {
+                    let fp = reuse::fingerprint(&self.fingerprint_key, &value)?;
+                    if fp == cred_fp {
+                        "in_sync"
+                    } else {
+                        "drifted"
+                    }
+                }
+                Ok(_) => match adapter.exists(&attachment.secret_name) {
+                    Ok(Some(true)) => "present_unverifiable",
+                    Ok(Some(false)) => "missing",
+                    _ => "unknown",
+                },
+                Err(_) => "unknown",
+            };
+            crate::destinations::record_verify(
+                &self.conn,
+                &attachment.credential_id,
+                &attachment.destination_id,
+                &attachment.secret_name,
+                drift,
+            )?;
+        }
+        self.destination_attachments(credential)
+    }
 }
 
 /// A provider connection's stored state (no secrets; the key is masked).
@@ -3422,6 +5135,37 @@ pub struct ProviderProjectOverview {
 /// unlocking the vault. Used by the pre-commit hook, which must run during a
 /// commit without prompting for the master password. Suppression keys carry
 /// no secret material.
+/// One entry in a credential's version history (masked values only).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CredentialVersionInfo {
+    pub version: i64,
+    pub masked_value: String,
+    pub created_at: String,
+    pub reason: String,
+    pub current: bool,
+}
+
+/// The result of importing (or skipping) one `.env` variable.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvImportOutcome {
+    pub key: String,
+    /// `imported`, `mapped_existing`, or `skipped`.
+    pub action: String,
+    pub credential: Option<String>,
+    pub note: String,
+}
+
+/// The result of an explicit `.env` export (no values).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EnvExportReport {
+    pub export_id: String,
+    pub path: String,
+    pub var_names: Vec<String>,
+    pub git_status: crate::envgov::GitStatus,
+    pub expires_at: Option<String>,
+    pub warnings: Vec<String>,
+}
+
 pub fn load_suppression_keys(conn: &Connection) -> Result<HashSet<String>> {
     let mut stmt = conn.prepare("SELECT suppression_key FROM scan_suppressions")?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;

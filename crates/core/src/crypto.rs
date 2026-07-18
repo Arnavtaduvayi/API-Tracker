@@ -191,6 +191,23 @@ pub mod aad {
     pub fn session(session_id: &str) -> String {
         format!("api-tracker:v1:session:{session_id}")
     }
+    /// A retained prior credential value (version history), bound to its
+    /// version number so rows cannot be swapped between versions.
+    pub fn credential_version(
+        vault_id: &str,
+        project_id: &str,
+        credential_id: &str,
+        version: i64,
+    ) -> String {
+        format!(
+            "api-tracker:v1:credential-version:{vault_id}:{project_id}:{credential_id}:{version}"
+        )
+    }
+    /// A destination's administrative credential (vault-level, encrypted
+    /// under the vault key; not tied to any project).
+    pub fn destination_auth(vault_id: &str, destination_id: &str) -> String {
+        format!("api-tracker:v1:destination-auth:{vault_id}:{destination_id}")
+    }
 }
 
 #[cfg(test)]

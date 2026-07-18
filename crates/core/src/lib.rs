@@ -29,7 +29,10 @@ pub mod clock;
 pub mod connectors;
 pub mod crypto;
 pub mod db;
+pub mod destinations;
 pub mod docwatch;
+pub mod envfile;
+pub mod envgov;
 pub mod error;
 pub mod gitrepo;
 pub mod hooks;
@@ -47,6 +50,7 @@ pub mod secret;
 pub mod session;
 pub mod settings;
 pub mod status;
+pub mod syncplan;
 pub mod usage;
 pub mod vault;
 

@@ -44,6 +44,8 @@ pub enum KeyCmd {
         #[arg(long)]
         sync: bool,
     },
+    /// Show a credential's retained value versions (masked; reauth).
+    Versions { key: String },
 }
 
 #[derive(Args)]
@@ -148,6 +150,7 @@ fn optional_date(raw: Option<String>) -> Option<Option<String>> {
 pub fn run(ctx: &Ctx, cmd: KeyCmd) -> Result<()> {
     match cmd {
         KeyCmd::Add(args) => add(ctx, args),
+        KeyCmd::Versions { key } => versions(ctx, &key),
         KeyCmd::List { project } => {
             let (vault, _token) = ctx.unlocked()?;
             let credentials = vault.list_credentials(project.as_deref())?;
@@ -339,6 +342,36 @@ fn add(ctx: &Ctx, args: AddArgs) -> Result<()> {
         println!(
             "Stored value: {} (encrypted at rest)",
             credential.masked_value
+        );
+    });
+    Ok(())
+}
+
+fn versions(ctx: &Ctx, key: &str) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    eprintln!("Reauthentication required to view version history.");
+    let password = ctx::master_password()?;
+    let history = vault.credential_version_history(key, &password)?;
+    render::emit(ctx.json, &history, || {
+        let rows: Vec<Vec<String>> = history
+            .iter()
+            .map(|v| {
+                vec![
+                    format!("v{}", v.version),
+                    v.masked_value.clone(),
+                    v.created_at.clone(),
+                    if v.current {
+                        "current".into()
+                    } else {
+                        v.reason.clone()
+                    },
+                ]
+            })
+            .collect();
+        render::table(&["VERSION", "VALUE (MASKED)", "AT", "NOTE"], &rows);
+        println!(
+            "\nOld versions exist so destination rollback works (`sync rollback`); they are \
+             encrypted like current values and pruned automatically."
         );
     });
     Ok(())

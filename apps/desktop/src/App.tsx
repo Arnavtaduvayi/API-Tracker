@@ -21,6 +21,9 @@ import { ProviderDetail } from "./components/ProviderDetail";
 import { ScanView } from "./components/ScanView";
 import { AlertsView } from "./components/AlertsView";
 import { UsageView } from "./components/UsageView";
+import { EnvView } from "./components/EnvView";
+import { DestinationsView } from "./components/DestinationsView";
+import { SyncView } from "./components/SyncView";
 
 export type View =
   | { name: "projects" }
@@ -33,6 +36,9 @@ export type View =
   | { name: "providers" }
   | { name: "provider"; id: string }
   | { name: "scan" }
+  | { name: "env" }
+  | { name: "destinations" }
+  | { name: "sync" }
   | { name: "alerts" }
   | { name: "usage" }
   | { name: "settings" }
@@ -102,6 +108,15 @@ export default function App() {
         </button>
         <button className="link" onClick={() => setView({ name: "scan" })}>
           Scan
+        </button>
+        <button className="link" onClick={() => setView({ name: "env" })}>
+          Env files
+        </button>
+        <button className="link" onClick={() => setView({ name: "destinations" })}>
+          Destinations
+        </button>
+        <button className="link" onClick={() => setView({ name: "sync" })}>
+          Sync plans
         </button>
         <button className="link" onClick={() => setView({ name: "alerts" })}>
           Alerts
@@ -176,6 +191,9 @@ export default function App() {
         <ProviderDetail id={view.id} onBack={() => setView({ name: "providers" })} />
       )}
       {view.name === "scan" && <ScanView />}
+      {view.name === "env" && <EnvView />}
+      {view.name === "destinations" && <DestinationsView />}
+      {view.name === "sync" && <SyncView />}
       {view.name === "alerts" && <AlertsView />}
       {view.name === "usage" && <UsageView />}
       {view.name === "settings" && <SettingsView dataDir={dataDir} />}

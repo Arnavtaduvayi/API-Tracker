@@ -1,7 +1,10 @@
 # Architecture Overview
 
-Current state: the "local foundation" milestone — encrypted vault, project
-and credential management, reuse detection, backups, CLI + desktop parity.
+Current state: milestones 1–5 — encrypted vault, project/credential
+management, reuse detection, backups, provider catalog + connectors,
+scanning + hooks, monitoring + doc watching, OpenAI usage/cost sync,
+`.env` governance, destinations, and synchronization plans. CLI + desktop
+parity throughout.
 
 ## Workspace
 
@@ -27,7 +30,17 @@ and credential management, reuse detection, backups, CLI + desktop parity.
 │  session   split-token CLI sessions                          │
 │  settings  auto-lock + thresholds                            │
 │  audit     local audit trail                                 │
-│  providers static informational catalog                      │
+│  providers manifest catalog + capability matrix              │
+│  scanner/gitrepo/hooks   local secret scanning + pre-commit  │
+│  alerts/monitor/docwatch alert lifecycle + doc watching      │
+│  connectors/http/openai  provider adapters (mockable HTTP)   │
+│  usage/pricing/budget    snapshots, estimates, budgets       │
+│  permissions/activity    scopes + suspicious-activity rules  │
+│  inject    credential→env mappings, process sessions         │
+│  envfile/envgov          lossless .env parsing + governance  │
+│  destinations            deployment adapters (keychain, AWS, │
+│                          GitHub Actions, Vercel) + catalog   │
+│  syncplan  reviewable value-change rollout plans             │
 └──────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -39,7 +52,7 @@ Both frontends resolve the same data directory (`API_TRACKER_DIR` override,
 platform default otherwise), so they operate on the same vault concurrently
 (SQLite WAL + busy timeout).
 
-## Data model (schema v1)
+## Data model (schema v5)
 
 - `vault_meta` — key/value: vault id, crypto version, KDF params, master
   salt, wrapped vault key, wrapped fingerprint key, settings.
@@ -52,6 +65,14 @@ platform default otherwise), so they operate on the same vault concurrently
   (`linked_credential_id`); a CHECK constraint enforces exactly one of the
   two.
 - `audit_events` — local sensitive-action log (no secret values).
+- v2: `scan_suppressions`, `alerts`, `doc_watches`.
+- v3: usage snapshots, pricing overrides, permissions, activity events,
+  env mappings, process sessions, budgets.
+- v4: encrypted provider admin connections, provider-side key/project
+  caches, key links, sync checkpoints.
+- v5: `credential_versions` (retained encrypted prior values),
+  `env_exports`, `destinations` (encrypted write-only auth),
+  `credential_destinations`, `sync_plans`, `sync_plan_steps`.
 
 Timestamps are RFC 3339 UTC strings. Schema changes are append-only
 migrations tracked via SQLite `user_version`.
@@ -83,11 +104,13 @@ the user's shell only. Sliding expiry = auto-lock setting. Desktop keeps the
 
 ## Where future milestones attach
 
-- Provider connectors: a `providers` capability matrix + adapters crate;
-  credentials already store a provider id (ADR 0007).
-- Repo scanning: a scanner module/crate reading `project_repos`; findings
-  feed `possibly_exposed` status which already exists.
-- Alerts/usage/doc-watching: new tables + evidence sources for the status
-  engine; the finding structure already carries source/confidence fields.
+- Background scheduling: `run_monitor`, doc checks, and destination drift
+  checks are on-demand functions today; a desktop timer + interval settings
+  make them autonomous (FEATURE_MATRIX #10/#17).
+- Rotation workflows: provider admin actions (create/revoke) + the existing
+  sync plans compose into create → deploy → verify → revoke.
+- More destinations/providers: both catalogs are additive (one reviewed
+  file/adapter each) with honest capability matrices.
 
-Decision records live in `docs/decisions/`.
+Decision records live in `docs/decisions/`; the audited feature status
+lives in `docs/FEATURE_MATRIX.md`.

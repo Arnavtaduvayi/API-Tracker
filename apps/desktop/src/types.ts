@@ -393,6 +393,196 @@ export interface BackupInfo {
   credential_count: number;
 }
 
+// --- .env governance ---
+
+export type EnvFileClass = "values" | "template";
+
+export type GitStatus = "tracked" | "ignored" | "untracked" | "not_in_repo";
+
+export interface EnvProblem {
+  line: number;
+  kind: "malformed" | "duplicate_key";
+  detail: string;
+}
+
+export interface EnvFileInfo {
+  path: string;
+  rel_path: string;
+  class: EnvFileClass;
+  environment: Environment | null;
+  git_status: GitStatus;
+  in_git_history: boolean;
+  entry_count: number;
+  problems: EnvProblem[];
+}
+
+export interface VarPreview {
+  key: string;
+  line: number;
+  masked: string;
+  provider: string | null;
+  looks_secret: boolean;
+  is_placeholder: boolean;
+  vault_credential: string | null;
+  mapped_credential: string | null;
+}
+
+export type DriftKind =
+  | "value_differs_from_vault"
+  | "missing_expected_variable"
+  | "unmapped_secret"
+  | "mapping_not_in_files"
+  | "production_value_in_dev_file"
+  | "same_value_in_multiple_files";
+
+export interface DriftFinding {
+  kind: DriftKind;
+  file: string;
+  key: string;
+  credential: string | null;
+  detail: string;
+  recommendation: string;
+}
+
+export interface EnvImportOutcome {
+  key: string;
+  action: string;
+  credential: string | null;
+  note: string;
+}
+
+export interface EnvExampleProposal {
+  proposed: string;
+  diff: string;
+  example_path: string;
+  changed: boolean;
+}
+
+export interface EnvExportReport {
+  export_id: string;
+  path: string;
+  var_names: string[];
+  git_status: GitStatus;
+  expires_at: string | null;
+  warnings: string[];
+}
+
+export interface EnvExport {
+  id: string;
+  project_id: string;
+  path: string;
+  var_names: string;
+  created_at: string;
+  expires_at: string | null;
+  cleaned_at: string | null;
+}
+
+export type CleanupOutcome =
+  "removed" | "already_gone" | "modified_since_export" | "not_yet_expired";
+
+export interface CleanupResult {
+  export_id: string;
+  path: string;
+  outcome: CleanupOutcome;
+}
+
+// --- Credential version history (masked values only) ---
+
+export interface CredentialVersionInfo {
+  version: number;
+  masked_value: string;
+  created_at: string;
+  reason: string;
+  current: boolean;
+}
+
+// --- Destinations ---
+
+export type DestSupport =
+  "implemented" | "supported_not_implemented" | "unsupported" | "platform_unavailable";
+
+export interface DestCapabilities {
+  read: DestSupport;
+  write: DestSupport;
+  delete: DestSupport;
+  versioning: DestSupport;
+  rollback: DestSupport;
+  validation: DestSupport;
+}
+
+export interface DestinationKindInfo {
+  kind: string;
+  name: string;
+  description: string;
+  auth: string;
+  platforms: string;
+  status: string;
+  capabilities: DestCapabilities;
+  config_help: string;
+}
+
+export interface Destination {
+  id: string;
+  kind: string;
+  name: string;
+  config: Record<string, unknown> | null;
+  auth_masked: string | null;
+  created_at: string;
+  updated_at: string;
+  last_verified_at: string | null;
+  last_error: string;
+}
+
+export interface Attachment {
+  credential_id: string;
+  credential_name: string;
+  project_name: string;
+  destination_id: string;
+  destination_name: string;
+  destination_kind: string;
+  secret_name: string;
+  environment: string;
+  last_synced_version: number | null;
+  last_synced_at: string | null;
+  last_verified_at: string | null;
+  drift: string;
+}
+
+// --- Synchronization plans (masked versions only, never values) ---
+
+export interface SyncStep {
+  destination_id: string;
+  destination_name: string;
+  destination_kind: string;
+  secret_name: string;
+  environment: string;
+  action: string;
+  status: string;
+  detail: string;
+  validation: string;
+  rollback_available: boolean;
+  executed_at: string | null;
+  verified_at: string | null;
+  rolled_back_at: string | null;
+}
+
+export interface SyncPlan {
+  id: string;
+  credential_id: string;
+  credential_name: string;
+  project_name: string;
+  from_version: number | null;
+  from_masked: string | null;
+  to_version: number;
+  to_masked: string;
+  created_at: string;
+  status: string;
+  note: string;
+  affected_projects: string[];
+  manual_steps: string[];
+  steps: SyncStep[];
+}
+
 export interface ApiError {
   code: string;
   message: string;

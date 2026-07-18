@@ -7,11 +7,22 @@ import type {
   ActivityEvent,
   Alert,
   ApiError,
+  Attachment,
   BackupInfo,
   BudgetReport,
+  CleanupResult,
   Credential,
+  CredentialVersionInfo,
+  Destination,
+  DestinationKindInfo,
   DocWatch,
+  EnvExampleProposal,
+  EnvExport,
+  EnvExportReport,
+  EnvFileInfo,
+  EnvImportOutcome,
   Environment,
+  DriftFinding,
   FetchedMetadata,
   Finding,
   HookStatus,
@@ -23,10 +34,12 @@ import type {
   ProviderProjectOverview,
   ReuseWarning,
   StoredPermissions,
+  SyncPlan,
   SyncReport,
   UsageSnapshot,
   UsageTotals,
   ValidationResult,
+  VarPreview,
   VaultSettings,
   VaultStatus,
 } from "./types";
@@ -250,4 +263,64 @@ export const api = {
     call<BackupInfo>("backup_verify", { path, backupPassword }),
   backupRestore: (path: string, backupPassword: string, force: boolean) =>
     call<BackupInfo>("backup_restore", { path, backupPassword, force }),
+
+  envDiscover: (project: string | null, path: string | null) =>
+    call<EnvFileInfo[]>("env_discover", { project, path }),
+  envPreview: (project: string, file: string) =>
+    call<VarPreview[]>("env_preview", { project, file }),
+  envImport: (project: string, file: string, keys: string[] | null) =>
+    call<EnvImportOutcome[]>("env_import", { project, file, keys }),
+  envDrift: (project: string) => call<DriftFinding[]>("env_drift", { project }),
+  envExamplePreview: (file: string) =>
+    call<EnvExampleProposal>("env_example_preview", { file }),
+  envExampleWrite: (examplePath: string, content: string) =>
+    call<void>("env_example_write", { examplePath, content }),
+  envExport: (args: {
+    project: string;
+    path: string;
+    vars: string[] | null;
+    password: string;
+    overwrite: boolean;
+    ttlMinutes: number | null;
+  }) => call<EnvExportReport>("env_export", args),
+  envCleanup: (all: boolean, force: boolean) =>
+    call<CleanupResult[]>("env_cleanup", { all, force }),
+  envExportsList: () => call<EnvExport[]>("env_exports_list"),
+
+  credentialVersions: (id: string, password: string) =>
+    call<CredentialVersionInfo[]>("credential_versions", { id, password }),
+
+  destinationCatalog: () => call<DestinationKindInfo[]>("destination_catalog"),
+  destinationAdd: (
+    kind: string,
+    name: string,
+    config: Record<string, unknown>,
+    auth: string | null,
+  ) => call<Destination>("destination_add", { kind, name, config, auth }),
+  destinationRemove: (ident: string, password: string) =>
+    call<Destination>("destination_remove", { ident, password }),
+  destinationList: () => call<Destination[]>("destination_list"),
+  destinationTest: (ident: string) => call<string>("destination_test", { ident }),
+  destinationAttach: (
+    credential: string,
+    destination: string,
+    secretName: string,
+    environment: string,
+  ) => call<void>("destination_attach", { credential, destination, secretName, environment }),
+  destinationDetach: (credential: string, destination: string, secretName: string | null) =>
+    call<number>("destination_detach", { credential, destination, secretName }),
+  destinationAttachments: (credential: string | null) =>
+    call<Attachment[]>("destination_attachments", { credential }),
+  destinationDriftCheck: (credential: string | null) =>
+    call<Attachment[]>("destination_drift_check", { credential }),
+
+  syncPlanCreate: (credential: string, note: string) =>
+    call<SyncPlan>("sync_plan_create", { credential, note }),
+  syncPlanGet: (id: string) => call<SyncPlan>("sync_plan_get", { id }),
+  syncPlansList: (credential: string | null, limit: number) =>
+    call<SyncPlan[]>("sync_plans_list", { credential, limit }),
+  syncPlanExecute: (id: string, onlyDestination: string | null, password: string) =>
+    call<SyncPlan>("sync_plan_execute", { id, onlyDestination, password }),
+  syncPlanRollback: (id: string, onlyDestination: string | null, password: string) =>
+    call<SyncPlan>("sync_plan_rollback", { id, onlyDestination, password }),
 };

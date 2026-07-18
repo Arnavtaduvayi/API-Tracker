@@ -17,8 +17,9 @@ export function ProviderCatalog(props: { onOpen: (id: string) => void }) {
     <div>
       <h1>Provider catalog</h1>
       <p className="muted">
-        Informational catalog with an honest capability matrix. Provider API connectors
-        (validation, usage, permissions) are not implemented yet — every capability is labeled.
+        Catalog with an honest capability matrix. Credential validation, metadata, permissions,
+        and usage sync are implemented where each provider supports them — open a provider and
+        check its capability matrix for the live support level of every operation.
       </p>
       {error && <p className="error">{error}</p>}
       {providers && (

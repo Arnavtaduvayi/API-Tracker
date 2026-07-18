@@ -65,6 +65,7 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
         crate::ctx::ENV_PROJECT_PASSWORD,
         crate::ctx::ENV_BACKUP_PASSWORD,
         crate::ctx::ENV_PROVIDER_ADMIN_KEY,
+        crate::destination_cmd::ENV_DESTINATION_AUTH,
     ] {
         cmd.env_remove(var);
     }

@@ -192,6 +192,51 @@ check $? "disconnect removes the administrative connection (reauth via env)"
 "$BIN" provider connection-status openai 2>/dev/null | grep -q "(not connected)"
 check $? "status reports not connected after disconnect"
 
+echo "-- .env governance (offline) --"
+ENV_WORK=$(mktemp -d)
+printf '# app config\nSMOKE_ENV_KEY=%s\nAPP_NAME=demo\n' "$FAKE_KEY" > "$ENV_WORK/.env"
+PREVIEW_OUT=$("$BIN" env preview --project smoke-dev "$ENV_WORK/.env" 2>&1)
+echo "$PREVIEW_OUT" | grep -q "SMOKE_ENV_KEY" && ! echo "$PREVIEW_OUT" | grep -qF "$FAKE_KEY"
+check $? "env preview lists variables without exposing values"
+"$BIN" env import --project smoke-dev --var SMOKE_ENV_KEY --yes "$ENV_WORK/.env" >/dev/null 2>&1
+check $? "env import stores a selected variable"
+"$BIN" mapping list --project smoke-dev 2>/dev/null | grep -q "SMOKE_ENV_KEY"
+check $? "env import creates the injection mapping"
+grep -qF "$FAKE_KEY" "$ENV_WORK/.env"
+check $? "env import never modifies the source file"
+"$BIN" env example --write --yes "$ENV_WORK/.env" >/dev/null 2>&1
+check $? "env example generates .env.example"
+grep -q "SMOKE_ENV_KEY=" "$ENV_WORK/.env.example" && ! grep -qF "$FAKE_KEY" "$ENV_WORK/.env.example"
+check $? ".env.example carries names only, never values"
+"$BIN" env export --project smoke-dev --var SMOKE_ENV_KEY --ttl 0 --yes --to "$ENV_WORK/exported.env" >/dev/null 2>&1
+check $? "env export writes after reauthentication (password via env)"
+if [ "$(uname)" = "Darwin" ]; then
+  EXPORT_MODE=$(stat -f "%Lp" "$ENV_WORK/exported.env" 2>/dev/null)
+else
+  EXPORT_MODE=$(stat -c "%a" "$ENV_WORK/exported.env" 2>/dev/null)
+fi
+[ "$EXPORT_MODE" = "600" ]; check $? "exported file has owner-only (0600) permissions"
+"$BIN" env cleanup >/dev/null 2>&1 && [ ! -f "$ENV_WORK/exported.env" ]
+check $? "expired temporary export is cleaned up"
+rm -rf "$ENV_WORK"
+
+echo "-- destinations (offline; no network request) --"
+DEST_OUT=$("$BIN" destination kinds 2>&1)
+echo "$DEST_OUT" | grep -q "aws_secrets_manager" && echo "$DEST_OUT" | grep -q "vercel"
+check $? "destination kinds reports the capability catalog"
+FAKE_GH_TOKEN="ghp_SMOKEFAKE0000000000000000000000000000"
+printf '%s' "$FAKE_GH_TOKEN" | "$BIN" destination add github_actions --name smoke-ci \
+  --owner smoke --repo demo --auth-stdin --no-verify >/dev/null 2>&1
+check $? "destination add stores an encrypted admin credential"
+grep -rqF "$FAKE_GH_TOKEN" "$API_TRACKER_DIR" && bad "destination token stored in plaintext" || ok "destination token exists nowhere in plaintext on disk"
+"$BIN" destination attach smoke-dev/main-key smoke-ci --secret-name SMOKE_KEY >/dev/null 2>&1
+check $? "credential attaches to the destination"
+PLAN_OUT=$("$BIN" sync plan smoke-dev/main-key 2>&1)
+echo "$PLAN_OUT" | grep -q "Dry run" && ! echo "$PLAN_OUT" | grep -qF "$FAKE_KEY"
+check $? "sync plan is a dry run and never shows values"
+"$BIN" destination remove smoke-ci --yes >/dev/null 2>&1
+check $? "destination remove works with reauthentication via env"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

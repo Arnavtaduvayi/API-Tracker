@@ -313,6 +313,101 @@ CREATE TABLE provider_sync_state (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 5,
+        name: "env governance, credential versions, destinations, sync plans",
+        sql: r#"
+-- Prior credential values, retained encrypted (same project key; AAD binds
+-- vault, project, credential, and version number) so synchronization plans
+-- can roll a destination back. Purged when the credential is deleted.
+CREATE TABLE credential_versions (
+    credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    version       INTEGER NOT NULL,
+    ciphertext    BLOB NOT NULL,
+    masked_value  TEXT NOT NULL,
+    fingerprint   BLOB NOT NULL,
+    created_at    TEXT NOT NULL,
+    reason        TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (credential_id, version)
+) STRICT;
+
+-- The current version number of each credential's value. Starts at 1.
+ALTER TABLE credentials ADD COLUMN value_version INTEGER NOT NULL DEFAULT 1;
+
+-- Exported .env files (explicit, reauthentication-gated). Values are never
+-- stored here — only where an export went, which variable NAMES it holds,
+-- a content hash for safe cleanup, and an optional expiry for temporary
+-- exports.
+CREATE TABLE env_exports (
+    id           TEXT PRIMARY KEY,
+    project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path         TEXT NOT NULL,
+    var_names    TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,
+    cleaned_at   TEXT
+) STRICT;
+
+-- Configured secret destinations (where credential values are deployed).
+-- kind is the adapter id (aws_secrets_manager, github_actions, vercel,
+-- macos_keychain, ...). auth_ciphertext holds the destination's own
+-- administrative credential encrypted under the vault key (AAD binds vault
+-- and destination id); it is write-only, like provider admin keys.
+CREATE TABLE destinations (
+    id              TEXT PRIMARY KEY,
+    kind            TEXT NOT NULL,
+    name            TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    config          TEXT NOT NULL DEFAULT '{}',
+    auth_ciphertext BLOB,
+    auth_masked     TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    last_verified_at TEXT,
+    last_error      TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+-- Which credential is deployed to which destination, under what name.
+CREATE TABLE credential_destinations (
+    credential_id       TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    destination_id      TEXT NOT NULL REFERENCES destinations(id) ON DELETE CASCADE,
+    secret_name         TEXT NOT NULL,
+    environment         TEXT NOT NULL DEFAULT '',
+    last_synced_version INTEGER,
+    last_synced_at      TEXT,
+    last_verified_at    TEXT,
+    drift               TEXT NOT NULL DEFAULT 'unknown',
+    PRIMARY KEY (credential_id, destination_id, secret_name)
+) STRICT;
+
+-- Synchronization plans: a reviewable, per-destination rollout of a
+-- credential value change. Plans store version NUMBERS and masked values
+-- only, never plaintext.
+CREATE TABLE sync_plans (
+    id            TEXT PRIMARY KEY,
+    credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    from_version  INTEGER,
+    to_version    INTEGER NOT NULL,
+    created_at    TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'planned',
+    note          TEXT NOT NULL DEFAULT ''
+) STRICT;
+
+CREATE TABLE sync_plan_steps (
+    plan_id        TEXT NOT NULL REFERENCES sync_plans(id) ON DELETE CASCADE,
+    destination_id TEXT NOT NULL,
+    secret_name    TEXT NOT NULL,
+    environment    TEXT NOT NULL DEFAULT '',
+    action         TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'planned',
+    detail         TEXT NOT NULL DEFAULT '',
+    executed_at    TEXT,
+    verified_at    TEXT,
+    rolled_back_at TEXT,
+    PRIMARY KEY (plan_id, destination_id, secret_name)
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

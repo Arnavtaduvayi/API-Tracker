@@ -90,12 +90,32 @@ Implemented and tested today:
   confidence, are matched against your vault (marking matches possibly
   exposed), and can be suppressed with a required reason. Nothing leaves the
   machine.
-- **Local repository scanning** — working-tree, staged, and Git-history scans
-  detect secrets via provider key patterns, known secret env-var names, and
-  calibrated entropy. Findings are redacted, show file/line/provider/
-  confidence, are matched against your vault (marking matches possibly
-  exposed), and can be suppressed with a required reason. Nothing leaves the
-  machine.
+- **`.env` governance** — discover `.env` files across a project's
+  repositories (with Git tracked/ignored/untracked/in-history status), parse
+  them losslessly without executing anything, preview variables masked,
+  **selectively import** secrets into the encrypted vault (auto-creating
+  injection mappings), generate `.env.example` (names only), detect drift
+  (diverged values, unmapped secrets, production keys in dev files, values
+  copied between files), and run a guided **migration** that removes
+  plaintext only after verifying every secret resolves from the vault.
+  Explicit, reauthentication-gated **export** exists for tools that truly
+  need a file: atomic 0600 writes, `.gitignore` verification, refusal to
+  write into Git-tracked files, and temporary exports with automatic
+  cleanup.
+- **Destinations & sync plans** — a destination-adapter system (separate
+  from provider connectors) with an honest per-kind capability matrix:
+  macOS Keychain, AWS Secrets Manager (SigV4, verified against the official
+  test vector), GitHub Actions repository secrets (sealed-box), and Vercel
+  environment variables, plus the local vault/mappings/exports. Destination
+  admin credentials are stored encrypted and write-only. Changing a
+  credential value generates a reviewable **synchronization plan** (dry run
+  by default) with per-destination execution, verification, partial-failure
+  handling, retry, and **rollback** to retained previous versions — never
+  an automatic write, never an automatic revoke.
+- **Credential version history** — replacing a value retains the previous
+  versions encrypted (bounded, purged with the credential) so destination
+  rollback restores real material; `key versions` lists them masked after
+  reauthentication.
 - **Pre-commit hook** — `hooks install` blocks commits containing
   high-confidence secrets; it runs without unlocking the vault and preserves
   any existing hook.
@@ -212,6 +232,21 @@ api-tracker budget set --project my-app --amount 50.00
 api-tracker budget source provider_reported    # which cost source budgets use
 api-tracker provider disconnect openai         # remove local admin access
 api-tracker activity list
+
+# Govern .env files: discover, import into the vault, migrate off plaintext
+api-tracker env discover --project my-app
+api-tracker env import --project my-app .env          # preview + confirm
+api-tracker env migrate --project my-app .env         # guided plaintext removal
+api-tracker env drift --project my-app
+api-tracker env export --project my-app --to .env --ttl 60   # reauth-gated escape hatch
+
+# Deploy destinations and synchronization plans
+api-tracker destination kinds
+api-tracker destination add github_actions --name ci --owner me --repo app --auth-stdin
+api-tracker destination attach my-app/openai-main ci --secret-name OPENAI_API_KEY
+api-tracker sync plan my-app/openai-main              # dry run
+api-tracker sync run <plan-id>                        # confirm + reauth
+api-tracker key versions my-app/openai-main
 
 # Run a command with exactly one credential injected (never written to disk)
 api-tracker run --project my-app --credential my-app/openai-main \
