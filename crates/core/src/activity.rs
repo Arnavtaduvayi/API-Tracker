@@ -112,9 +112,24 @@ pub fn cost_spike_alert(
     let now = clock::now();
     let (prev_start, this_start) = month_bounds(now);
     let now_str = clock::now_rfc3339();
-    let previous =
-        usage::used_cost_between(conn, &prev_start, &this_start, Some(credential_id), None)?;
-    let current = usage::used_cost_between(conn, &this_start, &now_str, Some(credential_id), None)?;
+    // Best-available keeps the comparison consistent whichever source a
+    // window has, without ever summing reported + estimated for one window.
+    let previous = usage::used_cost_between(
+        conn,
+        &prev_start,
+        &this_start,
+        Some(credential_id),
+        None,
+        usage::CostSource::BestAvailable,
+    )?;
+    let current = usage::used_cost_between(
+        conn,
+        &this_start,
+        &now_str,
+        Some(credential_id),
+        None,
+        usage::CostSource::BestAvailable,
+    )?;
 
     // Require both a >=2x increase and at least $1.00 absolute growth.
     const ABS_FLOOR: i64 = 1_000_000;

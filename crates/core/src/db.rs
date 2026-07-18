@@ -241,6 +241,78 @@ CREATE TABLE process_sessions (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 4,
+        name: "openai admin connection, sync checkpoints, provider key mapping",
+        sql: r#"
+-- A dedicated, vault-encrypted administrative provider connection. The admin
+-- key is encrypted under the vault key (AAD binds vault + provider); it is
+-- vault-level state, deliberately separate from ordinary project credentials.
+-- admin_credential_id (v3) remains as a legacy fallback.
+ALTER TABLE provider_connections ADD COLUMN admin_key_ciphertext BLOB;
+ALTER TABLE provider_connections ADD COLUMN admin_key_masked TEXT;
+ALTER TABLE provider_connections ADD COLUMN org_label TEXT;
+ALTER TABLE provider_connections ADD COLUMN connected_at TEXT;
+ALTER TABLE provider_connections ADD COLUMN last_success_at TEXT;
+ALTER TABLE provider_connections ADD COLUMN last_failure_at TEXT;
+ALTER TABLE provider_connections ADD COLUMN last_error TEXT NOT NULL DEFAULT '';
+
+-- Provider-side dimensions on usage snapshots. NULL means the provider did
+-- not report that dimension — values are never invented locally.
+ALTER TABLE usage_snapshots ADD COLUMN provider_account_id TEXT;
+ALTER TABLE usage_snapshots ADD COLUMN provider_project_id TEXT;
+ALTER TABLE usage_snapshots ADD COLUMN provider_api_key_id TEXT;
+ALTER TABLE usage_snapshots ADD COLUMN line_item TEXT;
+CREATE INDEX idx_usage_provider_key ON usage_snapshots(provider_api_key_id);
+
+-- Confirmed association between a provider-side API-key id and a vault
+-- credential. source records the evidence ('user_confirmed'); suggestions
+-- (e.g. redacted-value matches) are computed live and never stored as links.
+CREATE TABLE provider_key_links (
+    provider            TEXT NOT NULL,
+    provider_api_key_id TEXT NOT NULL,
+    credential_id       TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    source              TEXT NOT NULL,
+    evidence            TEXT NOT NULL DEFAULT '',
+    created_at          TEXT NOT NULL,
+    PRIMARY KEY (provider, provider_api_key_id)
+) STRICT;
+
+-- Cached provider-side metadata (non-secret): organization projects and the
+-- API keys the provider lists for them (redacted values only).
+CREATE TABLE provider_side_projects (
+    provider    TEXT NOT NULL,
+    project_id  TEXT NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT '',
+    synced_at   TEXT NOT NULL,
+    PRIMARY KEY (provider, project_id)
+) STRICT;
+
+CREATE TABLE provider_side_keys (
+    provider            TEXT NOT NULL,
+    api_key_id          TEXT NOT NULL,
+    provider_project_id TEXT,
+    name                TEXT NOT NULL DEFAULT '',
+    redacted_value      TEXT NOT NULL DEFAULT '',
+    created_at          TEXT,
+    last_used_at        TEXT,
+    synced_at           TEXT NOT NULL,
+    PRIMARY KEY (provider, api_key_id)
+) STRICT;
+
+-- Synchronization checkpoints: the last successfully synced window per
+-- provider + endpoint kind ('usage' / 'costs').
+CREATE TABLE provider_sync_state (
+    provider     TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end   TEXT NOT NULL,
+    synced_at    TEXT NOT NULL,
+    PRIMARY KEY (provider, kind)
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

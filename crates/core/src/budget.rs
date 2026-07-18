@@ -44,9 +44,13 @@ pub struct BudgetReport {
     pub period_start: String,
     pub reported_cost_micros: i64,
     pub estimated_cost_micros: i64,
-    /// The figure used for budget comparison (reported if present, else est).
+    /// The figure used for budget comparison, chosen by `cost_source` —
+    /// never the sum of both (cost rows and usage rows describe the same
+    /// consumption, so adding them would double-count).
     pub used_micros: i64,
     pub used_is_estimated: bool,
+    /// Which cost source this budget is configured to consume.
+    pub cost_source: String,
     pub remaining_micros: Option<i64>,
     pub projected_period_end_micros: i64,
     pub over_budget: bool,
@@ -58,11 +62,11 @@ fn build_report(
     budget: Option<i64>,
     totals: &usage::UsageTotals,
     now: OffsetDateTime,
+    cost_source: usage::CostSource,
 ) -> BudgetReport {
     let reported = totals.reported_cost_micros;
     let estimated = totals.estimated_cost_micros;
-    let used_is_estimated = reported == 0;
-    let used = if reported > 0 { reported } else { estimated };
+    let (used, used_is_estimated) = usage::pick_used_cost(totals, cost_source);
 
     // Projection: scale used cost by (days in month / days elapsed).
     let day = now.day() as i64;
@@ -85,6 +89,7 @@ fn build_report(
         estimated_cost_micros: estimated,
         used_micros: used,
         used_is_estimated,
+        cost_source: cost_source.as_str().to_string(),
         remaining_micros: remaining,
         projected_period_end_micros: projected,
         over_budget,
@@ -95,7 +100,11 @@ fn build_report(
     }
 }
 
-pub fn project_report(conn: &Connection, project_id: &str) -> Result<BudgetReport> {
+pub fn project_report(
+    conn: &Connection,
+    project_id: &str,
+    cost_source: usage::CostSource,
+) -> Result<BudgetReport> {
     let now = clock::now();
     let start = period_start(now);
     let budget: Option<i64> = conn.query_row(
@@ -114,6 +123,7 @@ pub fn project_report(conn: &Connection, project_id: &str) -> Result<BudgetRepor
         budget,
         &totals,
         now,
+        cost_source,
     ))
 }
 
@@ -121,6 +131,7 @@ pub fn credential_report(
     conn: &Connection,
     credential_id: &str,
     label: &str,
+    cost_source: usage::CostSource,
 ) -> Result<BudgetReport> {
     let now = clock::now();
     let start = period_start(now);
@@ -135,6 +146,7 @@ pub fn credential_report(
         budget,
         &totals,
         now,
+        cost_source,
     ))
 }
 
@@ -224,7 +236,9 @@ mod tests {
             Some(10_000_000),
             &totals(4_000_000, 9_000_000),
             now,
+            usage::CostSource::BestAvailable,
         );
+        // Best-available picks reported OR estimated — never their sum.
         assert_eq!(r.used_micros, 4_000_000);
         assert!(!r.used_is_estimated);
 
@@ -233,9 +247,35 @@ mod tests {
             Some(10_000_000),
             &totals(0, 9_000_000),
             now,
+            usage::CostSource::BestAvailable,
         );
         assert_eq!(r2.used_micros, 9_000_000);
         assert!(r2.used_is_estimated);
+    }
+
+    #[test]
+    fn explicit_cost_source_is_respected() {
+        let now = clock::parse_rfc3339("2026-07-15T00:00:00Z").unwrap();
+        let r = build_report(
+            "project:x".into(),
+            Some(10_000_000),
+            &totals(4_000_000, 9_000_000),
+            now,
+            usage::CostSource::Estimated,
+        );
+        assert_eq!(r.used_micros, 9_000_000);
+        assert!(r.used_is_estimated);
+        assert_eq!(r.cost_source, "estimated");
+
+        let r2 = build_report(
+            "project:x".into(),
+            Some(10_000_000),
+            &totals(0, 9_000_000),
+            now,
+            usage::CostSource::ProviderReported,
+        );
+        // Explicit provider-reported never silently substitutes estimates.
+        assert_eq!(r2.used_micros, 0);
     }
 
     #[test]
@@ -247,6 +287,7 @@ mod tests {
             Some(5_000_000),
             &totals(6_000_000, 0),
             now,
+            usage::CostSource::BestAvailable,
         );
         assert!(r.over_budget);
         assert_eq!(r.remaining_micros, Some(-1_000_000));
@@ -264,6 +305,7 @@ mod tests {
             Some(100_000_000),
             &totals(1_000_000, 0),
             now,
+            usage::CostSource::BestAvailable,
         );
         assert!(!r.over_budget);
         assert!(over_budget_alert(&r, None).is_none());

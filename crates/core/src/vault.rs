@@ -1730,6 +1730,7 @@ impl UnlockedVault {
     /// and reuse, and auto-resolve conditions that no longer hold.
     pub fn run_monitor(&self) -> Result<MonitorSummary> {
         let now = clock::now_rfc3339();
+        let cost_source = self.budget_cost_source()?;
         let credentials = self.list_credentials(None)?;
         let mut active_keys: Vec<String> = Vec::new();
         let mut created = 0usize;
@@ -1765,7 +1766,8 @@ impl UnlockedVault {
                 new_alerts.push(a);
             }
             // Credential-level budget.
-            let creport = crate::budget::credential_report(&self.conn, &cred.id, &label)?;
+            let creport =
+                crate::budget::credential_report(&self.conn, &cred.id, &label, cost_source)?;
             if let Some(a) = crate::budget::over_budget_alert(&creport, Some(&cred.id)) {
                 new_alerts.push(a);
             }
@@ -1780,7 +1782,7 @@ impl UnlockedVault {
 
         // Project-level budgets.
         for project in self.list_projects(false)? {
-            let report = crate::budget::project_report(&self.conn, &project.id)?;
+            let report = crate::budget::project_report(&self.conn, &project.id, cost_source)?;
             if let Some(alert) = crate::budget::over_budget_alert(&report, None) {
                 active_keys.push(alert.dedup_key.clone());
                 if alerts::upsert(&self.conn, &alert)? {
@@ -1789,8 +1791,22 @@ impl UnlockedVault {
             }
         }
 
+        // Provider connections: stale synced data, unmatched provider-side
+        // API keys with usage, and unmapped provider projects with cost.
+        for alert in self.provider_connection_alerts(&now)? {
+            active_keys.push(alert.dedup_key.clone());
+            if alerts::upsert(&self.conn, &alert)? {
+                created += 1;
+            }
+        }
+
         let mut managed = crate::monitor::managed_credential_kinds();
         managed.extend(crate::activity::managed_kinds());
+        managed.extend([
+            alerts::AlertKind::ProviderDataStale,
+            alerts::AlertKind::UnmatchedProviderKey,
+            alerts::AlertKind::UnmappedProviderProject,
+        ]);
         let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
         Ok(MonitorSummary {
             checked: credentials.len(),
@@ -1798,6 +1814,119 @@ impl UnlockedVault {
             alerts_resolved: resolved,
             open_alerts: alerts::open_count(&self.conn)? as usize,
         })
+    }
+
+    /// Provider-connection monitoring rules: stale synced data, unmatched
+    /// provider-side API keys that carry usage, and unmapped provider
+    /// projects with month-to-date reported cost above a conservative
+    /// threshold ($1.00, documented). Explainable and evidence-backed only.
+    fn provider_connection_alerts(&self, now: &str) -> Result<Vec<alerts::NewAlert>> {
+        use crate::providers::Confidence;
+        const UNMAPPED_PROJECT_COST_THRESHOLD_MICROS: i64 = 1_000_000;
+        let mut out = Vec::new();
+        for status in self.provider_connections()? {
+            if !status.connected {
+                continue;
+            }
+            let provider = status.provider.clone();
+            if status.stale {
+                out.push(alerts::NewAlert {
+                    kind: alerts::AlertKind::ProviderDataStale,
+                    severity: alerts::Severity::Low,
+                    dedup_key: format!("provider_data_stale:{provider}"),
+                    title: format!("{provider} usage data is stale"),
+                    detail: format!(
+                        "the last successful synchronization was {}; the staleness threshold \
+                         is {} day(s)",
+                        status.last_success_at.as_deref().unwrap_or("never"),
+                        self.settings.provider_stale_days
+                    ),
+                    evidence: format!(
+                        "last success: {}; last failure: {}",
+                        status.last_success_at.as_deref().unwrap_or("never"),
+                        status.last_failure_at.as_deref().unwrap_or("never")
+                    ),
+                    confidence: Confidence::High,
+                    recommended_action: format!("run `provider sync {provider}`"),
+                    project_id: None,
+                    credential_id: None,
+                    observed_at: now.to_string(),
+                });
+            }
+            for key in self.provider_keys_overview(&provider)? {
+                if key.linked_credential_id.is_none() && key.usage_rows > 0 {
+                    out.push(alerts::NewAlert {
+                        kind: alerts::AlertKind::UnmatchedProviderKey,
+                        severity: alerts::Severity::Low,
+                        dedup_key: format!("unmatched_provider_key:{provider}:{}", key.api_key_id),
+                        title: format!(
+                            "{provider} API key {} has usage but no local credential link",
+                            key.api_key_id
+                        ),
+                        detail: format!(
+                            "{} synced usage/cost row(s) are attributed to this provider-side \
+                             key; they are shown at provider-key level, not against any local \
+                             credential",
+                            key.usage_rows
+                        ),
+                        evidence: format!(
+                            "provider key name: '{}'; redacted value: '{}'",
+                            key.name, key.redacted_value
+                        ),
+                        confidence: Confidence::High,
+                        recommended_action: format!(
+                            "link it if it is yours: `provider link {provider} {} --credential \
+                             <project/name>`",
+                            key.api_key_id
+                        ),
+                        project_id: None,
+                        credential_id: None,
+                        observed_at: now.to_string(),
+                    });
+                }
+            }
+            for proj in self.provider_projects_overview(&provider)? {
+                if !proj.has_linked_usage
+                    && proj.reported_cost_micros_month >= UNMAPPED_PROJECT_COST_THRESHOLD_MICROS
+                {
+                    out.push(alerts::NewAlert {
+                        kind: alerts::AlertKind::UnmappedProviderProject,
+                        severity: alerts::Severity::Medium,
+                        dedup_key: format!(
+                            "unmapped_provider_project:{provider}:{}",
+                            proj.provider_project_id
+                        ),
+                        title: format!(
+                            "{provider} project '{}' has cost but no local mapping",
+                            if proj.name.is_empty() {
+                                proj.provider_project_id.clone()
+                            } else {
+                                proj.name.clone()
+                            }
+                        ),
+                        detail: format!(
+                            "{} provider-reported this month; none of its usage is linked to a \
+                             local credential",
+                            usage::format_micros(proj.reported_cost_micros_month)
+                        ),
+                        evidence: format!(
+                            "provider project id: {}; threshold: {}",
+                            proj.provider_project_id,
+                            usage::format_micros(UNMAPPED_PROJECT_COST_THRESHOLD_MICROS)
+                        ),
+                        confidence: Confidence::High,
+                        recommended_action:
+                            "review the provider project and link its API keys to local \
+                             credentials where they are yours"
+                                .into(),
+                        project_id: None,
+                        credential_id: None,
+                        observed_at: now.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     // --- Documentation watches ---
@@ -1975,7 +2104,10 @@ impl UnlockedVault {
         crate::permissions::load(&self.conn, &cred.id)
     }
 
-    /// Set the admin credential used for a provider's usage sync.
+    /// Legacy connection path: reference a vault credential as the provider's
+    /// admin key for usage sync. The dedicated administrative connection
+    /// ([`Self::provider_admin_connect`]) is preferred; this remains for
+    /// existing vaults and providers without a dedicated flow.
     pub fn provider_connect(&self, provider: &str, admin_selector: &str) -> Result<()> {
         let provider = crate::providers::normalize(provider);
         let cred = self.get_credential(admin_selector)?;
@@ -1995,73 +2127,612 @@ impl UnlockedVault {
         Ok(())
     }
 
-    /// Connection status for a provider.
+    /// Store a dedicated administrative provider connection. The admin key is
+    /// encrypted under the vault key (never a project key, never plaintext),
+    /// is validated against the provider before being stored, and can only be
+    /// replaced or removed — never displayed. Only OpenAI has a dedicated
+    /// admin flow today.
+    ///
+    /// Callers (CLI/desktop) must reauthenticate the master password before
+    /// invoking this for a replacement, and must never log the key.
+    pub fn provider_admin_connect(
+        &self,
+        provider: &str,
+        admin_key: &SecretString,
+        org_label: Option<&str>,
+        http: Option<&dyn crate::http::HttpClient>,
+    ) -> Result<String> {
+        let provider = crate::providers::normalize(provider);
+        if admin_key.expose().trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "the administrative key must not be empty".into(),
+            ));
+        }
+        if provider != crate::openai::PROVIDER {
+            return Err(CoreError::Unsupported {
+                provider,
+                capability: "admin_connection",
+                hint: "a dedicated administrative connection is only implemented for OpenAI; \
+                       use `provider connect <provider> --credential <vault credential>`"
+                    .into(),
+            });
+        }
+        // Validate before storing so a mistyped key is never persisted.
+        // `http: None` (explicit user opt-out, e.g. offline setup) stores the
+        // key unvalidated and says so.
+        let detail = match http {
+            Some(http) => crate::openai::validate_admin_key(http, admin_key)?,
+            None => "stored without validation (verification was skipped)".to_string(),
+        };
+        let ciphertext = crypto::encrypt(
+            &self.vault_key,
+            &aad::provider_admin(&self.vault_id, &provider),
+            admin_key.expose().as_bytes(),
+        )?;
+        let masked = mask_value(admin_key.expose());
+        let now = clock::now_rfc3339();
+        self.conn.execute(
+            "INSERT INTO provider_connections
+                 (provider, admin_key_ciphertext, admin_key_masked, org_label, connected_at,
+                  last_status, detail, last_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'connected', ?6, '')
+             ON CONFLICT(provider) DO UPDATE SET
+                 admin_key_ciphertext = excluded.admin_key_ciphertext,
+                 admin_key_masked = excluded.admin_key_masked,
+                 org_label = excluded.org_label,
+                 connected_at = excluded.connected_at,
+                 last_status = 'connected',
+                 detail = excluded.detail,
+                 last_error = ''",
+            params![provider, ciphertext, masked, org_label, now, detail],
+        )?;
+        audit::record(
+            &self.conn,
+            "provider_admin_connected",
+            None,
+            None,
+            &format!("provider={provider} org={}", org_label.unwrap_or("-")),
+        )?;
+        Ok(detail)
+    }
+
+    /// Remove a provider connection entirely: the encrypted admin key (or the
+    /// legacy credential reference) and the connection state are deleted.
+    /// Previously synchronized usage snapshots are kept for offline viewing.
+    /// Callers must confirm and reauthenticate first.
+    pub fn provider_admin_disconnect(&self, provider: &str) -> Result<bool> {
+        let provider = crate::providers::normalize(provider);
+        let n = self.conn.execute(
+            "DELETE FROM provider_connections WHERE provider = ?1",
+            [&provider],
+        )?;
+        if n > 0 {
+            audit::record(
+                &self.conn,
+                "provider_admin_disconnected",
+                None,
+                None,
+                &format!("provider={provider}"),
+            )?;
+        }
+        Ok(n > 0)
+    }
+
+    /// Decrypt the administrative secret for a provider: the dedicated
+    /// admin-connection key if present, else the legacy referenced credential.
+    fn provider_admin_secret(&self, provider: &str) -> Result<SecretString> {
+        let row: Option<(Option<Vec<u8>>, Option<String>)> = self
+            .conn
+            .query_row(
+                "SELECT admin_key_ciphertext, admin_credential_id
+                 FROM provider_connections WHERE provider = ?1",
+                [provider],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        match row {
+            Some((Some(ciphertext), _)) => {
+                let plaintext = crypto::decrypt(
+                    &self.vault_key,
+                    &aad::provider_admin(&self.vault_id, provider),
+                    &ciphertext,
+                    "provider admin key",
+                )?;
+                let value = String::from_utf8(plaintext.expose().to_vec())
+                    .map_err(|_| CoreError::VaultCorrupted("admin key is not valid UTF-8"))?;
+                Ok(SecretString::new(value))
+            }
+            Some((None, Some(credential_id))) => self.decrypt_value(&credential_id),
+            _ => Err(CoreError::InvalidInput(format!(
+                "no administrative connection for {provider}; run `provider connect {provider}`"
+            ))),
+        }
+    }
+
+    /// Live connection test against the provider using the stored admin key.
+    /// Callers must reauthenticate first. Updates the stored status.
+    pub fn provider_admin_test(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<String> {
+        let provider = crate::providers::normalize(provider);
+        let admin = self.provider_admin_secret(&provider)?;
+        if provider != crate::openai::PROVIDER {
+            return Err(CoreError::Unsupported {
+                provider,
+                capability: "admin_connection_test",
+                hint: "connection tests are only implemented for OpenAI".into(),
+            });
+        }
+        let now = clock::now_rfc3339();
+        match crate::openai::validate_admin_key(http, &admin) {
+            Ok(detail) => {
+                self.conn.execute(
+                    "UPDATE provider_connections SET last_status = 'connected', detail = ?1,
+                     last_error = '' WHERE provider = ?2",
+                    params![detail, provider],
+                )?;
+                Ok(detail)
+            }
+            Err(e) => {
+                self.conn.execute(
+                    "UPDATE provider_connections SET last_status = 'invalid',
+                     last_failure_at = ?1, last_error = ?2 WHERE provider = ?3",
+                    params![now, e.to_string(), provider],
+                )?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Connection status for a provider (no secrets; the key is masked).
     pub fn provider_connection_status(&self, provider: &str) -> Result<ProviderConnection> {
         let provider = crate::providers::normalize(provider);
         let row = self
             .conn
             .query_row(
-                "SELECT admin_credential_id, last_synced_at, last_status, detail
+                "SELECT admin_credential_id, last_synced_at, last_status, detail,
+                        admin_key_ciphertext IS NOT NULL, admin_key_masked, org_label,
+                        connected_at, last_success_at, last_failure_at, last_error
                  FROM provider_connections WHERE provider = ?1",
                 [&provider],
                 |r| {
+                    let admin_credential_id: Option<String> = r.get(0)?;
+                    let has_admin_key: bool = r.get(4)?;
                     Ok(ProviderConnection {
                         provider: provider.clone(),
-                        admin_credential_id: r.get(0)?,
+                        connected: has_admin_key || admin_credential_id.is_some(),
+                        admin_credential_id,
                         last_synced_at: r.get(1)?,
                         last_status: r.get(2)?,
                         detail: r.get(3)?,
+                        admin_key_masked: r.get(5)?,
+                        org_label: r.get(6)?,
+                        connected_at: r.get(7)?,
+                        last_success_at: r.get(8)?,
+                        last_failure_at: r.get(9)?,
+                        last_error: r.get(10)?,
+                        stale: false,
                     })
                 },
             )
             .optional()?;
-        Ok(row.unwrap_or(ProviderConnection {
+        let mut status = row.unwrap_or(ProviderConnection {
             provider,
+            connected: false,
             admin_credential_id: None,
             last_synced_at: None,
             last_status: "never".into(),
             detail: String::new(),
-        }))
+            admin_key_masked: None,
+            org_label: None,
+            connected_at: None,
+            last_success_at: None,
+            last_failure_at: None,
+            last_error: String::new(),
+            stale: false,
+        });
+        status.stale = self.connection_is_stale(&status);
+        Ok(status)
     }
 
-    /// Synchronize usage from a provider using its connected admin credential.
-    /// Records normalized snapshots (attribution as the connector reports it)
-    /// with a locally-estimated cost, and updates the connection status.
+    fn connection_is_stale(&self, status: &ProviderConnection) -> bool {
+        let days = self.settings.provider_stale_days;
+        if !status.connected || days == 0 {
+            return false;
+        }
+        let threshold = clock::to_rfc3339(clock::now() - time::Duration::days(i64::from(days)));
+        match (&status.last_success_at, &status.connected_at) {
+            (Some(ok), _) => ok < &threshold,
+            // Never synced successfully: stale once the connection itself is
+            // older than the threshold (grace period for fresh connections).
+            (None, Some(connected)) => connected < &threshold,
+            (None, None) => true,
+        }
+    }
+
+    /// All provider connections (for monitoring and UI).
+    pub fn provider_connections(&self) -> Result<Vec<ProviderConnection>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT provider FROM provider_connections ORDER BY provider")?;
+        let providers: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        providers
+            .iter()
+            .map(|p| self.provider_connection_status(p))
+            .collect()
+    }
+
+    /// Synchronize usage looking back `since_days` days from now.
     pub fn usage_sync(
         &self,
         provider: &str,
         http: &dyn crate::http::HttpClient,
         since_days: u32,
-    ) -> Result<usize> {
-        let provider = crate::providers::normalize(provider);
-        let connector = self.connector_for(&provider)?;
-        let status = self.provider_connection_status(&provider)?;
-        let admin_id = status.admin_credential_id.ok_or_else(|| {
-            CoreError::InvalidInput(format!(
-                "no admin credential connected for {provider}; run `provider connect {provider} <credential>`"
-            ))
-        })?;
-        let admin_secret = self.decrypt_value(&admin_id)?;
-        let result = connector.fetch_usage(http, &admin_secret, since_days);
-        let now = clock::now_rfc3339();
-        let fetched = match result {
-            Ok(f) => f,
-            Err(e) => {
-                self.conn.execute(
-                    "UPDATE provider_connections SET last_synced_at = ?1, last_status = 'error',
-                     detail = ?2 WHERE provider = ?3",
-                    params![now, e.to_string(), provider],
-                )?;
-                return Err(e);
+    ) -> Result<SyncReport> {
+        let to = clock::now();
+        let from = to - time::Duration::days(i64::from(since_days.max(1)));
+        self.usage_sync_range(provider, http, from, to)
+    }
+
+    /// Synchronize usage using the stored checkpoint: the first sync covers a
+    /// conservative default window (30 days); later syncs re-fetch from two
+    /// days before the last successful window end, reconciling late-arriving
+    /// provider data without re-downloading the full history.
+    pub fn usage_sync_default(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<SyncReport> {
+        const DEFAULT_DAYS: i64 = 30;
+        const OVERLAP_DAYS: i64 = 2;
+        let provider_norm = crate::providers::normalize(provider);
+        let to = clock::now();
+        let default_from = to - time::Duration::days(DEFAULT_DAYS);
+        let from = match self.sync_checkpoint(&provider_norm, "usage")? {
+            Some((_, window_end)) => {
+                let cp = clock::parse_rfc3339(&window_end)?;
+                let overlapped = cp - time::Duration::days(OVERLAP_DAYS);
+                if overlapped < default_from || overlapped > to {
+                    default_from
+                } else {
+                    overlapped
+                }
             }
+            None => default_from,
         };
-        // Replace any previously-synced snapshots covering the re-reported
-        // range so re-syncing does not double-count. We delete non-manual rows
-        // for this provider whose window starts at or after the earliest bucket
-        // the provider just returned — the exact range being refreshed,
-        // independent of wall-clock. Manual snapshots are never touched.
+        self.usage_sync_range(provider, http, from, to)
+    }
+
+    fn sync_checkpoint(&self, provider: &str, kind: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT window_start, window_end FROM provider_sync_state
+                 WHERE provider = ?1 AND kind = ?2",
+                params![provider, kind],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    /// Synchronize provider usage and (where supported) provider-reported
+    /// costs for an explicit window. All pages are fetched before anything is
+    /// written; the replacement of previously synced rows and the insertion
+    /// of fresh rows happen in one transaction, so a failed or interrupted
+    /// sync changes nothing and can be retried safely. Manual snapshots are
+    /// never touched.
+    pub fn usage_sync_range(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> Result<SyncReport> {
+        let provider = crate::providers::normalize(provider);
+        if from >= to {
+            return Err(CoreError::InvalidInput(
+                "the sync window start must be before its end".into(),
+            ));
+        }
+        let admin_secret = self.provider_admin_secret(&provider)?;
+        let result = if provider == crate::openai::PROVIDER {
+            self.openai_sync(http, &admin_secret, from, to)
+        } else {
+            self.legacy_connector_sync(&provider, http, &admin_secret, from, to)
+        };
+        let now = clock::now_rfc3339();
+        match result {
+            Ok(report) => {
+                self.conn.execute(
+                    "UPDATE provider_connections SET last_synced_at = ?1, last_success_at = ?1,
+                     last_status = 'ok', detail = ?2, last_error = '' WHERE provider = ?3",
+                    params![
+                        now,
+                        format!(
+                            "{} usage row(s), {} provider-reported cost row(s)",
+                            report.usage_rows, report.cost_rows
+                        ),
+                        provider
+                    ],
+                )?;
+                // A successful sync resolves prior sync-failure alerts.
+                self.conn.execute(
+                    "UPDATE alerts SET resolved_at = ?1 WHERE resolved_at IS NULL
+                     AND dedup_key IN (?2, ?3)",
+                    params![
+                        now,
+                        format!("provider_sync_failed:{provider}"),
+                        format!("provider_connection_invalid:{provider}"),
+                    ],
+                )?;
+                crate::activity::record(
+                    &self.conn,
+                    "provider_usage",
+                    "usage_sync",
+                    None,
+                    None,
+                    &format!(
+                        "{provider}: {} usage row(s), {} cost row(s)",
+                        report.usage_rows, report.cost_rows
+                    ),
+                    "",
+                )?;
+                Ok(report)
+            }
+            Err(e) => {
+                let (status_label, alert) = match &e {
+                    CoreError::ProviderAuth { .. } => (
+                        "invalid",
+                        Some(alerts::NewAlert {
+                            kind: alerts::AlertKind::ProviderConnectionInvalid,
+                            severity: alerts::Severity::High,
+                            dedup_key: format!("provider_connection_invalid:{provider}"),
+                            title: format!("The {provider} administrative connection is invalid"),
+                            detail: e.to_string(),
+                            evidence: "the provider rejected the stored admin credential".into(),
+                            confidence: crate::providers::Confidence::High,
+                            recommended_action: format!(
+                                "reconnect with a valid admin key: `provider connect {provider}`"
+                            ),
+                            project_id: None,
+                            credential_id: None,
+                            observed_at: now.clone(),
+                        }),
+                    ),
+                    // A missing connection is user guidance, not an alert.
+                    CoreError::InvalidInput(_) => ("error", None),
+                    _ => (
+                        "error",
+                        Some(alerts::NewAlert {
+                            kind: alerts::AlertKind::ProviderSyncFailed,
+                            severity: alerts::Severity::Medium,
+                            dedup_key: format!("provider_sync_failed:{provider}"),
+                            title: format!("{provider} usage synchronization failed"),
+                            detail: e.to_string(),
+                            evidence: "the most recent synchronization attempt failed".into(),
+                            confidence: crate::providers::Confidence::High,
+                            recommended_action:
+                                "check the network connection and retry; previously synced data \
+                                 remains available offline"
+                                    .into(),
+                            project_id: None,
+                            credential_id: None,
+                            observed_at: now.clone(),
+                        }),
+                    ),
+                };
+                self.conn.execute(
+                    "UPDATE provider_connections SET last_synced_at = ?1, last_failure_at = ?1,
+                     last_status = ?2, last_error = ?3 WHERE provider = ?4",
+                    params![now, status_label, e.to_string(), provider],
+                )?;
+                if let Some(a) = alert {
+                    alerts::upsert(&self.conn, &a)?;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// The OpenAI-specific sync: grouped usage + provider-reported costs +
+    /// provider-side metadata, applied transactionally (ADR 0011).
+    fn openai_sync(
+        &self,
+        http: &dyn crate::http::HttpClient,
+        admin_secret: &SecretString,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> Result<SyncReport> {
+        use crate::openai;
+        let provider = openai::PROVIDER;
+        let (from_unix, to_unix) = (from.unix_timestamp(), to.unix_timestamp());
+        let mut notes = Vec::new();
+
+        // Fetch everything (all pages) before writing anything. Usage is the
+        // primary payload: its failure fails the sync. Costs are fetched
+        // independently — cost data being unavailable while usage is
+        // available is a supported, noted condition, not a sync failure (its
+        // checkpoint is then left untouched so a later sync retries it).
+        let mut usage_rows = openai::fetch_usage(http, admin_secret, from_unix, to_unix)?;
+        let (mut cost_rows, costs_ok) =
+            match openai::fetch_costs(http, admin_secret, from_unix, to_unix) {
+                Ok(rows) => (rows, true),
+                Err(e) => {
+                    notes.push(format!("provider-reported costs are unavailable: {e}"));
+                    (Vec::new(), false)
+                }
+            };
+
+        // Provider-side metadata is best-effort: an admin key without the
+        // api_keys read scope must not fail the usage sync.
+        let mut side_projects = Vec::new();
+        let mut side_keys = Vec::new();
+        match openai::fetch_projects(http, admin_secret) {
+            Ok(projects) => {
+                const MAX_KEY_LISTINGS: usize = 50;
+                if projects.len() > MAX_KEY_LISTINGS {
+                    notes.push(format!(
+                        "only the first {MAX_KEY_LISTINGS} of {} provider projects had their \
+                         API keys listed",
+                        projects.len()
+                    ));
+                }
+                for p in projects.iter().take(MAX_KEY_LISTINGS) {
+                    match openai::fetch_project_keys(http, admin_secret, &p.id) {
+                        Ok(keys) => side_keys.extend(keys),
+                        Err(e) => {
+                            notes.push(format!(
+                                "could not list API keys for provider project {}: {e}",
+                                p.id
+                            ));
+                            break;
+                        }
+                    }
+                }
+                side_projects = projects;
+            }
+            Err(e) => notes.push(format!("provider project metadata unavailable: {e}")),
+        }
+
+        // Confirmed provider-key links upgrade rows to exact local
+        // attribution. Unlinked rows keep their provider-side level.
+        let links = self.provider_key_link_map(provider)?;
+        for row in usage_rows.iter_mut().chain(cost_rows.iter_mut()) {
+            if let Some(key_id) = &row.provider_api_key_id {
+                if let Some((credential_id, project_id)) = links.get(key_id) {
+                    row.credential_id = Some(credential_id.clone());
+                    row.project_id = Some(project_id.clone());
+                    row.attribution = usage::Attribution::ExactCredential;
+                }
+            }
+            if row.provider_account_id.is_none() {
+                row.provider_account_id = self.provider_org_label(provider)?;
+            }
+        }
+
+        // Local estimates only where the model is known — never for cost
+        // rows, which carry the provider-reported amount instead.
+        for row in usage_rows.iter_mut() {
+            if let (Some(model), Some(inp), Some(out)) =
+                (&row.model, row.input_tokens, row.output_tokens)
+            {
+                if let Some(est) =
+                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
+                {
+                    row.estimated_cost_micros = Some(est.micros);
+                }
+            }
+        }
+
+        let usage_count = usage_rows.len();
+        let cost_count = cost_rows.len();
+        let now = clock::now_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        // Replace previously synced rows covering the re-reported buckets so
+        // repeated and overlapping syncs never double-count. The deletion
+        // range comes from the buckets the provider actually returned.
+        if let (Some(min_start), Some(max_end)) = (
+            usage_rows.iter().map(|s| s.window_start.clone()).min(),
+            usage_rows.iter().map(|s| s.window_end.clone()).max(),
+        ) {
+            tx.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source != 'manual' AND source != ?2
+                 AND window_start >= ?3 AND window_start < ?4",
+                params![provider, openai::COSTS_SOURCE, min_start, max_end],
+            )?;
+        }
+        if let (Some(min_start), Some(max_end)) = (
+            cost_rows.iter().map(|s| s.window_start.clone()).min(),
+            cost_rows.iter().map(|s| s.window_end.clone()).max(),
+        ) {
+            tx.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source = ?2
+                 AND window_start >= ?3 AND window_start < ?4",
+                params![provider, openai::COSTS_SOURCE, min_start, max_end],
+            )?;
+        }
+        for row in usage_rows.iter().chain(cost_rows.iter()) {
+            usage::record(&tx, row)?;
+        }
+        for p in &side_projects {
+            tx.execute(
+                "INSERT INTO provider_side_projects (provider, project_id, name, status, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider, project_id) DO UPDATE SET
+                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at",
+                params![provider, p.id, p.name, p.status, now],
+            )?;
+        }
+        for k in &side_keys {
+            tx.execute(
+                "INSERT INTO provider_side_keys
+                 (provider, api_key_id, provider_project_id, name, redacted_value,
+                  created_at, last_used_at, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(provider, api_key_id) DO UPDATE SET
+                 provider_project_id = excluded.provider_project_id, name = excluded.name,
+                 redacted_value = excluded.redacted_value, created_at = excluded.created_at,
+                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at",
+                params![
+                    provider,
+                    k.id,
+                    k.provider_project_id,
+                    k.name,
+                    k.redacted_value,
+                    k.created_at,
+                    k.last_used_at,
+                    now
+                ],
+            )?;
+        }
+        let (from_s, to_s) = (clock::to_rfc3339(from), clock::to_rfc3339(to));
+        let mut checkpoint_kinds = vec!["usage"];
+        if costs_ok {
+            checkpoint_kinds.push("costs");
+        }
+        for kind in checkpoint_kinds {
+            tx.execute(
+                "INSERT INTO provider_sync_state (provider, kind, window_start, window_end, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider, kind) DO UPDATE SET
+                 window_start = excluded.window_start, window_end = excluded.window_end,
+                 synced_at = excluded.synced_at",
+                params![provider, kind, from_s, to_s, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(SyncReport {
+            provider: provider.to_string(),
+            usage_rows: usage_count,
+            cost_rows: cost_count,
+            window_start: from_s,
+            window_end: to_s,
+            notes,
+        })
+    }
+
+    /// The pre-existing single-request connector sync for providers without a
+    /// detailed engine (e.g. Anthropic org totals). Unchanged semantics.
+    fn legacy_connector_sync(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+        admin_secret: &SecretString,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> Result<SyncReport> {
+        let connector = self.connector_for(provider)?;
+        let since_days = ((to - from).whole_days().max(1)) as u32;
+        let fetched = connector.fetch_usage(http, admin_secret, since_days)?;
+        let tx = self.conn.unchecked_transaction()?;
         if let Some(earliest) = fetched.snapshots.iter().map(|s| &s.window_start).min() {
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM usage_snapshots
                  WHERE provider = ?1 AND source != 'manual' AND window_start >= ?2",
                 params![provider, earliest],
@@ -2070,39 +2741,352 @@ impl UnlockedVault {
         let mut count = 0;
         for mut snap in fetched.snapshots {
             snap.source = fetched.source.clone();
-            // Estimate cost when the model is known; org-level totals usually
-            // are not model-broken-down, so this is often absent (honest).
             if let (Some(model), Some(inp), Some(out)) =
                 (&snap.model, snap.input_tokens, snap.output_tokens)
             {
                 if let Some(est) =
-                    crate::pricing::estimate_token_cost(&self.conn, &provider, model, inp, out)?
+                    crate::pricing::estimate_token_cost(&tx, provider, model, inp, out)?
                 {
                     snap.estimated_cost_micros = Some(est.micros);
                 }
             }
-            usage::record(&self.conn, &snap)?;
+            usage::record(&tx, &snap)?;
             count += 1;
         }
+        tx.commit()?;
+        Ok(SyncReport {
+            provider: provider.to_string(),
+            usage_rows: count,
+            cost_rows: 0,
+            window_start: clock::to_rfc3339(from),
+            window_end: clock::to_rfc3339(to),
+            notes: Vec::new(),
+        })
+    }
+
+    fn provider_org_label(&self, provider: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT org_label FROM provider_connections WHERE provider = ?1",
+                [provider],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// provider_api_key_id -> (credential_id, project_id) for confirmed links.
+    fn provider_key_link_map(&self, provider: &str) -> Result<HashMap<String, (String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT l.provider_api_key_id, l.credential_id, c.project_id
+             FROM provider_key_links l JOIN credentials c ON c.id = l.credential_id
+             WHERE l.provider = ?1",
+        )?;
+        let rows = stmt.query_map([provider], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+            ))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            map.insert(k, v);
+        }
+        Ok(map)
+    }
+
+    /// Confirm an association between a provider-side API-key id and a local
+    /// credential. Retroactively upgrades matching synced rows to exact
+    /// attribution. Returns the number of rows re-attributed.
+    pub fn provider_link_key(
+        &self,
+        provider: &str,
+        api_key_id: &str,
+        credential_selector: &str,
+    ) -> Result<usize> {
+        let provider = crate::providers::normalize(provider);
+        let cred = self.get_credential(credential_selector)?;
+        if !cred.provider.eq_ignore_ascii_case(&provider) {
+            return Err(CoreError::InvalidInput(format!(
+                "credential '{}' belongs to provider '{}', not '{provider}'",
+                cred.name, cred.provider
+            )));
+        }
+        let now = clock::now_rfc3339();
         self.conn.execute(
-            "UPDATE provider_connections SET last_synced_at = ?1, last_status = 'ok',
-             detail = ?2 WHERE provider = ?3",
+            "INSERT INTO provider_key_links
+             (provider, provider_api_key_id, credential_id, source, evidence, created_at)
+             VALUES (?1, ?2, ?3, 'user_confirmed', ?4, ?5)
+             ON CONFLICT(provider, provider_api_key_id) DO UPDATE SET
+             credential_id = excluded.credential_id, source = excluded.source,
+             evidence = excluded.evidence, created_at = excluded.created_at",
             params![
-                now,
-                format!("{count} snapshot(s); {}", fetched.attribution.label()),
-                provider
+                provider,
+                api_key_id,
+                cred.id,
+                format!(
+                    "confirmed by the user for '{}/{}'",
+                    cred.project_name, cred.name
+                ),
+                now
             ],
         )?;
-        crate::activity::record(
-            &self.conn,
-            "provider_usage",
-            "usage_sync",
-            None,
-            None,
-            &format!("{provider}: {count} snapshot(s)"),
-            fetched.attribution.as_str(),
+        let updated = self.conn.execute(
+            "UPDATE usage_snapshots SET credential_id = ?1, project_id = ?2,
+             attribution = 'exact_credential'
+             WHERE provider = ?3 AND provider_api_key_id = ?4 AND source != 'manual'",
+            params![cred.id, cred.project_id, provider, api_key_id],
         )?;
-        Ok(count)
+        audit::record(
+            &self.conn,
+            "provider_key_linked",
+            Some(&cred.project_id),
+            Some(&cred.id),
+            &format!("provider={provider} api_key_id={api_key_id} rows={updated}"),
+        )?;
+        Ok(updated)
+    }
+
+    /// Remove a provider-key association and honestly downgrade the affected
+    /// rows back to provider-side attribution.
+    pub fn provider_unlink_key(&self, provider: &str, api_key_id: &str) -> Result<usize> {
+        let provider = crate::providers::normalize(provider);
+        let removed = self.conn.execute(
+            "DELETE FROM provider_key_links WHERE provider = ?1 AND provider_api_key_id = ?2",
+            params![provider, api_key_id],
+        )?;
+        if removed == 0 {
+            return Ok(0);
+        }
+        let updated = self.conn.execute(
+            "UPDATE usage_snapshots SET credential_id = NULL, project_id = NULL,
+             attribution = 'provider_key'
+             WHERE provider = ?1 AND provider_api_key_id = ?2 AND source != 'manual'",
+            params![provider, api_key_id],
+        )?;
+        audit::record(
+            &self.conn,
+            "provider_key_unlinked",
+            None,
+            None,
+            &format!("provider={provider} api_key_id={api_key_id} rows={updated}"),
+        )?;
+        Ok(updated)
+    }
+
+    /// Overview of every provider-side API key seen (from metadata and from
+    /// synced usage), with link status and — for unlinked keys — a suggestion
+    /// computed by matching the provider's redacted value against decryptable
+    /// vault credentials. Suggestions are evidence for the user to confirm;
+    /// they are never applied automatically.
+    pub fn provider_keys_overview(&self, provider: &str) -> Result<Vec<ProviderKeyOverview>> {
+        let provider = crate::providers::normalize(provider);
+        let links = self.provider_key_link_map(&provider)?;
+        let mut out: Vec<ProviderKeyOverview> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT k.api_key_id, k.name, k.redacted_value, k.provider_project_id, p.name
+             FROM provider_side_keys k
+             LEFT JOIN provider_side_projects p
+               ON p.provider = k.provider AND p.project_id = k.provider_project_id
+             WHERE k.provider = ?1 ORDER BY k.api_key_id",
+        )?;
+        let rows = stmt.query_map([&provider], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        })?;
+        for row in rows {
+            let (id, name, redacted, project_id, project_name) = row?;
+            seen.insert(id.clone());
+            out.push(ProviderKeyOverview {
+                provider: provider.clone(),
+                api_key_id: id,
+                name,
+                redacted_value: redacted,
+                provider_project_id: project_id,
+                provider_project_name: project_name,
+                linked_credential_id: None,
+                linked_credential: None,
+                link_source: None,
+                usage_rows: 0,
+                suggested_credential_id: None,
+                suggested_credential: None,
+                note: String::new(),
+            });
+        }
+        // Keys that appear in synced usage but not in metadata.
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT provider_api_key_id FROM usage_snapshots
+             WHERE provider = ?1 AND provider_api_key_id IS NOT NULL AND source != 'manual'",
+        )?;
+        let ids = stmt.query_map([&provider], |r| r.get::<_, String>(0))?;
+        for id in ids {
+            let id = id?;
+            if seen.insert(id.clone()) {
+                out.push(ProviderKeyOverview {
+                    provider: provider.clone(),
+                    api_key_id: id,
+                    name: String::new(),
+                    redacted_value: String::new(),
+                    provider_project_id: None,
+                    provider_project_name: None,
+                    linked_credential_id: None,
+                    linked_credential: None,
+                    link_source: None,
+                    usage_rows: 0,
+                    suggested_credential_id: None,
+                    suggested_credential: None,
+                    note: "seen in synced usage; not in the provider's key metadata".into(),
+                });
+            }
+        }
+        // Usage row counts, links, and suggestions.
+        let openai_credentials: Vec<Credential> = self
+            .list_credentials(None)?
+            .into_iter()
+            .filter(|c| c.provider.eq_ignore_ascii_case(&provider) && !c.is_reference)
+            .collect();
+        let mut locked_note = false;
+        for entry in out.iter_mut() {
+            entry.usage_rows = self.conn.query_row(
+                "SELECT count(*) FROM usage_snapshots
+                 WHERE provider = ?1 AND provider_api_key_id = ?2 AND source != 'manual'",
+                params![provider, entry.api_key_id],
+                |r| r.get(0),
+            )?;
+            if let Some((credential_id, _)) = links.get(&entry.api_key_id) {
+                entry.linked_credential_id = Some(credential_id.clone());
+                if let Some(c) = openai_credentials.iter().find(|c| &c.id == credential_id) {
+                    entry.linked_credential = Some(format!("{}/{}", c.project_name, c.name));
+                }
+                entry.link_source = self
+                    .conn
+                    .query_row(
+                        "SELECT source FROM provider_key_links
+                         WHERE provider = ?1 AND provider_api_key_id = ?2",
+                        params![provider, entry.api_key_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                continue;
+            }
+            if entry.redacted_value.is_empty() {
+                continue;
+            }
+            let mut matches = Vec::new();
+            for cred in &openai_credentials {
+                match self.decrypt_value(&cred.id) {
+                    Ok(value) => {
+                        if crate::openai::redacted_value_matches(
+                            &entry.redacted_value,
+                            value.expose(),
+                        ) {
+                            matches.push(cred);
+                        }
+                    }
+                    Err(CoreError::ProjectLocked(_)) => locked_note = true,
+                    Err(_) => {}
+                }
+            }
+            match matches.as_slice() {
+                [only] => {
+                    entry.suggested_credential_id = Some(only.id.clone());
+                    entry.suggested_credential =
+                        Some(format!("{}/{}", only.project_name, only.name));
+                    entry.note =
+                        "the provider's redacted value matches this vault credential; confirm \
+                         to link"
+                            .into();
+                }
+                [] => {}
+                _ => {
+                    entry.note =
+                        "several vault credentials match the redacted value; link manually".into();
+                }
+            }
+        }
+        if locked_note {
+            for entry in out.iter_mut() {
+                if entry.linked_credential_id.is_none() && entry.suggested_credential_id.is_none() {
+                    if !entry.note.is_empty() {
+                        entry.note.push_str("; ");
+                    }
+                    entry
+                        .note
+                        .push_str("credentials in password-locked projects were not checked");
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Provider-side projects with month-to-date reported cost and whether
+    /// any of their usage is linked to a local credential. Unmapped projects
+    /// stay visible instead of being hidden or force-joined.
+    pub fn provider_projects_overview(
+        &self,
+        provider: &str,
+    ) -> Result<Vec<ProviderProjectOverview>> {
+        let provider = crate::providers::normalize(provider);
+        let month_start = crate::budget::period_start(clock::now());
+        let mut stmt = self.conn.prepare(
+            "SELECT ids.provider_project_id,
+                    COALESCE(p.name, ''),
+                    COALESCE((SELECT SUM(u.reported_cost_micros) FROM usage_snapshots u
+                        WHERE u.provider = ?1 AND u.provider_project_id = ids.provider_project_id
+                        AND u.reported_cost_micros IS NOT NULL AND u.currency = 'USD'
+                        AND u.window_start >= ?2), 0),
+                    EXISTS(SELECT 1 FROM usage_snapshots u2
+                        WHERE u2.provider = ?1 AND u2.provider_project_id = ids.provider_project_id
+                        AND u2.credential_id IS NOT NULL)
+             FROM (SELECT DISTINCT provider_project_id FROM usage_snapshots
+                   WHERE provider = ?1 AND provider_project_id IS NOT NULL
+                   UNION SELECT project_id FROM provider_side_projects WHERE provider = ?1) ids
+             LEFT JOIN provider_side_projects p
+               ON p.provider = ?1 AND p.project_id = ids.provider_project_id
+             ORDER BY 3 DESC",
+        )?;
+        let rows = stmt.query_map(params![provider, month_start], |r| {
+            Ok(ProviderProjectOverview {
+                provider_project_id: r.get(0)?,
+                name: r.get(1)?,
+                reported_cost_micros_month: r.get(2)?,
+                has_linked_usage: r.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// The budget cost source configured for this vault.
+    pub fn budget_cost_source(&self) -> Result<usage::CostSource> {
+        Ok(meta_get(&self.conn, "budget_cost_source")?
+            .map(|s| s.parse())
+            .transpose()?
+            .unwrap_or(usage::CostSource::BestAvailable))
+    }
+
+    pub fn set_budget_cost_source(&self, source: usage::CostSource) -> Result<()> {
+        meta_set(&self.conn, "budget_cost_source", source.as_str())?;
+        audit::record(
+            &self.conn,
+            "settings_updated",
+            None,
+            None,
+            &format!("budget_cost_source={}", source.as_str()),
+        )?;
+        Ok(())
     }
 
     /// Record a usage snapshot manually (user-supplied), attributed to a
@@ -2157,6 +3141,38 @@ impl UnlockedVault {
         usage::totals_since(&self.conn, since, cred_id.as_deref(), proj_id.as_deref())
     }
 
+    /// A detailed usage report: totals plus the matching snapshots, with
+    /// provider/source filters resolved from user-facing selectors.
+    pub fn usage_report(
+        &self,
+        since: &str,
+        credential_selector: Option<&str>,
+        project: Option<&str>,
+        provider: Option<&str>,
+        source: usage::SourceFilter,
+    ) -> Result<(usage::UsageTotals, Vec<usage::UsageSnapshot>)> {
+        let cred_id = match credential_selector {
+            Some(s) => Some(self.get_credential(s)?.id),
+            None => None,
+        };
+        let proj_id = match project {
+            Some(p) => Some(self.project_row_by_ident(p)?.id),
+            None => None,
+        };
+        let filter = usage::UsageFilter {
+            since: Some(since.to_string()),
+            until: None,
+            credential_id: cred_id,
+            project_id: proj_id,
+            provider: provider.map(crate::providers::normalize),
+            source,
+        };
+        Ok((
+            usage::totals(&self.conn, &filter)?,
+            usage::list(&self.conn, &filter)?,
+        ))
+    }
+
     pub fn set_project_budget_dollars(&self, project: &str, dollars: Option<&str>) -> Result<()> {
         let project = self.project_row_by_ident(project)?;
         let micros = match dollars {
@@ -2181,7 +3197,7 @@ impl UnlockedVault {
 
     pub fn project_budget_report(&self, project: &str) -> Result<crate::budget::BudgetReport> {
         let project = self.project_row_by_ident(project)?;
-        crate::budget::project_report(&self.conn, &project.id)
+        crate::budget::project_report(&self.conn, &project.id, self.budget_cost_source()?)
     }
 
     pub fn credential_budget_report(&self, selector: &str) -> Result<crate::budget::BudgetReport> {
@@ -2190,6 +3206,7 @@ impl UnlockedVault {
             &self.conn,
             &cred.id,
             &format!("{}/{}", cred.project_name, cred.name),
+            self.budget_cost_source()?,
         )
     }
 
@@ -2337,14 +3354,68 @@ impl UnlockedVault {
     }
 }
 
-/// A provider connection's stored state.
+/// A provider connection's stored state (no secrets; the key is masked).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderConnection {
     pub provider: String,
+    /// True when either a dedicated admin key or a legacy credential
+    /// reference is configured.
+    pub connected: bool,
+    /// Masked preview of the dedicated administrative key, if one is stored.
+    pub admin_key_masked: Option<String>,
+    /// Legacy: the vault credential referenced as the admin key.
     pub admin_credential_id: Option<String>,
+    pub org_label: Option<String>,
+    pub connected_at: Option<String>,
     pub last_synced_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub last_error: String,
     pub last_status: String,
     pub detail: String,
+    /// True when synced data is older than the configured staleness window.
+    pub stale: bool,
+}
+
+/// The outcome of one provider synchronization.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SyncReport {
+    pub provider: String,
+    pub usage_rows: usize,
+    pub cost_rows: usize,
+    pub window_start: String,
+    pub window_end: String,
+    /// Non-fatal limitations encountered (e.g. metadata unavailable).
+    pub notes: Vec<String>,
+}
+
+/// A provider-side API key with its local link state and any suggestion.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderKeyOverview {
+    pub provider: String,
+    pub api_key_id: String,
+    pub name: String,
+    pub redacted_value: String,
+    pub provider_project_id: Option<String>,
+    pub provider_project_name: Option<String>,
+    pub linked_credential_id: Option<String>,
+    /// "project/name" label of the linked credential.
+    pub linked_credential: Option<String>,
+    /// How the link was established (e.g. `user_confirmed`).
+    pub link_source: Option<String>,
+    pub usage_rows: i64,
+    pub suggested_credential_id: Option<String>,
+    pub suggested_credential: Option<String>,
+    pub note: String,
+}
+
+/// A provider-side project with month-to-date reported cost and mapping state.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderProjectOverview {
+    pub provider_project_id: String,
+    pub name: String,
+    pub reported_cost_micros_month: i64,
+    pub has_linked_usage: bool,
 }
 
 /// Read suppression keys directly from a database connection, without

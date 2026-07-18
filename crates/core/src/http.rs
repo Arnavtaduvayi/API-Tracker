@@ -127,9 +127,10 @@ impl HttpClient for UreqClient {
                 });
             }
             Err(e) => {
-                return Err(CoreError::InvalidInput(format!(
-                    "network request failed: {e}"
-                )));
+                // Transport-level failure (DNS, refused, timeout, TLS). The
+                // ureq error Display never includes request headers, so no
+                // secret can leak here.
+                return Err(CoreError::Network(format!("request failed: {e}")));
             }
         };
         let status = resp.status().as_u16();
@@ -157,6 +158,9 @@ impl HttpClient for UreqClient {
 #[derive(Default)]
 pub struct MockHttpClient {
     responses: RefCell<Vec<HttpResponse>>,
+    /// Number of initial sends that fail with a transport error before the
+    /// queued responses are served (simulates an offline network).
+    network_failures: RefCell<u32>,
     pub requests: RefCell<Vec<HttpRequest>>,
 }
 
@@ -164,7 +168,25 @@ impl MockHttpClient {
     pub fn new(responses: Vec<HttpResponse>) -> Self {
         Self {
             responses: RefCell::new(responses),
+            network_failures: RefCell::new(0),
             requests: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Fail the first `failures` sends with [`CoreError::Network`], then
+    /// serve the queued responses.
+    pub fn with_network_failures(failures: u32, responses: Vec<HttpResponse>) -> Self {
+        let mock = Self::new(responses);
+        *mock.network_failures.borrow_mut() = failures;
+        mock
+    }
+
+    /// A 200 JSON response value, for building multi-response queues.
+    pub fn json_response(body: &str) -> HttpResponse {
+        HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.as_bytes().to_vec(),
         }
     }
 
@@ -194,6 +216,13 @@ impl MockHttpClient {
 impl HttpClient for MockHttpClient {
     fn send(&self, req: &HttpRequest) -> Result<HttpResponse> {
         self.requests.borrow_mut().push(req.clone());
+        {
+            let mut failures = self.network_failures.borrow_mut();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(CoreError::Network("mock: simulated offline".into()));
+            }
+        }
         let mut responses = self.responses.borrow_mut();
         if responses.is_empty() {
             return Err(CoreError::InvalidInput(

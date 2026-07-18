@@ -183,6 +183,11 @@ pub mod aad {
     pub fn backup(vault_id: &str) -> String {
         format!("api-tracker:v1:backup:{vault_id}")
     }
+    /// A provider's administrative connection key (vault-level, encrypted
+    /// under the vault key; not tied to any project).
+    pub fn provider_admin(vault_id: &str, provider: &str) -> String {
+        format!("api-tracker:v1:provider-admin:{vault_id}:{provider}")
+    }
     pub fn session(session_id: &str) -> String {
         format!("api-tracker:v1:session:{session_id}")
     }

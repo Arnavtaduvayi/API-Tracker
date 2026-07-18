@@ -71,6 +71,18 @@ pub enum CoreError {
     #[error("provider request failed: {0}")]
     Provider(String),
 
+    #[error("{provider} rejected the credential ({detail}); reconnect with a valid admin key")]
+    ProviderAuth { provider: String, detail: String },
+
+    #[error("{provider} is rate limiting requests; try again later")]
+    ProviderRateLimited {
+        provider: String,
+        retry_after_secs: Option<u64>,
+    },
+
+    #[error("network unavailable: {0}")]
+    Network(String),
+
     #[error("key derivation failed (unsupported KDF parameters)")]
     Kdf,
 
@@ -108,6 +120,9 @@ impl CoreError {
             CoreError::VaultCorrupted(_) => "vault_corrupted",
             CoreError::Unsupported { .. } => "unsupported",
             CoreError::Provider(_) => "provider_error",
+            CoreError::ProviderAuth { .. } => "provider_auth_error",
+            CoreError::ProviderRateLimited { .. } => "provider_rate_limited",
+            CoreError::Network(_) => "network_error",
             CoreError::Kdf => "kdf_error",
             CoreError::Db(_) => "db_error",
             CoreError::Io(_) => "io_error",

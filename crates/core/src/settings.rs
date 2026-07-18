@@ -21,6 +21,9 @@ pub struct VaultSettings {
     pub stale_days: u32,
     /// Best-effort clipboard clear delay after copying a secret. 0 disables.
     pub clipboard_clear_seconds: u32,
+    /// Days after the last successful provider sync before synchronized
+    /// data is flagged stale (connected providers only). 0 disables.
+    pub provider_stale_days: u32,
 }
 
 impl Default for VaultSettings {
@@ -31,16 +34,18 @@ impl Default for VaultSettings {
             unused_days: 30,
             stale_days: 90,
             clipboard_clear_seconds: 30,
+            provider_stale_days: 3,
         }
     }
 }
 
-const KEYS: [&str; 5] = [
+const KEYS: [&str; 6] = [
     "auto_lock_minutes",
     "expiring_soon_days",
     "unused_days",
     "stale_days",
     "clipboard_clear_seconds",
+    "provider_stale_days",
 ];
 
 impl VaultSettings {
@@ -83,6 +88,7 @@ impl VaultSettings {
             "unused_days" => Ok(self.unused_days),
             "stale_days" => Ok(self.stale_days),
             "clipboard_clear_seconds" => Ok(self.clipboard_clear_seconds),
+            "provider_stale_days" => Ok(self.provider_stale_days),
             other => Err(CoreError::InvalidInput(format!(
                 "unknown setting '{other}'"
             ))),
@@ -96,6 +102,7 @@ impl VaultSettings {
             "unused_days" => self.unused_days = value,
             "stale_days" => self.stale_days = value,
             "clipboard_clear_seconds" => self.clipboard_clear_seconds = value,
+            "provider_stale_days" => self.provider_stale_days = value,
             other => {
                 return Err(CoreError::InvalidInput(format!(
                     "unknown setting '{other}'"
