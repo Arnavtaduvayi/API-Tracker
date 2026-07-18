@@ -11,6 +11,7 @@
 use api_tracker_core::backup;
 use api_tracker_core::docwatch::{DocWatch, HttpFetcher};
 use api_tracker_core::error::CoreError;
+use api_tracker_core::http::UreqClient;
 use api_tracker_core::model::{Credential, Environment, Project};
 use api_tracker_core::providers::{self, ProviderManifest};
 use api_tracker_core::reuse::ReuseWarning;
@@ -18,8 +19,8 @@ use api_tracker_core::scanner::Finding;
 use api_tracker_core::secret::SecretString;
 use api_tracker_core::settings::VaultSettings;
 use api_tracker_core::vault::{
-    self, AddCredential, AddReference, NewProject, UnlockedVault, UpdateCredential, UpdateProject,
-    VaultPaths,
+    self, AddCredential, AddReference, NewProject, ProviderConnection, UnlockedVault,
+    UpdateCredential, UpdateProject, VaultPaths,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -677,6 +678,152 @@ fn backup_restore(
     Ok(info)
 }
 
+// --- Milestone 3: connectors, usage, budgets, permissions, activity ---
+
+#[tauri::command]
+fn credential_validate(
+    state: State<'_, AppState>,
+    selector: String,
+) -> CmdResult<api_tracker_core::connectors::ValidationResult> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| vault.validate_credential(&selector, &http))
+}
+
+#[tauri::command]
+fn credential_metadata(
+    state: State<'_, AppState>,
+    selector: String,
+) -> CmdResult<api_tracker_core::connectors::FetchedMetadata> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| vault.fetch_metadata(&selector, &http))
+}
+
+#[tauri::command]
+fn credential_permissions(
+    state: State<'_, AppState>,
+    selector: String,
+    sync: bool,
+) -> CmdResult<Option<api_tracker_core::permissions::StoredPermissions>> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        if sync {
+            Ok(Some(vault.sync_permissions(&selector, &http)?))
+        } else {
+            vault.get_permissions(&selector)
+        }
+    })
+}
+
+#[tauri::command]
+fn provider_connect(
+    state: State<'_, AppState>,
+    provider: String,
+    credential: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.provider_connect(&provider, &credential)
+    })
+}
+
+#[tauri::command]
+fn provider_sync(state: State<'_, AppState>, provider: String, days: u32) -> CmdResult<usize> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| vault.usage_sync(&provider, &http, days))
+}
+
+#[tauri::command]
+fn provider_connection_status(
+    state: State<'_, AppState>,
+    provider: String,
+) -> CmdResult<ProviderConnection> {
+    with_vault(&state, |vault| vault.provider_connection_status(&provider))
+}
+
+#[tauri::command]
+fn usage_report(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    credential: Option<String>,
+) -> CmdResult<api_tracker_core::usage::UsageTotals> {
+    let start = api_tracker_core::budget::period_start(api_tracker_core::clock::now());
+    with_vault(&state, |vault| {
+        vault.usage_totals(&start, credential.as_deref(), project.as_deref())
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn usage_record_manual(
+    state: State<'_, AppState>,
+    credential: String,
+    model: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+) -> CmdResult<()> {
+    let now = api_tracker_core::clock::now_rfc3339();
+    with_vault(&state, |vault| {
+        vault.usage_record_manual(
+            &credential,
+            model.as_deref(),
+            input_tokens,
+            output_tokens,
+            &now,
+            &now,
+        )?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+fn budget_set(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    credential: Option<String>,
+    amount: Option<String>,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        if let Some(p) = &project {
+            vault.set_project_budget_dollars(p, amount.as_deref())
+        } else if let Some(c) = &credential {
+            vault.set_credential_budget_dollars(c, amount.as_deref())
+        } else {
+            Err(CoreError::InvalidInput(
+                "pass a project or credential".into(),
+            ))
+        }
+    })
+}
+
+#[tauri::command]
+fn budget_report(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    credential: Option<String>,
+) -> CmdResult<api_tracker_core::budget::BudgetReport> {
+    with_vault(&state, |vault| {
+        if let Some(p) = &project {
+            vault.project_budget_report(p)
+        } else if let Some(c) = &credential {
+            vault.credential_budget_report(c)
+        } else {
+            Err(CoreError::InvalidInput(
+                "pass a project or credential".into(),
+            ))
+        }
+    })
+}
+
+#[tauri::command]
+fn activity_list(
+    state: State<'_, AppState>,
+    credential: Option<String>,
+    limit: u32,
+) -> CmdResult<Vec<api_tracker_core::activity::ActivityEvent>> {
+    with_vault(&state, |vault| {
+        vault.activity_list(limit, credential.as_deref())
+    })
+}
+
 fn main() {
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
     tauri::Builder::default()
@@ -732,6 +879,17 @@ fn main() {
             doc_watch_remove,
             doc_watch_list,
             doc_watch_check,
+            credential_validate,
+            credential_metadata,
+            credential_permissions,
+            provider_connect,
+            provider_sync,
+            provider_connection_status,
+            usage_report,
+            usage_record_manual,
+            budget_set,
+            budget_report,
+            activity_list,
             backup_create,
             backup_verify,
             backup_restore,

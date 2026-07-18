@@ -4,18 +4,25 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ActivityEvent,
   Alert,
   ApiError,
   BackupInfo,
+  BudgetReport,
   Credential,
   DocWatch,
   Environment,
+  FetchedMetadata,
   Finding,
   HookStatus,
   MonitorSummary,
   Project,
+  ProviderConnection,
   ProviderManifest,
   ReuseWarning,
+  StoredPermissions,
+  UsageTotals,
+  ValidationResult,
   VaultSettings,
   VaultStatus,
 } from "./types";
@@ -158,6 +165,39 @@ export const api = {
     call<string>("credential_reveal", { selector, password }),
   credentialCopy: (selector: string, password: string) =>
     call<number>("credential_copy", { selector, password }),
+
+  credentialValidate: (selector: string) =>
+    call<ValidationResult>("credential_validate", { selector }),
+  credentialMetadata: (selector: string) =>
+    call<FetchedMetadata>("credential_metadata", { selector }),
+  credentialPermissions: (selector: string, sync: boolean) =>
+    call<StoredPermissions | null>("credential_permissions", { selector, sync }),
+  providerConnect: (provider: string, credential: string) =>
+    call<void>("provider_connect", { provider, credential }),
+  providerSync: (provider: string, days: number) =>
+    call<number>("provider_sync", { provider, days }),
+  providerConnectionStatus: (provider: string) =>
+    call<ProviderConnection>("provider_connection_status", { provider }),
+  usageReport: (project?: string, credential?: string) =>
+    call<UsageTotals>("usage_report", {
+      project: project ?? null,
+      credential: credential ?? null,
+    }),
+  usageRecordManual: (
+    credential: string,
+    model: string | null,
+    inputTokens: number,
+    outputTokens: number,
+  ) => call<void>("usage_record_manual", { credential, model, inputTokens, outputTokens }),
+  budgetSet: (project: string | null, credential: string | null, amount: string | null) =>
+    call<void>("budget_set", { project, credential, amount }),
+  budgetReport: (project?: string, credential?: string) =>
+    call<BudgetReport>("budget_report", {
+      project: project ?? null,
+      credential: credential ?? null,
+    }),
+  activityList: (credential: string | null, limit: number) =>
+    call<ActivityEvent[]>("activity_list", { credential, limit }),
 
   backupCreate: (
     path: string,

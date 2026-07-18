@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, isApiError } from "../api";
-import type { Credential } from "../types";
+import type { Credential, StoredPermissions } from "../types";
 import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
 import { PromptDialog } from "./ConfirmDialog";
@@ -25,7 +25,19 @@ export function CredentialDetail(props: {
   const [newValue, setNewValue] = useState("");
   const [replacePassword, setReplacePassword] = useState("");
   const [exposurePromptOpen, setExposurePromptOpen] = useState(false);
+  const [permissions, setPermissions] = useState<StoredPermissions | null>(null);
   const revealTimer = useRef<number | null>(null);
+
+  // A small async wrapper that surfaces errors and a success notice.
+  const run = async (fn: () => Promise<void>) => {
+    setError(null);
+    setNotice(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(isApiError(e) ? e.message : String(e));
+    }
+  };
 
   const reload = useCallback(async () => {
     try {
@@ -37,10 +49,15 @@ export function CredentialDetail(props: {
 
   useEffect(() => {
     void reload();
+    // Load any previously-synced permissions (no network request).
+    api
+      .credentialPermissions(props.id, false)
+      .then(setPermissions)
+      .catch(() => setPermissions(null));
     return () => {
       if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
     };
-  }, [reload]);
+  }, [reload, props.id]);
 
   const hideRevealed = useCallback(() => {
     setRevealed(null);
@@ -165,6 +182,63 @@ export function CredentialDetail(props: {
           Delete…
         </button>
       </p>
+
+      <h2>Provider</h2>
+      <p className="muted">These make a direct request to the provider from this device.</p>
+      <p style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <button
+          onClick={() =>
+            void run(async () => {
+              const r = await api.credentialValidate(props.id);
+              setNotice(`${r.valid ? "Valid" : "Invalid"}: ${r.detail}`);
+            })
+          }
+        >
+          Validate
+        </button>
+        <button
+          onClick={() =>
+            void run(async () => {
+              const m = await api.credentialMetadata(props.id);
+              setNotice(
+                `Metadata (${m.source}): ${m.fields.map(([k, v]) => `${k}=${v}`).join(", ")}`,
+              );
+            })
+          }
+        >
+          Fetch metadata
+        </button>
+        <button
+          onClick={() =>
+            void run(async () => {
+              const p = await api.credentialPermissions(props.id, true);
+              setPermissions(p);
+              setNotice(p ? "Permissions synced." : "No permissions available.");
+            })
+          }
+        >
+          Sync permissions
+        </button>
+      </p>
+      {permissions && (
+        <div className="finding ok">
+          <div>
+            <strong>Permissions</strong>{" "}
+            <span className="muted">
+              ({permissions.source}, {permissions.confidence} confidence)
+            </span>
+          </div>
+          <div>{permissions.normalized.summary}</div>
+          {permissions.raw_scopes.length > 0 && (
+            <div className="muted mono">scopes: {permissions.raw_scopes.join(", ")}</div>
+          )}
+          {permissions.normalized.sensitive.length > 0 && (
+            <div className="muted">
+              production-sensitive: {permissions.normalized.sensitive.join(", ")}
+            </div>
+          )}
+        </div>
+      )}
 
       <h2>Manual tracking</h2>
       <p style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>

@@ -242,6 +242,80 @@ export interface DocWatch {
   created_at: string;
 }
 
+export interface ValidationResult {
+  valid: boolean;
+  status: number;
+  detail: string;
+}
+
+export interface FetchedMetadata {
+  fields: [string, string][];
+  source: string;
+}
+
+export interface NormalizedPermissions {
+  read: string[];
+  write: string[];
+  admin: string[];
+  sensitive: string[];
+  summary: string;
+}
+
+export interface StoredPermissions {
+  credential_id: string;
+  raw_scopes: string[];
+  normalized: NormalizedPermissions;
+  source: string;
+  precision: string;
+  confidence: string;
+  synced_at: string;
+}
+
+export interface ProviderConnection {
+  provider: string;
+  admin_credential_id: string | null;
+  last_synced_at: string | null;
+  last_status: string;
+  detail: string;
+}
+
+export interface UsageTotals {
+  snapshots: number;
+  request_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  reported_cost_micros: number;
+  estimated_cost_micros: number;
+  has_inexact_attribution: boolean;
+  coarsest_attribution: string | null;
+}
+
+export interface BudgetReport {
+  scope: string;
+  budget_micros: number | null;
+  period_start: string;
+  reported_cost_micros: number;
+  estimated_cost_micros: number;
+  used_micros: number;
+  used_is_estimated: boolean;
+  remaining_micros: number | null;
+  projected_period_end_micros: number;
+  over_budget: boolean;
+  attribution_note: string | null;
+}
+
+export interface ActivityEvent {
+  id: number;
+  at: string;
+  source: string;
+  kind: string;
+  credential_id: string | null;
+  project_id: string | null;
+  detail: string;
+  measurements: string;
+}
+
 export interface BackupInfo {
   path: string;
   vault_id: string;

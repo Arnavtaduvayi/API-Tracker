@@ -20,6 +20,7 @@ import { ProviderCatalog } from "./components/ProviderCatalog";
 import { ProviderDetail } from "./components/ProviderDetail";
 import { ScanView } from "./components/ScanView";
 import { AlertsView } from "./components/AlertsView";
+import { UsageView } from "./components/UsageView";
 
 export type View =
   | { name: "projects" }
@@ -33,6 +34,7 @@ export type View =
   | { name: "provider"; id: string }
   | { name: "scan" }
   | { name: "alerts" }
+  | { name: "usage" }
   | { name: "settings" }
   | { name: "backup" };
 
@@ -104,6 +106,9 @@ export default function App() {
         <button className="link" onClick={() => setView({ name: "alerts" })}>
           Alerts
         </button>
+        <button className="link" onClick={() => setView({ name: "usage" })}>
+          Usage
+        </button>
         <button className="link" onClick={() => setView({ name: "backup" })}>
           Backup
         </button>
@@ -172,6 +177,7 @@ export default function App() {
       )}
       {view.name === "scan" && <ScanView />}
       {view.name === "alerts" && <AlertsView />}
+      {view.name === "usage" && <UsageView />}
       {view.name === "settings" && <SettingsView dataDir={dataDir} />}
       {view.name === "backup" && <BackupView onRestored={() => void refreshStatus()} />}
     </div>
