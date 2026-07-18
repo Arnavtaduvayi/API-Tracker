@@ -136,6 +136,10 @@ pub struct NewUsageSnapshot {
     pub provider_project_id: Option<String>,
     pub provider_api_key_id: Option<String>,
     pub line_item: Option<String>,
+    /// Non-token units, verbatim from the provider (requests, events,
+    /// credits, bytes, operations, ...). Never coerced into tokens.
+    pub quantity: Option<f64>,
+    pub unit: Option<String>,
 }
 
 impl NewUsageSnapshot {
@@ -161,6 +165,8 @@ impl NewUsageSnapshot {
             provider_project_id: None,
             provider_api_key_id: None,
             line_item: None,
+            quantity: None,
+            unit: None,
         }
     }
 }
@@ -189,12 +195,16 @@ pub struct UsageSnapshot {
     pub provider_project_id: Option<String>,
     pub provider_api_key_id: Option<String>,
     pub line_item: Option<String>,
+    /// Non-token units, verbatim from the provider (requests, events,
+    /// credits, bytes, operations, ...). Never coerced into tokens.
+    pub quantity: Option<f64>,
+    pub unit: Option<String>,
 }
 
 const COLUMNS: &str = "id, credential_id, project_id, provider, model, window_start, window_end, \
      request_count, input_tokens, output_tokens, total_tokens, credits, reported_cost_micros, \
      estimated_cost_micros, currency, source, attribution, collected_at, provider_account_id, \
-     provider_project_id, provider_api_key_id, line_item";
+     provider_project_id, provider_api_key_id, line_item, quantity, unit";
 
 fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<UsageSnapshot> {
     Ok(UsageSnapshot {
@@ -220,6 +230,8 @@ fn row_to_snapshot(row: &Row<'_>) -> rusqlite::Result<UsageSnapshot> {
         provider_project_id: row.get(19)?,
         provider_api_key_id: row.get(20)?,
         line_item: row.get(21)?,
+        quantity: row.get(22)?,
+        unit: row.get(23)?,
     })
 }
 
@@ -230,7 +242,7 @@ pub fn record(conn: &Connection, snap: &NewUsageSnapshot) -> Result<String> {
         &format!(
             "INSERT INTO usage_snapshots ({COLUMNS}) VALUES \
              (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-              ?19, ?20, ?21, ?22)"
+              ?19, ?20, ?21, ?22, ?23, ?24)"
         ),
         params![
             id,
@@ -255,6 +267,8 @@ pub fn record(conn: &Connection, snap: &NewUsageSnapshot) -> Result<String> {
             snap.provider_project_id,
             snap.provider_api_key_id,
             snap.line_item,
+            snap.quantity,
+            snap.unit,
         ],
     )?;
     Ok(id)

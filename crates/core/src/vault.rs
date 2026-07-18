@@ -2251,12 +2251,13 @@ impl UnlockedVault {
                 "the administrative key must not be empty".into(),
             ));
         }
-        if provider != crate::openai::PROVIDER {
+        if provider != crate::openai::PROVIDER && provider != crate::anthropic::PROVIDER {
             return Err(CoreError::Unsupported {
                 provider,
                 capability: "admin_connection",
-                hint: "a dedicated administrative connection is only implemented for OpenAI; \
-                       use `provider connect <provider> --credential <vault credential>`"
+                hint: "a dedicated administrative connection is implemented for OpenAI and \
+                       Anthropic; use `provider connect <provider> --credential <vault \
+                       credential>` otherwise"
                     .into(),
             });
         }
@@ -2264,6 +2265,9 @@ impl UnlockedVault {
         // `http: None` (explicit user opt-out, e.g. offline setup) stores the
         // key unvalidated and says so.
         let detail = match http {
+            Some(http) if provider == crate::anthropic::PROVIDER => {
+                crate::anthropic::validate_admin_key(http, admin_key)?
+            }
             Some(http) => crate::openai::validate_admin_key(http, admin_key)?,
             None => "stored without validation (verification was skipped)".to_string(),
         };
@@ -2544,6 +2548,8 @@ impl UnlockedVault {
         let admin_secret = self.provider_admin_secret(&provider)?;
         let result = if provider == crate::openai::PROVIDER {
             self.openai_sync(http, &admin_secret, from, to)
+        } else if provider == crate::anthropic::PROVIDER {
+            self.anthropic_sync(http, &admin_secret, from, to)
         } else {
             self.legacy_connector_sync(&provider, http, &admin_secret, from, to)
         };
@@ -2765,10 +2771,12 @@ impl UnlockedVault {
         }
         for p in &side_projects {
             tx.execute(
-                "INSERT INTO provider_side_projects (provider, project_id, name, status, synced_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
+                "INSERT INTO provider_side_projects
+                 (provider, project_id, name, status, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
                  ON CONFLICT(provider, project_id) DO UPDATE SET
-                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at",
+                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_projects.first_seen_at, excluded.first_seen_at)",
                 params![provider, p.id, p.name, p.status, now],
             )?;
         }
@@ -2776,12 +2784,13 @@ impl UnlockedVault {
             tx.execute(
                 "INSERT INTO provider_side_keys
                  (provider, api_key_id, provider_project_id, name, redacted_value,
-                  created_at, last_used_at, synced_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  created_at, last_used_at, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
                  ON CONFLICT(provider, api_key_id) DO UPDATE SET
                  provider_project_id = excluded.provider_project_id, name = excluded.name,
                  redacted_value = excluded.redacted_value, created_at = excluded.created_at,
-                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at",
+                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_keys.first_seen_at, excluded.first_seen_at)",
                 params![
                     provider,
                     k.id,
@@ -2793,6 +2802,182 @@ impl UnlockedVault {
                     now
                 ],
             )?;
+        }
+        let (from_s, to_s) = (clock::to_rfc3339(from), clock::to_rfc3339(to));
+        let mut checkpoint_kinds = vec!["usage"];
+        if costs_ok {
+            checkpoint_kinds.push("costs");
+        }
+        for kind in checkpoint_kinds {
+            tx.execute(
+                "INSERT INTO provider_sync_state (provider, kind, window_start, window_end, synced_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(provider, kind) DO UPDATE SET
+                 window_start = excluded.window_start, window_end = excluded.window_end,
+                 synced_at = excluded.synced_at",
+                params![provider, kind, from_s, to_s, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(SyncReport {
+            provider: provider.to_string(),
+            usage_rows: usage_count,
+            cost_rows: cost_count,
+            window_start: from_s,
+            window_end: to_s,
+            notes,
+        })
+    }
+
+    /// The Anthropic Admin API sync engine: per-key daily usage (grouped
+    /// api_key_id × workspace_id × model), workspace-level cost report
+    /// (cents-denominated, converted with guards), workspace + key
+    /// metadata, and provider-reported key expirations. Mirrors the
+    /// fetch-all-then-replace semantics of `openai_sync`.
+    fn anthropic_sync(
+        &self,
+        http: &dyn crate::http::HttpClient,
+        admin_secret: &SecretString,
+        from: time::OffsetDateTime,
+        to: time::OffsetDateTime,
+    ) -> Result<SyncReport> {
+        use crate::anthropic;
+        let provider = anthropic::PROVIDER;
+        let mut notes = Vec::new();
+
+        let mut usage_rows = anthropic::fetch_usage(http, admin_secret, from, to)?;
+        let (mut cost_rows, costs_ok) = match anthropic::fetch_costs(http, admin_secret, from, to) {
+            Ok(rows) => (rows, true),
+            Err(e) => {
+                notes.push(format!("provider-reported costs are unavailable: {e}"));
+                (Vec::new(), false)
+            }
+        };
+
+        // Provider-side metadata is best-effort.
+        let mut side_projects = Vec::new();
+        let mut side_keys: Vec<crate::openai::ProviderSideKey> = Vec::new();
+        let mut key_expiries: Vec<(String, String)> = Vec::new();
+        match anthropic::fetch_workspaces(http, admin_secret) {
+            Ok(workspaces) => side_projects = workspaces,
+            Err(e) => notes.push(format!("workspace metadata unavailable: {e}")),
+        }
+        match anthropic::fetch_api_keys(http, admin_secret) {
+            Ok(keys) => {
+                for (key, expires_at) in keys {
+                    if let Some(expiry) = expires_at {
+                        key_expiries.push((key.id.clone(), expiry));
+                    }
+                    side_keys.push(key);
+                }
+            }
+            Err(e) => notes.push(format!("API-key metadata unavailable: {e}")),
+        }
+
+        // Confirmed links upgrade rows to exact local attribution; cost
+        // rows carry no key dimension (documented) and stay coarse.
+        let links = self.provider_key_link_map(provider)?;
+        for row in usage_rows.iter_mut() {
+            if let Some(key_id) = &row.provider_api_key_id {
+                if let Some((credential_id, project_id)) = links.get(key_id) {
+                    row.credential_id = Some(credential_id.clone());
+                    row.project_id = Some(project_id.clone());
+                    row.attribution = usage::Attribution::ExactCredential;
+                }
+            }
+            if row.provider_account_id.is_none() {
+                row.provider_account_id = self.provider_org_label(provider)?;
+            }
+        }
+        for row in cost_rows.iter_mut() {
+            if row.provider_account_id.is_none() {
+                row.provider_account_id = self.provider_org_label(provider)?;
+            }
+        }
+        for row in usage_rows.iter_mut() {
+            if let (Some(model), Some(inp), Some(out)) =
+                (&row.model, row.input_tokens, row.output_tokens)
+            {
+                if let Some(est) =
+                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
+                {
+                    row.estimated_cost_micros = Some(est.micros);
+                }
+            }
+        }
+
+        let usage_count = usage_rows.len();
+        let cost_count = cost_rows.len();
+        let now = clock::now_rfc3339();
+        let tx = self.conn.unchecked_transaction()?;
+        if let (Some(min_start), Some(max_end)) = (
+            usage_rows.iter().map(|s| s.window_start.clone()).min(),
+            usage_rows.iter().map(|s| s.window_end.clone()).max(),
+        ) {
+            tx.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source != 'manual' AND source != ?2
+                 AND window_start >= ?3 AND window_start < ?4",
+                params![provider, anthropic::COSTS_SOURCE, min_start, max_end],
+            )?;
+        }
+        if let (Some(min_start), Some(max_end)) = (
+            cost_rows.iter().map(|s| s.window_start.clone()).min(),
+            cost_rows.iter().map(|s| s.window_end.clone()).max(),
+        ) {
+            tx.execute(
+                "DELETE FROM usage_snapshots
+                 WHERE provider = ?1 AND source = ?2
+                 AND window_start >= ?3 AND window_start < ?4",
+                params![provider, anthropic::COSTS_SOURCE, min_start, max_end],
+            )?;
+        }
+        for row in usage_rows.iter().chain(cost_rows.iter()) {
+            usage::record(&tx, row)?;
+        }
+        for p in &side_projects {
+            tx.execute(
+                "INSERT INTO provider_side_projects
+                 (provider, project_id, name, status, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+                 ON CONFLICT(provider, project_id) DO UPDATE SET
+                 name = excluded.name, status = excluded.status, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_projects.first_seen_at, excluded.first_seen_at)",
+                params![provider, p.id, p.name, p.status, now],
+            )?;
+        }
+        for k in &side_keys {
+            tx.execute(
+                "INSERT INTO provider_side_keys
+                 (provider, api_key_id, provider_project_id, name, redacted_value,
+                  created_at, last_used_at, synced_at, first_seen_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                 ON CONFLICT(provider, api_key_id) DO UPDATE SET
+                 provider_project_id = excluded.provider_project_id, name = excluded.name,
+                 redacted_value = excluded.redacted_value, created_at = excluded.created_at,
+                 last_used_at = excluded.last_used_at, synced_at = excluded.synced_at,
+                 first_seen_at = COALESCE(provider_side_keys.first_seen_at, excluded.first_seen_at)",
+                params![
+                    provider,
+                    k.id,
+                    k.provider_project_id,
+                    k.name,
+                    k.redacted_value,
+                    k.created_at,
+                    k.last_used_at,
+                    now
+                ],
+            )?;
+        }
+        // Provider-reported key expirations flow onto LINKED credentials
+        // (recorded verbatim from the provider, never invented).
+        for (key_id, expiry) in &key_expiries {
+            if let Some((credential_id, _)) = links.get(key_id) {
+                tx.execute(
+                    "UPDATE credentials SET provider_expires_at = ?1 WHERE id = ?2",
+                    params![expiry, credential_id],
+                )?;
+            }
         }
         let (from_s, to_s) = (clock::to_rfc3339(from), clock::to_rfc3339(to));
         let mut checkpoint_kinds = vec!["usage"];
@@ -4252,12 +4437,10 @@ impl UnlockedVault {
                 None => 0, // baseline only
                 Some(last) if last == &head => continue,
                 Some(last) => {
-                    let units = match crate::gitrepo::range_added_units(repo, last, &head) {
-                        Ok(units) => units,
-                        // History rewritten or range unreadable: re-baseline
-                        // rather than failing the whole monitor run.
-                        Err(_) => Vec::new(),
-                    };
+                    // History rewritten or range unreadable: re-baseline
+                    // rather than failing the whole monitor run.
+                    let units =
+                        crate::gitrepo::range_added_units(repo, last, &head).unwrap_or_default();
                     let mut findings = Vec::new();
                     for unit in &units {
                         let options = scanner::ScanOptions {
@@ -4267,8 +4450,12 @@ impl UnlockedVault {
                     }
                     let suppressions = load_suppression_keys(&self.conn)?;
                     findings.retain(|f| !suppressions.contains(&f.suppression_key));
-                    for i in 0..findings.len() {
-                        findings[i].vault_match = self.match_finding(&findings[i])?;
+                    let matches: Vec<_> = findings
+                        .iter()
+                        .map(|f| self.match_finding(f))
+                        .collect::<Result<_>>()?;
+                    for (finding, matched) in findings.iter_mut().zip(matches) {
+                        finding.vault_match = matched;
                     }
                     let count = findings.len();
                     if count > 0 {

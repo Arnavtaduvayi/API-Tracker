@@ -127,7 +127,7 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
     }
 
     // Rich path when unlocked: the vault scans, matches, and marks exposures.
-    if let Some(mut vault) = ctx.try_unlocked() {
+    if let Some(vault) = ctx.try_unlocked() {
         let mut findings = if args.staged {
             vault.scan_staged(&args.path)?
         } else if args.all_history {

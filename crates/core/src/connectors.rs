@@ -323,6 +323,93 @@ impl Connector for GitHub {
         })
     }
 
+    /// Metered usage from the Enhanced Billing platform. Requires a
+    /// FINE-GRAINED token with "Plan" (read) — classic PATs are not
+    /// documented to work; failures say so instead of guessing.
+    /// Account-level only, never per token.
+    fn fetch_usage(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        _since_days: u32,
+    ) -> Result<FetchedUsage> {
+        let resp = http.send(&Self::user_request(admin_secret))?;
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "GitHub rejected the token (status {})",
+                resp.status
+            )));
+        }
+        let login = parse_json(&resp.body)?
+            .get("login")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| CoreError::Provider("GitHub /user returned no login".into()))?;
+        let now = crate::clock::now();
+        let url = format!(
+            "https://api.github.com/users/{login}/settings/billing/usage?year={}&month={}",
+            now.year(),
+            now.month() as u8
+        );
+        let req = HttpRequest::get(url)
+            .header("Authorization", format!("Bearer {}", admin_secret.expose()))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "api-tracker");
+        let resp = http.send(&req)?;
+        if resp.status == 403 || resp.status == 404 {
+            return Err(CoreError::Unsupported {
+                provider: "github".into(),
+                capability: "fetch_usage",
+                hint: "the billing usage API needs a FINE-GRAINED token with 'Plan' (read) \
+                       permission and the enhanced billing platform; classic PATs are not \
+                       documented to work"
+                    .into(),
+            });
+        }
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "GitHub billing usage returned status {}",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let mut snapshots = Vec::new();
+        if let Some(items) = json.get("usageItems").and_then(|v| v.as_array()) {
+            for item in items {
+                let date = item
+                    .get("date")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let mut snap = NewUsageSnapshot::new("github", &date, &date);
+                snap.quantity = item.get("quantity").and_then(|v| v.as_f64());
+                snap.unit = item
+                    .get("unitType")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                snap.line_item = Some(format!(
+                    "{}/{}",
+                    item.get("product").and_then(|v| v.as_str()).unwrap_or("?"),
+                    item.get("sku").and_then(|v| v.as_str()).unwrap_or("?")
+                ));
+                if let Some(net) = item.get("netAmount").and_then(|v| v.as_f64()) {
+                    snap.reported_cost_micros = Some(crate::usage::micros_from_decimal(net)?);
+                }
+                snap.source = "github_billing_api".to_string();
+                // The billing platform reports per ACCOUNT, never per token.
+                snap.attribution = Attribution::ProviderAccount;
+                snap.provider_account_id = Some(login.clone());
+                snapshots.push(snap);
+            }
+        }
+        Ok(FetchedUsage {
+            snapshots,
+            attribution: Attribution::ProviderAccount,
+            source: "GitHub Enhanced Billing usage (account level)".to_string(),
+        })
+    }
+
     fn fetch_permissions(
         &self,
         http: &dyn HttpClient,
@@ -784,6 +871,15 @@ impl Stripe {
     }
 }
 
+impl Stripe {
+    fn events_request(secret: &SecretString, url: &str) -> HttpRequest {
+        use base64::Engine;
+        let basic =
+            base64::engine::general_purpose::STANDARD.encode(format!("{}:", secret.expose()));
+        HttpRequest::get(url).header("Authorization", format!("Basic {basic}"))
+    }
+}
+
 impl Connector for Stripe {
     fn id(&self) -> &'static str {
         "stripe"
@@ -845,6 +941,102 @@ impl Connector for Stripe {
         Ok(FetchedMetadata {
             fields,
             source: "Stripe GET /v1/balance".to_string(),
+        })
+    }
+
+    /// Daily account-activity aggregates from the official Events API
+    /// (30-day retention). Stripe has no per-key request-log API — the
+    /// dashboard is the only place for that — so this is ACCOUNT-level
+    /// activity, recorded in events (never forced into tokens).
+    fn fetch_usage(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        since_days: u32,
+    ) -> Result<FetchedUsage> {
+        let since_days = since_days.min(30); // documented retention
+        let created_gte =
+            (crate::clock::now() - time::Duration::days(i64::from(since_days))).unix_timestamp();
+        const MAX_PAGES: usize = 100;
+        let mut counts: std::collections::BTreeMap<(String, String), i64> =
+            std::collections::BTreeMap::new();
+        let mut starting_after: Option<String> = None;
+        let mut pages = 0usize;
+        loop {
+            pages += 1;
+            if pages > MAX_PAGES {
+                return Err(CoreError::Provider(format!(
+                    "the Stripe events listing exceeded {MAX_PAGES} pages; narrow the window \
+                     (events would otherwise be silently truncated)"
+                )));
+            }
+            let mut url =
+                format!("https://api.stripe.com/v1/events?limit=100&created[gte]={created_gte}");
+            if let Some(cursor) = &starting_after {
+                url.push_str(&format!("&starting_after={cursor}"));
+            }
+            let resp = http.send(&Self::events_request(admin_secret, &url))?;
+            if resp.status == 401 {
+                return Err(CoreError::Provider(
+                    "Stripe rejected the secret key (401)".into(),
+                ));
+            }
+            if !resp.is_success() {
+                return Err(CoreError::Provider(format!(
+                    "Stripe events returned status {}",
+                    resp.status
+                )));
+            }
+            let json = parse_json(&resp.body)?;
+            let Some(data) = json.get("data").and_then(|v| v.as_array()) else {
+                return Err(CoreError::Provider(
+                    "Stripe events response has no data".into(),
+                ));
+            };
+            let mut last_id = None;
+            for event in data {
+                let created = event.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
+                let day = crate::clock::to_rfc3339(
+                    unix_to_time(created).replace_time(time::Time::MIDNIGHT),
+                );
+                let family = event
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .split('.')
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string();
+                *counts.entry((day, family)).or_insert(0) += 1;
+                last_id = event.get("id").and_then(|v| v.as_str()).map(str::to_string);
+            }
+            let has_more = json
+                .get("has_more")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !has_more || last_id.is_none() {
+                break;
+            }
+            starting_after = last_id;
+        }
+        let mut snapshots = Vec::new();
+        for ((day, family), count) in counts {
+            let day_end = crate::clock::to_rfc3339(
+                crate::clock::parse_rfc3339(&day).unwrap_or_else(|_| crate::clock::now())
+                    + time::Duration::days(1),
+            );
+            let mut snap = NewUsageSnapshot::new("stripe", &day, &day_end);
+            snap.quantity = Some(count as f64);
+            snap.unit = Some("events".to_string());
+            snap.line_item = Some(family);
+            snap.source = "stripe_events".to_string();
+            snap.attribution = Attribution::ProviderAccount;
+            snapshots.push(snap);
+        }
+        Ok(FetchedUsage {
+            snapshots,
+            attribution: Attribution::ProviderAccount,
+            source: "Stripe Events API (account activity, 30-day retention)".to_string(),
         })
     }
 }
@@ -1288,5 +1480,92 @@ mod tests {
         assert!(for_provider("github").is_some());
         assert!(for_provider("OpenAI").is_some());
         assert!(for_provider("unknown").is_none());
+    }
+
+    #[test]
+    fn github_billing_usage_preserves_units_and_account_attribution() {
+        let mock = MockHttpClient::new(vec![
+            MockHttpClient::json_response(r#"{"login":"octo"}"#),
+            MockHttpClient::json_response(
+                r#"{"usageItems":[
+                    {"date":"2026-07-01","product":"actions","sku":"actions_linux",
+                     "quantity":120,"unitType":"minutes","pricePerUnit":0.008,
+                     "grossAmount":0.96,"discountAmount":0,"netAmount":0.96,
+                     "repositoryName":"octo/app"}]}"#,
+            ),
+        ]);
+        let usage = GitHub
+            .fetch_usage(
+                &mock,
+                &SecretString::from("github_pat_FAKE0000000000000000000000000000000000000000000000000000000000000000000000000001"),
+                30,
+            )
+            .unwrap();
+        assert_eq!(usage.snapshots.len(), 1);
+        let snap = &usage.snapshots[0];
+        assert_eq!(snap.quantity, Some(120.0));
+        assert_eq!(snap.unit.as_deref(), Some("minutes"));
+        assert_eq!(snap.line_item.as_deref(), Some("actions/actions_linux"));
+        assert_eq!(snap.reported_cost_micros, Some(960_000)); // $0.96
+        assert_eq!(snap.attribution, Attribution::ProviderAccount);
+        assert!(
+            snap.input_tokens.is_none(),
+            "minutes are never forced into tokens"
+        );
+    }
+
+    #[test]
+    fn github_billing_403_explains_fine_grained_requirement() {
+        let mock = MockHttpClient::new(vec![
+            MockHttpClient::json_response(r#"{"login":"octo"}"#),
+            crate::http::HttpResponse {
+                status: 403,
+                headers: vec![],
+                body: b"{}".to_vec(),
+            },
+        ]);
+        let err = GitHub
+            .fetch_usage(
+                &mock,
+                &SecretString::from("ghp_FAKE0000000000000000000000000000000000"),
+                30,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("FINE-GRAINED"), "{err}");
+    }
+
+    #[test]
+    fn stripe_events_aggregate_daily_families_with_pagination() {
+        let mock = MockHttpClient::new(vec![
+            MockHttpClient::json_response(
+                r#"{"object":"list","has_more":true,"data":[
+                    {"id":"evt_1","type":"charge.succeeded","created":1767225600},
+                    {"id":"evt_2","type":"charge.failed","created":1767225700}]}"#,
+            ),
+            MockHttpClient::json_response(
+                r#"{"object":"list","has_more":false,"data":[
+                    {"id":"evt_3","type":"customer.created","created":1767312000}]}"#,
+            ),
+        ]);
+        let usage = Stripe
+            .fetch_usage(
+                &mock,
+                &SecretString::from("sk_test_FAKEFAKEFAKEFAKEFAKEFAKE01"),
+                30,
+            )
+            .unwrap();
+        // charge x2 on day one, customer x1 on day two.
+        assert_eq!(usage.snapshots.len(), 2);
+        let charge = usage
+            .snapshots
+            .iter()
+            .find(|s| s.line_item.as_deref() == Some("charge"))
+            .unwrap();
+        assert_eq!(charge.quantity, Some(2.0));
+        assert_eq!(charge.unit.as_deref(), Some("events"));
+        assert_eq!(charge.attribution, Attribution::ProviderAccount);
+        // The cursor was passed on page two.
+        let requests = mock.requests.borrow();
+        assert!(requests[1].url.contains("starting_after=evt_2"));
     }
 }

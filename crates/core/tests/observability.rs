@@ -8,7 +8,7 @@ use api_tracker_core::alerts;
 use api_tracker_core::http::MockHttpClient;
 use api_tracker_core::model::Environment;
 use api_tracker_core::secret::SecretString;
-use common::{add_key, add_project, master_pw, new_vault};
+use common::{add_key, add_project, new_vault};
 use std::process::Command;
 
 const FAKE_KEY: &str = "sk-proj-FAKE0000000000000000000000000000FAKE";

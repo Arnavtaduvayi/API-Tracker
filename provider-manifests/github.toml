@@ -30,7 +30,7 @@ confidence = "high"
 [capabilities]
 validate_credential = { support = "implemented", attribution = "exact_credential", note = "An authenticated GET /user confirms the token works; the provider-reported token expiration header is recorded when present." }
 fetch_metadata = { support = "implemented", attribution = "exact_credential", note = "GET / returns X-OAuth-Scopes and X-RateLimit headers for classic tokens." }
-fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "account_level", note = "The Enhanced Billing API reports metered usage at user/org/enterprise account level, never per token." }
+fetch_usage = { support = "implemented", requires_admin_credential = true, attribution = "account_level", note = "Metered usage syncs from the Enhanced Billing API (quantities and unit types verbatim, net amounts as reported) at ACCOUNT level, never per token. Requires a fine-grained token with 'Plan' (read); classic PATs are not documented to work." }
 read_permissions = { support = "implemented", attribution = "exact_credential", note = "Classic tokens expose scopes via the X-OAuth-Scopes response header; fine-grained token permissions are not enumerable via the API." }
 change_permissions = { support = "manual_only", note = "Token scopes/permissions are edited on the token settings page." }
 create_credential = { support = "manual_only", note = "Personal access tokens are created in the web UI, not through the REST API." }

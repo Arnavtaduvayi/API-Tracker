@@ -23,6 +23,7 @@
 pub mod access;
 pub mod activity;
 pub mod alerts;
+pub mod anthropic;
 pub mod audit;
 pub mod backup;
 pub mod budget;
