@@ -1,6 +1,6 @@
 // Small pure helpers (unit-tested with vitest).
 
-import type { Status } from "./types";
+import type { DriftKind, Status } from "./types";
 
 /** RFC 3339 timestamp -> short local display, or a placeholder. */
 export function formatTimestamp(iso: string | null | undefined): string {
@@ -60,4 +60,20 @@ export function emptyToNull(value: string): string | null {
 /** Format integer micro-USD as a dollar string. */
 export function formatMicros(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(2)}`;
+}
+
+/** Display severity for an .env drift finding (mirrors DriftKind::severity in core). */
+export function driftSeverity(kind: DriftKind): "high" | "medium" | "low" | "info" {
+  switch (kind) {
+    case "production_value_in_dev_file":
+    case "unmapped_secret":
+      return "high";
+    case "value_differs_from_vault":
+    case "same_value_in_multiple_files":
+      return "medium";
+    case "missing_expected_variable":
+      return "low";
+    case "mapping_not_in_files":
+      return "info";
+  }
 }

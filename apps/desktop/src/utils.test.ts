@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emptyToNull, statusLabel, statusSeverity, toDateInput } from "./utils";
+import { driftSeverity, emptyToNull, statusLabel, statusSeverity, toDateInput } from "./utils";
 
 describe("toDateInput", () => {
   it("extracts the date part from RFC 3339", () => {
@@ -32,5 +32,16 @@ describe("emptyToNull", () => {
     expect(emptyToNull("")).toBeNull();
     expect(emptyToNull("   ")).toBeNull();
     expect(emptyToNull("2030-01-01")).toBe("2030-01-01");
+  });
+});
+
+describe("driftSeverity", () => {
+  it("mirrors the core severity ordering", () => {
+    expect(driftSeverity("unmapped_secret")).toBe("high");
+    expect(driftSeverity("production_value_in_dev_file")).toBe("high");
+    expect(driftSeverity("value_differs_from_vault")).toBe("medium");
+    expect(driftSeverity("same_value_in_multiple_files")).toBe("medium");
+    expect(driftSeverity("missing_expected_variable")).toBe("low");
+    expect(driftSeverity("mapping_not_in_files")).toBe("info");
   });
 });

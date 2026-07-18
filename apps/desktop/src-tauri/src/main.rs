@@ -978,6 +978,319 @@ fn activity_list(
     })
 }
 
+// --- .env governance, credential versions, destinations, sync plans ---
+
+#[tauri::command]
+fn env_discover(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    path: Option<String>,
+) -> CmdResult<Vec<api_tracker_core::envgov::EnvFileInfo>> {
+    with_vault(&state, |vault| {
+        vault.env_discover(
+            project.as_deref(),
+            path.as_deref().map(std::path::Path::new),
+        )
+    })
+}
+
+#[tauri::command]
+fn env_preview(
+    state: State<'_, AppState>,
+    project: String,
+    file: String,
+) -> CmdResult<Vec<api_tracker_core::envgov::VarPreview>> {
+    with_vault(&state, |vault| {
+        vault.env_preview(&project, std::path::Path::new(&file))
+    })
+}
+
+#[tauri::command]
+fn env_import(
+    state: State<'_, AppState>,
+    project: String,
+    file: String,
+    keys: Option<Vec<String>>,
+) -> CmdResult<Vec<api_tracker_core::vault::EnvImportOutcome>> {
+    with_vault(&state, |vault| {
+        vault.env_import(
+            &project,
+            std::path::Path::new(&file),
+            keys.as_deref(),
+            None,
+        )
+    })
+}
+
+#[tauri::command]
+fn env_drift(
+    state: State<'_, AppState>,
+    project: String,
+) -> CmdResult<Vec<api_tracker_core::envgov::DriftFinding>> {
+    with_vault(&state, |vault| vault.env_drift(&project))
+}
+
+/// A proposed `.env.example` update: names and comments only, never values.
+#[derive(Serialize)]
+struct EnvExampleProposal {
+    proposed: String,
+    diff: String,
+    example_path: String,
+    changed: bool,
+}
+
+/// Compute (without writing) the `.env.example` sibling for a values file.
+/// Purely local file work; no vault access and no secret values involved —
+/// the proposal carries variable names only and the diff is masked.
+#[tauri::command]
+fn env_example_preview(file: String) -> CmdResult<EnvExampleProposal> {
+    use api_tracker_core::{envfile::EnvDocument, envgov};
+    let file = PathBuf::from(&file);
+    let inner = || -> Result<EnvExampleProposal, CoreError> {
+        let content = std::fs::read_to_string(&file)?;
+        let values = EnvDocument::parse(&content);
+        let example_path = file
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(".env.example");
+        let existing = std::fs::read_to_string(&example_path)
+            .ok()
+            .map(|text| EnvDocument::parse(&text));
+        let old = existing.as_ref().map(|d| d.render()).unwrap_or_default();
+        let proposed = envgov::generate_example(&values, existing.as_ref());
+        let diff = envgov::render_diff(".env.example", &old, &proposed);
+        let changed = old != proposed;
+        Ok(EnvExampleProposal {
+            proposed,
+            diff,
+            example_path: example_path.display().to_string(),
+            changed,
+        })
+    };
+    inner().map_err(Into::into)
+}
+
+/// Write a previously previewed `.env.example` (atomic, owner-only).
+#[tauri::command]
+fn env_example_write(example_path: String, content: String) -> CmdResult<()> {
+    api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn env_export(
+    state: State<'_, AppState>,
+    project: String,
+    path: String,
+    vars: Option<Vec<String>>,
+    password: String,
+    overwrite: bool,
+    ttl_minutes: Option<u64>,
+) -> CmdResult<api_tracker_core::vault::EnvExportReport> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault.env_export(
+            &project,
+            std::path::Path::new(&path),
+            vars.as_deref(),
+            &password,
+            overwrite,
+            ttl_minutes,
+        )
+    })
+}
+
+#[tauri::command]
+fn env_cleanup(
+    state: State<'_, AppState>,
+    all: bool,
+    force: bool,
+) -> CmdResult<Vec<api_tracker_core::envgov::CleanupResult>> {
+    with_vault(&state, |vault| vault.env_cleanup(all, force))
+}
+
+#[tauri::command]
+fn env_exports_list(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::envgov::EnvExport>> {
+    with_vault(&state, |vault| vault.env_exports(false))
+}
+
+/// Version history is reauthentication-gated: it reveals rotation cadence.
+#[tauri::command]
+fn credential_versions(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+) -> CmdResult<Vec<api_tracker_core::vault::CredentialVersionInfo>> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault.credential_version_history(&id, &password)
+    })
+}
+
+#[tauri::command]
+fn destination_catalog() -> Vec<&'static api_tracker_core::destinations::DestinationKindInfo> {
+    api_tracker_core::destinations::catalog().iter().collect()
+}
+
+/// The destination credential (`auth`) is encrypted in the vault and is
+/// write-only thereafter; it never crosses back to the frontend.
+#[tauri::command]
+fn destination_add(
+    state: State<'_, AppState>,
+    kind: String,
+    name: String,
+    config: serde_json::Value,
+    auth: Option<String>,
+) -> CmdResult<api_tracker_core::destinations::Destination> {
+    let auth = auth.map(SecretString::new);
+    with_vault(&state, |vault| {
+        vault.destination_add(&kind, &name, config, auth.as_ref())
+    })
+}
+
+/// Removing a destination is reauthentication-gated (it may hold an
+/// administrative credential and deployed-secret bookkeeping).
+#[tauri::command]
+fn destination_remove(
+    state: State<'_, AppState>,
+    ident: String,
+    password: String,
+) -> CmdResult<api_tracker_core::destinations::Destination> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault.destination_remove(&ident, &password)
+    })
+}
+
+#[tauri::command]
+fn destination_list(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::destinations::Destination>> {
+    with_vault(&state, |vault| vault.destination_list())
+}
+
+#[tauri::command]
+fn destination_test(state: State<'_, AppState>, ident: String) -> CmdResult<String> {
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.destination_test(&ident, &http, &runner)
+    })
+}
+
+#[tauri::command]
+fn destination_attach(
+    state: State<'_, AppState>,
+    credential: String,
+    destination: String,
+    secret_name: String,
+    environment: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.destination_attach(&credential, &destination, &secret_name, &environment)
+    })
+}
+
+#[tauri::command]
+fn destination_detach(
+    state: State<'_, AppState>,
+    credential: String,
+    destination: String,
+    secret_name: Option<String>,
+) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.destination_detach(&credential, &destination, secret_name.as_deref())
+    })
+}
+
+#[tauri::command]
+fn destination_attachments(
+    state: State<'_, AppState>,
+    credential: Option<String>,
+) -> CmdResult<Vec<api_tracker_core::destinations::Attachment>> {
+    with_vault(&state, |vault| {
+        vault.destination_attachments(credential.as_deref())
+    })
+}
+
+#[tauri::command]
+fn destination_drift_check(
+    state: State<'_, AppState>,
+    credential: Option<String>,
+) -> CmdResult<Vec<api_tracker_core::destinations::Attachment>> {
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.destination_drift_check(credential.as_deref(), &http, &runner)
+    })
+}
+
+/// Generate a plan (dry run). Nothing is written until `sync_plan_execute`.
+#[tauri::command]
+fn sync_plan_create(
+    state: State<'_, AppState>,
+    credential: String,
+    note: String,
+) -> CmdResult<api_tracker_core::syncplan::SyncPlan> {
+    with_vault(&state, |vault| vault.sync_plan_create(&credential, &note))
+}
+
+#[tauri::command]
+fn sync_plan_get(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<api_tracker_core::syncplan::SyncPlan> {
+    with_vault(&state, |vault| vault.sync_plan_get(&id))
+}
+
+#[tauri::command]
+fn sync_plans_list(
+    state: State<'_, AppState>,
+    credential: Option<String>,
+    limit: u32,
+) -> CmdResult<Vec<api_tracker_core::syncplan::SyncPlan>> {
+    with_vault(&state, |vault| {
+        vault.sync_plans(credential.as_deref(), limit)
+    })
+}
+
+/// Execute a plan's pending or failed steps (retry re-runs failed steps).
+/// Reauthentication-gated; never runs automatically.
+#[tauri::command]
+fn sync_plan_execute(
+    state: State<'_, AppState>,
+    id: String,
+    only_destination: Option<String>,
+    password: String,
+) -> CmdResult<api_tracker_core::syncplan::SyncPlan> {
+    let password = SecretString::new(password);
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.sync_plan_execute(&id, only_destination.as_deref(), &password, &http, &runner)
+    })
+}
+
+/// Roll executed steps back to the plan's previous version (where one is
+/// retained). Reauthentication-gated.
+#[tauri::command]
+fn sync_plan_rollback(
+    state: State<'_, AppState>,
+    id: String,
+    only_destination: Option<String>,
+    password: String,
+) -> CmdResult<api_tracker_core::syncplan::SyncPlan> {
+    let password = SecretString::new(password);
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.sync_plan_rollback(&id, only_destination.as_deref(), &password, &http, &runner)
+    })
+}
+
 fn main() {
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
     tauri::Builder::default()
@@ -1057,6 +1370,30 @@ fn main() {
             backup_create,
             backup_verify,
             backup_restore,
+            env_discover,
+            env_preview,
+            env_import,
+            env_drift,
+            env_example_preview,
+            env_example_write,
+            env_export,
+            env_cleanup,
+            env_exports_list,
+            credential_versions,
+            destination_catalog,
+            destination_add,
+            destination_remove,
+            destination_list,
+            destination_test,
+            destination_attach,
+            destination_detach,
+            destination_attachments,
+            destination_drift_check,
+            sync_plan_create,
+            sync_plan_get,
+            sync_plans_list,
+            sync_plan_execute,
+            sync_plan_rollback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the API Tracker desktop app");
