@@ -147,7 +147,13 @@ mod tests {
         let mut conn = mem();
         migrate(&mut conn).unwrap();
         assert_eq!(user_version(&conn).unwrap(), current_schema_version());
-        for table in ["vault_meta", "projects", "project_repos", "credentials", "audit_events"] {
+        for table in [
+            "vault_meta",
+            "projects",
+            "project_repos",
+            "credentials",
+            "audit_events",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -171,8 +177,16 @@ mod tests {
     fn migrations_apply_incrementally() {
         let mut conn = mem();
         let steps = [
-            Migration { version: 1, name: "one", sql: "CREATE TABLE a (x INTEGER);" },
-            Migration { version: 2, name: "two", sql: "CREATE TABLE b (y INTEGER);" },
+            Migration {
+                version: 1,
+                name: "one",
+                sql: "CREATE TABLE a (x INTEGER);",
+            },
+            Migration {
+                version: 2,
+                name: "two",
+                sql: "CREATE TABLE b (y INTEGER);",
+            },
         ];
         migrate_with(&mut conn, &steps[..1]).unwrap();
         assert_eq!(user_version(&conn).unwrap(), 1);

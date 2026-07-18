@@ -85,8 +85,13 @@ pub fn derive_key(password: &SecretString, salt: &[u8], params: &KdfParams) -> R
     if params.algorithm != "argon2id" {
         return Err(CoreError::Kdf);
     }
-    let argon_params = Params::new(params.m_cost_kib, params.t_cost, params.p_cost, Some(KEY_LEN))
-        .map_err(|_| CoreError::Kdf)?;
+    let argon_params = Params::new(
+        params.m_cost_kib,
+        params.t_cost,
+        params.p_cost,
+        Some(KEY_LEN),
+    )
+    .map_err(|_| CoreError::Kdf)?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
     let mut out = vec![0u8; KEY_LEN];
     argon
@@ -98,17 +103,25 @@ pub fn derive_key(password: &SecretString, salt: &[u8], params: &KdfParams) -> R
 /// Encrypt `plaintext` under `key`, bound to `aad`.
 /// Envelope layout: `[version:1][nonce:24][ciphertext+tag]`.
 pub fn encrypt(key: &SecretBytes, aad: &str, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let cipher = XChaCha20Poly1305::new_from_slice(key.expose())
-        .map_err(|_| CoreError::Crypto { context: "invalid key length" })?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(key.expose()).map_err(|_| CoreError::Crypto {
+            context: "invalid key length",
+        })?;
     let nonce_bytes = random_bytes(NONCE_LEN);
-    let nonce = XNonce::try_from(nonce_bytes.as_slice())
-        .map_err(|_| CoreError::Crypto { context: "invalid nonce length" })?;
+    let nonce = XNonce::try_from(nonce_bytes.as_slice()).map_err(|_| CoreError::Crypto {
+        context: "invalid nonce length",
+    })?;
     let ciphertext = cipher
         .encrypt(
             &nonce,
-            Payload { msg: plaintext, aad: aad.as_bytes() },
+            Payload {
+                msg: plaintext,
+                aad: aad.as_bytes(),
+            },
         )
-        .map_err(|_| CoreError::Crypto { context: "encryption" })?;
+        .map_err(|_| CoreError::Crypto {
+            context: "encryption",
+        })?;
     let mut out = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
     out.push(CRYPTO_VERSION);
     out.extend_from_slice(&nonce_bytes);
@@ -132,12 +145,15 @@ pub fn decrypt(
     }
     let cipher = XChaCha20Poly1305::new_from_slice(key.expose())
         .map_err(|_| CoreError::Crypto { context })?;
-    let nonce = XNonce::try_from(&envelope[1..1 + NONCE_LEN])
-        .map_err(|_| CoreError::Crypto { context })?;
+    let nonce =
+        XNonce::try_from(&envelope[1..1 + NONCE_LEN]).map_err(|_| CoreError::Crypto { context })?;
     let plaintext = cipher
         .decrypt(
             &nonce,
-            Payload { msg: &envelope[1 + NONCE_LEN..], aad: aad.as_bytes() },
+            Payload {
+                msg: &envelope[1 + NONCE_LEN..],
+                aad: aad.as_bytes(),
+            },
         )
         .map_err(|_| CoreError::Crypto { context })?;
     Ok(SecretBytes::new(plaintext))

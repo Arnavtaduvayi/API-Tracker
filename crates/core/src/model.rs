@@ -137,8 +137,14 @@ mod tests {
 
     #[test]
     fn environment_parses_aliases() {
-        assert_eq!(Environment::from_str("dev").unwrap(), Environment::Development);
-        assert_eq!(Environment::from_str("PROD").unwrap(), Environment::Production);
+        assert_eq!(
+            Environment::from_str("dev").unwrap(),
+            Environment::Development
+        );
+        assert_eq!(
+            Environment::from_str("PROD").unwrap(),
+            Environment::Production
+        );
         assert!(Environment::from_str("qa").is_err());
     }
 

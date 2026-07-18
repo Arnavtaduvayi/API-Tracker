@@ -43,9 +43,7 @@ pub enum CoreError {
     #[error("{kind} named '{ident}' already exists")]
     AlreadyExists { kind: &'static str, ident: String },
 
-    #[error(
-        "credential is referenced by {0} linked credential(s); remove the references first"
-    )]
+    #[error("credential is referenced by {0} linked credential(s); remove the references first")]
     HasLinkedReferences(usize),
 
     #[error("cannot create reference: {0}")]
@@ -54,13 +52,14 @@ pub enum CoreError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
-    #[error(
-        "decryption failed for {context}: wrong key/password, corrupted data, or tampering"
-    )]
+    #[error("decryption failed for {context}: wrong key/password, corrupted data, or tampering")]
     Crypto { context: &'static str },
 
     #[error("backup file is not valid: {0}")]
     BackupInvalid(String),
+
+    #[error("the vault database is damaged: {0}")]
+    VaultCorrupted(&'static str),
 
     #[error("key derivation failed (unsupported KDF parameters)")]
     Kdf,
@@ -96,6 +95,7 @@ impl CoreError {
             CoreError::InvalidInput(_) => "invalid_input",
             CoreError::Crypto { .. } => "crypto_error",
             CoreError::BackupInvalid(_) => "backup_invalid",
+            CoreError::VaultCorrupted(_) => "vault_corrupted",
             CoreError::Kdf => "kdf_error",
             CoreError::Db(_) => "db_error",
             CoreError::Io(_) => "io_error",

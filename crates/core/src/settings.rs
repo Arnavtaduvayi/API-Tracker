@@ -49,10 +49,12 @@ impl VaultSettings {
         let mut stmt = conn.prepare("SELECT value FROM vault_meta WHERE key = ?1")?;
         for key in KEYS {
             let value: Option<String> =
-                stmt.query_row([key], |row| row.get(0)).map(Some).or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                    other => Err(other),
-                })?;
+                stmt.query_row([key], |row| row.get(0))
+                    .map(Some)
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                        other => Err(other),
+                    })?;
             if let Some(v) = value {
                 let parsed: u32 = v.parse().map_err(|_| {
                     CoreError::InvalidInput(format!("stored setting '{key}' is not a number"))
@@ -81,7 +83,9 @@ impl VaultSettings {
             "unused_days" => Ok(self.unused_days),
             "stale_days" => Ok(self.stale_days),
             "clipboard_clear_seconds" => Ok(self.clipboard_clear_seconds),
-            other => Err(CoreError::InvalidInput(format!("unknown setting '{other}'"))),
+            other => Err(CoreError::InvalidInput(format!(
+                "unknown setting '{other}'"
+            ))),
         }
     }
 
@@ -93,7 +97,9 @@ impl VaultSettings {
             "stale_days" => self.stale_days = value,
             "clipboard_clear_seconds" => self.clipboard_clear_seconds = value,
             other => {
-                return Err(CoreError::InvalidInput(format!("unknown setting '{other}'")));
+                return Err(CoreError::InvalidInput(format!(
+                    "unknown setting '{other}'"
+                )));
             }
         }
         Ok(())

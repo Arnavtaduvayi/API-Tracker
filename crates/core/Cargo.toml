@@ -11,6 +11,7 @@ argon2 = "0.5.3"
 base64 = "0.22.1"
 blake3 = { version = "1.8.5", features = ["zeroize"] }
 chacha20poly1305 = "0.11.0"
+directories = "6.0.0"
 getrandom = "0.4.3"
 hex = "0.4.3"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
