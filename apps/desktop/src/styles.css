@@ -1,0 +1,183 @@
+/* Deliberately plain, functional styling. No branding. */
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  color: #1a1a1a;
+  background: #fafafa;
+}
+
+#root {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+h1 {
+  font-size: 1.4rem;
+}
+h2 {
+  font-size: 1.15rem;
+}
+
+nav.topbar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+nav.topbar .spacer {
+  flex: 1;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5rem 0;
+}
+
+th,
+td {
+  text-align: left;
+  border-bottom: 1px solid #ddd;
+  padding: 0.4rem 0.6rem;
+}
+
+form.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-width: 32rem;
+}
+
+label.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.9rem;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  padding: 0.35rem;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+}
+
+button {
+  font: inherit;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+button.link {
+  background: none;
+  border: none;
+  color: #0645ad;
+  text-decoration: underline;
+  padding: 0;
+}
+
+button.danger {
+  color: #a40000;
+}
+
+.error {
+  color: #a40000;
+  white-space: pre-wrap;
+}
+
+.notice {
+  color: #205020;
+}
+
+.warnbox {
+  border: 1px solid #c99;
+  background: #fff4f2;
+  padding: 0.6rem;
+  margin: 0.6rem 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  border: 1px solid #999;
+}
+
+.badge.ok {
+  border-color: #2a7;
+  color: #185;
+}
+
+.badge.warn {
+  border-color: #b80;
+  color: #960;
+}
+
+.badge.bad {
+  border-color: #b33;
+  color: #a00;
+}
+
+.mono {
+  font-family: ui-monospace, monospace;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  margin: 0.6rem 0;
+}
+
+.detail-grid dt {
+  font-weight: 600;
+}
+
+.detail-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+dialog {
+  border: 1px solid #999;
+  border-radius: 4px;
+  padding: 1rem;
+  min-width: 24rem;
+}
+
+.finding {
+  border: 1px solid #ddd;
+  border-left-width: 4px;
+  padding: 0.5rem;
+  margin: 0.4rem 0;
+}
+
+.finding.warn {
+  border-left-color: #b80;
+}
+
+.finding.bad {
+  border-left-color: #b33;
+}
+
+.finding.ok {
+  border-left-color: #2a7;
+}
+
+.muted {
+  color: #666;
+  font-size: 0.85rem;
+}
