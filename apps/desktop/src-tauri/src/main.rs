@@ -16,8 +16,8 @@ use api_tracker_core::reuse::ReuseWarning;
 use api_tracker_core::secret::SecretString;
 use api_tracker_core::settings::VaultSettings;
 use api_tracker_core::vault::{
-    self, AddCredential, AddReference, NewProject, UnlockedVault, UpdateCredential,
-    UpdateProject, VaultPaths,
+    self, AddCredential, AddReference, NewProject, UnlockedVault, UpdateCredential, UpdateProject,
+    VaultPaths,
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -36,7 +36,10 @@ struct ErrDto {
 
 impl From<CoreError> for ErrDto {
     fn from(err: CoreError) -> Self {
-        Self { code: err.code().to_owned(), message: err.to_string() }
+        Self {
+            code: err.code().to_owned(),
+            message: err.to_string(),
+        }
     }
 }
 
@@ -177,7 +180,13 @@ fn project_create(
     repo_paths: Vec<String>,
 ) -> CmdResult<Project> {
     with_vault(&state, |vault| {
-        vault.create_project(NewProject { name, description, notes, environments, repo_paths })
+        vault.create_project(NewProject {
+            name,
+            description,
+            notes,
+            environments,
+            repo_paths,
+        })
     })
 }
 
@@ -195,10 +204,17 @@ fn project_update(
         // The UI sends the full desired repo list; diff it against the
         // current one.
         let current = vault.get_project(&ident)?;
-        let add: Vec<String> =
-            repo_paths.iter().filter(|p| !current.repo_paths.contains(p)).cloned().collect();
-        let remove: Vec<String> =
-            current.repo_paths.iter().filter(|p| !repo_paths.contains(p)).cloned().collect();
+        let add: Vec<String> = repo_paths
+            .iter()
+            .filter(|p| !current.repo_paths.contains(p))
+            .cloned()
+            .collect();
+        let remove: Vec<String> = current
+            .repo_paths
+            .iter()
+            .filter(|p| !repo_paths.contains(p))
+            .cloned()
+            .collect();
         vault.update_project(
             &ident,
             UpdateProject {
@@ -229,7 +245,9 @@ fn project_set_password(
     password: String,
 ) -> CmdResult<()> {
     let password = SecretString::new(password);
-    with_vault(&state, |vault| vault.set_project_password(&ident, &password))
+    with_vault(&state, |vault| {
+        vault.set_project_password(&ident, &password)
+    })
 }
 
 #[tauri::command]
@@ -239,7 +257,9 @@ fn project_remove_password(
     password: String,
 ) -> CmdResult<()> {
     let password = SecretString::new(password);
-    with_vault(&state, |vault| vault.remove_project_password(&ident, &password))
+    with_vault(&state, |vault| {
+        vault.remove_project_password(&ident, &password)
+    })
 }
 
 #[tauri::command]
@@ -278,7 +298,9 @@ fn credential_check_reuse(
     value: String,
 ) -> CmdResult<Vec<ReuseWarning>> {
     let value = SecretString::new(value);
-    with_vault(&state, |vault| vault.check_reuse(&project, environment, &value))
+    with_vault(&state, |vault| {
+        vault.check_reuse(&project, environment, &value)
+    })
 }
 
 #[tauri::command]
@@ -481,7 +503,12 @@ fn backup_create(
     let backup_password = SecretString::new(backup_password);
     with_vault(&state, |vault| {
         vault.verify_master_password(&master_password)?;
-        backup::create_backup(vault, std::path::Path::new(&path), &backup_password, overwrite)
+        backup::create_backup(
+            vault,
+            std::path::Path::new(&path),
+            &backup_password,
+            overwrite,
+        )
     })
 }
 
@@ -509,15 +536,23 @@ fn backup_restore(
         let mut slot = state.slot.lock().expect("vault state mutex poisoned");
         slot.vault = None;
     }
-    backup::restore_backup(std::path::Path::new(&path), &backup_password, &state.paths(), force)
-        .map_err(Into::into)
+    backup::restore_backup(
+        std::path::Path::new(&path),
+        &backup_password,
+        &state.paths(),
+        force,
+    )
+    .map_err(Into::into)
 }
 
 fn main() {
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
     tauri::Builder::default()
         .manage(AppState {
-            slot: Mutex::new(VaultSlot { vault: None, last_activity: Instant::now() }),
+            slot: Mutex::new(VaultSlot {
+                vault: None,
+                last_activity: Instant::now(),
+            }),
             data_dir,
         })
         .invoke_handler(tauri::generate_handler![

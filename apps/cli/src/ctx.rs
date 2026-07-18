@@ -37,10 +37,13 @@ impl Ctx {
     /// to session state (project unlock/lock) can be persisted.
     pub fn unlocked(&self) -> Result<(UnlockedVault, Option<SessionToken>)> {
         if let Ok(raw) = std::env::var(ENV_SESSION) {
-            let token = SessionToken::decode(&raw)
-                .context("API_TRACKER_SESSION is not a valid session token")?;
-            let vault = vault::resume_session(&self.paths, &token)?;
-            return Ok((vault, Some(token)));
+            // An empty variable means "no session", not an invalid token.
+            if !raw.trim().is_empty() {
+                let token = SessionToken::decode(&raw)
+                    .context("API_TRACKER_SESSION is not a valid session token")?;
+                let vault = vault::resume_session(&self.paths, &token)?;
+                return Ok((vault, Some(token)));
+            }
         }
         if std::env::var_os(ENV_PASSWORD).is_some() {
             let password = env_secret(ENV_PASSWORD)?;
