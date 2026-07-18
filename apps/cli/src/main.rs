@@ -4,6 +4,7 @@
 //! `api-tracker-core`. All output redacts credential values; the single
 //! deliberate exception is `key reveal`, which requires reauthentication.
 
+mod access_cmd;
 mod alerts_cmd;
 mod backup_cmd;
 mod ctx;
@@ -13,6 +14,7 @@ mod key_cmd;
 mod project_cmd;
 mod provider_cmd;
 mod render;
+mod rotation_cmd;
 mod run_cmd;
 mod scan_cmd;
 mod sync_cmd;
@@ -101,6 +103,12 @@ enum Commands {
     /// Synchronization plans for credential value changes.
     #[command(subcommand)]
     Sync(sync_cmd::SyncCmd),
+    /// Safe, durable credential rotation.
+    #[command(subcommand)]
+    Rotation(rotation_cmd::RotationCmd),
+    /// Temporary local access grants for `run`.
+    #[command(subcommand)]
+    Access(access_cmd::AccessCmd),
     /// Encrypted vault backups.
     #[command(subcommand)]
     Backup(backup_cmd::BackupCmd),
@@ -138,6 +146,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Env(cmd) => env_cmd::run(&ctx, cmd),
         Commands::Destination(cmd) => destination_cmd::run(&ctx, cmd),
         Commands::Sync(cmd) => sync_cmd::run(&ctx, cmd),
+        Commands::Rotation(cmd) => rotation_cmd::run(&ctx, cmd),
+        Commands::Access(cmd) => access_cmd::run(&ctx, cmd),
         Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
     }
 }

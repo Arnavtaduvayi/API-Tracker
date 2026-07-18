@@ -6450,6 +6450,40 @@ impl UnlockedVault {
         Ok(detail)
     }
 
+    /// Fetch fresh permissions WITHOUT storing them, alongside the stored
+    /// snapshot — the before/after diff for permission review.
+    pub fn permissions_preview(
+        &self,
+        selector: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<(
+        Option<crate::permissions::StoredPermissions>,
+        crate::connectors::FetchedPermissions,
+        crate::permissions::NormalizedPermissions,
+    )> {
+        let cred = self.get_credential(selector)?;
+        let stored = crate::permissions::load(&self.conn, &cred.id)?;
+        let connector = self.connector_for(&cred.provider)?;
+        let value = self.decrypt_value(selector)?;
+        let fetched = connector.fetch_permissions(http, &value)?;
+        let normalized = crate::permissions::normalize_for(&cred.provider, &fetched.raw_scopes);
+        Ok((stored, fetched, normalized))
+    }
+
+    /// List provider-side keys via the administrative connection (for
+    /// picking an old key id before rotation/disable/revoke).
+    pub fn provider_list_keys(
+        &self,
+        provider: &str,
+        provider_project_id: Option<&str>,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<Vec<crate::connectors::ProviderKeyListing>> {
+        let provider = crate::providers::normalize(provider);
+        let admin = self.provider_admin_secret(&provider)?;
+        let connector = self.connector_for(&provider)?;
+        connector.list_keys(http, &admin, provider_project_id)
+    }
+
     // ------------------------------------------------------------------
     // Credential lifecycle timeline
     // ------------------------------------------------------------------

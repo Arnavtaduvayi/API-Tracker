@@ -14,8 +14,11 @@ use clap::Args;
 #[derive(Args)]
 pub struct RunArgs {
     /// Project whose credentials may be injected.
+    #[arg(long, required_unless_present = "grant", conflicts_with = "grant")]
+    pub project: Option<String>,
+    /// Run under a temporary access grant (see `access grant`).
     #[arg(long)]
-    pub project: String,
+    pub grant: Option<String>,
     /// Credential selector(s) to inject. Pair each with a matching --env.
     #[arg(long = "credential", value_name = "CREDENTIAL")]
     pub credentials: Vec<String>,
@@ -44,7 +47,30 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
 
     let (vault, _token) = ctx.unlocked()?;
     let command_label = args.command.join(" ");
-    let (env, session) = vault.build_injection(&args.project, &explicit, &command_label)?;
+    let (env, session, grant_limits) = match &args.grant {
+        Some(grant_id) => {
+            if !args.credentials.is_empty() {
+                bail!("--credential cannot be combined with --grant (the grant decides)");
+            }
+            let injection = vault.build_injection_with_grant(grant_id, &command_label)?;
+            for warning in &injection.warnings {
+                eprintln!("{warning}");
+            }
+            (
+                injection.env,
+                injection.session_id,
+                Some((grant_id.clone(), injection.max_duration_secs)),
+            )
+        }
+        None => {
+            let project = args
+                .project
+                .as_deref()
+                .expect("clap enforces project|grant");
+            let (env, session) = vault.build_injection(project, &explicit, &command_label)?;
+            (env, session, None)
+        }
+    };
 
     let injected_names: Vec<&str> = env.iter().map(|(v, _)| v.as_str()).collect();
     eprintln!(
@@ -74,15 +100,49 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
         cmd.env(name, value.expose());
     }
 
-    let status = cmd.status();
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = vault.end_process_session(&session, None);
+            bail!("failed to run '{program}': {e}");
+        }
+    };
     // env (with its SecretStrings) drops here, zeroizing the values.
     drop(env);
+    let (grant_id, max_duration) = match &grant_limits {
+        Some((id, secs)) => (Some(id.as_str()), *secs),
+        None => (None, None),
+    };
+    let _ = vault.record_session_pid(&session, child.id(), grant_id);
+
+    // Wait, enforcing the grant's per-process time bound where set.
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if let Some(secs) = max_duration {
+                    if started.elapsed().as_secs() >= secs.max(0) as u64 {
+                        eprintln!(
+                            "Grant time limit ({secs}s) reached — terminating the child.                              (This is a LOCAL bound; the credential itself remains valid.)"
+                        );
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = vault.end_process_session(&session, None);
+                        std::process::exit(124);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => break Err(e),
+        }
+    };
 
     let (code, summary): (Option<i32>, String) = match status {
         Ok(s) => (s.code(), describe_status(&s)),
         Err(e) => {
             let _ = vault.end_process_session(&session, None);
-            bail!("failed to run '{program}': {e}");
+            bail!("failed to wait for '{program}': {e}");
         }
     };
     // Best-effort session bookkeeping — never lose the child's exit code if
