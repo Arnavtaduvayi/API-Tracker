@@ -16,10 +16,11 @@ pub struct Migration {
     pub sql: &'static str,
 }
 
-pub const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial schema",
-    sql: r#"
+pub const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial schema",
+        sql: r#"
 CREATE TABLE vault_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -86,7 +87,60 @@ CREATE TABLE audit_events (
     detail        TEXT NOT NULL DEFAULT ''
 ) STRICT;
 "#,
-}];
+    },
+    Migration {
+        version: 2,
+        name: "scanning, alerts, and documentation watches",
+        sql: r#"
+-- Local scan suppressions. suppression_key is a non-secret hash of
+-- (rule|path|redacted-preview); no credential value is stored here.
+CREATE TABLE scan_suppressions (
+    id              TEXT PRIMARY KEY,
+    suppression_key TEXT NOT NULL UNIQUE,
+    rule            TEXT NOT NULL,
+    path            TEXT NOT NULL,
+    reason          TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+) STRICT;
+
+-- Local alerts with lifecycle. dedup_key keeps one open alert per condition.
+CREATE TABLE alerts (
+    id                 TEXT PRIMARY KEY,
+    kind               TEXT NOT NULL,
+    severity           TEXT NOT NULL,
+    dedup_key          TEXT NOT NULL,
+    title              TEXT NOT NULL,
+    detail             TEXT NOT NULL,
+    evidence           TEXT NOT NULL DEFAULT '',
+    confidence         TEXT NOT NULL,
+    recommended_action TEXT NOT NULL DEFAULT '',
+    project_id         TEXT,
+    credential_id      TEXT,
+    created_at         TEXT NOT NULL,
+    observed_at        TEXT NOT NULL,
+    acknowledged_at    TEXT,
+    resolved_at        TEXT
+) STRICT;
+
+CREATE UNIQUE INDEX idx_alerts_open_dedup ON alerts(dedup_key) WHERE resolved_at IS NULL;
+CREATE INDEX idx_alerts_open ON alerts(resolved_at);
+
+-- Watched official documentation URLs and their conditional-request state.
+CREATE TABLE doc_watches (
+    id              TEXT PRIMARY KEY,
+    provider        TEXT NOT NULL,
+    url             TEXT NOT NULL UNIQUE,
+    etag            TEXT,
+    last_modified   TEXT,
+    content_hash    TEXT,
+    last_checked_at TEXT,
+    last_changed_at TEXT,
+    last_status     TEXT NOT NULL DEFAULT 'never checked',
+    created_at      TEXT NOT NULL
+) STRICT;
+"#,
+    },
+];
 
 /// Open (or create) the database file with hardened pragmas.
 pub fn open(path: &Path) -> Result<Connection> {

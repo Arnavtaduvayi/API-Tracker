@@ -1,0 +1,46 @@
+# OpenAI provider manifest.
+# Capability statuses are honest declarations: no provider connector is
+# implemented in this milestone, so nothing is "implemented".
+id = "openai"
+name = "OpenAI"
+description = "OpenAI API platform (GPT models, embeddings, etc.)."
+website = "https://openai.com"
+api_docs_url = "https://platform.openai.com/docs/api-reference"
+auth_docs_url = "https://platform.openai.com/docs/api-reference/authentication"
+manage_url = "https://platform.openai.com/api-keys"
+# env_vars lists SECRET-bearing variables only (used for scan detection);
+# non-secret vars like OPENAI_ORG_ID / OPENAI_PROJECT_ID are deliberately excluded.
+env_vars = ["OPENAI_API_KEY", "OPENAI_ADMIN_KEY"]
+credential_types = ["user_api_key", "project_api_key", "service_account_key", "admin_key"]
+expiration = "API keys do not expire automatically; they remain valid until revoked."
+watch_docs = [
+    "https://platform.openai.com/docs/api-reference/authentication",
+    "https://platform.openai.com/docs/deprecations",
+]
+
+[[detection]]
+name = "openai-project-key"
+regex = "sk-proj-[A-Za-z0-9_-]{20,}"
+confidence = "high"
+
+[[detection]]
+name = "openai-service-account-key"
+regex = "sk-svcacct-[A-Za-z0-9_-]{20,}"
+confidence = "high"
+
+[[detection]]
+name = "openai-legacy-key"
+regex = "sk-[A-Za-z0-9]{32,}"
+confidence = "medium"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
+fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Admin API lists project API keys with id, name and creation time; requires an organization admin key." }
+fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Usage API (admin key) can group token/request metrics by api_key_id (exact per key); the Costs API reports dollar spend only at project granularity, so cost is never exact per key." }
+read_permissions = { support = "manual_only", note = "The API does not return a key's endpoint scopes; per-key permission tiers are viewable only in the dashboard." }
+change_permissions = { support = "manual_only", note = "A key's endpoint scopes can be changed only in the dashboard, not via API." }
+create_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Admin API can create service-account keys within a project; user project keys are dashboard-only." }
+disable_credential = { support = "unsupported", note = "There is no disable action; keys are deleted instead." }
+revoke_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Admin API can delete project/service-account keys; personal keys are dashboard-only." }
+rotate_credential = { support = "manual_only", note = "No single rotate endpoint; rotate by creating a new key and deleting the old one (Admin API for service accounts, dashboard otherwise)." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

@@ -1,0 +1,42 @@
+# Anthropic provider manifest.
+id = "anthropic"
+name = "Anthropic"
+description = "Anthropic API platform (Claude models)."
+website = "https://www.anthropic.com"
+api_docs_url = "https://docs.anthropic.com/en/api"
+auth_docs_url = "https://docs.anthropic.com/en/api/overview"
+manage_url = "https://console.anthropic.com/settings/keys"
+env_vars = ["ANTHROPIC_API_KEY", "ANTHROPIC_ADMIN_KEY"]
+credential_types = ["api_key", "admin_key"]
+expiration = "Keys can be given an expiration at creation (presets or custom) or 'Never'; otherwise they remain valid until deactivated."
+watch_docs = [
+    "https://docs.anthropic.com/en/api/versioning",
+    "https://docs.anthropic.com/en/api/overview",
+]
+
+[[detection]]
+name = "anthropic-api-key"
+regex = "sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{80,}"
+confidence = "high"
+
+[[detection]]
+name = "anthropic-admin-key"
+regex = "sk-ant-admin[0-9]{2}-[A-Za-z0-9_-]{80,}"
+confidence = "high"
+
+[[detection]]
+name = "anthropic-key-generic"
+regex = "sk-ant-[A-Za-z0-9_-]{20,}"
+confidence = "medium"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
+fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "The Admin API lists API keys with id, name, status and workspace; requires an admin key." }
+fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "provider_project_level", note = "The Admin Usage & Cost API requires an admin key and reports at organization/workspace granularity." }
+read_permissions = { support = "unsupported", note = "Keys are scoped by workspace membership, not by API-readable per-key scopes." }
+change_permissions = { support = "unsupported", note = "Per-key permissions cannot be changed through a public API." }
+create_credential = { support = "manual_only", note = "API keys can only be created in the console, not through the Admin API." }
+disable_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "POST /v1/organizations/api_keys/{id} with status=inactive; requires an admin key." }
+revoke_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Soft revoke only: set status inactive/archived via the Admin API; there is no hard-delete endpoint." }
+rotate_credential = { support = "manual_only", note = "No atomic rotate; create a new key in the console, then deactivate the old one via the Admin API." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

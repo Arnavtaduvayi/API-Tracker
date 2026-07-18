@@ -1,0 +1,42 @@
+# Stripe provider manifest.
+id = "stripe"
+name = "Stripe"
+description = "Stripe payments API keys."
+website = "https://stripe.com"
+api_docs_url = "https://docs.stripe.com/api"
+auth_docs_url = "https://docs.stripe.com/keys"
+manage_url = "https://dashboard.stripe.com/apikeys"
+env_vars = ["STRIPE_SECRET_KEY", "STRIPE_API_KEY", "STRIPE_RESTRICTED_KEY"]
+credential_types = ["secret_key", "restricted_key", "publishable_key"]
+expiration = "Keys do not expire by default; an optional expiration can be set on secret keys. They remain valid until rolled/revoked."
+watch_docs = [
+    "https://docs.stripe.com/keys",
+    "https://docs.stripe.com/api/versioning",
+]
+
+[[detection]]
+name = "stripe-secret-key"
+regex = "sk_live_[A-Za-z0-9]{24,}"
+confidence = "high"
+
+[[detection]]
+name = "stripe-restricted-key"
+regex = "rk_live_[A-Za-z0-9]{24,}"
+confidence = "high"
+
+[[detection]]
+name = "stripe-test-secret-key"
+regex = "sk_test_[A-Za-z0-9]{24,}"
+confidence = "medium"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/balance confirms the secret key works." }
+fetch_metadata = { support = "manual_only", note = "For standard accounts, key metadata is visible only in the Developers Dashboard, not via a public API." }
+fetch_usage = { support = "manual_only", attribution = "exact_credential", note = "Stripe is a payments provider, not a metered API; per-key request logs are viewable (and filterable by key) only in the dashboard." }
+read_permissions = { support = "manual_only", note = "Restricted-key permissions are visible on the dashboard, not through the API." }
+change_permissions = { support = "manual_only", note = "Restricted-key permissions are edited on the dashboard." }
+create_credential = { support = "manual_only", note = "Standard-account keys are created on the dashboard; programmatic creation exists only via the v2 IAM API for approved Stripe Apps." }
+disable_credential = { support = "unsupported", note = "No distinct disable state for standard keys; set an expiration or revoke instead." }
+revoke_credential = { support = "manual_only", note = "Roll or delete keys on the dashboard; programmatic lifecycle exists only for v2 IAM managed keys." }
+rotate_credential = { support = "manual_only", note = "The dashboard 'roll key' action revokes the old key and issues a replacement with a grace period." }
+fetch_pricing = { support = "unsupported", note = "Not applicable to API keys." }

@@ -15,6 +15,7 @@
 //! authentication failure when unwrapping, so no separate password hash is
 //! kept. Every wrap is bound to AAD naming the vault/project it belongs to.
 
+use crate::alerts;
 use crate::audit;
 use crate::clock;
 use crate::crypto::{self, aad, KdfParams};
@@ -22,6 +23,7 @@ use crate::db;
 use crate::error::{CoreError, Result};
 use crate::model::{mask_value, Credential, Environment, Project};
 use crate::reuse::{self, ReuseMatch, ReuseWarning};
+use crate::scanner;
 use crate::secret::{SecretBytes, SecretString};
 use crate::session::{self, SessionKeys, SessionToken};
 use crate::settings::VaultSettings;
@@ -1532,6 +1534,307 @@ impl UnlockedVault {
     pub fn recent_audit_events(&self, limit: u32) -> Result<Vec<audit::AuditEvent>> {
         audit::list(&self.conn, limit)
     }
+
+    // ------------------------------------------------------------------
+    // Milestone 2: repository scanning, monitoring, and doc watching
+    // ------------------------------------------------------------------
+
+    /// Run the detection engine over scan units, match each finding against
+    /// the vault (by keyed fingerprint), and drop suppressed findings.
+    fn scan_units(&self, units: Vec<crate::gitrepo::ScanUnit>) -> Result<Vec<scanner::Finding>> {
+        let suppressed = self.suppression_keys()?;
+        let mut out = Vec::new();
+        for unit in units {
+            let options = scanner::ScanOptions {
+                entropy: !scanner::skip_entropy_for(&unit.label),
+            };
+            for mut finding in scanner::scan_text(&unit.content, &unit.label, &options) {
+                if suppressed.contains(&finding.suppression_key) {
+                    continue;
+                }
+                finding.vault_match = self.match_finding(&finding)?;
+                out.push(finding);
+            }
+        }
+        Ok(out)
+    }
+
+    fn match_finding(&self, finding: &scanner::Finding) -> Result<Option<scanner::VaultMatch>> {
+        let fp = reuse::fingerprint(&self.fingerprint_key, &finding.secret)?;
+        let matches = self.find_reuse_matches(&fp, None)?;
+        let Some(primary) = matches.first() else {
+            return Ok(None);
+        };
+        // The value-bearing record (skip references) is the identity.
+        let root = matches.iter().find(|m| !m.is_reference).unwrap_or(primary);
+        let mut other_projects: Vec<String> = matches
+            .iter()
+            .filter(|m| m.project_id != root.project_id)
+            .map(|m| m.project_name.clone())
+            .collect();
+        other_projects.sort();
+        other_projects.dedup();
+        Ok(Some(scanner::VaultMatch {
+            credential_id: root.credential_id.clone(),
+            credential_name: root.credential_name.clone(),
+            project_id: root.project_id.clone(),
+            project_name: root.project_name.clone(),
+            other_projects,
+        }))
+    }
+
+    /// Scan a working-tree directory or single file.
+    pub fn scan_working_tree(&self, path: &std::path::Path) -> Result<Vec<scanner::Finding>> {
+        let units = crate::gitrepo::working_tree_units(path)?;
+        self.scan_units(units)
+    }
+
+    /// Scan the staged changes of a Git repository.
+    pub fn scan_staged(&self, repo: &std::path::Path) -> Result<Vec<scanner::Finding>> {
+        let root = crate::gitrepo::repo_root(repo)?;
+        let units = crate::gitrepo::staged_units(&root)?;
+        self.scan_units(units)
+    }
+
+    /// Scan Git history (last `n` commits, or all when `None`).
+    pub fn scan_history(
+        &self,
+        repo: &std::path::Path,
+        n: Option<usize>,
+    ) -> Result<Vec<scanner::Finding>> {
+        let root = crate::gitrepo::repo_root(repo)?;
+        let units = crate::gitrepo::history_added_units(&root, n)?;
+        self.scan_units(units)
+    }
+
+    /// Mark every credential matched by a scan finding as possibly exposed,
+    /// recording where. Returns the affected credential ids. Never touches
+    /// files or provider state.
+    pub fn mark_findings_exposed(&mut self, findings: &[scanner::Finding]) -> Result<Vec<String>> {
+        let mut affected = Vec::new();
+        for finding in findings {
+            if let Some(m) = &finding.vault_match {
+                if affected.contains(&m.credential_id) {
+                    continue;
+                }
+                let note = format!(
+                    "matched during a repository scan in {} (line {})",
+                    finding.file, finding.line
+                );
+                self.conn.execute(
+                    "UPDATE credentials SET possibly_exposed = 1, exposure_note = ?1,
+                     updated_at = ?2 WHERE id = ?3",
+                    params![note, clock::now_rfc3339(), m.credential_id],
+                )?;
+                audit::record(
+                    &self.conn,
+                    "credential_marked_exposed",
+                    Some(&m.project_id),
+                    Some(&m.credential_id),
+                    "source=repository_scan",
+                )?;
+                affected.push(m.credential_id.clone());
+            }
+        }
+        Ok(affected)
+    }
+
+    fn suppression_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT suppression_key FROM scan_suppressions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        Ok(set)
+    }
+
+    /// Record a local suppression for a finding (requires a reason).
+    pub fn add_suppression(
+        &self,
+        suppression_key: &str,
+        rule: &str,
+        path: &str,
+        reason: &str,
+    ) -> Result<()> {
+        if reason.trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "a suppression reason is required".into(),
+            ));
+        }
+        self.conn.execute(
+            "INSERT INTO scan_suppressions (id, suppression_key, rule, path, reason, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(suppression_key) DO UPDATE SET reason = excluded.reason",
+            params![
+                Uuid::new_v4().to_string(),
+                suppression_key,
+                rule,
+                path,
+                reason.trim(),
+                clock::now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_suppressions(&self) -> Result<Vec<Suppression>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT suppression_key, rule, path, reason, created_at
+             FROM scan_suppressions ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Suppression {
+                suppression_key: r.get(0)?,
+                rule: r.get(1)?,
+                path: r.get(2)?,
+                reason: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Run monitoring checks: generate/refresh alerts from credential status
+    /// and reuse, and auto-resolve conditions that no longer hold.
+    pub fn run_monitor(&self) -> Result<MonitorSummary> {
+        let now = clock::now_rfc3339();
+        let credentials = self.list_credentials(None)?;
+        let mut active_keys: Vec<String> = Vec::new();
+        let mut created = 0usize;
+
+        for cred in &credentials {
+            let mut new_alerts = crate::monitor::credential_alerts(cred, &now);
+            // Reuse-based alerts need the value-level warnings.
+            if !cred.is_reference {
+                if let Ok(value) = self.reveal_value_internal(cred) {
+                    let fp = reuse::fingerprint(&self.fingerprint_key, &value)?;
+                    let matches = self.find_reuse_matches(&fp, Some(&cred.id))?;
+                    let warnings = reuse::classify(&cred.project_id, cred.environment, matches);
+                    new_alerts.extend(crate::monitor::reuse_alerts(cred, &warnings, &now));
+                }
+            }
+            for alert in new_alerts {
+                active_keys.push(alert.dedup_key.clone());
+                if alerts::upsert(&self.conn, &alert)? {
+                    created += 1;
+                }
+            }
+        }
+
+        let resolved = alerts::auto_resolve_stale(
+            &self.conn,
+            &crate::monitor::managed_credential_kinds(),
+            &active_keys,
+        )?;
+        Ok(MonitorSummary {
+            checked: credentials.len(),
+            alerts_created: created,
+            alerts_resolved: resolved,
+            open_alerts: alerts::open_count(&self.conn)? as usize,
+        })
+    }
+
+    /// Internal helper to decrypt a value for monitoring (no reauth; the
+    /// vault is already unlocked and this never leaves the process).
+    fn reveal_value_internal(&self, cred: &Credential) -> Result<SecretString> {
+        let row = self.resolve_credential(&cred.id)?;
+        let root = match &row.linked_credential_id {
+            Some(target) => self
+                .credential_row_by_id(target)?
+                .ok_or(CoreError::VaultCorrupted("reference target is missing"))?,
+            None => row,
+        };
+        let ciphertext = root.ciphertext.as_deref().ok_or(CoreError::VaultCorrupted(
+            "credential is missing its ciphertext",
+        ))?;
+        let project = self.project_row_by_ident(&root.project_id)?;
+        let project_key = self.project_key_for_row(&project)?;
+        let plaintext = crypto::decrypt(
+            &project_key,
+            &aad::credential_value(&self.vault_id, &root.project_id, &root.id),
+            ciphertext,
+            "credential value",
+        )?;
+        let value = String::from_utf8(plaintext.expose().to_vec())
+            .map_err(|_| CoreError::VaultCorrupted("credential value is not valid UTF-8"))?;
+        Ok(SecretString::new(value))
+    }
+
+    // --- Documentation watches ---
+
+    pub fn watch_docs(&self, provider: &str, url: &str) -> Result<crate::docwatch::DocWatch> {
+        crate::docwatch::add_watch(&self.conn, provider, url)
+    }
+
+    pub fn unwatch_docs(&self, url: &str) -> Result<bool> {
+        crate::docwatch::remove_watch(&self.conn, url)
+    }
+
+    pub fn list_doc_watches(&self) -> Result<Vec<crate::docwatch::DocWatch>> {
+        crate::docwatch::list(&self.conn)
+    }
+
+    pub fn list_doc_watches_for(&self, provider: &str) -> Result<Vec<crate::docwatch::DocWatch>> {
+        crate::docwatch::list_for_provider(&self.conn, provider)
+    }
+
+    /// Check one watched URL, and raise a `DocumentationChanged` alert if it
+    /// changed. Returns the check result and the refreshed watch.
+    pub fn check_doc_watch(
+        &self,
+        fetcher: &dyn crate::docwatch::DocFetcher,
+        url: &str,
+    ) -> Result<(crate::docwatch::CheckResult, crate::docwatch::DocWatch)> {
+        let (result, watch) = crate::docwatch::check_watch(&self.conn, fetcher, url)?;
+        if result == crate::docwatch::CheckResult::Changed {
+            let now = clock::now_rfc3339();
+            alerts::upsert(
+                &self.conn,
+                &alerts::NewAlert {
+                    kind: alerts::AlertKind::DocumentationChanged,
+                    severity: alerts::Severity::Info,
+                    dedup_key: format!("docchange:{url}"),
+                    title: format!("{} documentation changed", watch.provider),
+                    detail: format!(
+                        "the tracked content at {url} changed. A page change does not necessarily mean a breaking API change."
+                    ),
+                    evidence: format!("content hash differs; last changed {}", now),
+                    confidence: crate::providers::Confidence::Medium,
+                    recommended_action: "review the official page linked in this alert".into(),
+                    project_id: None,
+                    credential_id: None,
+                    observed_at: now,
+                },
+            )?;
+        }
+        Ok((result, watch))
+    }
+}
+
+/// A stored scan suppression (no secret material).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Suppression {
+    pub suppression_key: String,
+    pub rule: String,
+    pub path: String,
+    pub reason: String,
+    pub created_at: String,
+}
+
+/// Summary of a monitoring run.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorSummary {
+    pub checked: usize,
+    pub alerts_created: usize,
+    pub alerts_resolved: usize,
+    pub open_alerts: usize,
 }
 
 impl CredentialRow {

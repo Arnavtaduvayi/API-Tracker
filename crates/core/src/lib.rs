@@ -20,15 +20,21 @@
 
 #![forbid(unsafe_code)]
 
+pub mod alerts;
 pub mod audit;
 pub mod backup;
 pub mod clock;
 pub mod crypto;
 pub mod db;
+pub mod docwatch;
 pub mod error;
+pub mod gitrepo;
+pub mod hooks;
 pub mod model;
+pub mod monitor;
 pub mod providers;
 pub mod reuse;
+pub mod scanner;
 pub mod secret;
 pub mod session;
 pub mod settings;
