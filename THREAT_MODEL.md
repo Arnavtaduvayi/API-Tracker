@@ -9,12 +9,23 @@ integrations land.
 ## Assets
 
 1. Credential values (the secrets themselves) — primary asset.
-2. Credential/project metadata (names, providers, environments, notes,
+2. Provider **administrative connection keys** (e.g. an OpenAI Admin API
+   key) — a higher-value asset than a workload key: it grants
+   organization-wide read access to usage, costs, projects, and key
+   metadata. Encrypted under the vault key like credential values; it can be
+   replaced or removed but never displayed, and removal deletes the
+   ciphertext (`secure_delete`). Its compromise does not expose workload
+   secrets but does expose organization activity and spend.
+3. Credential/project metadata (names, providers, environments, notes,
    repository paths, timestamps) — sensitive but stored unencrypted inside
    the vault database file; see "Known trade-offs".
-3. The master password and project passwords (never stored).
-4. Backup files.
-5. The local audit trail.
+4. Synchronized usage/cost data and cached provider-side metadata (project
+   names, key names, redacted key previews) — non-secret by the provider's
+   definition, but reveals activity and spend; stored unencrypted like other
+   metadata.
+5. The master password and project passwords (never stored).
+6. Backup files.
+7. The local audit trail.
 
 ## Trust boundaries and data at rest
 
@@ -35,10 +46,16 @@ integrations land.
   the **documentation watcher** (explicit user-selected official URLs,
   conditional GETs, 8 MiB body cap, stores only validators/hash/timestamps,
   no crawling); and **provider connectors** (validation, metadata, permission
-  reads, and usage sync) that send the credential only in a request header to
-  the provider's own official API endpoint. No secret is ever sent to an
-  API-Tracker-operated server. Connectors are built to the documented API
-  shapes and tested offline against fixtures.
+  reads, and usage/cost sync) that send the credential only in a request
+  header to the provider's own official API endpoint. No secret is ever sent
+  to an API-Tracker-operated server. Connectors are built to the documented
+  API shapes and tested offline against fixtures.
+- The **OpenAI administrative connection** stores an Admin API key encrypted
+  under the vault key (AAD binds it to this vault + provider). It is
+  write-only after storage (replace/remove, never reveal); replacing,
+  removing, or live-testing it requires master-password reauthentication;
+  and `run` strips its environment variable from child processes. Sync
+  errors, statuses, and alerts carry status text only — never the key.
 - **Secure process injection** (`run`) decrypts only the selected credentials
   of one project and sets them in the child process's environment. It never
   writes a `.env` or prints values, and it refuses credentials from other

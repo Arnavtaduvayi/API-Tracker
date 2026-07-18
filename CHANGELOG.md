@@ -5,6 +5,45 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — real OpenAI usage & cost synchronization
+- **Administrative OpenAI connection**: `provider connect openai` stores an
+  OpenAI Admin API key encrypted under the vault key (validated before
+  storage; replace/remove only — never displayed; reauthentication required
+  to replace, remove, or live-test). `connection-status` reports last
+  successful/failed sync, errors, and staleness. One organization per vault
+  (documented limitation).
+- **Usage sync** from the official organization Usage API: daily buckets
+  grouped by provider project × API-key id × model, with cursor pagination,
+  bounded retries honoring `Retry-After`, and typed auth/rate-limit/network
+  errors. **Provider-reported costs** from the Costs API (project × key ×
+  line item), preserved exactly as reported (value + currency; money-safety
+  guards against negative/non-finite/overflowing amounts; non-USD rows are
+  never silently mixed into USD totals).
+- **Honest attribution + key linking**: new `provider_key` attribution
+  level; provider-side key ids count against a local credential only after
+  an explicit `provider link` confirmation (redacted-value matches are
+  suggestions only). `provider keys` / `provider projects` show unmatched
+  keys and unmapped projects; new alerts `provider_connection_invalid`,
+  `provider_sync_failed`, `provider_data_stale`, `unmatched_provider_key`,
+  and `unmapped_provider_project`.
+- **Safe re-sync**: fetch-all-then-replace transactional writes; repeated
+  and overlapping windows reconcile instead of double-counting; manual
+  usage entries are never touched; checkpoints drive incremental default
+  syncs (first sync 30 days, later syncs overlap 2 days). Offline failures
+  change nothing and previously synced data stays viewable.
+- **Budget cost source** (`budget source`, desktop selector):
+  `best_available` (default) / `provider_reported` / `estimated` — budgets
+  consume exactly one source, never the sum of reported + estimated.
+- **CLI**: `provider connect/disconnect/test/keys/link/unlink/projects`,
+  `provider sync [--days|--from/--to]`, `usage report
+  --provider/--source/--limit` with per-record attribution and stale-data
+  warnings. **Desktop**: administrative connection panel (connect/replace/
+  disconnect/test/sync with period selection), provider key linking with
+  suggestions, per-record usage listing, non-USD and stale warnings.
+- `scripts/live_verify_openai.sh`: optional, self-cleaning live check with a
+  throwaway vault (normal builds/tests remain fully mocked); six new smoke
+  checks for the connection lifecycle (53 total). Schema migration v4.
+
 ### Added — demo, smoke test
 - `scripts/demo.sh [--keep]` builds a fully isolated demonstration vault
   (fake generated credentials only, never a network call): a development

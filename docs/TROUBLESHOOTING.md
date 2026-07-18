@@ -27,15 +27,37 @@
 - **`key validate` fails with a network error** — validation makes a direct
   request to the provider; check connectivity and that the key is for that
   provider. A `401` means the provider rejected the key (marked invalid).
-- **`usage sync` says "no admin credential connected"** — run
-  `api-tracker provider connect <provider> <credential>` first with an
-  admin/organization key. OpenAI/Anthropic usage APIs require an admin key.
-- **Usage shows "not per key" / account-level** — that is the provider's
-  attribution limit, reported honestly. Use manual usage entries
-  (`usage record --credential …`) for per-credential budgets.
-- **Costs look wrong** — they are **estimates** from a bundled pricing table.
-  Set a manual override, or trust provider-reported cost when present.
-  Estimates are flagged stale after 45 days.
+- **`provider sync` says "no administrative connection"** — run
+  `api-tracker provider connect openai` first (an OpenAI **Admin** key, not
+  a normal API key; see `docs/OPENAI_SYNC.md`). For other providers, connect
+  a vault credential: `provider connect <provider> --credential <c>`.
+- **Sync fails with "rejected the credential" / connection `invalid`** — the
+  provider returned 401/403: the admin key was revoked, mistyped, or lacks
+  the required scopes. Reconnect with a valid key
+  (`provider connect openai`), then `provider test openai`.
+- **Sync fails with "network unavailable"** — offline or DNS/timeout
+  trouble. Nothing was changed; previously synced data is still viewable.
+  Retry when online (`provider sync openai` is always safe to retry).
+- **"provider-reported costs are unavailable" note after a sync** — usage
+  synced but the costs endpoint failed (often a scope limit). Usage is
+  stored; costs will be retried next sync.
+- **Data flagged STALE** — the last successful sync is older than the
+  `provider_stale_days` setting (default 3 days). Run
+  `api-tracker provider sync <provider>`.
+- **Usage shows "provider key" / "not per key"** — that row's provider-side
+  key id is not linked to a local credential. See suggestions with
+  `provider keys openai`, then confirm with
+  `provider link openai <key-id> --credential <project/name>`. Coarser
+  levels (project/account) are the provider's own attribution limit,
+  reported honestly.
+- **Reported and estimated costs differ** — expected. Reported cost is the
+  provider's own bill line; the estimate is computed locally from token
+  counts and a bundled price table that does not model every discount
+  (caching, batch, service tiers). Budgets use one configurable source:
+  `api-tracker budget source`.
+- **Costs look wrong** — check whether you are reading the **estimate**
+  (labeled) or the provider-reported figure. Estimates can be overridden per
+  model and are flagged stale after 45 days.
 - **`key permissions` empty for a GitHub token** — fine-grained tokens don't
   expose scopes via the API; only classic PATs do.
 

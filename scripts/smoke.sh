@@ -176,6 +176,22 @@ unset API_TRACKER_SESSION API_TRACKER_PROJECT_PASSWORD
 FOUND_ENV=$(find "$WORK" -name "*.env" -o -name ".env" 2>/dev/null)
 [ -z "$FOUND_ENV" ]; check $? "no plaintext .env file is ever created"
 
+echo "-- OpenAI administrative connection (offline; no network request) --"
+FAKE_ADMIN="sk-admin-SMOKE-FAKE-$(head -c6 /dev/urandom | od -An -tx1 | tr -d ' \n')-NOT-A-REAL-KEY"
+API_TRACKER_PROVIDER_ADMIN_KEY="$FAKE_ADMIN" \
+  "$BIN" provider connect openai --no-verify --org smoke-org >/dev/null 2>&1
+check $? "admin connection stored (--no-verify, key via environment)"
+STATUS_OUT=$("$BIN" provider connection-status openai 2>&1)
+echo "$STATUS_OUT" | grep -q "administrative" && ! echo "$STATUS_OUT" | grep -qF "$FAKE_ADMIN"
+check $? "connection status is labeled administrative and never shows the key"
+grep -rqF "$FAKE_ADMIN" "$API_TRACKER_DIR" && bad "admin key stored in plaintext" || ok "admin key exists nowhere in plaintext on disk"
+"$BIN" usage report --provider openai >/dev/null 2>&1
+check $? "usage report works offline with a provider filter"
+"$BIN" provider disconnect openai --yes >/dev/null 2>&1
+check $? "disconnect removes the administrative connection (reauth via env)"
+"$BIN" provider connection-status openai 2>/dev/null | grep -q "(not connected)"
+check $? "status reports not connected after disconnect"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

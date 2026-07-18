@@ -72,3 +72,16 @@ and `usage_sync` which decrypt in-process and call your connector. Usage sync
 records normalized snapshots with your reported attribution and a locally
 estimated cost (from `pricing`). No connector code touches the database
 directly.
+
+## 5. Detailed sync engines (beyond the trait)
+
+The `Connector` trait covers single-request capabilities. A provider with a
+richer official surface can get a dedicated engine module instead —
+`crates/core/src/openai.rs` (ADR 0011) is the template: explicit sync
+windows, cursor pagination with a page cap, bounded retries honoring
+`Retry-After`, typed auth/rate-limit/network errors, grouped dimensions
+stored exactly as reported, provider-reported costs kept separate from local
+estimates, and fetch-all-then-replace transactional writes so re-syncs never
+double-count. The vault dispatches to the engine in `usage_sync_range`; the
+generic trait path remains the fallback for everyone else. The same honesty
+rules apply — record only the dimensions the response actually contains.
