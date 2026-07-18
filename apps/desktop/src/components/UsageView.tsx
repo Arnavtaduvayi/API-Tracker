@@ -169,8 +169,8 @@ export function UsageView() {
             <dd>
               {formatMicros(usage.estimated_cost_micros)}{" "}
               <span className="muted">
-                (estimated locally from token counts and a bundled price table — may differ
-                from the provider&apos;s bill)
+                (estimated locally from token counts and a bundled price table — may differ from
+                the provider&apos;s bill)
               </span>
             </dd>
             <dt>Attribution</dt>

@@ -116,7 +116,9 @@ export function ProviderConnectionPanel(props: { provider: string }) {
     setNotice(null);
     try {
       await api.providerUnlinkKey(props.provider, apiKeyId);
-      setNotice(`Unlinked ${apiKeyId}; its records honestly show provider-key attribution again.`);
+      setNotice(
+        `Unlinked ${apiKeyId}; its records honestly show provider-key attribution again.`,
+      );
       await reload();
     } catch (err) {
       setError(isApiError(err) ? err.message : String(err));
@@ -130,10 +132,10 @@ export function ProviderConnectionPanel(props: { provider: string }) {
       <h2>Administrative connection</h2>
       <p className="muted">
         An administrative (organization) key lets API Tracker read usage, costs, and key
-        metadata for your whole organization — it is more powerful than an ordinary API key.
-        It is stored encrypted in this vault, used only for direct requests to the provider,
-        never displayed once stored, and can be removed at any time. All synced data stays on
-        this computer.
+        metadata for your whole organization — it is more powerful than an ordinary API key. It
+        is stored encrypted in this vault, used only for direct requests to the provider, never
+        displayed once stored, and can be removed at any time. All synced data stays on this
+        computer.
       </p>
 
       {status.connected ? (
@@ -230,8 +232,8 @@ export function ProviderConnectionPanel(props: { provider: string }) {
             </label>
           )}
           <p className="muted">
-            The key is validated against the provider before it is stored, then encrypted
-            under your vault key.
+            The key is validated against the provider before it is stored, then encrypted under
+            your vault key.
           </p>
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <button type="submit" disabled={busy}>
@@ -260,8 +262,8 @@ export function ProviderConnectionPanel(props: { provider: string }) {
           <p className="muted">
             Keys the provider reports for your organization. Usage is attributed to a local
             credential only after you confirm the association — suggestions are evidence, not
-            proof, and nothing links automatically. Not every provider key must map to a
-            local credential.
+            proof, and nothing links automatically. Not every provider key must map to a local
+            credential.
           </p>
           <table>
             <thead>
@@ -299,7 +301,10 @@ export function ProviderConnectionPanel(props: { provider: string }) {
                   </td>
                   <td>
                     {k.linked_credential ? (
-                      <button className="link danger" onClick={() => void unlinkKey(k.api_key_id)}>
+                      <button
+                        className="link danger"
+                        onClick={() => void unlinkKey(k.api_key_id)}
+                      >
                         unlink
                       </button>
                     ) : (
