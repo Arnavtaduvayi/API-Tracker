@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { api, isApiError } from "../api";
 import type { CapabilityEntry, DocWatch, ProviderManifest, SupportLevel } from "../types";
+import { ProviderConnectionPanel } from "./ProviderConnectionPanel";
 
 const SUPPORT_LABEL: Record<SupportLevel, string> = {
   implemented: "implemented",
@@ -130,8 +131,10 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
         <dd>{m.expiration || "—"}</dd>
       </dl>
 
+      {m.id === "openai" && <ProviderConnectionPanel provider={m.id} />}
+
       <h2>Capabilities</h2>
-      <p className="muted">Nothing is implemented yet; these are honest declarations.</p>
+      <p className="muted">Honest support declarations for this provider.</p>
       <table>
         <thead>
           <tr>

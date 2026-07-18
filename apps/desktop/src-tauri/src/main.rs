@@ -725,10 +725,82 @@ fn provider_connect(
     })
 }
 
+/// Store the provider's administrative key (encrypted in the vault). When a
+/// connection already exists, replacing it requires reauthentication, so
+/// `password` must be provided in that case.
 #[tauri::command]
-fn provider_sync(state: State<'_, AppState>, provider: String, days: u32) -> CmdResult<usize> {
+fn provider_admin_connect(
+    state: State<'_, AppState>,
+    provider: String,
+    admin_key: String,
+    org: Option<String>,
+    password: Option<String>,
+) -> CmdResult<String> {
+    let admin_key = SecretString::new(admin_key);
     let http = UreqClient::new();
-    with_vault(&state, |vault| vault.usage_sync(&provider, &http, days))
+    with_vault(&state, |vault| {
+        if vault.provider_connection_status(&provider)?.connected {
+            let password = password.ok_or_else(|| {
+                api_tracker_core::CoreError::InvalidInput(
+                    "reauthentication is required to replace the administrative connection".into(),
+                )
+            })?;
+            vault.verify_master_password(&SecretString::new(password))?;
+        }
+        vault.provider_admin_connect(&provider, &admin_key, org.as_deref(), Some(&http))
+    })
+}
+
+/// Remove the administrative connection (requires reauthentication).
+#[tauri::command]
+fn provider_admin_disconnect(
+    state: State<'_, AppState>,
+    provider: String,
+    password: String,
+) -> CmdResult<bool> {
+    with_vault(&state, |vault| {
+        vault.verify_master_password(&SecretString::new(password))?;
+        vault.provider_admin_disconnect(&provider)
+    })
+}
+
+/// Live connection test (requires reauthentication).
+#[tauri::command]
+fn provider_admin_test(
+    state: State<'_, AppState>,
+    provider: String,
+    password: String,
+) -> CmdResult<String> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        vault.verify_master_password(&SecretString::new(password))?;
+        vault.provider_admin_test(&provider, &http)
+    })
+}
+
+#[tauri::command]
+fn provider_sync(
+    state: State<'_, AppState>,
+    provider: String,
+    days: Option<u32>,
+    from: Option<String>,
+    to: Option<String>,
+) -> CmdResult<api_tracker_core::vault::SyncReport> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        if let Some(from) = &from {
+            let from_ts = api_tracker_core::clock::parse_user_date(from)?;
+            let to_ts = match &to {
+                Some(t) => api_tracker_core::clock::parse_user_date(t)?,
+                None => api_tracker_core::clock::now(),
+            };
+            vault.usage_sync_range(&provider, &http, from_ts, to_ts)
+        } else if let Some(days) = days {
+            vault.usage_sync(&provider, &http, days)
+        } else {
+            vault.usage_sync_default(&provider, &http)
+        }
+    })
 }
 
 #[tauri::command]
@@ -740,6 +812,45 @@ fn provider_connection_status(
 }
 
 #[tauri::command]
+fn provider_keys(
+    state: State<'_, AppState>,
+    provider: String,
+) -> CmdResult<Vec<api_tracker_core::vault::ProviderKeyOverview>> {
+    with_vault(&state, |vault| vault.provider_keys_overview(&provider))
+}
+
+#[tauri::command]
+fn provider_projects(
+    state: State<'_, AppState>,
+    provider: String,
+) -> CmdResult<Vec<api_tracker_core::vault::ProviderProjectOverview>> {
+    with_vault(&state, |vault| vault.provider_projects_overview(&provider))
+}
+
+#[tauri::command]
+fn provider_link_key(
+    state: State<'_, AppState>,
+    provider: String,
+    api_key_id: String,
+    credential: String,
+) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.provider_link_key(&provider, &api_key_id, &credential)
+    })
+}
+
+#[tauri::command]
+fn provider_unlink_key(
+    state: State<'_, AppState>,
+    provider: String,
+    api_key_id: String,
+) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.provider_unlink_key(&provider, &api_key_id)
+    })
+}
+
+#[tauri::command]
 fn usage_report(
     state: State<'_, AppState>,
     project: Option<String>,
@@ -748,6 +859,49 @@ fn usage_report(
     let start = api_tracker_core::budget::period_start(api_tracker_core::clock::now());
     with_vault(&state, |vault| {
         vault.usage_totals(&start, credential.as_deref(), project.as_deref())
+    })
+}
+
+/// Individual usage records (current month) with provider/source filters,
+/// for the detailed usage listing.
+#[tauri::command]
+fn usage_records(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    credential: Option<String>,
+    provider: Option<String>,
+    source: String,
+) -> CmdResult<Vec<api_tracker_core::usage::UsageSnapshot>> {
+    let source = match source.as_str() {
+        "provider" => api_tracker_core::usage::SourceFilter::Provider,
+        "manual" => api_tracker_core::usage::SourceFilter::Manual,
+        _ => api_tracker_core::usage::SourceFilter::All,
+    };
+    let start = api_tracker_core::budget::period_start(api_tracker_core::clock::now());
+    with_vault(&state, |vault| {
+        let (_totals, rows) = vault.usage_report(
+            &start,
+            credential.as_deref(),
+            project.as_deref(),
+            provider.as_deref(),
+            source,
+        )?;
+        Ok(rows)
+    })
+}
+
+#[tauri::command]
+fn budget_cost_source_get(state: State<'_, AppState>) -> CmdResult<String> {
+    with_vault(&state, |vault| {
+        Ok(vault.budget_cost_source()?.as_str().to_string())
+    })
+}
+
+#[tauri::command]
+fn budget_cost_source_set(state: State<'_, AppState>, value: String) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        let source: api_tracker_core::usage::CostSource = value.parse()?;
+        vault.set_budget_cost_source(source)
     })
 }
 
@@ -883,8 +1037,18 @@ fn main() {
             credential_metadata,
             credential_permissions,
             provider_connect,
+            provider_admin_connect,
+            provider_admin_disconnect,
+            provider_admin_test,
             provider_sync,
             provider_connection_status,
+            provider_keys,
+            provider_projects,
+            provider_link_key,
+            provider_unlink_key,
+            usage_records,
+            budget_cost_source_get,
+            budget_cost_source_set,
             usage_report,
             usage_record_manual,
             budget_set,
