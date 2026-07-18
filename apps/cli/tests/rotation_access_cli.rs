@@ -217,9 +217,12 @@ fn grant_time_limit_terminates_the_child() {
     let grant_id = json.get("id").and_then(|v| v.as_str()).unwrap().to_string();
 
     let start = std::time::Instant::now();
+    // `sleep` is the DIRECT child (no `sh -c` wrapper): the kill targets the
+    // direct child, and a shell that forks instead of exec-ing would leave
+    // an orphaned sleep holding the output pipes open until it finishes.
     v.cmd()
         .args(["run", "--grant", &grant_id, "--"])
-        .args(["sh", "-c", "sleep 30"])
+        .args(["sleep", "30"])
         .assert()
         .code(124)
         .stderr(predicate::str::contains("time limit"));
