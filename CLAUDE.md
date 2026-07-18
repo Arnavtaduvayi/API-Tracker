@@ -55,6 +55,33 @@ Ask the user only when genuinely blocked by something that cannot safely be assu
 
 Do not ask about ordinary library choices, naming decisions, file organization, or other normal engineering decisions.
 
+## Requirements and scope hierarchy
+
+Use the following hierarchy:
+
+1. The user's current session prompt defines the active implementation scope.
+2. `PRODUCT_SPEC.md` defines the long-term product vision and requirements.
+3. This `CLAUDE.md` defines permanent engineering and repository rules.
+4. Existing architecture decisions and code constrain how new work integrates.
+
+Read the complete product specification for context, but implement only the
+milestone explicitly requested in the current session prompt.
+
+Do not attempt to implement every feature in `PRODUCT_SPEC.md` during each
+session.
+
+Features described in `PRODUCT_SPEC.md` but not included in the current
+session scope should influence architecture only when necessary to avoid
+blocking future development. Do not build them prematurely.
+
+The current session prompt may narrow or sequence the product specification,
+but it must not silently contradict its core security and local-first
+requirements.
+
+If a genuine contradiction exists, preserve security and existing user data,
+document the conflict, and ask only if the decision materially changes the
+product.
+
 ## Product priorities
 
 Prioritize in this order:
