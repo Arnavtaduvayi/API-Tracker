@@ -22,6 +22,10 @@ pub struct ValidationResult {
     pub valid: bool,
     pub status: u16,
     pub detail: String,
+    /// Expiration REPORTED BY THE PROVIDER during validation (e.g. GitHub's
+    /// token-expiration header), RFC 3339. None when the provider reports
+    /// nothing — which is not the same as "never expires".
+    pub provider_expires_at: Option<String>,
 }
 
 /// Provider-side metadata discovered for a credential (non-secret).
@@ -46,6 +50,38 @@ pub struct FetchedUsage {
     pub snapshots: Vec<NewUsageSnapshot>,
     pub attribution: Attribution,
     pub source: String,
+}
+
+/// A credential newly created at the provider. The value is returned by the
+/// provider exactly once, at creation; it goes straight into the vault.
+pub struct CreatedCredential {
+    pub value: SecretString,
+    /// Provider-side id of the new key (for linking and later revocation).
+    pub provider_key_id: Option<String>,
+    /// Provider-side id of a service account that owns the key, if any.
+    pub service_account_id: Option<String>,
+    pub provider_project_id: Option<String>,
+    pub credential_type: &'static str,
+    pub detail: String,
+}
+
+/// One provider-side key, as listed by an administrative API (non-secret).
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderKeyListing {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub created_at: Option<String>,
+    /// A redacted hint of the value, when the provider shows one.
+    pub redacted_hint: String,
+}
+
+/// Parameters for creating a credential at the provider.
+#[derive(Debug, Clone)]
+pub struct CreateParams {
+    pub name: String,
+    /// Provider-side project (OpenAI project id, Supabase project ref).
+    pub provider_project_id: Option<String>,
 }
 
 /// A provider connector. Default methods report the capability as
@@ -82,6 +118,49 @@ pub trait Connector {
         Err(self.unsupported("fetch_usage"))
     }
 
+    /// Create a credential at the provider (admin credential required).
+    fn create_credential(
+        &self,
+        _http: &dyn HttpClient,
+        _admin_secret: &SecretString,
+        _params: &CreateParams,
+    ) -> Result<CreatedCredential> {
+        Err(self.unsupported("create_credential"))
+    }
+
+    /// Disable (deactivate without deleting) a provider-side key by id.
+    fn disable_credential(
+        &self,
+        _http: &dyn HttpClient,
+        _admin_secret: &SecretString,
+        _provider_project_id: Option<&str>,
+        _provider_key_id: &str,
+    ) -> Result<String> {
+        Err(self.unsupported("disable_credential"))
+    }
+
+    /// Revoke (permanently delete or archive) a provider-side key by id.
+    fn revoke_credential(
+        &self,
+        _http: &dyn HttpClient,
+        _admin_secret: &SecretString,
+        _provider_project_id: Option<&str>,
+        _provider_key_id: &str,
+    ) -> Result<String> {
+        Err(self.unsupported("revoke_credential"))
+    }
+
+    /// List provider-side keys (admin credential required) so the user can
+    /// pick the id of an existing key for disable/revoke.
+    fn list_keys(
+        &self,
+        _http: &dyn HttpClient,
+        _admin_secret: &SecretString,
+        _provider_project_id: Option<&str>,
+    ) -> Result<Vec<ProviderKeyListing>> {
+        Err(self.unsupported("list_keys"))
+    }
+
     fn unsupported(&self, capability: &'static str) -> CoreError {
         let hint = providers::find(self.id())
             .map(|m| format!("use the official page: {}", m.manage_url))
@@ -103,6 +182,51 @@ pub fn for_provider(provider: &str) -> Option<Box<dyn Connector>> {
         "stripe" => Some(Box::new(Stripe)),
         "supabase" => Some(Box::new(Supabase)),
         _ => None,
+    }
+}
+
+/// GitHub's expiration header is either RFC 3339 or
+/// `YYYY-MM-DD HH:MM:SS UTC`; both are normalized to RFC 3339.
+fn parse_github_expiration(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if crate::clock::parse_rfc3339(raw).is_ok() {
+        return Some(raw.to_string());
+    }
+    let cleaned = raw.strip_suffix(" UTC").unwrap_or(raw);
+    let fmt = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    time::PrimitiveDateTime::parse(cleaned, &fmt)
+        .ok()
+        .map(|dt| crate::clock::to_rfc3339(dt.assume_utc()))
+}
+
+/// Read the `role` claim from a legacy Supabase JWT (anon / service_role).
+/// The claim is the key's own self-description; no verification is implied.
+fn legacy_jwt_role(value: &str) -> Option<String> {
+    use base64::Engine;
+    if !value.starts_with("eyJ") {
+        return None;
+    }
+    let payload = value.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let role = json.get("role")?.as_str()?;
+    match role {
+        "anon" => Some("anon_key".to_string()),
+        "service_role" => Some("service_role_key".to_string()),
+        // Unknown roles are shown, but bounded and stripped of anything
+        // non-printable (a crafted JWT must not inject terminal escapes).
+        other => Some(
+            other
+                .chars()
+                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                .take(64)
+                .collect(),
+        ),
     }
 }
 
@@ -137,7 +261,7 @@ impl Connector for GitHub {
 
     fn validate(&self, http: &dyn HttpClient, secret: &SecretString) -> Result<ValidationResult> {
         let resp = http.send(&Self::user_request(secret))?;
-        let detail = if resp.is_success() {
+        let mut detail = if resp.is_success() {
             let json = parse_json(&resp.body).unwrap_or(serde_json::Value::Null);
             match json.get("login").and_then(|v| v.as_str()) {
                 Some(login) => format!("authenticated as {login}"),
@@ -148,10 +272,20 @@ impl Connector for GitHub {
         } else {
             format!("unexpected status {}", resp.status)
         };
+        // GitHub reports a token's expiration in an official response header
+        // (fine-grained PATs and classic PATs with an expiry). This is a
+        // PROVIDER-enforced expiration, recorded verbatim.
+        let provider_expires_at = resp
+            .header("github-authentication-token-expiration")
+            .and_then(parse_github_expiration);
+        if let Some(expiry) = &provider_expires_at {
+            detail.push_str(&format!("; provider-reported expiration {expiry}"));
+        }
         Ok(ValidationResult {
             valid: resp.is_success(),
             status: resp.status,
             detail,
+            provider_expires_at,
         })
     }
 
@@ -256,6 +390,7 @@ impl Connector for OpenAi {
             valid: resp.is_success(),
             status: resp.status,
             detail,
+            provider_expires_at: None,
         })
     }
 
@@ -325,6 +460,76 @@ impl Connector for OpenAi {
             source: "OpenAI Usage API (organization level)".to_string(),
         })
     }
+
+    fn create_credential(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        params: &CreateParams,
+    ) -> Result<CreatedCredential> {
+        let project_id = params.provider_project_id.as_deref().ok_or_else(|| {
+            CoreError::InvalidInput(
+                "OpenAI key creation needs a provider project id (see `provider projects`)".into(),
+            )
+        })?;
+        let created = crate::openai::create_service_account_key(
+            http,
+            admin_secret,
+            project_id,
+            &params.name,
+        )?;
+        Ok(CreatedCredential {
+            value: created.value,
+            provider_key_id: Some(created.api_key_id),
+            service_account_id: Some(created.service_account_id),
+            provider_project_id: Some(project_id.to_string()),
+            credential_type: "service_account_key",
+            detail: created.detail,
+        })
+    }
+
+    fn revoke_credential(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        provider_project_id: Option<&str>,
+        provider_key_id: &str,
+    ) -> Result<String> {
+        let project_id = provider_project_id.ok_or_else(|| {
+            CoreError::InvalidInput(
+                "OpenAI key deletion needs the provider project id the key belongs to".into(),
+            )
+        })?;
+        crate::openai::delete_project_api_key(http, admin_secret, project_id, provider_key_id)
+    }
+
+    fn list_keys(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        provider_project_id: Option<&str>,
+    ) -> Result<Vec<ProviderKeyListing>> {
+        let projects: Vec<String> = match provider_project_id {
+            Some(p) => vec![p.to_string()],
+            None => crate::openai::fetch_projects(http, admin_secret)?
+                .into_iter()
+                .map(|p| p.id)
+                .collect(),
+        };
+        let mut out = Vec::new();
+        for project in projects {
+            for key in crate::openai::fetch_project_keys(http, admin_secret, &project)? {
+                out.push(ProviderKeyListing {
+                    id: key.id,
+                    name: key.name,
+                    status: format!("project {project}"),
+                    created_at: key.created_at,
+                    redacted_hint: key.redacted_value,
+                });
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn unix_to_time(unix: i64) -> time::OffsetDateTime {
@@ -332,10 +537,66 @@ fn unix_to_time(unix: i64) -> time::OffsetDateTime {
 }
 
 // ---------------------------------------------------------------------------
-// Anthropic — validate (no admin) + usage (admin, account level).
+// Anthropic — validate (no admin) + usage (admin, account level) + key
+// disable/archive via the Admin API. Keys cannot be CREATED via API
+// (console only) and there is no hard delete — archive is the soft revoke.
 // ---------------------------------------------------------------------------
 
 pub struct Anthropic;
+
+impl Anthropic {
+    fn admin_request(url: &str, admin: &SecretString) -> HttpRequest {
+        HttpRequest::get(url)
+            .header("x-api-key", admin.expose())
+            .header("anthropic-version", "2023-06-01")
+    }
+
+    /// `POST /v1/organizations/api_keys/{id}` with a status update — the
+    /// documented Admin API way to deactivate/archive a key. `pub(crate)`
+    /// so rotation rollback can re-enable a disabled key.
+    pub(crate) fn set_key_status(
+        http: &dyn HttpClient,
+        admin: &SecretString,
+        key_id: &str,
+        status: &str,
+    ) -> Result<String> {
+        let url = format!("https://api.anthropic.com/v1/organizations/api_keys/{key_id}");
+        let body = serde_json::json!({ "status": status });
+        let req = HttpRequest::with_method(crate::http::Method::Post, url)
+            .header("x-api-key", admin.expose())
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .body(body.to_string().into_bytes());
+        let resp = http.send(&req)?;
+        if resp.status == 401 || resp.status == 403 {
+            return Err(CoreError::ProviderAuth {
+                provider: "anthropic".into(),
+                detail: format!(
+                    "status {} — an ADMIN key (sk-ant-admin...) is required",
+                    resp.status
+                ),
+            });
+        }
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Anthropic returned status {} updating key {key_id}",
+                resp.status
+            )));
+        }
+        let confirmed = parse_json(&resp.body)
+            .ok()
+            .and_then(|j| j.get("status").and_then(|v| v.as_str()).map(str::to_string));
+        match confirmed {
+            Some(now) if now == status => Ok(format!("key {key_id} is now '{now}'")),
+            Some(now) => Err(CoreError::Provider(format!(
+                "Anthropic reports key {key_id} as '{now}', not the requested '{status}'"
+            ))),
+            None => Err(CoreError::Provider(
+                "Anthropic did not confirm the key status".into(),
+            )),
+        }
+    }
+}
 
 impl Connector for Anthropic {
     fn id(&self) -> &'static str {
@@ -358,6 +619,7 @@ impl Connector for Anthropic {
             valid: resp.is_success(),
             status: resp.status,
             detail,
+            provider_expires_at: None,
         })
     }
 
@@ -423,6 +685,86 @@ impl Connector for Anthropic {
             source: "Anthropic Usage Report (organization level)".to_string(),
         })
     }
+
+    fn disable_credential(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        _provider_project_id: Option<&str>,
+        provider_key_id: &str,
+    ) -> Result<String> {
+        Self::set_key_status(http, admin_secret, provider_key_id, "inactive")
+    }
+
+    /// Anthropic has no hard delete: `archived` is the documented terminal
+    /// state and is reported as such (soft revoke), never as deletion.
+    fn revoke_credential(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        _provider_project_id: Option<&str>,
+        provider_key_id: &str,
+    ) -> Result<String> {
+        Self::set_key_status(http, admin_secret, provider_key_id, "archived")
+            .map(|d| format!("{d} (soft revoke — Anthropic has no hard delete)"))
+    }
+
+    fn list_keys(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        _provider_project_id: Option<&str>,
+    ) -> Result<Vec<ProviderKeyListing>> {
+        let url = "https://api.anthropic.com/v1/organizations/api_keys?limit=100";
+        let resp = http.send(&Self::admin_request(url, admin_secret))?;
+        if resp.status == 401 || resp.status == 403 {
+            return Err(CoreError::ProviderAuth {
+                provider: "anthropic".into(),
+                detail: format!(
+                    "status {} — an ADMIN key is required to list keys",
+                    resp.status
+                ),
+            });
+        }
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Anthropic returned status {} listing keys",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let mut out = Vec::new();
+        if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+            for k in data {
+                let Some(id) = k.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                out.push(ProviderKeyListing {
+                    id: id.to_string(),
+                    name: k
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    status: k
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    created_at: k
+                        .get("created_at")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    redacted_hint: k
+                        .get("partial_key_hint")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                });
+            }
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +807,7 @@ impl Connector for Stripe {
             valid: resp.is_success(),
             status: resp.status,
             detail,
+            provider_expires_at: None,
         })
     }
 
@@ -517,6 +860,18 @@ impl Supabase {
         HttpRequest::get("https://api.supabase.com/v1/projects")
             .header("Authorization", format!("Bearer {}", secret.expose()))
     }
+
+    fn bearer(req: HttpRequest, secret: &SecretString) -> HttpRequest {
+        req.header("Authorization", format!("Bearer {}", secret.expose()))
+    }
+
+    fn need_ref(provider_project_id: Option<&str>) -> Result<&str> {
+        provider_project_id.ok_or_else(|| {
+            CoreError::InvalidInput(
+                "Supabase key operations need the project ref (the id in your project URL)".into(),
+            )
+        })
+    }
 }
 
 impl Connector for Supabase {
@@ -558,6 +913,7 @@ impl Connector for Supabase {
             valid: resp.is_success(),
             status: resp.status,
             detail,
+            provider_expires_at: None,
         })
     }
 
@@ -590,6 +946,182 @@ impl Connector for Supabase {
             fields,
             source: "Supabase Management GET /v1/projects".to_string(),
         })
+    }
+
+    /// A Supabase key's privilege is fixed by its TYPE, which the key format
+    /// itself declares (documented prefixes; legacy JWTs carry a `role`
+    /// claim). No network call is needed — this reads the key's own
+    /// self-description, never guessing.
+    fn fetch_permissions(
+        &self,
+        _http: &dyn HttpClient,
+        secret: &SecretString,
+    ) -> Result<FetchedPermissions> {
+        let value = secret.expose().trim();
+        let (scope, source) = if value.starts_with("sbp_") {
+            ("personal_access_token", "Supabase key format (sbp_ prefix)")
+        } else if value.starts_with("sb_secret_") {
+            ("secret_key", "Supabase key format (sb_secret_ prefix)")
+        } else if value.starts_with("sb_publishable_") {
+            (
+                "publishable_key",
+                "Supabase key format (sb_publishable_ prefix)",
+            )
+        } else if let Some(role) = legacy_jwt_role(value) {
+            return Ok(FetchedPermissions {
+                raw_scopes: vec![role],
+                precision: "exact_credential".to_string(),
+                confidence: "high".to_string(),
+                source: "Supabase legacy JWT role claim".to_string(),
+            });
+        } else {
+            return Err(CoreError::Unsupported {
+                provider: "supabase".into(),
+                capability: "read_permissions",
+                hint: "unrecognized key format; check the key type in the dashboard".into(),
+            });
+        };
+        Ok(FetchedPermissions {
+            raw_scopes: vec![scope.to_string()],
+            precision: "exact_credential".to_string(),
+            confidence: "high".to_string(),
+            source: source.to_string(),
+        })
+    }
+
+    /// `POST /v1/projects/{ref}/api-keys` creates a new-format secret key.
+    /// Requires a personal access token (sbp_...). The key value is
+    /// returned at creation.
+    fn create_credential(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        params: &CreateParams,
+    ) -> Result<CreatedCredential> {
+        let project_ref = Self::need_ref(params.provider_project_id.as_deref())?;
+        let url = format!("https://api.supabase.com/v1/projects/{project_ref}/api-keys");
+        let body = serde_json::json!({ "type": "secret", "name": params.name });
+        let req = Self::bearer(
+            HttpRequest::with_method(crate::http::Method::Post, url)
+                .header("content-type", "application/json")
+                .body(body.to_string().into_bytes()),
+            admin_secret,
+        );
+        let resp = http.send(&req)?;
+        if resp.status == 401 || resp.status == 403 {
+            return Err(CoreError::ProviderAuth {
+                provider: "supabase".into(),
+                detail: format!(
+                    "status {} — a personal access token is required",
+                    resp.status
+                ),
+            });
+        }
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Supabase returned status {} creating the key",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let value = json
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CoreError::Provider("the creation response did not include the key value".into())
+            })?;
+        let id = json.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+            CoreError::Provider("the creation response is missing the key id".into())
+        })?;
+        Ok(CreatedCredential {
+            value: SecretString::new(value.to_string()),
+            provider_key_id: Some(id.to_string()),
+            service_account_id: None,
+            provider_project_id: Some(project_ref.to_string()),
+            credential_type: "secret_key",
+            detail: format!(
+                "created secret key '{}' in project {project_ref}",
+                params.name
+            ),
+        })
+    }
+
+    /// `DELETE /v1/projects/{ref}/api-keys/{id}` permanently revokes a
+    /// new-format key. Legacy anon/service_role JWTs cannot be revoked this
+    /// way (dashboard only).
+    fn revoke_credential(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        provider_project_id: Option<&str>,
+        provider_key_id: &str,
+    ) -> Result<String> {
+        let project_ref = Self::need_ref(provider_project_id)?;
+        let url = format!(
+            "https://api.supabase.com/v1/projects/{project_ref}/api-keys/{provider_key_id}"
+        );
+        let req = Self::bearer(
+            HttpRequest::with_method(crate::http::Method::Delete, url),
+            admin_secret,
+        );
+        let resp = http.send(&req)?;
+        if resp.status == 404 {
+            // See openai::delete_project_api_key: a 404 is ambiguous between
+            // "already deleted" and "wrong id"; never blindly a success.
+            return Err(CoreError::NotFound {
+                kind: "provider key",
+                ident: provider_key_id.to_string(),
+            });
+        }
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Supabase returned status {} deleting key {provider_key_id}",
+                resp.status
+            )));
+        }
+        Ok(format!("deleted key {provider_key_id}"))
+    }
+
+    fn list_keys(
+        &self,
+        http: &dyn HttpClient,
+        admin_secret: &SecretString,
+        provider_project_id: Option<&str>,
+    ) -> Result<Vec<ProviderKeyListing>> {
+        let project_ref = Self::need_ref(provider_project_id)?;
+        let url = format!("https://api.supabase.com/v1/projects/{project_ref}/api-keys");
+        let resp = http.send(&Self::bearer(HttpRequest::get(url), admin_secret))?;
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Supabase returned status {} listing keys",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let mut out = Vec::new();
+        if let Some(arr) = json.as_array() {
+            for k in arr {
+                let Some(id) = k.get("id").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                out.push(ProviderKeyListing {
+                    id: id.to_string(),
+                    name: k
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    status: k
+                        .get("type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    created_at: None,
+                    redacted_hint: String::new(),
+                });
+            }
+        }
+        Ok(out)
     }
 }
 

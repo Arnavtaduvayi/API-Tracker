@@ -83,6 +83,8 @@ pub struct StatusReport {
 pub struct StatusInputs<'a> {
     pub created_at: OffsetDateTime,
     pub expires_at: Option<OffsetDateTime>,
+    /// Expiration reported by the provider itself (authoritative).
+    pub provider_expires_at: Option<OffsetDateTime>,
     pub last_validated_at: Option<OffsetDateTime>,
     pub last_used_at: Option<OffsetDateTime>,
     pub manually_disabled: bool,
@@ -144,15 +146,24 @@ pub fn evaluate(
                 "re-enable it when it is needed again, or revoke it at the provider".into(),
         });
     }
-    if let Some(expires) = inputs.expires_at {
+    // Both expiration sources are evaluated; the provider-reported one is
+    // authoritative and labeled as such.
+    for (expires, source) in [
+        (inputs.expires_at, "user-entered expiration date"),
+        (
+            inputs.provider_expires_at,
+            "provider-reported expiration (recorded during validation)",
+        ),
+    ] {
+        let Some(expires) = expires else { continue };
         if expires <= now {
             findings.push(Finding {
                 status: Status::Expired,
                 reason: format!(
-                    "the user-entered expiration date {} has passed",
+                    "the expiration date {} has passed",
                     crate::clock::to_rfc3339(expires)
                 ),
-                source: "user-entered expiration date".into(),
+                source: source.into(),
                 observed_at: observed.clone(),
                 confidence: Confidence::High,
                 recommended_action: "create a replacement credential at the provider and rotate"
@@ -165,10 +176,10 @@ pub fn evaluate(
                 findings.push(Finding {
                     status: Status::ExpiringSoon,
                     reason: format!(
-                        "the user-entered expiration date is about {days_left} day(s) away (threshold: {} days)",
+                        "the expiration date is about {days_left} day(s) away (threshold: {} days)",
                         settings.expiring_soon_days
                     ),
-                    source: "user-entered expiration date".into(),
+                    source: source.into(),
                     observed_at: observed.clone(),
                     confidence: Confidence::High,
                     recommended_action: "rotate the credential before it expires".into(),
@@ -328,6 +339,7 @@ mod tests {
         StatusInputs {
             created_at: now(),
             expires_at: None,
+            provider_expires_at: None,
             last_validated_at: None,
             last_used_at: None,
             manually_disabled: false,

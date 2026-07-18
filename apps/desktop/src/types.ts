@@ -65,6 +65,8 @@ export interface Credential {
   updated_at: string;
   key_created_at: string | null;
   expires_at: string | null;
+  /** Expiration reported by the provider itself (recorded during validation). */
+  provider_expires_at: string | null;
   last_validated_at: string | null;
   last_used_at: string | null;
   docs_url: string;
@@ -581,6 +583,142 @@ export interface SyncPlan {
   affected_projects: string[];
   manual_steps: string[];
   steps: SyncStep[];
+}
+
+// --- Credential rotation (state, ids, and versions only — never values) ---
+
+export type RotationState =
+  | "planned"
+  | "approved"
+  | "creating_replacement"
+  | "awaiting_manual_key"
+  | "replacement_stored"
+  | "updating_destinations"
+  | "destinations_verified"
+  | "grace_period"
+  | "old_disabled"
+  | "completed"
+  | "failed"
+  | "rolling_back"
+  | "rolled_back"
+  | "manual_required";
+
+export type RotationMode = "api_create" | "manual_create";
+
+/** A rotation with display context (core's RotationView, serde-flattened). */
+export interface RotationView {
+  id: string;
+  credential_id: string;
+  provider: string;
+  state: RotationState;
+  mode: RotationMode;
+  note: string;
+  created_at: string;
+  updated_at: string;
+  approved_at: string | null;
+  old_version: number | null;
+  new_version: number | null;
+  sync_plan_id: string | null;
+  grace_minutes: number;
+  grace_ends_at: string | null;
+  old_provider_key_id: string | null;
+  new_provider_key_id: string | null;
+  provider_project_id: string | null;
+  new_value_validated: boolean;
+  old_disabled_at: string | null;
+  old_revoked_at: string | null;
+  last_error: string;
+  manual_instructions: string;
+  credential_name: string;
+  project_name: string;
+  waiting_on: string | null;
+}
+
+export interface RotationEvent {
+  at: string;
+  from_state: string;
+  to_state: string;
+  detail: string;
+}
+
+export interface RotationSchedule {
+  credential_id: string;
+  interval_days: number;
+  next_due_at: string;
+  enabled: boolean;
+  paused_reason: string;
+  created_at: string;
+  last_completed_rotation_id: string | null;
+}
+
+// --- Temporary LOCAL access grants ---
+
+export type AccessGrantStatus = "active" | "expired" | "used_up" | "revoked";
+
+export interface AccessGrant {
+  id: string;
+  project_id: string;
+  label: string;
+  /** Credential ids the grant is limited to; empty = the project's mappings. */
+  credential_ids: string[];
+  expires_at: string;
+  /** 0 = unlimited launches within the window. */
+  max_launches: number;
+  launches_used: number;
+  max_duration_secs: number | null;
+  budget_warn_micros: number | null;
+  created_at: string;
+  revoked_at: string | null;
+  status: AccessGrantStatus;
+}
+
+export interface RunningSession {
+  session_id: string;
+  pid: number;
+}
+
+export interface GrantEndResult {
+  grant: AccessGrant;
+  running: RunningSession[];
+}
+
+// --- Credential lifecycle timeline (metadata only) ---
+
+export interface TimelineEvent {
+  at: string;
+  kind: string;
+  detail: string;
+  source: string;
+}
+
+// --- Provider-side keys, permission preview, test keys ---
+
+export interface ProviderKeyListing {
+  id: string;
+  name: string;
+  status: string;
+  created_at: string | null;
+  redacted_hint: string;
+}
+
+export interface FetchedPermissions {
+  raw_scopes: string[];
+  precision: string;
+  confidence: string;
+  source: string;
+}
+
+export interface PermissionsPreview {
+  stored: StoredPermissions | null;
+  /** Fresh from the provider — NOT stored until an explicit sync. */
+  fetched: FetchedPermissions;
+  normalized: NormalizedPermissions;
+}
+
+export interface TestKeyResult {
+  credential: Credential;
+  /** Honest enforcement notes from core, rendered verbatim. */
+  notes: string[];
 }
 
 export interface ApiError {

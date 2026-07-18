@@ -172,6 +172,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:00Z".into(),
             key_created_at: None,
             expires_at: None,
+            provider_expires_at: None,
             last_validated_at: None,
             last_used_at: None,
             docs_url: String::new(),

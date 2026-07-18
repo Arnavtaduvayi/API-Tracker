@@ -21,12 +21,12 @@ Legend:
 | Metadata | implemented (admin) | supported (not impl.) (admin) | implemented | implemented | implemented (admin) |
 | Usage | implemented (admin) | implemented (admin) | supported (not impl.) (admin) | manual | supported (not impl.) (admin) |
 | Provider-reported cost | implemented (admin) | supported (not impl.) (admin) | supported (not impl.) (admin) | manual | manual |
-| Read permissions | manual | unsupported | implemented | manual | supported (not impl.) (admin) |
+| Read permissions | manual | unsupported | implemented | manual | implemented |
 | Change permissions | manual | unsupported | manual | manual | unsupported |
-| Create | supported (not impl.) (admin) | manual | manual | manual | supported (not impl.) (admin) |
-| Disable | unsupported | supported (not impl.) (admin) | unsupported | unsupported | supported (not impl.) (admin) |
-| Revoke | supported (not impl.) (admin) | supported (not impl.) (admin) | manual | manual | supported (not impl.) (admin) |
-| Rotate | manual | manual | manual | manual | supported (not impl.) (admin) |
+| Create | implemented (admin) | manual | manual | manual | implemented (admin) |
+| Disable | unsupported | implemented (admin) | unsupported | unsupported | supported (not impl.) (admin) |
+| Revoke | implemented (admin) | implemented (admin, soft) | manual | manual | implemented (admin) |
+| Rotate | implemented (workflow) | manual create + API disable | manual (guided) | manual (guided) | implemented (workflow) |
 | Pricing | manual | manual | unsupported | unsupported | manual |
 
 ## Attribution precision (important)
@@ -64,4 +64,16 @@ Usage attribution **varies by provider** and is always labeled:
   API-readable — API Tracker says so rather than guessing.
 - **Permission changes**: no provider offers a safe, documented per-key scope
   change, so API Tracker surfaces the official management link and marks the
-  action manual. It never reports a change it did not make.
+  action manual — or routes the change through the rotation workflow
+  (create a replacement with the desired scope, deploy, verify, revoke the
+  old). It never reports a change it did not make.
+- **Rotation** (`api-tracker rotation`): OpenAI and Supabase rotate fully
+  via official APIs (create → deploy → verify → grace → delete old);
+  Anthropic is guided-manual creation plus API disable/archive (archive is
+  a SOFT revoke — no hard delete exists and the output says so); GitHub and
+  Stripe are guided-manual with explicit `complete-manual` confirmation.
+  Revocation always happens last, only after the new value validated.
+- **Provider-reported expiration**: GitHub's token-expiration header is
+  recorded during validation and drives expiry status with a
+  "provider-reported" source label. No current provider issues short-lived
+  credentials via API; API Tracker says so rather than simulating it.

@@ -4,20 +4,29 @@ This document hands the repository off to a fresh session. **"Verified"**
 means exercised by a passing test or a manual end-to-end run this session;
 **"planned"** means designed/labeled but not yet implemented.
 
-_Last updated for the `.env`-governance + destinations milestone wrap-up._
+_Last updated for the rotation/permissions/temporary-credentials milestone
+wrap-up._
 
 ---
 
 ## 1. Where things stand
 
-- **`main`** contains milestones 1–4 (vault, catalog/scanning/monitoring,
-  provider integrations, OpenAI usage/cost sync), tagged
-  `v0.1.0-alpha-core` and `v0.2.0-alpha-openai`.
-- **This milestone's branch:** `feat/env-destinations` — `.env` governance,
-  credential version history, destination adapters, synchronization plans,
-  across core + CLI + desktop, with docs and tests. See §2–§4 and the PR.
-- A prettier regression from PR #3 was fixed directly on `main`
-  (`e7c1edf`); `main` CI is green.
+- **`main`** contains milestones 1–5 (vault, catalog/scanning/monitoring,
+  provider integrations, OpenAI usage/cost sync, `.env` governance +
+  destinations + sync plans), tagged `v0.1.0-alpha-core` and
+  `v0.2.0-alpha-openai`.
+- **This milestone's branch:** `feat/rotation-permissions-temporary` —
+  durable credential rotation (state machine, migration v6), provider
+  lifecycle actions (OpenAI/Supabase create+revoke, Anthropic
+  disable/archive), scheduled-rotation intent, temporary local access
+  grants, provider-reported expiration, provider-created test keys,
+  permission diffs, lifecycle timelines — core + CLI + desktop + docs +
+  tests. Read `docs/decisions/0013-rotation-permissions-temporary.md`
+  FIRST; it records the design and the honesty decisions.
+- An adversarial review of this milestone produced 3 high / 11 medium
+  findings (wrong-key revocation via stale links + blind 404-success,
+  `--json` confirmation bypass, concurrency/idempotency holes, rollback
+  honesty) — ALL fixed with regression tests; see the review-fix commit.
 
 ## 2. What this milestone added
 
@@ -60,13 +69,14 @@ records the design and its reasoning. Summary:
 
 ## 3. Test/verification status at handoff
 
-- Core: 152 lib unit tests + integration suites incl. 17 new
-  `env_destinations` tests; CLI: 40 tests incl. 7 new end-to-end
-  `env_destinations_cli` tests. All green with
-  `API_TRACKER_INSECURE_FAST_KDF=1`.
+- Core: 160 lib unit tests + integration suites incl. 22 `rotation_access`
+  tests (restart recovery, idempotency, 404-ambiguity, external
+  replacement, orphaned keys, prune exemptions, rollback refusals) and 20
+  `env_destinations` tests; CLI: 46 tests incl. 6 `rotation_access_cli`
+  end-to-end tests. All green with `API_TRACKER_INSECURE_FAST_KDF=1`.
 - `cargo fmt --check`, `cargo +1.97.0 clippy --workspace --all-targets -- -D warnings`: clean.
 - Frontend: `tsc --noEmit`, eslint, vitest, `vite build`, prettier: clean.
-- **Smoke test: 68 checks** (`bash scripts/smoke.sh`) — 15 new checks cover
+- **Smoke test: 76 checks** (`bash scripts/smoke.sh`) — 15 new checks cover
   env preview/import/example/export permissions/cleanup and destination
   add/attach/plan (offline, encrypted-at-rest asserted).
 - An adversarial security review ran over the milestone diff; findings were

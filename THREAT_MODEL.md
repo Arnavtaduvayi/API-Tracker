@@ -92,6 +92,28 @@ integrations land.
   (GitHub/Vercel never return values; AWS read-back is used for
   verification). Keychain writes pass the secret via stdin, never argv.
 
+- **Rotation** composes destructive provider-side operations (create,
+  disable, revoke). Ordering bounds the blast radius: nothing destructive
+  runs before destinations verified AND the new value validated live;
+  revocation is last and is refused otherwise. Every step needs the master
+  password again; scheduled rotations only raise alerts — there is no
+  unattended executor. Rollback restores destinations/vault/Anthropic
+  disable, but a revoked key is gone: the CLI says "irreversible" instead
+  of pretending. Provider admin credentials therefore carry create/revoke
+  power now; scope them minimally at the issuer.
+- **Temporary access grants** are local controls: they bound what this
+  machine injects (window, launch count, per-process kill timer) and can
+  SIGTERM recorded child PIDs. They cannot claw back values a process
+  already received, cannot constrain the provider credential, and the UI/CLI
+  say both. `access end --kill` signals a PID recorded at spawn; PID reuse
+  between spawn and kill is theoretically possible (bounded by OS PID
+  cycling; an attacker who can forge session rows is already "malware as
+  the user", which this model excludes).
+- **Retained credential versions** expire after the configured rollback
+  window (default 30 days); pruning relies on SQLite `secure_delete`
+  overwriting freed pages — best-effort secure deletion, not a guarantee
+  against forensic recovery of previously-checkpointed WAL frames.
+
 ## Adversaries and outcomes
 
 | Adversary | Outcome |

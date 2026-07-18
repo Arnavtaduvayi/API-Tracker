@@ -24,6 +24,8 @@ import { UsageView } from "./components/UsageView";
 import { EnvView } from "./components/EnvView";
 import { DestinationsView } from "./components/DestinationsView";
 import { SyncView } from "./components/SyncView";
+import { RotationView } from "./components/RotationView";
+import { AccessView } from "./components/AccessView";
 
 export type View =
   | { name: "projects" }
@@ -39,6 +41,8 @@ export type View =
   | { name: "env" }
   | { name: "destinations" }
   | { name: "sync" }
+  | { name: "rotation" }
+  | { name: "access" }
   | { name: "alerts" }
   | { name: "usage" }
   | { name: "settings" }
@@ -118,6 +122,12 @@ export default function App() {
         <button className="link" onClick={() => setView({ name: "sync" })}>
           Sync plans
         </button>
+        <button className="link" onClick={() => setView({ name: "rotation" })}>
+          Rotation
+        </button>
+        <button className="link" onClick={() => setView({ name: "access" })}>
+          Temporary access
+        </button>
         <button className="link" onClick={() => setView({ name: "alerts" })}>
           Alerts
         </button>
@@ -194,6 +204,8 @@ export default function App() {
       {view.name === "env" && <EnvView />}
       {view.name === "destinations" && <DestinationsView />}
       {view.name === "sync" && <SyncView />}
+      {view.name === "rotation" && <RotationView />}
+      {view.name === "access" && <AccessView />}
       {view.name === "alerts" && <AlertsView />}
       {view.name === "usage" && <UsageView />}
       {view.name === "settings" && <SettingsView dataDir={dataDir} />}

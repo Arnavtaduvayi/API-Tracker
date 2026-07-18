@@ -46,6 +46,41 @@ pub enum KeyCmd {
     },
     /// Show a credential's retained value versions (masked; reauth).
     Versions { key: String },
+    /// Show a credential's merged lifecycle timeline.
+    History { key: String },
+    /// Compare stored permissions with a fresh provider read (no store).
+    PermissionsDiff { key: String },
+    /// Create a provider-side TEST key (reauth; honest enforcement labels).
+    TestCreate(TestCreateArgs),
+    /// Revoke a credential AT THE PROVIDER via its linked key id.
+    ProviderRevoke {
+        key: String,
+        /// Confirm non-interactively.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Args)]
+pub struct TestCreateArgs {
+    /// Project to store the test key in.
+    #[arg(long)]
+    pub project: String,
+    /// Provider (openai or supabase — the ones with API key creation).
+    #[arg(long, default_value = "openai")]
+    pub provider: String,
+    /// Provider-side project id / ref to create the key in.
+    #[arg(long)]
+    pub provider_project: Option<String>,
+    /// Name for the key (at the provider and in the vault).
+    #[arg(long)]
+    pub name: String,
+    /// LOCAL reminder lifetime in minutes (NOT provider-enforced).
+    #[arg(long, default_value_t = 240)]
+    pub ttl_minutes: u64,
+    /// Confirm non-interactively.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -151,6 +186,10 @@ pub fn run(ctx: &Ctx, cmd: KeyCmd) -> Result<()> {
     match cmd {
         KeyCmd::Add(args) => add(ctx, args),
         KeyCmd::Versions { key } => versions(ctx, &key),
+        KeyCmd::History { key } => history(ctx, &key),
+        KeyCmd::PermissionsDiff { key } => permissions_diff(ctx, &key),
+        KeyCmd::TestCreate(args) => test_create(ctx, args),
+        KeyCmd::ProviderRevoke { key, yes } => provider_revoke(ctx, &key, yes),
         KeyCmd::List { project } => {
             let (vault, _token) = ctx.unlocked()?;
             let credentials = vault.list_credentials(project.as_deref())?;
@@ -374,6 +413,145 @@ fn versions(ctx: &Ctx, key: &str) -> Result<()> {
              encrypted like current values and pruned automatically."
         );
     });
+    Ok(())
+}
+
+fn history(ctx: &Ctx, key: &str) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    let timeline = vault.credential_timeline(key)?;
+    render::emit(ctx.json, &timeline, || {
+        if timeline.is_empty() {
+            println!("No recorded lifecycle events.");
+            return;
+        }
+        let rows: Vec<Vec<String>> = timeline
+            .iter()
+            .map(|e| {
+                vec![
+                    e.at.clone(),
+                    e.kind.clone(),
+                    e.detail.clone(),
+                    e.source.clone(),
+                ]
+            })
+            .collect();
+        render::table(&["AT", "EVENT", "DETAIL", "SOURCE"], &rows);
+    });
+    Ok(())
+}
+
+fn permissions_diff(ctx: &Ctx, key: &str) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    let http = api_tracker_core::http::UreqClient::new();
+    let (stored, fetched, normalized) = vault.permissions_preview(key, &http)?;
+    render::emit(ctx.json, &(&stored, &fetched, &normalized), || {
+        println!("BEFORE (stored):");
+        match &stored {
+            Some(p) => {
+                println!("  {}", p.normalized.summary);
+                println!("  Raw: {}", p.raw_scopes.join(", "));
+                println!("  Synced: {}", p.synced_at);
+            }
+            None => println!("  (no stored permission snapshot)"),
+        }
+        println!(
+            "
+AFTER (fresh from the provider — NOT stored yet):"
+        );
+        println!("  {}", normalized.summary);
+        println!("  Raw: {}", fetched.raw_scopes.join(", "));
+        println!(
+            "  Source: {} (confidence: {})",
+            fetched.source, fetched.confidence
+        );
+        let stored_scopes: Vec<String> = stored
+            .as_ref()
+            .map(|p| p.raw_scopes.clone())
+            .unwrap_or_default();
+        let added: Vec<&String> = fetched
+            .raw_scopes
+            .iter()
+            .filter(|s| !stored_scopes.contains(s))
+            .collect();
+        let removed: Vec<&String> = stored_scopes
+            .iter()
+            .filter(|s| !fetched.raw_scopes.contains(s))
+            .collect();
+        if added.is_empty() && removed.is_empty() {
+            println!(
+                "
+No scope changes."
+            );
+        } else {
+            for scope in added {
+                println!("  + {scope}");
+            }
+            for scope in removed {
+                println!("  - {scope}");
+            }
+        }
+        println!(
+            "
+Apply/store with `key permissions {key} --sync`. To CHANGE permissions: no              current provider supports editing a key's scopes via API — change them in the              provider dashboard where supported (GitHub/Stripe), or create a replacement              with the desired scope and rotate (`rotation plan {key}`)."
+        );
+    });
+    Ok(())
+}
+
+fn test_create(ctx: &Ctx, args: TestCreateArgs) -> Result<()> {
+    let (mut vault, token) = ctx.unlocked()?;
+    println!(
+        "This creates a REAL key at {} (project {}).",
+        args.provider,
+        args.provider_project.as_deref().unwrap_or("?")
+    );
+    if !ctx::confirm("Create it?", args.yes)? {
+        anyhow::bail!("cancelled");
+    }
+    let password = ctx::master_password()?;
+    let http = api_tracker_core::http::UreqClient::new();
+    let (credential, notes) = vault.test_key_create(
+        &args.project,
+        &args.provider,
+        args.provider_project.as_deref(),
+        &args.name,
+        args.ttl_minutes,
+        &password,
+        &http,
+    )?;
+    ctx.persist_session(&vault, &token)?;
+    println!(
+        "Created test key '{}/{}' ({}).",
+        credential.project_name, credential.name, credential.masked_value
+    );
+    println!(
+        "
+What is actually enforced:"
+    );
+    for note in &notes {
+        println!("  - {note}");
+    }
+    Ok(())
+}
+
+fn provider_revoke(ctx: &Ctx, key: &str, yes: bool) -> Result<()> {
+    let (mut vault, token) = ctx.unlocked()?;
+    let credential = vault.get_credential(key)?;
+    if !ctx::confirm(
+        &format!(
+            "REVOKE '{}/{}' at {}? This is usually irreversible and anything still using the key will break.",
+            credential.project_name, credential.name, credential.provider
+        ),
+        yes,
+    )? {
+        anyhow::bail!("cancelled — nothing was revoked");
+    }
+    let password = ctx::master_password()?;
+    let http = api_tracker_core::http::UreqClient::new();
+    let detail = vault.credential_provider_revoke(key, &password, &http)?;
+    ctx.persist_session(&vault, &token)?;
+    println!("Revoked: {detail}");
+    println!("The vault record is marked revoked (kept for history).");
     Ok(())
 }
 

@@ -397,6 +397,102 @@ pub fn fetch_project_keys(
         .collect())
 }
 
+/// A key created via the Admin API. The plaintext value is returned by
+/// OpenAI exactly once (at creation) and is moved straight into the vault.
+pub struct CreatedServiceAccountKey {
+    pub value: SecretString,
+    pub api_key_id: String,
+    pub service_account_id: String,
+    pub detail: String,
+}
+
+fn post_json(url: &str, admin: &SecretString, body: serde_json::Value) -> HttpRequest {
+    HttpRequest::with_method(crate::http::Method::Post, url)
+        .header("Authorization", format!("Bearer {}", admin.expose()))
+        .header("content-type", "application/json")
+        .body(body.to_string().into_bytes())
+}
+
+/// Create a service account (and its API key) inside a provider project.
+/// `POST /v1/organization/projects/{id}/service_accounts` — the officially
+/// documented way to create a workload key programmatically. User keys
+/// cannot be created via API (dashboard only), and the response's
+/// `api_key.value` is shown only once.
+pub fn create_service_account_key(
+    http: &dyn HttpClient,
+    admin: &SecretString,
+    project_id: &str,
+    name: &str,
+) -> Result<CreatedServiceAccountKey> {
+    let url = format!("{BASE}/organization/projects/{project_id}/service_accounts");
+    let resp = send_checked(
+        http,
+        &post_json(&url, admin, serde_json::json!({ "name": name })),
+    )?;
+    require_success(&resp, "service-account creation")?;
+    let json = parse_json(&resp)?;
+    let service_account_id = opt_str(&json, "id")
+        .ok_or_else(|| CoreError::Provider("service-account response is missing its id".into()))?;
+    let api_key = json
+        .get("api_key")
+        .ok_or_else(|| CoreError::Provider("service-account response has no api_key".into()))?;
+    let value = api_key
+        .get("value")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            CoreError::Provider(
+                "the creation response did not include the key value (it is only \
+                 returned once, at creation)"
+                    .into(),
+            )
+        })?;
+    let api_key_id = opt_str(api_key, "id").ok_or_else(|| {
+        CoreError::Provider("service-account key response is missing the key id".into())
+    })?;
+    Ok(CreatedServiceAccountKey {
+        value: SecretString::new(value.to_string()),
+        api_key_id,
+        service_account_id,
+        detail: format!("created service account '{name}' in project {project_id}"),
+    })
+}
+
+/// Permanently delete a project API key by id.
+/// `DELETE /v1/organization/projects/{id}/api_keys/{key_id}`. OpenAI has no
+/// disable state — deletion is the only programmatic kill switch.
+pub fn delete_project_api_key(
+    http: &dyn HttpClient,
+    admin: &SecretString,
+    project_id: &str,
+    key_id: &str,
+) -> Result<String> {
+    let url = format!("{BASE}/organization/projects/{project_id}/api_keys/{key_id}");
+    let req = HttpRequest::with_method(crate::http::Method::Delete, url)
+        .header("Authorization", format!("Bearer {}", admin.expose()));
+    let resp = send_checked(http, &req)?;
+    if resp.status == 404 {
+        // NOT success: on a first attempt a 404 means a wrong key id or
+        // project just as often as "already deleted". The caller decides —
+        // the rotation engine treats it as success only when a prior
+        // recorded attempt exists.
+        return Err(CoreError::NotFound {
+            kind: "provider key",
+            ident: key_id.to_string(),
+        });
+    }
+    require_success(&resp, "project API-key deletion")?;
+    let deleted = parse_json(&resp)
+        .ok()
+        .and_then(|j| j.get("deleted").and_then(|d| d.as_bool()))
+        .unwrap_or(true);
+    if !deleted {
+        return Err(CoreError::Provider(format!(
+            "OpenAI did not confirm deletion of key {key_id}"
+        )));
+    }
+    Ok(format!("deleted project API key {key_id}"))
+}
+
 /// True when a provider-listed redacted value (e.g. `sk-...abc1`) is
 /// consistent with a full secret value. This is *suggestion evidence only*:
 /// a match is strong but not proof, so it never links automatically.

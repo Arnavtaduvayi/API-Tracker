@@ -153,12 +153,9 @@ fn env_export_is_gated_confirmed_and_cleaned_up() {
         .unwrap()
         .contains(FAKE_OPENAI));
 
-    // Expired ttl → cleanup removes it.
-    v.cmd()
-        .args(["env", "cleanup"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Removed"));
+    // Expired ttl → cleanup removes it. (The unlock-time sweep may already
+    // have removed it before the explicit command ran — both are correct.)
+    v.cmd().args(["env", "cleanup"]).assert().success();
     assert!(!target.exists());
 }
 

@@ -5,6 +5,40 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — rotation, permission management, and temporary credentials
+- **Durable rotation workflows** (`rotation` command group, desktop
+  Rotation screen): dry-run plan → reauthenticated approval → replacement
+  (OpenAI/Supabase via official APIs; Anthropic/GitHub/Stripe guided
+  manual) → destination sync + verification → live validation of the new
+  value → grace/overlap with continued-use detection from per-key provider
+  usage → disable where supported (Anthropic) → revoke ONLY after
+  verification (OpenAI/Supabase delete; Anthropic archive, labeled soft) →
+  completed. Restart-recoverable, idempotent retries, stuck detection,
+  rollback (destinations + vault value + Anthropic re-enable + optional
+  new-key revocation), honest manual fallbacks.
+- **Scheduled rotation as intent**: enabled only after a completed manual
+  rotation; due schedules raise high-severity alerts (desktop
+  notification) after preflight; preflight failure pauses the schedule;
+  nothing ever executes unattended.
+- **Temporary local access grants**: `access grant/list/end` +
+  `run --grant` with expiry windows, one-time/max-launch atomic limits,
+  per-process kill timers, PID-tracked termination, advisory budget
+  warnings — explicitly local controls, never presented as provider-side.
+- **Provider-reported expiration**: GitHub's token-expiration header is
+  recorded and drives expiry status with its own source label.
+- **Provider-created test keys**: `key test-create` (OpenAI service
+  accounts / Supabase secret keys) with PROVIDER-ENFORCED vs NOT-enforced
+  vs ADVISORY labeling; `key provider-revoke` for confirmed provider-side
+  revocation.
+- **Permissions**: Supabase privilege read from the documented key format
+  (incl. legacy JWT role claim); `key permissions-diff` before/after view;
+  permission snapshots in the audit trail; changes routed through
+  dashboards or rotation — never faked.
+- **Lifecycle**: `key history` merged timeline (audit + activity +
+  versions + rotation events); rollback window setting (default 30 days)
+  pruning retained versions with secure_delete.
+- Database migration v6.
+
 ### Added — `.env` governance, destinations, and synchronization plans
 - **`.env` governance**: `env discover` (variants + Git
   tracked/ignored/untracked/in-history status), lossless non-executing

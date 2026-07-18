@@ -116,6 +116,35 @@ pub fn start_session(
     Ok(id)
 }
 
+/// Record the spawned child's PID (for temporary-access termination) and
+/// the grant that authorized the launch.
+pub fn set_session_pid(
+    conn: &Connection,
+    session_id: &str,
+    pid: u32,
+    grant_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE process_sessions SET pid = ?1, grant_id = ?2 WHERE id = ?3",
+        params![i64::from(pid), grant_id, session_id],
+    )?;
+    Ok(())
+}
+
+/// Running sessions (not ended) launched under a grant, with their PIDs.
+pub fn running_sessions_for_grant(conn: &Connection, grant_id: &str) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pid FROM process_sessions
+         WHERE grant_id = ?1 AND ended_at IS NULL AND pid IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([grant_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 pub fn end_session(conn: &Connection, session_id: &str, exit_code: Option<i32>) -> Result<()> {
     conn.execute(
         "UPDATE process_sessions SET ended_at = ?1, exit_code = ?2 WHERE id = ?3",

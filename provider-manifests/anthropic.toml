@@ -36,7 +36,7 @@ fetch_usage = { support = "implemented", requires_admin_credential = true, attri
 read_permissions = { support = "unsupported", note = "Keys are scoped by workspace membership, not by API-readable per-key scopes." }
 change_permissions = { support = "unsupported", note = "Per-key permissions cannot be changed through a public API." }
 create_credential = { support = "manual_only", note = "API keys can only be created in the console, not through the Admin API." }
-disable_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "POST /v1/organizations/api_keys/{id} with status=inactive; requires an admin key." }
-revoke_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Soft revoke only: set status inactive/archived via the Admin API; there is no hard-delete endpoint." }
-rotate_credential = { support = "manual_only", note = "No atomic rotate; create a new key in the console, then deactivate the old one via the Admin API." }
+disable_credential = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "API Tracker sets status=inactive via the Admin API and verifies the returned status; requires an admin key." }
+revoke_credential = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Soft revoke only: API Tracker sets status=archived via the Admin API and says so — there is no hard-delete endpoint." }
+rotate_credential = { support = "manual_only", note = "Semi-automated in API Tracker's rotation workflow: the new key must be created in the console (no create API); deactivating/archiving the old key then happens via the Admin API." }
 fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

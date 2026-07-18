@@ -103,9 +103,16 @@ fn provider_catalog_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("validate credential"))
-        .stdout(predicate::str::contains("supported, not implemented"))
-        // Honesty: usage attribution is labeled, never presented as exact cost.
+        // Honesty: unsupported/manual capabilities stay labeled as such.
+        .stdout(predicate::str::contains("manual action required"))
         .stdout(predicate::str::contains("admin credential"));
+
+    // The not-yet-implemented label still appears where it is true.
+    v.cmd_no_password()
+        .args(["provider", "capabilities", "supabase"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("supported, not implemented"));
 
     v.cmd_no_password()
         .args(["provider", "docs", "anthropic"])

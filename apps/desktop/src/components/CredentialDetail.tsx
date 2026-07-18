@@ -1,15 +1,24 @@
 // Credential details: masked value, explainable status findings, manual
-// marks, and the sensitive actions (reveal / copy / replace / delete) —
-// each gated behind master-password reauthentication.
+// marks, lifecycle timeline, permission diffs, provider-side key lifecycle
+// (test keys, revocation), and the sensitive actions (reveal / copy /
+// replace / delete) — each gated behind master-password reauthentication.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, isApiError } from "../api";
-import type { Credential, StoredPermissions } from "../types";
+import type {
+  Credential,
+  CredentialVersionInfo,
+  PermissionsPreview,
+  ProviderManifest,
+  StoredPermissions,
+  TimelineEvent,
+} from "../types";
 import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
-import { PromptDialog } from "./ConfirmDialog";
+import { ConfirmDialog, PromptDialog } from "./ConfirmDialog";
 
-type SensitiveAction = "reveal" | "copy" | "delete";
+type SensitiveAction =
+  "reveal" | "copy" | "delete" | "versions" | "provider-revoke" | "test-key";
 
 export function CredentialDetail(props: {
   id: string;
@@ -26,6 +35,16 @@ export function CredentialDetail(props: {
   const [replacePassword, setReplacePassword] = useState("");
   const [exposurePromptOpen, setExposurePromptOpen] = useState(false);
   const [permissions, setPermissions] = useState<StoredPermissions | null>(null);
+  const [manifest, setManifest] = useState<ProviderManifest | null>(null);
+  const [timeline, setTimeline] = useState<TimelineEvent[] | null>(null);
+  const [versions, setVersions] = useState<CredentialVersionInfo[] | null>(null);
+  const [permPreview, setPermPreview] = useState<PermissionsPreview | null>(null);
+  const [revokeConfirmOpen, setRevokeConfirmOpen] = useState(false);
+  const [testKeyOpen, setTestKeyOpen] = useState(false);
+  const [tkProviderProject, setTkProviderProject] = useState("");
+  const [tkName, setTkName] = useState("");
+  const [tkTtl, setTkTtl] = useState("60");
+  const [testKeyNotes, setTestKeyNotes] = useState<string[] | null>(null);
   const revealTimer = useRef<number | null>(null);
 
   // A small async wrapper that surfaces errors and a success notice.
@@ -58,6 +77,16 @@ export function CredentialDetail(props: {
       if (revealTimer.current !== null) window.clearTimeout(revealTimer.current);
     };
   }, [reload, props.id]);
+
+  // The provider manifest gates the provider-side lifecycle actions so only
+  // truly implemented capabilities get buttons (honest representation).
+  useEffect(() => {
+    if (!credential) return;
+    api
+      .providerGet(credential.provider)
+      .then(setManifest)
+      .catch(() => setManifest(null));
+  }, [credential]);
 
   const hideRevealed = useCallback(() => {
     setRevealed(null);
@@ -104,6 +133,29 @@ export function CredentialDetail(props: {
       const projectId = credential?.project_id ?? null;
       await api.credentialDelete(props.id);
       props.onBack(projectId);
+    } else if (action === "versions") {
+      setVersions(await api.credentialVersions(props.id, password));
+    } else if (action === "provider-revoke") {
+      const detail = await api.credentialProviderRevoke(props.id, password);
+      setNotice(
+        `Revoked at the provider: ${detail}. The vault record is marked revoked (kept for history).`,
+      );
+      await reload();
+    } else if (action === "test-key") {
+      if (!credential) return;
+      const result = await api.testKeyCreate({
+        project: credential.project_id,
+        provider: credential.provider,
+        providerProject: tkProviderProject.trim() || null,
+        name: tkName.trim(),
+        ttlMinutes: Number(tkTtl),
+        password,
+      });
+      setTestKeyNotes(result.notes);
+      setNotice(
+        `Created test key '${result.credential.project_name}/${result.credential.name}' ` +
+          `(${result.credential.masked_value}).`,
+      );
     }
   };
 
@@ -148,7 +200,21 @@ export function CredentialDetail(props: {
         <dt>Key created</dt>
         <dd>{formatTimestamp(c.key_created_at)}</dd>
         <dt>Expires</dt>
-        <dd>{formatTimestamp(c.expires_at)}</dd>
+        <dd>
+          {formatTimestamp(c.expires_at)}
+          {c.expires_at && (
+            <>
+              {" "}
+              <span className="muted">(entered by you — a local reminder)</span>
+            </>
+          )}
+        </dd>
+        <dt>Expires (provider-reported)</dt>
+        <dd>
+          {c.provider_expires_at
+            ? formatTimestamp(c.provider_expires_at)
+            : "not reported by the provider"}
+        </dd>
         <dt>Last validated</dt>
         <dd>{formatTimestamp(c.last_validated_at)}</dd>
         <dt>Last used</dt>
@@ -219,6 +285,15 @@ export function CredentialDetail(props: {
         >
           Sync permissions
         </button>
+        <button
+          onClick={() =>
+            void run(async () => {
+              setPermPreview(await api.permissionsPreview(props.id));
+            })
+          }
+        >
+          Permissions diff
+        </button>
       </p>
       {permissions && (
         <div className="finding ok">
@@ -238,6 +313,172 @@ export function CredentialDetail(props: {
             </div>
           )}
         </div>
+      )}
+      {permPreview && (
+        <div className="finding warn">
+          <div>
+            <strong>Permissions diff</strong>{" "}
+            <span className="muted">
+              (fresh from {permPreview.fetched.source}, {permPreview.fetched.confidence}{" "}
+              confidence — NOT stored)
+            </span>
+          </div>
+          <div>
+            Before (stored):{" "}
+            {permPreview.stored
+              ? `${permPreview.stored.normalized.summary} (synced ${formatTimestamp(
+                  permPreview.stored.synced_at,
+                )})`
+              : "no stored permission snapshot"}
+          </div>
+          <div>After (fresh): {permPreview.normalized.summary}</div>
+          {(() => {
+            const storedScopes = permPreview.stored?.raw_scopes ?? [];
+            const added = permPreview.fetched.raw_scopes.filter(
+              (s) => !storedScopes.includes(s),
+            );
+            const removed = storedScopes.filter(
+              (s) => !permPreview.fetched.raw_scopes.includes(s),
+            );
+            if (added.length === 0 && removed.length === 0) {
+              return <div>No scope changes.</div>;
+            }
+            return (
+              <div className="mono">
+                {added.map((s) => (
+                  <div key={`+${s}`}>+ {s}</div>
+                ))}
+                {removed.map((s) => (
+                  <div key={`-${s}`}>− {s}</div>
+                ))}
+              </div>
+            );
+          })()}
+          <div className="muted">
+            Store the fresh scopes with &quot;Sync permissions&quot;. To CHANGE permissions: no
+            current provider supports editing a key&apos;s scopes via API — change them in the
+            provider dashboard where supported, or create a replacement key with the desired
+            scope and rotate this credential (Rotation view).
+          </div>
+        </div>
+      )}
+
+      <h2>Lifecycle</h2>
+      <p className="muted">
+        A merged, chronological record of this credential&apos;s lifecycle (metadata only —
+        never values). Version history additionally asks for your master password because it
+        reveals rotation cadence.
+      </p>
+      <p style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <button
+          onClick={() =>
+            void run(async () => {
+              setTimeline(await api.credentialTimeline(props.id));
+            })
+          }
+        >
+          Load timeline
+        </button>
+        <button onClick={() => setAction("versions")}>Version history…</button>
+      </p>
+      {timeline !== null &&
+        (timeline.length === 0 ? (
+          <p className="muted">No recorded lifecycle events.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>At</th>
+                <th>Event</th>
+                <th>Detail</th>
+                <th>Source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {timeline.map((e, i) => (
+                <tr key={i}>
+                  <td>{formatTimestamp(e.at)}</td>
+                  <td className="mono">{e.kind}</td>
+                  <td>{e.detail || "—"}</td>
+                  <td className="muted">{e.source}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
+      {versions !== null && (
+        <>
+          <table>
+            <thead>
+              <tr>
+                <th>Version</th>
+                <th>Value (masked)</th>
+                <th>At</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              {versions.map((v) => (
+                <tr key={v.version}>
+                  <td className="mono">v{v.version}</td>
+                  <td className="mono">{v.masked_value}</td>
+                  <td>{formatTimestamp(v.created_at)}</td>
+                  <td>{v.current ? "current" : v.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted">
+            Old versions exist so destination rollback works; they are encrypted like current
+            values and pruned automatically.
+          </p>
+        </>
+      )}
+
+      {!c.is_reference && (
+        <>
+          <h2>Provider-side lifecycle</h2>
+          <p className="muted">
+            These act on REAL provider-side keys through the provider&apos;s administrative
+            connection.
+          </p>
+          <p style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            {manifest?.capabilities.create_credential.support === "implemented" ? (
+              <button onClick={() => setTestKeyOpen(true)}>Create test key…</button>
+            ) : (
+              <span className="muted">
+                This provider has no API key creation — create keys in its dashboard
+                {manifest?.manage_url ? ` (${manifest.manage_url})` : ""}.
+              </span>
+            )}
+            {manifest?.capabilities.revoke_credential.support === "implemented" ? (
+              <button className="danger" onClick={() => setRevokeConfirmOpen(true)}>
+                Revoke at provider…
+              </button>
+            ) : (
+              <span className="muted">
+                This provider has no API revocation — revoke keys in its dashboard
+                {manifest?.manage_url ? ` (${manifest.manage_url})` : ""}.
+              </span>
+            )}
+          </p>
+          {c.provider === "anthropic" &&
+            manifest?.capabilities.revoke_credential.support === "implemented" && (
+              <p className="muted">
+                Anthropic has no hard delete — revocation archives the key (soft revoke).
+              </p>
+            )}
+          {testKeyNotes && (
+            <div className="warnbox">
+              <strong>What is actually enforced:</strong>
+              <ul>
+                {testKeyNotes.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
       )}
 
       <h2>Manual tracking</h2>
@@ -373,12 +614,108 @@ export function CredentialDetail(props: {
               ? "Reveal credential value"
               : action === "copy"
                 ? "Copy credential value"
-                : "Delete credential"
+                : action === "delete"
+                  ? "Delete credential"
+                  : action === "versions"
+                    ? "View version history"
+                    : action === "provider-revoke"
+                      ? "Revoke at the provider"
+                      : "Create a real provider-side key"
           }
-          actionLabel={action === "delete" ? "Delete permanently" : "Confirm"}
+          actionLabel={
+            action === "delete"
+              ? "Delete permanently"
+              : action === "provider-revoke"
+                ? "Revoke at provider"
+                : action === "test-key"
+                  ? "Create real key"
+                  : "Confirm"
+          }
           onConfirm={confirmAction}
           onClose={() => setAction(null)}
         />
+      )}
+
+      {revokeConfirmOpen && (
+        <ConfirmDialog
+          title="Revoke at the provider"
+          body={
+            `REVOKE '${c.project_name}/${c.name}' at ${c.provider}? This is usually ` +
+            `irreversible and anything still using the key will break.` +
+            (c.provider === "anthropic"
+              ? " (Anthropic has no hard delete — this archives the key, a soft revoke.)"
+              : "")
+          }
+          confirmLabel="Continue to password"
+          danger
+          onConfirm={() => {
+            setRevokeConfirmOpen(false);
+            setAction("provider-revoke");
+          }}
+          onCancel={() => setRevokeConfirmOpen(false)}
+        />
+      )}
+
+      {testKeyOpen && (
+        <dialog open>
+          <h2>Create a test key</h2>
+          <p className="muted">
+            This creates a REAL key at {c.provider} via the administrative connection and stores
+            it encrypted in project &apos;{c.project_name}&apos;. The expiry below is a LOCAL
+            reminder only — the provider key stays valid until you revoke it.
+          </p>
+          <form
+            className="stack"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const ttl = Number(tkTtl);
+              if (!Number.isFinite(ttl) || ttl <= 0) {
+                setError("The reminder lifetime must be a positive number of minutes.");
+                return;
+              }
+              if (!tkName.trim()) {
+                setError("Give the test key a name.");
+                return;
+              }
+              setError(null);
+              setTestKeyOpen(false);
+              setAction("test-key");
+            }}
+          >
+            <label className="field">
+              Provider-side project (OpenAI project id / Supabase project ref — optional)
+              <input
+                value={tkProviderProject}
+                onChange={(e) => setTkProviderProject(e.target.value)}
+              />
+            </label>
+            <label className="field">
+              Key name
+              <input
+                value={tkName}
+                onChange={(e) => setTkName(e.target.value)}
+                autoFocus
+                required
+              />
+            </label>
+            <label className="field">
+              Local reminder lifetime (minutes — not enforced by the provider)
+              <input
+                type="number"
+                min={1}
+                value={tkTtl}
+                onChange={(e) => setTkTtl(e.target.value)}
+              />
+            </label>
+            {error && <p className="error">{error}</p>}
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button type="submit">Continue to password</button>
+              <button type="button" onClick={() => setTestKeyOpen(false)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        </dialog>
       )}
 
       {exposurePromptOpen && (
