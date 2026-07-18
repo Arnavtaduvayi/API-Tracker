@@ -19,24 +19,24 @@ Classifications:
 
 | # | Requirement | Status |
 | --- | --- | --- |
-| 1 | Per-key metadata and usage attribution | Partially implemented / provider-limited |
+| 1 | Per-key metadata and usage attribution | Provider-limited (per-key for OpenAI + Anthropic; account-level GitHub/Stripe; Supabase honest ceiling) |
 | 2 | Secret-manager synchronization | Partially implemented (this milestone) |
 | 3 | Offline access | Fully implemented |
 | 4 | Token-based cost estimation | Partially implemented |
 | 5 | Permission visibility and changes | Provider-limited (visibility complete for GitHub+Supabase; changes route through rotation/dashboard by design) |
-| 6 | Request/activity tracking + suspicious-activity alerts | Partially implemented |
+| 6 | Request/activity tracking + suspicious-activity alerts | Provider-limited (official aggregates + local sessions; 16 explainable rules) |
 | 7 | Duplicate credentials across projects | Fully implemented |
 | 8 | `.env` governance | Fully implemented (this milestone) |
 | 9 | Provider/API catalog | Fully implemented |
-| 10 | Documentation-change notifications | Partially implemented |
+| 10 | Documentation-change notifications | Fully implemented (intervals, history, monitor-driven) |
 | 11 | Git hooks and history scanning | Fully implemented (desktop partial) |
 | 12 | Temporary local access | Fully implemented |
 | 13 | Provider-issued temporary credentials | Provider-limited (expiry recorded where reported; none issuable via API) |
 | 14 | Credential version history | Fully implemented (this milestone) |
 | 15 | Provider-account metadata | Partially implemented (OpenAI-first) |
 | 16 | Provider-account password handling | Intentionally excluded (metadata only) |
-| 17 | Local desktop notifications | Partially implemented |
-| 18 | Remote push notifications | Intentionally excluded |
+| 17 | Local desktop notifications | Fully implemented (background monitor timer) |
+| 18 | Remote push notifications | Intentionally excluded (user-configured webhooks offered instead) |
 | 19 | Project templates and local stack learning | Not implemented |
 
 ---

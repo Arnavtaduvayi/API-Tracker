@@ -18,9 +18,9 @@ Legend:
 | Capability | OpenAI | Anthropic | GitHub | Stripe | Supabase |
 | --- | --- | --- | --- | --- | --- |
 | Validate | implemented | implemented | implemented | implemented | implemented |
-| Metadata | implemented (admin) | supported (not impl.) (admin) | implemented | implemented | implemented (admin) |
-| Usage | implemented (admin) | implemented (admin) | supported (not impl.) (admin) | manual | supported (not impl.) (admin) |
-| Provider-reported cost | implemented (admin) | supported (not impl.) (admin) | supported (not impl.) (admin) | manual | manual |
+| Metadata | implemented (admin) | implemented (admin) | implemented | implemented | implemented (admin) |
+| Usage | implemented (admin) | implemented (admin, per key) | implemented (fine-grained token) | implemented (events) | supported (not impl.) (admin) |
+| Provider-reported cost | implemented (admin) | implemented (admin, workspace level) | implemented (billing net amounts) | manual | manual |
 | Read permissions | manual | unsupported | implemented | manual | implemented |
 | Change permissions | manual | unsupported | manual | manual | unsupported |
 | Create | implemented (admin) | manual | manual | manual | implemented (admin) |
@@ -41,9 +41,20 @@ Usage attribution **varies by provider** and is always labeled:
   it stays at `provider_key`, `provider_project`, or `provider_account`
   level — never divided among local keys. See
   [OPENAI_SYNC.md](OPENAI_SYNC.md).
-- **Anthropic usage** is synced from the organization Usage API (admin key)
-  and is **account-level** — recorded as `provider_account` and never
-  presented as exact per-key usage.
+- **Anthropic usage and costs** are synced from the organization Usage and
+  Cost APIs (admin key). Usage is grouped by provider API-key id ×
+  workspace × model (per-key grouping is officially supported); a row is
+  `exact_credential` only after you explicitly link the key id. Costs are
+  workspace-level at best — the cost API has no per-key grouping, and cost
+  is never divided among keys. Amounts arrive as cents-denominated decimal
+  strings and are converted with guards.
+- **GitHub usage** comes from the Enhanced Billing API at ACCOUNT level
+  (quantities + unit types verbatim, e.g. Actions minutes), and needs a
+  fine-grained token with "Plan" (read) — classic PATs are not documented
+  to work. Never per token.
+- **Stripe activity** comes from the official Events API as daily
+  event-count aggregates (30-day retention, account-level, unit `events`).
+  Per-key request logs are dashboard-only; Stripe offers no API for them.
 - **Per-credential / per-project budgets** count usage attributed to that
   credential/project: linked provider-synced rows and manual entries
   (`api-tracker usage record --credential <c> --model <m> --input-tokens N
