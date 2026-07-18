@@ -1818,6 +1818,20 @@ impl UnlockedVault {
     }
 }
 
+/// Read suppression keys directly from a database connection, without
+/// unlocking the vault. Used by the pre-commit hook, which must run during a
+/// commit without prompting for the master password. Suppression keys carry
+/// no secret material.
+pub fn load_suppression_keys(conn: &Connection) -> Result<HashSet<String>> {
+    let mut stmt = conn.prepare("SELECT suppression_key FROM scan_suppressions")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut set = HashSet::new();
+    for r in rows {
+        set.insert(r?);
+    }
+    Ok(set)
+}
+
 /// A stored scan suppression (no secret material).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Suppression {

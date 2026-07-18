@@ -56,6 +56,36 @@ impl Ctx {
         );
     }
 
+    /// Try to obtain an unlocked vault without ever prompting: only if a
+    /// session token or password is already present in the environment.
+    /// Used by scanning, which is useful even against a locked vault.
+    pub fn try_unlocked(&self) -> Option<UnlockedVault> {
+        let has_creds = std::env::var(ENV_SESSION)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+            || std::env::var_os(ENV_PASSWORD).is_some();
+        if has_creds {
+            self.unlocked().ok().map(|(v, _)| v)
+        } else {
+            None
+        }
+    }
+
+    /// Read scan suppression keys from the local database without unlocking
+    /// (they contain no secret material). Empty if no vault exists yet.
+    pub fn suppression_keys(&self) -> std::collections::HashSet<String> {
+        if !self.paths.vault_exists() {
+            return Default::default();
+        }
+        match api_tracker_core::db::open(&self.paths.db_path()) {
+            Ok(mut conn) => {
+                let _ = api_tracker_core::db::migrate(&mut conn);
+                api_tracker_core::vault::load_suppression_keys(&conn).unwrap_or_default()
+            }
+            Err(_) => Default::default(),
+        }
+    }
+
     /// Persist session-state changes (unlocked project keys) when running
     /// under a session token.
     pub fn persist_session(

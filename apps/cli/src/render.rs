@@ -3,6 +3,7 @@
 //! (`key reveal`) prints directly in its command handler.
 
 use api_tracker_core::model::{Credential, Project};
+use api_tracker_core::providers::{Capabilities, ProviderManifest};
 use api_tracker_core::reuse::ReuseWarning;
 use api_tracker_core::status::StatusReport;
 use serde::Serialize;
@@ -183,6 +184,48 @@ pub fn print_status_report(report: &StatusReport) {
         println!("  Observed:    {}", finding.observed_at);
         println!("  Recommended: {}", finding.recommended_action);
     }
+}
+
+pub fn print_provider(m: &ProviderManifest) {
+    println!("Provider:     {} ({})", m.name, m.id);
+    println!("Description:  {}", m.description);
+    println!("Website:      {}", m.website);
+    println!("API docs:     {}", m.api_docs_url);
+    println!("Auth docs:    {}", m.auth_docs_url);
+    println!("Manage keys:  {}", m.manage_url);
+    if !m.env_vars.is_empty() {
+        println!("Secret vars:  {}", m.env_vars.join(", "));
+    }
+    if !m.credential_types.is_empty() {
+        println!("Key types:    {}", m.credential_types.join(", "));
+    }
+    if !m.expiration.is_empty() {
+        println!("Expiration:   {}", m.expiration);
+    }
+    if !m.detection.is_empty() {
+        println!("Detection patterns: {}", m.detection.len());
+    }
+    println!();
+    print_capabilities(&m.capabilities);
+}
+
+pub fn print_capabilities(caps: &Capabilities) {
+    let rows: Vec<Vec<String>> = caps
+        .entries()
+        .iter()
+        .map(|(name, entry)| {
+            let mut status = entry.support.label().to_string();
+            if entry.requires_admin_credential {
+                status.push_str(" · admin credential");
+            }
+            let attribution = entry.attribution.label();
+            if attribution != "n/a" {
+                status.push_str(&format!(" · {attribution}"));
+            }
+            vec![name.to_string(), status, entry.note.clone()]
+        })
+        .collect();
+    table(&["CAPABILITY", "STATUS", "NOTE"], &rows);
 }
 
 pub fn print_reuse_warnings(warnings: &[ReuseWarning]) {

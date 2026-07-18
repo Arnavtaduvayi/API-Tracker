@@ -4,11 +4,14 @@
 //! `api-tracker-core`. All output redacts credential values; the single
 //! deliberate exception is `key reveal`, which requires reauthentication.
 
+mod alerts_cmd;
 mod backup_cmd;
 mod ctx;
 mod key_cmd;
 mod project_cmd;
+mod provider_cmd;
 mod render;
+mod scan_cmd;
 mod vault_cmd;
 
 use clap::{Parser, Subcommand};
@@ -48,15 +51,28 @@ enum Commands {
     /// Show or change vault settings (auto-lock, status thresholds).
     #[command(subcommand)]
     Settings(vault_cmd::SettingsCmd),
-    /// Informational provider catalog.
+    /// Provider catalog and documentation watches.
     #[command(subcommand)]
-    Provider(vault_cmd::ProviderCmd),
+    Provider(provider_cmd::ProviderCmd),
     /// Manage projects (folders of credentials).
     #[command(subcommand)]
     Project(project_cmd::ProjectCmd),
     /// Manage credentials.
     #[command(subcommand)]
     Key(key_cmd::KeyCmd),
+    /// Scan a repository or directory for committed secrets.
+    Scan(scan_cmd::ScanArgs),
+    /// Manage the Git pre-commit secret-scanning hook.
+    #[command(subcommand)]
+    Hooks(scan_cmd::HooksCmd),
+    /// Manage local scan suppressions.
+    #[command(subcommand)]
+    Suppress(scan_cmd::SuppressCmd),
+    /// Run local monitoring checks and generate alerts.
+    Monitor,
+    /// View and manage local alerts.
+    #[command(subcommand)]
+    Alerts(alerts_cmd::AlertsCmd),
     /// Encrypted vault backups.
     #[command(subcommand)]
     Backup(backup_cmd::BackupCmd),
@@ -78,9 +94,14 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Lock => vault_cmd::lock(&ctx),
         Commands::Doctor => vault_cmd::doctor(&ctx),
         Commands::Settings(cmd) => vault_cmd::settings(&ctx, cmd),
-        Commands::Provider(cmd) => vault_cmd::provider(&ctx, cmd),
+        Commands::Provider(cmd) => provider_cmd::run(&ctx, cmd),
         Commands::Project(cmd) => project_cmd::run(&ctx, cmd),
         Commands::Key(cmd) => key_cmd::run(&ctx, cmd),
+        Commands::Scan(args) => scan_cmd::scan(&ctx, args),
+        Commands::Hooks(cmd) => scan_cmd::hooks(&ctx, cmd),
+        Commands::Suppress(cmd) => scan_cmd::suppress(&ctx, cmd),
+        Commands::Monitor => alerts_cmd::monitor_run(&ctx),
+        Commands::Alerts(cmd) => alerts_cmd::alerts(&ctx, cmd),
         Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
     }
 }
