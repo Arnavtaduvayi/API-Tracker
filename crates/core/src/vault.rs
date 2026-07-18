@@ -1753,6 +1753,29 @@ impl UnlockedVault {
         Ok(())
     }
 
+    /// Remove a suppression so its finding is reported again by future
+    /// scans (including the pre-commit hook).
+    pub fn remove_suppression(&self, suppression_key: &str) -> Result<()> {
+        let removed = self.conn.execute(
+            "DELETE FROM scan_suppressions WHERE suppression_key = ?1",
+            [suppression_key],
+        )?;
+        if removed == 0 {
+            return Err(CoreError::NotFound {
+                kind: "suppression",
+                ident: suppression_key.to_string(),
+            });
+        }
+        audit::record(
+            &self.conn,
+            "suppression_removed",
+            None,
+            None,
+            &format!("key={suppression_key}"),
+        )?;
+        Ok(())
+    }
+
     pub fn list_suppressions(&self) -> Result<Vec<Suppression>> {
         let mut stmt = self.conn.prepare(
             "SELECT suppression_key, rule, path, reason, created_at
@@ -1943,6 +1966,78 @@ impl UnlockedVault {
             alerts_created: created,
             alerts_resolved: resolved,
             open_alerts: alerts::open_count(&self.conn)? as usize,
+        })
+    }
+
+    /// One full monitor cycle — the shared orchestration both frontends use:
+    /// the local rules pass (`run_monitor`), then, when transports are
+    /// provided, the best-effort network phases (due documentation checks
+    /// and webhook notification delivery). Records when the cycle ran and
+    /// whether it succeeded so both frontends can display it
+    /// (`monitor_status`). Network-phase failures never fail the cycle.
+    pub fn run_monitor_cycle(
+        &self,
+        network: Option<(
+            &dyn crate::docwatch::DocFetcher,
+            &dyn crate::http::HttpClient,
+        )>,
+    ) -> Result<MonitorCycleReport> {
+        let started = clock::now_rfc3339();
+        meta_set(&self.conn, "monitor_last_run_at", &started)?;
+        let summary = match self.run_monitor() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = meta_set(&self.conn, "monitor_last_failure_at", &started);
+                let _ = meta_set(&self.conn, "monitor_last_error", &e.to_string());
+                return Err(e);
+            }
+        };
+        let mut doc_checks = 0usize;
+        let mut webhooks_delivered = 0usize;
+        if let Some((fetcher, http)) = network {
+            if let Ok(results) = self.check_due_doc_watches(fetcher) {
+                doc_checks = results.len();
+            }
+            webhooks_delivered = self.deliver_notifications(http).unwrap_or(0);
+        }
+        let finished = clock::now_rfc3339();
+        meta_set(&self.conn, "monitor_last_success_at", &finished)?;
+        meta_set(&self.conn, "monitor_last_error", "")?;
+        meta_set(
+            &self.conn,
+            "monitor_last_detail",
+            &format!(
+                "checked {} credential(s); {} new alert(s), {} resolved; {} doc check(s); \
+                 {} webhook delivery(ies){}",
+                summary.checked,
+                summary.alerts_created,
+                summary.alerts_resolved,
+                doc_checks,
+                webhooks_delivered,
+                if network.is_none() {
+                    " (offline: network phases skipped)"
+                } else {
+                    ""
+                }
+            ),
+        )?;
+        Ok(MonitorCycleReport {
+            summary,
+            doc_checks,
+            webhooks_delivered,
+            offline: network.is_none(),
+        })
+    }
+
+    /// When monitoring last ran and how it went (no run is performed).
+    /// All fields are empty/None before the first recorded cycle.
+    pub fn monitor_status(&self) -> Result<MonitorStatus> {
+        Ok(MonitorStatus {
+            last_run_at: meta_get(&self.conn, "monitor_last_run_at")?,
+            last_success_at: meta_get(&self.conn, "monitor_last_success_at")?,
+            last_failure_at: meta_get(&self.conn, "monitor_last_failure_at")?,
+            last_error: meta_get(&self.conn, "monitor_last_error")?.unwrap_or_default(),
+            last_detail: meta_get(&self.conn, "monitor_last_detail")?.unwrap_or_default(),
         })
     }
 
@@ -2416,15 +2511,22 @@ impl UnlockedVault {
     ) -> Result<String> {
         let provider = crate::providers::normalize(provider);
         let admin = self.provider_admin_secret(&provider)?;
-        if provider != crate::openai::PROVIDER {
+        if provider != crate::openai::PROVIDER && provider != crate::anthropic::PROVIDER {
             return Err(CoreError::Unsupported {
                 provider,
                 capability: "admin_connection_test",
-                hint: "connection tests are only implemented for OpenAI".into(),
+                hint: "connection tests are implemented for the providers with dedicated \
+                       admin connections (OpenAI and Anthropic)"
+                    .into(),
             });
         }
         let now = clock::now_rfc3339();
-        match crate::openai::validate_admin_key(http, &admin) {
+        let validation = if provider == crate::anthropic::PROVIDER {
+            crate::anthropic::validate_admin_key(http, &admin)
+        } else {
+            crate::openai::validate_admin_key(http, &admin)
+        };
+        match validation {
             Ok(detail) => {
                 self.conn.execute(
                     "UPDATE provider_connections SET last_status = 'connected', detail = ?1,
@@ -3693,8 +3795,43 @@ impl UnlockedVault {
         crate::inject::end_session(&self.conn, session_id, exit_code)
     }
 
-    pub fn list_process_sessions(&self, limit: u32) -> Result<Vec<crate::inject::ProcessSession>> {
-        crate::inject::list_sessions(&self.conn, limit)
+    pub fn list_process_sessions(
+        &self,
+        limit: u32,
+        active_only: bool,
+    ) -> Result<Vec<crate::inject::ProcessSession>> {
+        crate::inject::list_sessions(&self.conn, limit, active_only)
+    }
+
+    /// Terminate a recorded injection session's process (best-effort local
+    /// SIGTERM to the PID recorded at spawn). This is a LOCAL control: it
+    /// cannot claw back values the process already received and never
+    /// touches the provider credential. Refuses sessions that already ended
+    /// or that recorded no PID. The session row itself is closed by the
+    /// launching `run` process when the child exits.
+    pub fn terminate_process_session(&self, ident: &str) -> Result<(String, i64, bool)> {
+        let session = crate::inject::get_session(&self.conn, ident)?;
+        if session.ended_at.is_some() {
+            return Err(CoreError::InvalidInput(format!(
+                "session {} already ended",
+                session.id
+            )));
+        }
+        let Some(pid) = session.pid else {
+            return Err(CoreError::InvalidInput(format!(
+                "session {} recorded no PID (started by an older build?)",
+                session.id
+            )));
+        };
+        let signalled = crate::inject::terminate_pid(pid);
+        audit::record(
+            &self.conn,
+            "process_session_terminated",
+            None,
+            None,
+            &format!("session={} pid={pid} signalled={signalled}", session.id),
+        )?;
+        Ok((session.id, pid, signalled))
     }
 
     // ------------------------------------------------------------------
@@ -4693,6 +4830,13 @@ impl UnlockedVault {
         crate::notify::get(&self.conn, &id)
     }
 
+    /// Delivery/failure history for webhook notifications: one recorded
+    /// event per attempt (channel name, alert kind, outcome — never the
+    /// URL, never secret values).
+    pub fn notification_history(&self, limit: u32) -> Result<Vec<crate::activity::ActivityEvent>> {
+        crate::activity::list_by_kind(&self.conn, "webhook_delivery", limit)
+    }
+
     pub fn notification_channels(&self) -> Result<Vec<crate::notify::NotificationChannel>> {
         crate::notify::list(&self.conn)
     }
@@ -4796,6 +4940,17 @@ impl UnlockedVault {
                 if crate::notify::severity_rank(&alert.severity) < floor {
                     continue;
                 }
+                // Once per alert per channel: deliver only when the alert is
+                // new to this channel or its severity escalated. Failures do
+                // not mark the alert delivered, so they are retried next run.
+                if !crate::notify::should_deliver(
+                    &self.conn,
+                    &channel.id,
+                    &alert.id,
+                    &alert.severity,
+                )? {
+                    continue;
+                }
                 let payload = crate::notify::NotificationPayload {
                     source: "api-tracker",
                     kind: &alert.kind,
@@ -4814,9 +4969,28 @@ impl UnlockedVault {
                             &alert.id,
                             &alert.severity,
                         )?;
+                        let _ = crate::activity::record(
+                            &self.conn,
+                            "notification",
+                            "webhook_delivery",
+                            None,
+                            None,
+                            &format!("channel={} alert={} delivered", channel.name, alert.kind),
+                            &format!("severity={}", alert.severity),
+                        );
                     }
                     Err(e) => {
                         channel_error = Some(e.to_string());
+                        // Delivery errors carry status text only, never the URL.
+                        let _ = crate::activity::record(
+                            &self.conn,
+                            "notification",
+                            "webhook_delivery",
+                            None,
+                            None,
+                            &format!("channel={} alert={} FAILED: {e}", channel.name, alert.kind),
+                            &format!("severity={}", alert.severity),
+                        );
                         break; // one failure: stop hammering this channel
                     }
                 }
@@ -7663,6 +7837,26 @@ pub struct MonitorSummary {
     pub alerts_created: usize,
     pub alerts_resolved: usize,
     pub open_alerts: usize,
+}
+
+/// Result of one full monitor cycle (local rules + optional network phases).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorCycleReport {
+    pub summary: MonitorSummary,
+    pub doc_checks: usize,
+    pub webhooks_delivered: usize,
+    /// True when the network phases were skipped (no transports provided).
+    pub offline: bool,
+}
+
+/// When monitoring last ran and how it went. Timestamps are RFC 3339.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MonitorStatus {
+    pub last_run_at: Option<String>,
+    pub last_success_at: Option<String>,
+    pub last_failure_at: Option<String>,
+    pub last_error: String,
+    pub last_detail: String,
 }
 
 impl CredentialRow {

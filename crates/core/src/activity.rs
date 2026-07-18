@@ -86,6 +86,32 @@ pub fn list(
     Ok(out)
 }
 
+/// List events of one kind (e.g. `webhook_delivery` for the notification
+/// delivery/failure history). Events never contain secret values or URLs.
+pub fn list_by_kind(conn: &Connection, kind: &str, limit: u32) -> Result<Vec<ActivityEvent>> {
+    let cols = "id, at, source, kind, credential_id, project_id, detail, measurements";
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {cols} FROM activity_events WHERE kind = ?1 ORDER BY id DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![kind, limit], |r: &Row<'_>| {
+        Ok(ActivityEvent {
+            id: r.get(0)?,
+            at: r.get(1)?,
+            source: r.get(2)?,
+            kind: r.get(3)?,
+            credential_id: r.get(4)?,
+            project_id: r.get(5)?,
+            detail: r.get(6)?,
+            measurements: r.get(7)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
 /// Start of the previous calendar month, and the start of this one.
 fn month_bounds(now: time::OffsetDateTime) -> (String, String) {
     let this = Date::from_calendar_date(now.year(), now.month(), 1).expect("valid");
@@ -264,6 +290,34 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "injection");
         assert!(!events[0].detail.is_empty());
+    }
+
+    #[test]
+    fn cost_spike_requires_double_and_absolute_growth() {
+        let conn = mem();
+        let (prev_start, this_start) = month_bounds(crate::clock::now());
+
+        // $2 last month, $5 this month: >=2x and >= $1.00 growth -> alert.
+        snap(&conn, "c1", &prev_start, 2_000_000);
+        snap(&conn, "c1", &this_start, 5_000_000);
+        let alert = cost_spike_alert(&conn, "c1", "web/openai").unwrap();
+        let alert = alert.expect("a 2.5x, +$3 jump must raise a cost spike");
+        assert_eq!(alert.dedup_key, "cost_spike:c1");
+        assert!(alert.detail.contains("2.5x"));
+
+        // 3x growth on a tiny baseline (well under $1.00 absolute): no alert.
+        snap(&conn, "c2", &prev_start, 100_000); // $0.10
+        snap(&conn, "c2", &this_start, 300_000); // $0.30
+        assert!(cost_spike_alert(&conn, "c2", "web/tiny").unwrap().is_none());
+
+        // No previous-month baseline: never flagged.
+        snap(&conn, "c3", &this_start, 9_000_000);
+        assert!(cost_spike_alert(&conn, "c3", "web/new").unwrap().is_none());
+
+        // Growth below 2x, even if large in absolute terms: no alert.
+        snap(&conn, "c4", &prev_start, 10_000_000);
+        snap(&conn, "c4", &this_start, 15_000_000);
+        assert!(cost_spike_alert(&conn, "c4", "web/big").unwrap().is_none());
     }
 
     #[test]

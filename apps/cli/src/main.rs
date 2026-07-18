@@ -80,6 +80,9 @@ enum Commands {
         /// Skip network phases (due doc checks, webhook delivery).
         #[arg(long)]
         offline: bool,
+        /// Show when monitoring last ran and how it went, without running.
+        #[arg(long)]
+        status: bool,
     },
     /// View and manage local alerts.
     #[command(subcommand)]
@@ -143,7 +146,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Scan(args) => scan_cmd::scan(&ctx, args),
         Commands::Hooks(cmd) => scan_cmd::hooks(&ctx, cmd),
         Commands::Suppress(cmd) => scan_cmd::suppress(&ctx, cmd),
-        Commands::Monitor { offline } => alerts_cmd::monitor_run(&ctx, offline),
+        Commands::Monitor { offline, status } => alerts_cmd::monitor_run(&ctx, offline, status),
         Commands::Alerts(cmd) => alerts_cmd::alerts(&ctx, cmd),
         Commands::Usage(cmd) => usage_cmd::usage(&ctx, cmd),
         Commands::Budget(cmd) => usage_cmd::budget(&ctx, cmd),

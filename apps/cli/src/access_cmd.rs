@@ -23,6 +23,27 @@ pub enum AccessCmd {
     /// End a grant now (stops new launches; --kill terminates recorded
     /// running processes).
     End(EndArgs),
+    /// List recorded injection sessions (from `run`), including sessions
+    /// started without a grant. Names and PIDs only — never values.
+    Sessions {
+        /// Include ended sessions (default: only sessions still recorded
+        /// as running).
+        #[arg(long)]
+        all: bool,
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
+    /// Terminate one recorded session's process (best-effort local SIGTERM
+    /// to the PID recorded at spawn). Local control only: values already in
+    /// the process's environment cannot be clawed back, and the provider
+    /// credential stays valid.
+    Kill {
+        /// Session id (or unambiguous prefix) from `access sessions`.
+        session: String,
+        /// Confirm non-interactively.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Args)]
@@ -69,7 +90,71 @@ pub fn run(ctx: &Ctx, cmd: AccessCmd) -> Result<()> {
         AccessCmd::Grant(args) => grant(ctx, args),
         AccessCmd::List { all } => list(ctx, all),
         AccessCmd::End(args) => end(ctx, args),
+        AccessCmd::Sessions { all, limit } => sessions(ctx, all, limit),
+        AccessCmd::Kill { session, yes } => kill(ctx, &session, yes),
     }
+}
+
+fn sessions(ctx: &Ctx, all: bool, limit: u32) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    let sessions = vault.list_process_sessions(limit, !all)?;
+    render::emit(ctx.json, &sessions, || {
+        if sessions.is_empty() {
+            println!("No {}sessions recorded.", if all { "" } else { "running " });
+            return;
+        }
+        let rows: Vec<Vec<String>> = sessions
+            .iter()
+            .map(|s| {
+                vec![
+                    s.id.chars().take(8).collect::<String>(),
+                    s.project_id.chars().take(8).collect::<String>(),
+                    s.started_at.clone(),
+                    s.ended_at.clone().unwrap_or_else(|| "running".into()),
+                    s.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into()),
+                    s.grant_id
+                        .as_deref()
+                        .map(|g| g.chars().take(8).collect::<String>())
+                        .unwrap_or_else(|| "-".into()),
+                    s.command.clone(),
+                ]
+            })
+            .collect();
+        render::table(
+            &[
+                "SESSION", "PROJECT", "STARTED", "ENDED", "PID", "GRANT", "COMMAND",
+            ],
+            &rows,
+        );
+        println!(
+            "Note: a session row is closed by the `run` process that launched it; \
+             a row still open after its launcher died only means the end was not \
+             recorded. `access kill <session>` sends SIGTERM to the recorded PID."
+        );
+    });
+    Ok(())
+}
+
+fn kill(ctx: &Ctx, session: &str, yes: bool) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    if !ctx::confirm(
+        "Send SIGTERM to this session's recorded process? Values already in its \
+         environment cannot be clawed back, and the provider credential stays valid.",
+        yes,
+    )? {
+        bail!("kept");
+    }
+    let (id, pid, signalled) = vault.terminate_process_session(session)?;
+    println!(
+        "session {id}: pid {pid} — {}",
+        if signalled {
+            "SIGTERM sent"
+        } else {
+            "kill failed (already gone?)"
+        }
+    );
+    println!("Reminder: this is a local control; it does not revoke the provider credential.");
+    Ok(())
 }
 
 fn grant(ctx: &Ctx, args: GrantArgs) -> Result<()> {

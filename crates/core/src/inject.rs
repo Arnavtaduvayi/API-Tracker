@@ -91,6 +91,12 @@ pub struct ProcessSession {
     pub command: String,
     pub injected_vars: String,
     pub exit_code: Option<i64>,
+    /// PID recorded at spawn time. A recorded PID proves what was launched,
+    /// not that the process is still alive (rows are closed by the launching
+    /// `run` process; if that process itself died, the row stays open).
+    pub pid: Option<i64>,
+    /// The access grant that authorized the launch, when there was one.
+    pub grant_id: Option<String>,
 }
 
 /// Record the start of an injection session. `command` and `injected_vars`
@@ -153,11 +159,21 @@ pub fn end_session(conn: &Connection, session_id: &str, exit_code: Option<i32>) 
     Ok(())
 }
 
-pub fn list_sessions(conn: &Connection, limit: u32) -> Result<Vec<ProcessSession>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, project_id, started_at, ended_at, command, injected_vars, exit_code
-         FROM process_sessions ORDER BY started_at DESC LIMIT ?1",
-    )?;
+pub fn list_sessions(
+    conn: &Connection,
+    limit: u32,
+    active_only: bool,
+) -> Result<Vec<ProcessSession>> {
+    let filter = if active_only {
+        "WHERE ended_at IS NULL"
+    } else {
+        ""
+    };
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, project_id, started_at, ended_at, command, injected_vars, exit_code,
+                pid, grant_id
+         FROM process_sessions {filter} ORDER BY started_at DESC LIMIT ?1",
+    ))?;
     let rows = stmt.query_map([limit], |r: &Row<'_>| {
         Ok(ProcessSession {
             id: r.get(0)?,
@@ -167,6 +183,8 @@ pub fn list_sessions(conn: &Connection, limit: u32) -> Result<Vec<ProcessSession
             command: r.get(4)?,
             injected_vars: r.get(5)?,
             exit_code: r.get(6)?,
+            pid: r.get(7)?,
+            grant_id: r.get(8)?,
         })
     })?;
     let mut out = Vec::new();
@@ -174,6 +192,47 @@ pub fn list_sessions(conn: &Connection, limit: u32) -> Result<Vec<ProcessSession
         out.push(r?);
     }
     Ok(out)
+}
+
+/// Look one session up by id (or unambiguous id prefix).
+pub fn get_session(conn: &Connection, ident: &str) -> Result<ProcessSession> {
+    let all = list_sessions(conn, u32::MAX, false)?;
+    let matches: Vec<_> = all
+        .into_iter()
+        .filter(|s| s.id == ident || s.id.starts_with(ident))
+        .collect();
+    match matches.len() {
+        0 => Err(crate::error::CoreError::NotFound {
+            kind: "process session",
+            ident: ident.to_string(),
+        }),
+        1 => Ok(matches.into_iter().next().expect("len checked")),
+        _ => Err(crate::error::CoreError::Ambiguous {
+            kind: "process session",
+            ident: ident.to_string(),
+        }),
+    }
+}
+
+/// Send SIGTERM to a recorded PID (best-effort, Unix only). Returns whether
+/// the signal was accepted. This is a LOCAL control: it cannot claw back
+/// values the process already received, and it never touches the provider.
+pub fn terminate_pid(pid: i64) -> bool {
+    if cfg!(unix) {
+        std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        // Windows has no SIGTERM; taskkill without /F requests a graceful
+        // close, matching the Unix semantics as closely as the OS allows.
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(test)]

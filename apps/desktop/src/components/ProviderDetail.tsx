@@ -219,6 +219,7 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
               <th>URL</th>
               <th>Status</th>
               <th>Last checked</th>
+              <th>Last changed</th>
               <th></th>
             </tr>
           </thead>
@@ -232,6 +233,7 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
                 </td>
                 <td>{w.last_status}</td>
                 <td>{w.last_checked_at ?? "never"}</td>
+                <td>{w.last_changed_at ?? "no change seen"}</td>
                 <td>
                   <button className="link" onClick={() => void checkNow(w.url)}>
                     check now

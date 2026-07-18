@@ -2,12 +2,19 @@
 // this machine injects (time window, launch count, per-process duration,
 // credential subset). These are local controls only: they never constrain
 // the provider-side credential, and local expiry is not provider revocation.
-// The desktop app never terminates processes — it surfaces recorded PIDs and
-// points at the CLI's `access end --kill`.
+// Recorded injection sessions (grant-bound or not) are listed below the
+// grants; terminating one sends a best-effort local SIGTERM to the PID
+// recorded at spawn — it cannot claw back injected values.
 
 import { useCallback, useEffect, useState } from "react";
 import { api, isApiError } from "../api";
-import type { AccessGrant, Credential, GrantEndResult, Project } from "../types";
+import type {
+  AccessGrant,
+  Credential,
+  GrantEndResult,
+  ProcessSession,
+  Project,
+} from "../types";
 import { formatMicros, formatTimestamp } from "../utils";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -35,6 +42,9 @@ export function AccessView() {
 
   const [ending, setEnding] = useState<AccessGrant | null>(null);
   const [endResult, setEndResult] = useState<GrantEndResult | null>(null);
+  const [sessions, setSessions] = useState<ProcessSession[] | null>(null);
+  const [includeEndedSessions, setIncludeEndedSessions] = useState(false);
+  const [killing, setKilling] = useState<ProcessSession | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -315,8 +325,9 @@ export function AccessView() {
                 ))}
               </ul>
               <p>
-                The desktop app does not terminate processes. To send SIGTERM to these, use the
-                CLI: <code>api-tracker access end {endResult.grant.id} --kill</code>
+                Use the Sessions list below (or the CLI&apos;s{" "}
+                <code>api-tracker access end {endResult.grant.id} --kill</code>) to send SIGTERM
+                to these processes.
               </p>
             </>
           )}
@@ -328,15 +339,117 @@ export function AccessView() {
         </div>
       )}
 
+      <div style={{ marginTop: "1.5rem" }}>
+        <h2>Injection sessions</h2>
+        <p className="muted">
+          Every `run` launch is recorded (command, variable names, PID — never values), whether
+          or not a grant authorized it. A session row is closed by the `run` process that
+          launched it; a row still open after its launcher died only means the end was not
+          recorded.
+        </p>
+        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+          <button
+            disabled={busy}
+            onClick={() =>
+              void run(async () =>
+                setSessions(await api.accessSessions(includeEndedSessions, 50)),
+              )
+            }
+          >
+            {sessions === null ? "Show sessions" : "Refresh sessions"}
+          </button>
+          <label>
+            <input
+              type="checkbox"
+              checked={includeEndedSessions}
+              onChange={(e) => setIncludeEndedSessions(e.target.checked)}
+            />{" "}
+            include ended sessions
+          </label>
+        </div>
+        {sessions !== null &&
+          (sessions.length === 0 ? (
+            <p>No {includeEndedSessions ? "" : "running "}sessions recorded.</p>
+          ) : (
+            <table style={{ marginTop: "0.75rem" }}>
+              <thead>
+                <tr>
+                  <th>Session</th>
+                  <th>Project</th>
+                  <th>Started</th>
+                  <th>Status</th>
+                  <th>PID</th>
+                  <th>Grant</th>
+                  <th>Command</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {sessions.map((s) => (
+                  <tr key={s.id}>
+                    <td className="mono">{s.id.slice(0, 8)}</td>
+                    <td>{projectName(s.project_id)}</td>
+                    <td>{formatTimestamp(s.started_at)}</td>
+                    <td>
+                      {s.ended_at ? (
+                        <span className="badge">ended</span>
+                      ) : (
+                        <span className="badge ok">running</span>
+                      )}
+                    </td>
+                    <td className="mono">{s.pid ?? "—"}</td>
+                    <td className="mono">{s.grant_id ? s.grant_id.slice(0, 8) : "—"}</td>
+                    <td className="mono">{s.command}</td>
+                    <td>
+                      {!s.ended_at && s.pid !== null && (
+                        <button className="link" disabled={busy} onClick={() => setKilling(s)}>
+                          terminate
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ))}
+      </div>
+
+      {killing && (
+        <ConfirmDialog
+          title="Terminate session process"
+          body={
+            `Send SIGTERM to session ${killing.id.slice(0, 8)} (pid ${killing.pid})? ` +
+            "This is a local control: values already in the process's environment cannot be " +
+            "clawed back, and the provider credential stays valid."
+          }
+          confirmLabel="Send SIGTERM"
+          danger
+          onConfirm={() => {
+            const s = killing;
+            setKilling(null);
+            void run(async () => {
+              const result = await api.accessSessionKill(s.id);
+              setNotice(
+                result.signalled
+                  ? `SIGTERM sent to pid ${result.pid}. The provider credential stays valid.`
+                  : `kill failed for pid ${result.pid} (already gone?).`,
+              );
+              setSessions(await api.accessSessions(includeEndedSessions, 50));
+            });
+          }}
+          onCancel={() => setKilling(null)}
+        />
+      )}
+
       {ending && (
         <ConfirmDialog
           title="End access grant"
           body={
             `End grant ${ending.label ? `"${ending.label}" (${ending.id.slice(0, 8)})` : ending.id}? ` +
-            "New launches are refused immediately. Running processes keep running — the " +
-            "desktop app does not terminate them (the CLI's `access end --kill` can), and " +
-            "values already injected stay in those processes until they exit. Ending a grant " +
-            "never revokes the provider credential."
+            "New launches are refused immediately. Running processes keep running — terminate " +
+            "them individually from the Sessions list below if needed — and values already " +
+            "injected stay in those processes until they exit. Ending a grant never revokes " +
+            "the provider credential."
           }
           confirmLabel="End grant"
           danger

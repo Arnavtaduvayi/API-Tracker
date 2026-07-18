@@ -272,7 +272,7 @@ fn injection_builds_env_for_only_requested_project_credentials() {
 
     // The session was recorded (names only, no values).
     vault.end_process_session(&session, Some(0)).unwrap();
-    let sessions = vault.list_process_sessions(10).unwrap();
+    let sessions = vault.list_process_sessions(10, false).unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].injected_vars, "OPENAI_API_KEY");
     assert_eq!(sessions[0].exit_code, Some(0));

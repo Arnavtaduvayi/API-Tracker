@@ -70,6 +70,8 @@ pub enum SuppressCmd {
     },
     /// List local suppressions.
     List,
+    /// Remove a suppression so future scans report the finding again.
+    Remove { suppression_key: String },
 }
 
 fn build_units(args: &ScanArgs) -> Result<Vec<gitrepo::ScanUnit>> {
@@ -275,6 +277,11 @@ pub fn suppress(ctx: &Ctx, cmd: SuppressCmd) -> Result<()> {
                     render::table(&["KEY", "PATH", "REASON"], &rows);
                 }
             });
+        }
+        SuppressCmd::Remove { suppression_key } => {
+            let (vault, _t) = ctx.unlocked()?;
+            vault.remove_suppression(&suppression_key)?;
+            println!("Suppression removed; future scans report this finding again.");
         }
     }
     Ok(())
