@@ -1711,11 +1711,14 @@ impl UnlockedVault {
 
         for cred in &credentials {
             let mut new_alerts = crate::monitor::credential_alerts(cred, &now);
-            // Reuse-based alerts need the value-level warnings.
+            // Reuse alerts are computed from the STORED fingerprint, not by
+            // decrypting the value. This works for password-locked projects
+            // too (so their still-valid reuse alerts are not spuriously
+            // auto-resolved) and avoids decrypting every credential on every
+            // scheduled run.
             if !cred.is_reference {
-                if let Ok(value) = self.reveal_value_internal(cred) {
-                    let fp = reuse::fingerprint(&self.fingerprint_key, &value)?;
-                    let matches = self.find_reuse_matches(&fp, Some(&cred.id))?;
+                if let Some(row) = self.credential_row_by_id(&cred.id)? {
+                    let matches = self.find_reuse_matches(&row.fingerprint, Some(&cred.id))?;
                     let warnings = reuse::classify(&cred.project_id, cred.environment, matches);
                     new_alerts.extend(crate::monitor::reuse_alerts(cred, &warnings, &now));
                 }
@@ -1739,32 +1742,6 @@ impl UnlockedVault {
             alerts_resolved: resolved,
             open_alerts: alerts::open_count(&self.conn)? as usize,
         })
-    }
-
-    /// Internal helper to decrypt a value for monitoring (no reauth; the
-    /// vault is already unlocked and this never leaves the process).
-    fn reveal_value_internal(&self, cred: &Credential) -> Result<SecretString> {
-        let row = self.resolve_credential(&cred.id)?;
-        let root = match &row.linked_credential_id {
-            Some(target) => self
-                .credential_row_by_id(target)?
-                .ok_or(CoreError::VaultCorrupted("reference target is missing"))?,
-            None => row,
-        };
-        let ciphertext = root.ciphertext.as_deref().ok_or(CoreError::VaultCorrupted(
-            "credential is missing its ciphertext",
-        ))?;
-        let project = self.project_row_by_ident(&root.project_id)?;
-        let project_key = self.project_key_for_row(&project)?;
-        let plaintext = crypto::decrypt(
-            &project_key,
-            &aad::credential_value(&self.vault_id, &root.project_id, &root.id),
-            ciphertext,
-            "credential value",
-        )?;
-        let value = String::from_utf8(plaintext.expose().to_vec())
-            .map_err(|_| CoreError::VaultCorrupted("credential value is not valid UTF-8"))?;
-        Ok(SecretString::new(value))
     }
 
     // --- Documentation watches ---

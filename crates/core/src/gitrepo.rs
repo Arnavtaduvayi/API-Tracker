@@ -165,7 +165,11 @@ fn parse_log_added_lines(log: &str) -> Vec<ScanUnit> {
                 new_line_no = num.parse().unwrap_or(0);
             }
         } else if let Some(rest) = line.strip_prefix('+') {
-            if !line.starts_with("+++") {
+            // Diff headers are `+++ b/...` (consumed above) and `+++ /dev/null`,
+            // both of which have a space after `+++`. Only skip those — an
+            // added *content* line like `++i;` becomes `+++i;` (no space) and
+            // must still be scanned.
+            if !line.starts_with("+++ ") {
                 buffer.push((new_line_no, rest.to_string()));
                 new_line_no += 1;
             }
@@ -276,5 +280,27 @@ diff --git a/.env b/.env
             units[0].content.lines().next().unwrap(),
             "OPENAI_API_KEY=sk-proj-FAKE"
         );
+    }
+
+    #[test]
+    fn keeps_added_content_lines_starting_with_plus_plus() {
+        // A `++i;` content line renders as `+++i;` in the diff and must not be
+        // mistaken for a `+++ b/...` header.
+        let log = "\
+commit abcdef1234567890
+diff --git a/main.c b/main.c
+--- /dev/null
++++ b/main.c
+@@ -0,0 +1,2 @@
++++i;
++int x = 1;
+";
+        let units = parse_log_added_lines(log);
+        assert_eq!(units.len(), 1);
+        assert!(
+            units[0].content.contains("++i;"),
+            "the ++i; line must be scanned"
+        );
+        assert!(units[0].content.contains("int x = 1;"));
     }
 }

@@ -225,12 +225,20 @@ pub fn check_watch(
                 Some(prev) if *prev == hash => CheckResult::Unchanged,
                 Some(_) => CheckResult::Changed,
             };
-            (
-                result,
-                Some(hash),
-                etag.or(watch.etag.clone()),
-                last_modified.or(watch.last_modified.clone()),
-            )
+            // Validators describe THIS body. If the response omits them, store
+            // None (do not carry the previous body's ETag/Last-Modified) so the
+            // next request is unconditional and a stale validator can never
+            // make a future 304 mask a real change. Carrying them forward is
+            // only safe when the content is unchanged.
+            let (new_etag, new_last_modified) = if result == CheckResult::Unchanged {
+                (
+                    etag.or(watch.etag.clone()),
+                    last_modified.or(watch.last_modified.clone()),
+                )
+            } else {
+                (etag, last_modified)
+            };
+            (result, Some(hash), new_etag, new_last_modified)
         }
     };
 
@@ -443,6 +451,37 @@ mod tests {
         // The second request carried the stored validators.
         let cond = fetcher.last_conditional.borrow();
         assert_eq!(cond.as_ref().unwrap().etag.as_deref(), Some("\"abc\""));
+    }
+
+    #[test]
+    fn changed_body_without_validators_clears_stale_validator() {
+        let conn = mem();
+        let url = "https://example.com/docs";
+        add_watch(&conn, "openai", url).unwrap();
+        // First body carries an ETag; a later CHANGED body omits it.
+        let fetcher = MockFetcher::with(
+            url,
+            vec![
+                FetchOutcome::Body {
+                    bytes: b"v1".to_vec(),
+                    etag: Some("\"v1etag\"".into()),
+                    last_modified: None,
+                },
+                FetchOutcome::Body {
+                    bytes: b"v2".to_vec(),
+                    etag: None,
+                    last_modified: None,
+                },
+            ],
+        );
+        check_watch(&conn, &fetcher, url).unwrap();
+        let (r, w) = check_watch(&conn, &fetcher, url).unwrap();
+        assert_eq!(r, CheckResult::Changed);
+        // The stale v1 ETag must not be carried onto the v2 body.
+        assert_eq!(
+            w.etag, None,
+            "stale validator must be cleared on a changed body"
+        );
     }
 
     #[test]

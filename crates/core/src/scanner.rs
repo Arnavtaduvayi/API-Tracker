@@ -181,7 +181,8 @@ pub fn shannon_entropy(s: &str) -> f64 {
 /// Recognizable non-secret prefixes (publishable keys) that must never be
 /// treated as secrets by the generic heuristics.
 fn is_publishable_value(value: &str) -> bool {
-    const PUBLISHABLE_PREFIXES: [&str; 4] = ["pk_live_", "pk_test_", "pk-", "pub_"];
+    const PUBLISHABLE_PREFIXES: [&str; 5] =
+        ["pk_live_", "pk_test_", "pk-", "pub_", "sb_publishable_"];
     PUBLISHABLE_PREFIXES.iter().any(|p| value.starts_with(p))
 }
 
@@ -241,9 +242,14 @@ fn split_assignment(line: &str) -> Option<(&str, String)> {
     Some((name, value))
 }
 
-fn suppression_key(rule: &str, file: &str, redacted: &str) -> String {
-    // No secret material: rule + file + redacted preview only.
-    let material = format!("{rule}|{file}|{redacted}");
+fn suppression_key(rule: &str, file: &str, value: &str) -> String {
+    // A one-way BLAKE3 hash of rule + file + the full value. Hashing the whole
+    // value (not the lossy masked preview) means two distinct secrets never
+    // collide, so a scan never silently drops a second real secret and a
+    // suppression never hides a different value. The hash is not the secret
+    // (it never contains the literal), and it is line-independent so a
+    // suppression survives the secret moving within a file.
+    let material = format!("{rule}|{file}|{value}");
     hex::encode(blake3::hash(material.as_bytes()).as_bytes())
 }
 
@@ -267,7 +273,7 @@ fn provider_pattern_finding(
         recommended:
             "confirm it is a real credential; if committed, rotate it at the provider and remove it"
                 .to_string(),
-        suppression_key: suppression_key(rule, file, &redacted),
+        suppression_key: suppression_key(rule, file, matched),
         vault_match: None,
         secret: SecretString::from(matched),
     }
@@ -346,7 +352,7 @@ pub fn scan_text(content: &str, file: &str, options: &ScanOptions) -> Vec<Findin
                         "'{name}' is a known {provider} secret variable and has a non-placeholder value"
                     ),
                     recommended: "verify and, if real, move it out of source control".to_string(),
-                    suppression_key: suppression_key(&format!("env-var:{name}"), file, &redacted),
+                    suppression_key: suppression_key(&format!("env-var:{name}"), file, &value),
                     vault_match: None,
                     secret: SecretString::from(value.as_str()),
                 };
@@ -379,7 +385,7 @@ pub fn scan_text(content: &str, file: &str, options: &ScanOptions) -> Vec<Findin
                     ),
                     recommended: "review manually; suppress with a reason if it is not a secret"
                         .to_string(),
-                    suppression_key: suppression_key("high-entropy", file, &redacted),
+                    suppression_key: suppression_key("high-entropy", file, &value),
                     vault_match: None,
                     secret: SecretString::from(value.as_str()),
                 };
@@ -564,6 +570,24 @@ mod tests {
         let content = format!("line one\nline two\nOPENAI_API_KEY={OPENAI_FAKE}\n");
         let findings = scan_text(&content, ".env", &ScanOptions::default());
         assert_eq!(findings[0].line, 3);
+    }
+
+    #[test]
+    fn two_distinct_same_provider_secrets_are_both_reported() {
+        // Regression: dedup must key on the full value, not the lossy preview,
+        // so two distinct GitHub PATs sharing their last two characters are
+        // both reported rather than the second being silently dropped.
+        let a = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAZZ";
+        let b = "ghp_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBZZ";
+        assert_eq!(
+            mask_value(a),
+            mask_value(b),
+            "preconditions: same masked preview"
+        );
+        let content = format!("TOKEN_A={a}\nTOKEN_B={b}\n");
+        let findings = scan_text(&content, ".env", &ScanOptions::default());
+        assert_eq!(findings.len(), 2, "both distinct secrets must be reported");
+        assert_ne!(findings[0].suppression_key, findings[1].suppression_key);
     }
 
     #[test]

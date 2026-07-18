@@ -154,10 +154,18 @@ pub fn upsert(conn: &Connection, alert: &NewAlert) -> Result<bool> {
         Ok(false)
     } else {
         let id = Uuid::new_v4().to_string();
-        conn.execute(
+        // ON CONFLICT against the partial unique index makes this atomic: if a
+        // concurrent monitor run (desktop + CLI) inserted the same open alert
+        // between our SELECT and this INSERT, we update in place instead of
+        // aborting on a unique-constraint violation.
+        let inserted = conn.execute(
             "INSERT INTO alerts (id, kind, severity, dedup_key, title, detail, evidence,
              confidence, recommended_action, project_id, credential_id, created_at, observed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(dedup_key) WHERE resolved_at IS NULL DO UPDATE SET
+             severity = excluded.severity, title = excluded.title, detail = excluded.detail,
+             evidence = excluded.evidence, confidence = excluded.confidence,
+             recommended_action = excluded.recommended_action, observed_at = excluded.observed_at",
             params![
                 id,
                 alert.kind.as_str(),
@@ -174,7 +182,7 @@ pub fn upsert(conn: &Connection, alert: &NewAlert) -> Result<bool> {
                 alert.observed_at,
             ],
         )?;
-        Ok(true)
+        Ok(inserted > 0)
     }
 }
 

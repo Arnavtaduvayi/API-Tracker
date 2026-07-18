@@ -25,11 +25,10 @@ confidence = "high"
 name = "supabase-secret-key"
 regex = "sb_secret_[A-Za-z0-9_-]{20,}"
 confidence = "high"
-
-[[detection]]
-name = "supabase-publishable-key"
-regex = "sb_publishable_[A-Za-z0-9_-]{20,}"
-confidence = "medium"
+# Note: sb_publishable_ keys are intentionally NOT detected — they are the
+# modern client-safe key, designed to ship in client code (security relies on
+# row-level security, not on the key being secret). Flagging them would be a
+# false positive with the wrong remediation.
 
 [capabilities]
 validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated request to the project REST endpoint confirms a key works; the Management API validates a personal access token." }

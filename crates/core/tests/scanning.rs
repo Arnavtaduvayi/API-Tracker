@@ -311,6 +311,54 @@ fn monitor_flags_reuse_and_alert_lifecycle() {
 }
 
 #[test]
+fn reuse_alerts_survive_a_password_locked_project_across_monitor_runs() {
+    // Regression: run_monitor must compute reuse from the stored fingerprint,
+    // not by decrypting values — otherwise a still-valid reuse alert for a
+    // password-locked (locked) project would be spuriously auto-resolved.
+    let (_dir, _paths, mut vault) = new_vault();
+    add_project(&mut vault, "prod");
+    add_project(&mut vault, "dev");
+    add_openai_key(&mut vault, "prod", "shared");
+    vault
+        .add_credential(AddCredential {
+            project: "dev".into(),
+            provider: "openai".into(),
+            name: "copy".into(),
+            environment: Environment::Development,
+            value: SecretString::from(FAKE_OPENAI),
+            credential_type: None,
+            key_created_at: None,
+            expires_at: None,
+            docs_url: String::new(),
+            notes: String::new(),
+        })
+        .unwrap();
+
+    vault.run_monitor().unwrap();
+    assert!(alerts::list(vault.connection(), false)
+        .unwrap()
+        .iter()
+        .any(|a| a.kind == "production_in_development"));
+
+    // Lock the prod project (drop its key from the session), then re-run.
+    vault
+        .set_project_password("prod", &SecretString::from(PROJECT_PW))
+        .unwrap();
+    vault.lock_project("prod").unwrap();
+    vault.run_monitor().unwrap();
+
+    // The reuse alert must still be open — the condition still holds even
+    // though the project's value cannot be decrypted this session.
+    assert!(
+        alerts::list(vault.connection(), false)
+            .unwrap()
+            .iter()
+            .any(|a| a.kind == "production_in_development"),
+        "reuse alert must not be auto-resolved just because a project is locked"
+    );
+}
+
+#[test]
 fn documentation_change_raises_an_alert() {
     let (_dir, _paths, vault) = new_vault();
     let url = "https://example.com/docs/auth";

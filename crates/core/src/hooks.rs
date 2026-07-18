@@ -61,7 +61,10 @@ pub struct HookStatus {
 fn require_git_dir(repo: &Path) -> Result<PathBuf> {
     let root = gitrepo::repo_root(repo)?;
     let git_dir = root.join(".git");
-    if !git_dir.exists() {
+    // In a worktree or submodule, `.git` is a regular FILE (containing a
+    // `gitdir:` pointer), so we require an actual directory here — `.exists()`
+    // would be true for the file and let us write hooks to the wrong place.
+    if !git_dir.is_dir() {
         return Err(CoreError::InvalidInput(format!(
             "{} has no .git directory (worktrees/submodules are not supported yet)",
             root.display()
@@ -201,10 +204,16 @@ pub fn remove(repo: &Path) -> Result<HookState> {
         return Ok(HookState::Absent);
     }
     // Strip our block (and any lone shebang we may have shared), keep the rest.
-    let (s, e) = (
-        content.find(SENTINEL).expect("checked"),
-        content.find(SENTINEL_END).expect("checked") + SENTINEL_END.len(),
-    );
+    // If the end sentinel is missing (a hand-edited/corrupted hook), treat
+    // everything from the start sentinel to end-of-file as ours rather than
+    // panicking.
+    let s = content
+        .find(SENTINEL)
+        .expect("start sentinel present (checked)");
+    let e = content
+        .find(SENTINEL_END)
+        .map(|i| i + SENTINEL_END.len())
+        .unwrap_or(content.len());
     let mut out = String::new();
     out.push_str(content[..s].trim_end());
     out.push('\n');
@@ -295,5 +304,69 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "#!/bin/sh\necho not-ours\n").unwrap();
         assert!(remove(dir.path()).is_err());
+    }
+
+    #[test]
+    fn remove_does_not_panic_on_truncated_block() {
+        // A hand-edited hook with the start sentinel but no end sentinel must
+        // not panic; the block is stripped to end-of-file.
+        if !gitrepo::git_available() {
+            return;
+        }
+        let dir = init_repo();
+        let path = hook_path(dir.path());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\n{SENTINEL}\napi-tracker scan ...\n"),
+        )
+        .unwrap();
+        // Must return Ok, not panic.
+        let state = remove(dir.path()).unwrap();
+        assert!(matches!(state, HookState::Absent | HookState::Foreign));
+    }
+
+    #[test]
+    fn rejects_worktree_whose_git_is_a_file() {
+        if !gitrepo::git_available() {
+            return;
+        }
+        let dir = init_repo();
+        // A commit is required before adding a worktree.
+        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.email=t@e.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-m",
+                "init",
+            ],
+        ] {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        let wt = dir.path().join("wt");
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["worktree", "add", wt.to_str().unwrap()])
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            return; // worktree unsupported in this environment; skip
+        }
+        // In the worktree, `.git` is a FILE — hook operations must error, not
+        // write to the wrong place or panic.
+        assert!(wt.join(".git").is_file());
+        assert!(status(&wt).is_err());
+        assert!(install(&wt, false).is_err());
     }
 }
