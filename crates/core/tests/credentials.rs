@@ -192,6 +192,17 @@ fn duplicate_names_within_project_rejected_and_selectors_disambiguate() {
 }
 
 #[test]
+fn short_project_password_is_rejected() {
+    let (_dir, _paths, mut vault) = new_vault();
+    add_project(&mut vault, "secure");
+    let err = vault
+        .set_project_password("secure", &SecretString::from("elevenchars"))
+        .unwrap_err();
+    assert!(matches!(err, CoreError::InvalidInput(_)));
+    assert!(!vault.get_project("secure").unwrap().password_locked);
+}
+
+#[test]
 fn project_password_lock_flow() {
     let (_dir, paths, mut vault) = new_vault();
     add_project(&mut vault, "secure");

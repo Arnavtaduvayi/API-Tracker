@@ -34,7 +34,7 @@ export function VaultSetup(props: { dataDir: string; onCreated: () => void }) {
       </p>
       <form className="stack" onSubmit={(e) => void submit(e)}>
         <label className="field">
-          Master password (at least 8 characters)
+          Master password (at least 12 characters; a long multi-word passphrase is best)
           <input
             type="password"
             value={password}

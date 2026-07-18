@@ -21,6 +21,11 @@ pub fn init(ctx: &Ctx) -> Result<()> {
         "Creating a new encrypted vault at {}",
         ctx.paths.db_path().display()
     );
+    eprintln!(
+        "Choose a master password of at least {} characters. A long multi-word \
+         passphrase is the strongest choice.",
+        vault::MIN_PASSWORD_LEN
+    );
     let password = ctx::new_password("master password", ctx::ENV_PASSWORD)?;
     let vault = vault::create_vault(&ctx.paths, &password)?;
     println!("Vault created at {}", ctx.paths.db_path().display());

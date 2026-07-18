@@ -5,6 +5,26 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — demo, smoke test
+- `scripts/demo.sh [--keep]` builds a fully isolated demonstration vault
+  (fake generated credentials only, never a network call): a development
+  project plus a password-locked production project; active / expired /
+  expiring-soon / unused credentials; a cross-project reuse warning;
+  synthetic usage with an over-budget alert; an encrypted, verified backup;
+  and secure process injection. See `docs/DEMO.md`.
+- `scripts/smoke.sh` runs an automated end-to-end smoke test of the release
+  binary under production Argon2id (47 checks: vault lifecycle, password
+  policy, sessions, project locks, encryption at rest, redaction, expiration,
+  duplicate detection, usage/cost, budget alerts, backup verify/restore,
+  desktop/CLI shared core, injection hygiene, and `.gitignore` protection).
+
+### Changed — security
+- The minimum length for newly chosen master, project, and backup passwords
+  is now **12 characters** (was 8), with passphrase guidance in the desktop
+  setup screen and CLI `init`. Existing vaults, locked projects, and backups
+  created under the old policy still unlock and restore unchanged
+  (ADR 0010).
+
 ### Added — provider integrations, usage, cost, and secure injection
 - **Provider connectors** for OpenAI, Anthropic, GitHub, Stripe, and Supabase
   behind a mockable HTTP client. Implemented: credential **validation** (all
