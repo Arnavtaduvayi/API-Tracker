@@ -136,6 +136,10 @@ against a throwaway vault under `mktemp -d` and verifies, end to end:
   deliberately live in the parent environment at that moment — are absent
   from the child's environment
 - no plaintext `.env` file is ever created
+- the OpenAI administrative connection lifecycle (offline, `--no-verify`):
+  connect via environment, status labeled administrative with the key
+  masked, no plaintext key anywhere on disk, offline usage report,
+  disconnect with reauthentication
 - `.gitignore` protection for databases, vaults, backups, `.env` files,
   logs, and generated demo files
 

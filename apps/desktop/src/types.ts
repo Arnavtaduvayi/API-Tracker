@@ -273,10 +273,74 @@ export interface StoredPermissions {
 
 export interface ProviderConnection {
   provider: string;
+  connected: boolean;
+  admin_key_masked: string | null;
   admin_credential_id: string | null;
+  org_label: string | null;
+  connected_at: string | null;
   last_synced_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string;
   last_status: string;
   detail: string;
+  stale: boolean;
+}
+
+export interface SyncReport {
+  provider: string;
+  usage_rows: number;
+  cost_rows: number;
+  window_start: string;
+  window_end: string;
+  notes: string[];
+}
+
+export interface ProviderKeyOverview {
+  provider: string;
+  api_key_id: string;
+  name: string;
+  redacted_value: string;
+  provider_project_id: string | null;
+  provider_project_name: string | null;
+  linked_credential_id: string | null;
+  linked_credential: string | null;
+  link_source: string | null;
+  usage_rows: number;
+  suggested_credential_id: string | null;
+  suggested_credential: string | null;
+  note: string;
+}
+
+export interface ProviderProjectOverview {
+  provider_project_id: string;
+  name: string;
+  reported_cost_micros_month: number;
+  has_linked_usage: boolean;
+}
+
+export interface UsageSnapshot {
+  id: string;
+  credential_id: string | null;
+  project_id: string | null;
+  provider: string;
+  model: string | null;
+  window_start: string;
+  window_end: string;
+  request_count: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  reported_cost_micros: number | null;
+  estimated_cost_micros: number | null;
+  currency: string;
+  source: string;
+  attribution: string;
+  collected_at: string;
+  provider_account_id: string | null;
+  provider_project_id: string | null;
+  provider_api_key_id: string | null;
+  line_item: string | null;
 }
 
 export interface UsageTotals {
@@ -289,6 +353,9 @@ export interface UsageTotals {
   estimated_cost_micros: number;
   has_inexact_attribution: boolean;
   coarsest_attribution: string | null;
+  reported_currencies: string[];
+  has_non_usd_reported: boolean;
+  last_collected_at: string | null;
 }
 
 export interface BudgetReport {
@@ -299,6 +366,7 @@ export interface BudgetReport {
   estimated_cost_micros: number;
   used_micros: number;
   used_is_estimated: boolean;
+  cost_source: string;
   remaining_micros: number | null;
   projected_period_end_micros: number;
   over_budget: boolean;

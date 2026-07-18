@@ -130,11 +130,17 @@ fn usage_sync_records_account_level_snapshots() {
         ]}
     ]}"#;
     let mock = MockHttpClient::json(fixture);
-    let n = vault.usage_sync("openai", &mock, 7).unwrap();
-    assert_eq!(n, 1);
+    let report = vault.usage_sync("openai", &mock, 7).unwrap();
+    assert_eq!(report.usage_rows, 1);
+    // Only one response was queued, so provider-reported costs were
+    // unavailable — a noted condition, not a sync failure.
+    assert_eq!(report.cost_rows, 0);
+    assert!(report.notes.iter().any(|n| n.contains("costs")));
 
     let status = vault.provider_connection_status("openai").unwrap();
     assert_eq!(status.last_status, "ok");
+    assert!(status.connected);
+    assert!(status.last_success_at.is_some());
     // The synced usage is account-level, not attributable to a credential.
     let totals =
         usage::totals_since(vault.connection(), "2000-01-01T00:00:00Z", None, None).unwrap();

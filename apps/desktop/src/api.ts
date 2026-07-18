@@ -18,9 +18,13 @@ import type {
   MonitorSummary,
   Project,
   ProviderConnection,
+  ProviderKeyOverview,
   ProviderManifest,
+  ProviderProjectOverview,
   ReuseWarning,
   StoredPermissions,
+  SyncReport,
+  UsageSnapshot,
   UsageTotals,
   ValidationResult,
   VaultSettings,
@@ -174,15 +178,52 @@ export const api = {
     call<StoredPermissions | null>("credential_permissions", { selector, sync }),
   providerConnect: (provider: string, credential: string) =>
     call<void>("provider_connect", { provider, credential }),
-  providerSync: (provider: string, days: number) =>
-    call<number>("provider_sync", { provider, days }),
+  providerAdminConnect: (
+    provider: string,
+    adminKey: string,
+    org: string | null,
+    password: string | null,
+  ) => call<string>("provider_admin_connect", { provider, adminKey, org, password }),
+  providerAdminDisconnect: (provider: string, password: string) =>
+    call<boolean>("provider_admin_disconnect", { provider, password }),
+  providerAdminTest: (provider: string, password: string) =>
+    call<string>("provider_admin_test", { provider, password }),
+  providerSync: (provider: string, days: number | null, from?: string, to?: string) =>
+    call<SyncReport>("provider_sync", {
+      provider,
+      days,
+      from: from ?? null,
+      to: to ?? null,
+    }),
   providerConnectionStatus: (provider: string) =>
     call<ProviderConnection>("provider_connection_status", { provider }),
+  providerKeys: (provider: string) =>
+    call<ProviderKeyOverview[]>("provider_keys", { provider }),
+  providerProjects: (provider: string) =>
+    call<ProviderProjectOverview[]>("provider_projects", { provider }),
+  providerLinkKey: (provider: string, apiKeyId: string, credential: string) =>
+    call<number>("provider_link_key", { provider, apiKeyId, credential }),
+  providerUnlinkKey: (provider: string, apiKeyId: string) =>
+    call<number>("provider_unlink_key", { provider, apiKeyId }),
   usageReport: (project?: string, credential?: string) =>
     call<UsageTotals>("usage_report", {
       project: project ?? null,
       credential: credential ?? null,
     }),
+  usageRecords: (args: {
+    project?: string;
+    credential?: string;
+    provider?: string;
+    source: "all" | "provider" | "manual";
+  }) =>
+    call<UsageSnapshot[]>("usage_records", {
+      project: args.project ?? null,
+      credential: args.credential ?? null,
+      provider: args.provider ?? null,
+      source: args.source,
+    }),
+  budgetCostSourceGet: () => call<string>("budget_cost_source_get"),
+  budgetCostSourceSet: (value: string) => call<void>("budget_cost_source_set", { value }),
   usageRecordManual: (
     credential: string,
     model: string | null,

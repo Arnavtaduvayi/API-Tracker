@@ -18,8 +18,9 @@ Legend:
 | Capability | OpenAI | Anthropic | GitHub | Stripe | Supabase |
 | --- | --- | --- | --- | --- | --- |
 | Validate | implemented | implemented | implemented | implemented | implemented |
-| Metadata | supported (not impl.) (admin) | supported (not impl.) (admin) | implemented | implemented | implemented (admin) |
+| Metadata | implemented (admin) | supported (not impl.) (admin) | implemented | implemented | implemented (admin) |
 | Usage | implemented (admin) | implemented (admin) | supported (not impl.) (admin) | manual | supported (not impl.) (admin) |
+| Provider-reported cost | implemented (admin) | supported (not impl.) (admin) | supported (not impl.) (admin) | manual | manual |
 | Read permissions | manual | unsupported | implemented | manual | supported (not impl.) (admin) |
 | Change permissions | manual | unsupported | manual | manual | unsupported |
 | Create | supported (not impl.) (admin) | manual | manual | manual | supported (not impl.) (admin) |
@@ -32,18 +33,26 @@ Legend:
 
 Usage attribution **varies by provider** and is always labeled:
 
-- **OpenAI / Anthropic usage** is synced from the organization Usage APIs
-  (admin key) and is **account-level** — it is *not* attributed to an
-  individual key. API Tracker records it as `provider_account` and never
-  presents it as exact per-key usage.
-- **Per-credential / per-project budgets** are meaningful for usage you
-  attribute yourself (manual usage entries) — record with
-  `api-tracker usage record --credential <c> --model <m> --input-tokens N
-  --output-tokens N`.
-- **Costs are estimates** computed from a local, versioned pricing table (with
-  a source URL and retrieval date) unless a provider reports cost directly.
-  Estimates are labeled "estimated" and flagged stale after 45 days; override
-  with `api-tracker` pricing overrides.
+- **OpenAI usage and costs** are synced from the organization Usage and
+  Costs APIs (admin key) grouped by provider project × API-key id (× model /
+  line item). A row is attributed `exact_credential` **only** when you have
+  explicitly linked that provider-side key id to a vault credential
+  (`api-tracker provider link openai <key-id> --credential <c>`); otherwise
+  it stays at `provider_key`, `provider_project`, or `provider_account`
+  level — never divided among local keys. See
+  [OPENAI_SYNC.md](OPENAI_SYNC.md).
+- **Anthropic usage** is synced from the organization Usage API (admin key)
+  and is **account-level** — recorded as `provider_account` and never
+  presented as exact per-key usage.
+- **Per-credential / per-project budgets** count usage attributed to that
+  credential/project: linked provider-synced rows and manual entries
+  (`api-tracker usage record --credential <c> --model <m> --input-tokens N
+  --output-tokens N`).
+- **Provider-reported cost vs. estimates:** OpenAI costs are stored exactly
+  as reported (amount + currency + line item). Everything else is a local
+  estimate from a versioned pricing table (source URL + retrieval date),
+  labeled "estimated" and flagged stale after 45 days. Budgets consume one
+  configurable source (`api-tracker budget source`) — never the sum of both.
 
 ## Notes per capability
 

@@ -37,6 +37,7 @@ pub mod http;
 pub mod inject;
 pub mod model;
 pub mod monitor;
+pub mod openai;
 pub mod permissions;
 pub mod pricing;
 pub mod providers;

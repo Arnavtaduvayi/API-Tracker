@@ -55,15 +55,27 @@ Implemented and tested today:
 - **Provider catalog + connectors** — version-controlled TOML manifests for
   OpenAI, Anthropic, GitHub, Stripe, and Supabase with an **honest capability
   matrix**. Implemented: credential **validation** (all five), GitHub
-  **metadata + permissions**, OpenAI/Anthropic **usage** sync (admin key,
-  account level), Stripe/Supabase metadata. Unimplemented capabilities link to
-  the official page instead of faking it. See the
-  [provider support matrix](docs/PROVIDER_SUPPORT.md).
-- **Usage, cost & budgets** — normalized usage snapshots with honest
-  attribution (account-level provider data is never shown as exact per-key);
-  estimated costs from a versioned pricing table (source + retrieval date +
-  staleness) with manual overrides; project/credential budgets with month-end
-  projection and over-budget alerts.
+  **metadata + permissions**, Anthropic org-level usage sync, Stripe/Supabase
+  metadata. Unimplemented capabilities link to the official page instead of
+  faking it. See the [provider support matrix](docs/PROVIDER_SUPPORT.md).
+- **OpenAI usage & cost synchronization** — connect an OpenAI **Admin API
+  key** (stored encrypted in the vault, replace/remove only, never
+  displayed) and sync daily token usage grouped by provider project ×
+  API-key id × model, plus **provider-reported costs** (value + currency
+  preserved) grouped by project × key × line item. Repeated and overlapping
+  syncs reconcile instead of double-counting; previously synced data stays
+  viewable offline. See the [OpenAI sync guide](docs/OPENAI_SYNC.md).
+- **Honest attribution + key linking** — every usage record carries its
+  attribution level (exact credential / provider key / provider project /
+  provider account); a provider-side key id counts against a local
+  credential **only after you confirm the link** (redacted-value matches are
+  shown as suggestions, never auto-applied). Unmatched keys and unmapped
+  provider projects stay visible and raise alerts instead of being divided
+  among local keys.
+- **Usage, cost & budgets** — normalized usage snapshots; provider-reported
+  cost and locally estimated cost are kept strictly separate; budgets pick
+  one configurable source (best-available, provider-reported, or estimated)
+  and never sum both; month-end projection and over-budget alerts.
 - **Permissions** — raw scopes plus a normalized read/write/admin/sensitive
   view; read-only GitHub scope sync.
 - **Suspicious-activity rules** — over-budget, cost-spike, and
@@ -102,9 +114,11 @@ Implemented and tested today:
 Not implemented yet (planned, see `docs/PRODUCT_SPEC.md`): programmatic
 permission *changes* and credential create/rotate/revoke (no provider offers a
 safe documented per-key method today — the app links to the official page
-instead); per-key usage attribution where the provider only exposes
-account/project-level data; and **signed/notarized** installers (the alpha
-artifacts are unsigned — see [docs/PACKAGING.md](docs/PACKAGING.md)).
+instead); OpenAI token detail beyond the completions endpoint
+(embeddings/images/audio usage endpoints — total *spend* is still complete via
+the costs API); more than one OpenAI organization per vault; and
+**signed/notarized** installers (the alpha artifacts are unsigned — see
+[docs/PACKAGING.md](docs/PACKAGING.md)).
 
 ## Install and build
 
@@ -186,10 +200,17 @@ api-tracker provider check-docs openai         # conditional request, direct
 # Validate, sync usage, budget, and inspect permissions
 api-tracker key validate my-app/openai-main    # direct provider request
 api-tracker key permissions my-app/gh --sync   # e.g. GitHub scopes
-api-tracker provider connect openai my-app/admin-key   # admin key for usage
-api-tracker provider sync openai               # sync org-level usage
+api-tracker provider connect openai            # prompts for an Admin key
+api-tracker provider connection-status openai  # status, freshness, last error
+api-tracker provider sync openai               # usage + provider-reported costs
+api-tracker provider sync openai --from 2026-07-01 --to 2026-07-15
+api-tracker provider keys openai               # provider-side keys + link state
+api-tracker provider link openai key_abc123 --credential my-app/openai-main
+api-tracker usage report --provider openai --source provider
 api-tracker usage report --project my-app      # usage + estimated cost
 api-tracker budget set --project my-app --amount 50.00
+api-tracker budget source provider_reported    # which cost source budgets use
+api-tracker provider disconnect openai         # remove local admin access
 api-tracker activity list
 
 # Run a command with exactly one credential injected (never written to disk)
