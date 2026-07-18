@@ -60,6 +60,22 @@ fn short_master_password_is_rejected() {
 }
 
 #[test]
+fn master_password_minimum_is_exactly_twelve_characters() {
+    fast_kdf();
+    assert_eq!(vault::MIN_PASSWORD_LEN, 12);
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let paths = VaultPaths::new(dir.path().join("eleven"));
+    let err = vault::create_vault(&paths, &SecretString::from("elevenchars")).unwrap_err();
+    assert!(matches!(err, CoreError::InvalidInput(_)));
+    assert!(!paths.vault_exists());
+
+    let paths = VaultPaths::new(dir.path().join("twelve"));
+    let vault = vault::create_vault(&paths, &SecretString::from("twelve-chars")).expect("12 ok");
+    vault.lock();
+}
+
+#[test]
 fn corrupted_wrapped_vault_key_fails_to_unlock() {
     let (_dir, paths, vault) = new_vault();
     vault.lock();

@@ -34,7 +34,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
 
-pub const MIN_PASSWORD_LEN: usize = 8;
+/// Minimum length for newly chosen master, project, and backup passwords.
+/// Enforced only when a password is *set* — existing vaults, projects, and
+/// backups created under an older, shorter policy still unlock and restore.
+/// A multi-word passphrase well beyond this minimum is recommended; length
+/// is the primary defense the user controls, on top of Argon2id stretching.
+pub const MIN_PASSWORD_LEN: usize = 12;
 const DB_FILE: &str = "vault.db";
 const SESSION_FILE: &str = "session.json";
 
