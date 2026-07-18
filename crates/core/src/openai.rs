@@ -471,8 +471,14 @@ pub fn delete_project_api_key(
         .header("Authorization", format!("Bearer {}", admin.expose()));
     let resp = send_checked(http, &req)?;
     if resp.status == 404 {
-        // Idempotent: already gone is success for a revocation retry.
-        return Ok(format!("key {key_id} was already deleted"));
+        // NOT success: on a first attempt a 404 means a wrong key id or
+        // project just as often as "already deleted". The caller decides —
+        // the rotation engine treats it as success only when a prior
+        // recorded attempt exists.
+        return Err(CoreError::NotFound {
+            kind: "provider key",
+            ident: key_id.to_string(),
+        });
     }
     require_success(&resp, "project API-key deletion")?;
     let deleted = parse_json(&resp)

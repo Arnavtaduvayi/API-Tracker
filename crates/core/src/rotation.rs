@@ -20,6 +20,7 @@ use uuid::Uuid;
 // failed / rolling_back / rolled_back / manual_required.
 pub const PLANNED: &str = "planned";
 pub const APPROVED: &str = "approved";
+pub const CREATING_REPLACEMENT: &str = "creating_replacement";
 pub const AWAITING_MANUAL_KEY: &str = "awaiting_manual_key";
 pub const REPLACEMENT_STORED: &str = "replacement_stored";
 pub const UPDATING_DESTINATIONS: &str = "updating_destinations";
@@ -41,6 +42,7 @@ pub fn is_active(state: &str) -> bool {
     matches!(
         state,
         APPROVED
+            | CREATING_REPLACEMENT
             | AWAITING_MANUAL_KEY
             | REPLACEMENT_STORED
             | UPDATING_DESTINATIONS
@@ -211,15 +213,43 @@ pub fn active(conn: &Connection) -> Result<Vec<Rotation>> {
     Ok(out)
 }
 
-/// Transition to a new state, recording the event. The `detail` must never
-/// contain secret material.
-pub fn set_state(conn: &Connection, id: &str, to_state: &str, detail: &str) -> Result<()> {
-    let current = load(conn, id)?;
-    conn.execute(
-        "UPDATE rotations SET state = ?1, updated_at = ?2, last_error = '' WHERE id = ?3",
-        params![to_state, crate::clock::now_rfc3339(), id],
+/// Compare-and-swap state transition, recording the event. The write
+/// happens only if the rotation is still in `from_state` — a concurrent
+/// process advancing the same rotation fails loudly instead of double-
+/// executing a step. The `detail` must never contain secret material.
+pub fn set_state(
+    conn: &Connection,
+    id: &str,
+    from_state: &str,
+    to_state: &str,
+    detail: &str,
+) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE rotations SET state = ?1, updated_at = ?2, last_error = ''
+         WHERE id = ?3 AND state = ?4",
+        params![to_state, crate::clock::now_rfc3339(), id, from_state],
     )?;
-    record_event(conn, id, &current.state, to_state, detail)
+    if n == 0 {
+        let current = load(conn, id)?;
+        return Err(CoreError::InvalidInput(format!(
+            "rotation {id} changed concurrently (expected '{from_state}', found '{}'); \
+             re-check its state before acting",
+            current.state
+        )));
+    }
+    record_event(conn, id, from_state, to_state, detail)
+}
+
+/// Record an informational event without changing state or error.
+pub fn record_event_note(conn: &Connection, id: &str, note: &str) -> Result<()> {
+    let current = load(conn, id)?;
+    record_event(conn, id, &current.state, &current.state, note)
+}
+
+/// Clear a recorded error without adding a timeline event.
+pub fn clear_error(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("UPDATE rotations SET last_error = '' WHERE id = ?1", [id])?;
+    Ok(())
 }
 
 /// Record a step failure WITHOUT changing state (the step stays retryable).

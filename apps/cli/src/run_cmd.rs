@@ -128,7 +128,7 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
                         );
                         let _ = child.kill();
                         let _ = child.wait();
-                        let _ = vault.end_process_session(&session, None);
+                        let _ = vault.end_process_session(&session, Some(124));
                         std::process::exit(124);
                     }
                 }

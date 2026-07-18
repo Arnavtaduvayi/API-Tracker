@@ -218,7 +218,15 @@ fn legacy_jwt_role(value: &str) -> Option<String> {
     match role {
         "anon" => Some("anon_key".to_string()),
         "service_role" => Some("service_role_key".to_string()),
-        other => Some(other.to_string()),
+        // Unknown roles are shown, but bounded and stripped of anything
+        // non-printable (a crafted JWT must not inject terminal escapes).
+        other => Some(
+            other
+                .chars()
+                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                .take(64)
+                .collect(),
+        ),
     }
 }
 
@@ -1058,7 +1066,12 @@ impl Connector for Supabase {
         );
         let resp = http.send(&req)?;
         if resp.status == 404 {
-            return Ok(format!("key {provider_key_id} was already deleted"));
+            // See openai::delete_project_api_key: a 404 is ambiguous between
+            // "already deleted" and "wrong id"; never blindly a success.
+            return Err(CoreError::NotFound {
+                kind: "provider key",
+                ident: provider_key_id.to_string(),
+            });
         }
         if !resp.is_success() {
             return Err(CoreError::Provider(format!(

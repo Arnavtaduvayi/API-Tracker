@@ -1284,6 +1284,330 @@ fn sync_plan_rollback(
     })
 }
 
+// --- Rotation, temporary access grants, test keys, lifecycle ---
+
+#[tauri::command]
+fn rotation_plan(
+    state: State<'_, AppState>,
+    credential: String,
+    grace_minutes: i64,
+    provider_project: Option<String>,
+    old_key_id: Option<String>,
+    note: String,
+) -> CmdResult<vault::RotationView> {
+    with_vault(&state, |vault| {
+        vault.rotation_plan(
+            &credential,
+            grace_minutes,
+            provider_project.as_deref(),
+            old_key_id.as_deref(),
+            &note,
+        )
+    })
+}
+
+#[tauri::command]
+fn rotation_approve(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+) -> CmdResult<vault::RotationView> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| vault.rotation_approve(&id, &password))
+}
+
+/// Advance a rotation as far as it can go. `provide_value` carries the
+/// manually created replacement key (awaiting_manual_key state only); it is
+/// wrapped in a SecretString immediately and never logged or echoed back.
+#[tauri::command]
+fn rotation_advance(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+    provide_value: Option<String>,
+    acknowledge_continued_use: bool,
+) -> CmdResult<vault::RotationView> {
+    let password = SecretString::new(password);
+    let provide_value = provide_value.map(SecretString::new);
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.rotation_advance(
+            &id,
+            &password,
+            &http,
+            &runner,
+            provide_value,
+            acknowledge_continued_use,
+        )
+    })
+}
+
+#[tauri::command]
+fn rotation_rollback(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+    revoke_new: bool,
+) -> CmdResult<vault::RotationView> {
+    let password = SecretString::new(password);
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.rotation_rollback(&id, &password, &http, &runner, revoke_new)
+    })
+}
+
+#[tauri::command]
+fn rotation_complete_manual(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+    note: String,
+) -> CmdResult<vault::RotationView> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault.rotation_complete_manual(&id, &password, &note)
+    })
+}
+
+#[tauri::command]
+fn rotation_cancel(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+) -> CmdResult<vault::RotationView> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| vault.rotation_cancel(&id, &password))
+}
+
+#[tauri::command]
+fn rotation_get(state: State<'_, AppState>, id: String) -> CmdResult<vault::RotationView> {
+    with_vault(&state, |vault| vault.rotation_get(&id))
+}
+
+#[tauri::command]
+fn rotations_list(
+    state: State<'_, AppState>,
+    credential: Option<String>,
+    limit: u32,
+) -> CmdResult<Vec<vault::RotationView>> {
+    with_vault(&state, |vault| {
+        vault.rotations(credential.as_deref(), limit)
+    })
+}
+
+#[tauri::command]
+fn rotation_events(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<api_tracker_core::rotation::RotationEvent>> {
+    with_vault(&state, |vault| vault.rotation_events(&id))
+}
+
+#[tauri::command]
+fn rotation_schedule_set(
+    state: State<'_, AppState>,
+    credential: String,
+    every_days: i64,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.rotation_schedule_set(&credential, every_days)
+    })
+}
+
+#[tauri::command]
+fn rotation_schedule_remove(state: State<'_, AppState>, credential: String) -> CmdResult<bool> {
+    with_vault(&state, |vault| vault.rotation_schedule_remove(&credential))
+}
+
+#[tauri::command]
+fn rotation_schedules(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::rotation::RotationSchedule>> {
+    with_vault(&state, |vault| vault.rotation_schedules())
+}
+
+/// An access grant plus its computed status ("active", "expired",
+/// "used_up", "revoked") so the UI reuses core's status logic.
+#[derive(Serialize)]
+struct AccessGrantDto {
+    #[serde(flatten)]
+    grant: api_tracker_core::access::AccessGrant,
+    status: &'static str,
+}
+
+impl From<api_tracker_core::access::AccessGrant> for AccessGrantDto {
+    fn from(grant: api_tracker_core::access::AccessGrant) -> Self {
+        let status = grant.status(&api_tracker_core::clock::now_rfc3339());
+        Self { grant, status }
+    }
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn access_grant_create(
+    state: State<'_, AppState>,
+    project: String,
+    label: String,
+    credentials: Vec<String>,
+    ttl_minutes: u64,
+    max_launches: i64,
+    max_duration_secs: Option<i64>,
+    budget_warn: Option<String>,
+) -> CmdResult<AccessGrantDto> {
+    with_vault(&state, |vault| {
+        let grant = vault.access_grant_create(
+            &project,
+            &label,
+            &credentials,
+            ttl_minutes,
+            max_launches,
+            max_duration_secs,
+            budget_warn.as_deref(),
+        )?;
+        Ok(grant.into())
+    })
+}
+
+#[tauri::command]
+fn access_grants(
+    state: State<'_, AppState>,
+    include_inactive: bool,
+) -> CmdResult<Vec<AccessGrantDto>> {
+    with_vault(&state, |vault| {
+        Ok(vault
+            .access_grants(include_inactive)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    })
+}
+
+#[derive(Serialize)]
+struct RunningSessionDto {
+    session_id: String,
+    pid: i64,
+}
+
+#[derive(Serialize)]
+struct GrantEndDto {
+    grant: AccessGrantDto,
+    running: Vec<RunningSessionDto>,
+}
+
+/// End a grant: new launches are refused immediately. The desktop app does
+/// NOT terminate processes — it surfaces the recorded running PIDs so the
+/// user can decide (the CLI's `access end --kill` sends SIGTERM).
+#[tauri::command]
+fn access_grant_end(state: State<'_, AppState>, id: String) -> CmdResult<GrantEndDto> {
+    with_vault(&state, |vault| {
+        let (grant, running) = vault.access_grant_end(&id)?;
+        Ok(GrantEndDto {
+            grant: grant.into(),
+            running: running
+                .into_iter()
+                .map(|(session_id, pid)| RunningSessionDto { session_id, pid })
+                .collect(),
+        })
+    })
+}
+
+#[tauri::command]
+fn credential_timeline(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<vault::TimelineEvent>> {
+    with_vault(&state, |vault| vault.credential_timeline(&id))
+}
+
+#[derive(Serialize)]
+struct PermissionsPreviewDto {
+    stored: Option<api_tracker_core::permissions::StoredPermissions>,
+    fetched: api_tracker_core::connectors::FetchedPermissions,
+    normalized: api_tracker_core::permissions::NormalizedPermissions,
+}
+
+/// Fetch fresh permissions WITHOUT storing them, alongside the stored
+/// snapshot — the before/after diff for permission review.
+#[tauri::command]
+fn permissions_preview(state: State<'_, AppState>, id: String) -> CmdResult<PermissionsPreviewDto> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        let (stored, fetched, normalized) = vault.permissions_preview(&id, &http)?;
+        Ok(PermissionsPreviewDto {
+            stored,
+            fetched,
+            normalized,
+        })
+    })
+}
+
+/// Live provider-side key listing via the administrative connection (for
+/// picking the OLD key id before a rotation).
+#[tauri::command]
+fn provider_list_keys(
+    state: State<'_, AppState>,
+    provider: String,
+    provider_project: Option<String>,
+) -> CmdResult<Vec<api_tracker_core::connectors::ProviderKeyListing>> {
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        vault.provider_list_keys(&provider, provider_project.as_deref(), &http)
+    })
+}
+
+#[derive(Serialize)]
+struct TestKeyDto {
+    credential: Credential,
+    /// Honest enforcement notes: what the provider enforces vs. what is only
+    /// a local reminder. Rendered verbatim by the UI.
+    notes: Vec<String>,
+}
+
+/// Create a REAL provider-side test key (reauthentication-gated).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn test_key_create(
+    state: State<'_, AppState>,
+    project: String,
+    provider: String,
+    provider_project: Option<String>,
+    name: String,
+    ttl_minutes: u64,
+    password: String,
+) -> CmdResult<TestKeyDto> {
+    let password = SecretString::new(password);
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        let (credential, notes) = vault.test_key_create(
+            &project,
+            &provider,
+            provider_project.as_deref(),
+            &name,
+            ttl_minutes,
+            &password,
+            &http,
+        )?;
+        Ok(TestKeyDto { credential, notes })
+    })
+}
+
+/// Revoke a credential AT THE PROVIDER (usually irreversible) and mark it
+/// revoked locally. Reauthentication-gated; the UI must confirm first.
+#[tauri::command]
+fn credential_provider_revoke(
+    state: State<'_, AppState>,
+    id: String,
+    password: String,
+) -> CmdResult<String> {
+    let password = SecretString::new(password);
+    let http = UreqClient::new();
+    with_vault(&state, |vault| {
+        vault.credential_provider_revoke(&id, &password, &http)
+    })
+}
+
 fn main() {
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
     tauri::Builder::default()
@@ -1387,6 +1711,26 @@ fn main() {
             sync_plans_list,
             sync_plan_execute,
             sync_plan_rollback,
+            rotation_plan,
+            rotation_approve,
+            rotation_advance,
+            rotation_rollback,
+            rotation_complete_manual,
+            rotation_cancel,
+            rotation_get,
+            rotations_list,
+            rotation_events,
+            rotation_schedule_set,
+            rotation_schedule_remove,
+            rotation_schedules,
+            access_grant_create,
+            access_grants,
+            access_grant_end,
+            credential_timeline,
+            permissions_preview,
+            provider_list_keys,
+            test_key_create,
+            credential_provider_revoke,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the API Tracker desktop app");

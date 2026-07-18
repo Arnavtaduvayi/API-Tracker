@@ -78,6 +78,9 @@ pub struct TestCreateArgs {
     /// LOCAL reminder lifetime in minutes (NOT provider-enforced).
     #[arg(long, default_value_t = 240)]
     pub ttl_minutes: u64,
+    /// Confirm non-interactively.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -502,7 +505,7 @@ fn test_create(ctx: &Ctx, args: TestCreateArgs) -> Result<()> {
         args.provider,
         args.provider_project.as_deref().unwrap_or("?")
     );
-    if !ctx::confirm("Create it?", false)? && !ctx.json {
+    if !ctx::confirm("Create it?", args.yes)? {
         anyhow::bail!("cancelled");
     }
     let password = ctx::master_password()?;
@@ -536,7 +539,7 @@ fn provider_revoke(ctx: &Ctx, key: &str, yes: bool) -> Result<()> {
     let credential = vault.get_credential(key)?;
     if !ctx::confirm(
         &format!(
-            "REVOKE '{}/{}' at {}? This is usually irreversible and anything still using              the key will break.",
+            "REVOKE '{}/{}' at {}? This is usually irreversible and anything still using the key will break.",
             credential.project_name, credential.name, credential.provider
         ),
         yes,

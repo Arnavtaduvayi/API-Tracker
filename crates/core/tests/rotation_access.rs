@@ -290,7 +290,10 @@ fn provider_create_failure_is_retryable_and_old_key_untouched() {
             false,
         )
         .unwrap();
-    assert_eq!(stuck.rotation.state, "approved", "stays retryable");
+    assert_eq!(
+        stuck.rotation.state, "creating_replacement",
+        "stays in the claim state, retryable"
+    );
     assert!(!stuck.rotation.last_error.is_empty());
     let value = v.reveal_credential(&cred_id, &master_pw()).unwrap();
     assert_eq!(value.expose(), FAKE_OLD, "old value untouched");
@@ -728,6 +731,288 @@ fn test_key_creation_labels_enforcement_honestly_and_provider_revoke_works() {
     assert!(detail.contains("deleted"));
     let refreshed = v.get_credential(&cred.id).unwrap();
     assert!(refreshed.revoked);
+}
+
+#[test]
+fn revoke_404_is_an_error_not_success_on_first_attempt() {
+    let (_dir, _paths, mut v, cred_id) = openai_rotation_fixture();
+    let plan = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan.rotation.id, &master_pw()).unwrap();
+    let http = MockHttpClient::new(vec![
+        created_sa_response(),
+        gh_pubkey_response(),
+        resp(204, ""),
+        resp(200, r#"{"name":"OPENAI_API_KEY"}"#),
+        resp(200, r#"{"data":[{"id":"gpt-4o"}]}"#),
+        resp(404, r#"{"error":{"message":"No such key"}}"#), // revoke: 404
+    ]);
+    let stuck = v
+        .rotation_advance(
+            &plan.rotation.id,
+            &master_pw(),
+            &http,
+            &NullRunner,
+            None,
+            false,
+        )
+        .unwrap();
+    // NOT completed: a first-attempt 404 is ambiguous (wrong id?) and must
+    // never be reported as a successful revocation.
+    assert_ne!(stuck.rotation.state, "completed");
+    assert!(stuck.rotation.old_revoked_at.is_none());
+    assert!(
+        stuck.rotation.last_error.contains("does not exist"),
+        "{}",
+        stuck.rotation.last_error
+    );
+}
+
+#[test]
+fn external_replacement_mid_rotation_blocks_destructive_arming() {
+    let (_dir, _paths, mut v, cred_id) = openai_rotation_fixture();
+    let plan = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan.rotation.id, &master_pw()).unwrap();
+    // Advance through destinations, stopping before validation.
+    let http = MockHttpClient::new(vec![
+        created_sa_response(),
+        gh_pubkey_response(),
+        resp(204, ""),
+        resp(200, r#"{"name":"OPENAI_API_KEY"}"#),
+        resp(500, "{}"), // validation attempt fails -> stays retryable
+        resp(500, "{}"),
+        resp(500, "{}"),
+    ]);
+    let stuck = v
+        .rotation_advance(
+            &plan.rotation.id,
+            &master_pw(),
+            &http,
+            &NullRunner,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(stuck.rotation.state, "destinations_verified");
+    // Someone replaces the value OUTSIDE the rotation.
+    v.replace_credential_value(
+        &cred_id,
+        &master_pw(),
+        SecretString::from("sk-proj-FAKEEXTERNAL000000000000000000000001"),
+    )
+    .unwrap();
+    // Validation must now refuse: the current value is not the rotation's.
+    let http = MockHttpClient::new(vec![resp(200, r#"{"data":[]}"#)]);
+    let blocked = v
+        .rotation_advance(
+            &plan.rotation.id,
+            &master_pw(),
+            &http,
+            &NullRunner,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(blocked.rotation.state, "destinations_verified");
+    assert!(
+        blocked.rotation.last_error.contains("changed outside"),
+        "{}",
+        blocked.rotation.last_error
+    );
+    assert!(!blocked.rotation.new_value_validated);
+}
+
+#[test]
+fn orphaned_provider_key_blocks_a_second_creation() {
+    let (_dir, _paths, mut v, cred_id) = openai_rotation_fixture();
+    let plan = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan.rotation.id, &master_pw()).unwrap();
+    // Simulate a crash after creation but before storing: the key id is
+    // recorded, the version is not, state stayed in the claim.
+    v.connection()
+        .execute(
+            "UPDATE rotations SET state = 'creating_replacement',
+                 new_provider_key_id = 'key_orphan_1' WHERE id = ?1",
+            [&plan.rotation.id],
+        )
+        .unwrap();
+    let http = MockHttpClient::new(vec![]); // any HTTP call would error
+    let stuck = v
+        .rotation_advance(
+            &plan.rotation.id,
+            &master_pw(),
+            &http,
+            &NullRunner,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(stuck.rotation.state, "creating_replacement");
+    assert!(
+        stuck.rotation.last_error.contains("never")
+            && stuck.rotation.last_error.contains("key_orphan_1"),
+        "{}",
+        stuck.rotation.last_error
+    );
+}
+
+#[test]
+fn second_concurrent_rotation_approval_is_refused() {
+    let (_dir, _paths, v, cred_id) = openai_rotation_fixture();
+    let plan1 = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    let plan2 = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan1.rotation.id, &master_pw())
+        .unwrap();
+    let err = v
+        .rotation_approve(&plan2.rotation.id, &master_pw())
+        .unwrap_err();
+    assert!(err.to_string().contains("in flight"), "{err}");
+}
+
+#[test]
+fn completed_rotations_cannot_be_rolled_back() {
+    let (_dir, _paths, mut v) = new_vault();
+    add_project(&mut v, "app");
+    let cred = add_provider_key(&mut v, "app", "gh-token", "github", FAKE_GH_TOKEN);
+    let plan = v.rotation_plan(&cred.id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan.rotation.id, &master_pw()).unwrap();
+    let http = MockHttpClient::new(vec![resp(200, r#"{"login":"octo"}"#)]);
+    v.rotation_advance(
+        &plan.rotation.id,
+        &master_pw(),
+        &http,
+        &NullRunner,
+        Some(SecretString::from(
+            "ghp_FAKENEW00000000000000000000000000000001",
+        )),
+        false,
+    )
+    .unwrap();
+    let done = v
+        .rotation_complete_manual(&plan.rotation.id, &master_pw(), "revoked in UI")
+        .unwrap();
+    assert_eq!(done.rotation.state, "completed");
+    // Rolling back a completed (manual) rotation would push a dashboard-
+    // revoked value back into service claiming success — refused.
+    let err = v
+        .rotation_rollback(
+            &plan.rotation.id,
+            &master_pw(),
+            &MockHttpClient::new(vec![]),
+            &NullRunner,
+            false,
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot be rolled back"), "{err}");
+}
+
+#[test]
+fn replacing_a_value_clears_provider_reported_expiry() {
+    let (_dir, _paths, mut v) = new_vault();
+    add_project(&mut v, "app");
+    let cred = add_provider_key(&mut v, "app", "gh", "github", FAKE_GH_TOKEN);
+    let http = MockHttpClient::with(
+        200,
+        vec![(
+            "github-authentication-token-expiration".into(),
+            "2020-01-15 10:30:00 UTC".into(),
+        )],
+        r#"{"login":"octo"}"#,
+    );
+    v.validate_credential(&cred.id, &http).unwrap();
+    assert!(v
+        .get_credential(&cred.id)
+        .unwrap()
+        .provider_expires_at
+        .is_some());
+    v.replace_credential_value(
+        &cred.id,
+        &master_pw(),
+        SecretString::from("ghp_FAKENEW00000000000000000000000000000001"),
+    )
+    .unwrap();
+    // The old token's provider-reported expiry must not stick to the new one.
+    assert!(v
+        .get_credential(&cred.id)
+        .unwrap()
+        .provider_expires_at
+        .is_none());
+}
+
+#[test]
+fn config_errors_do_not_burn_one_time_grants() {
+    let (_dir, _paths, mut v) = new_vault();
+    add_project(&mut v, "app");
+    let (cred, _) = add_key(&mut v, "app", "openai", FAKE_OLD, Environment::Development);
+    // No mapping configured: the launch must fail WITHOUT consuming.
+    let grant = v
+        .access_grant_create(
+            "app",
+            "one",
+            std::slice::from_ref(&cred.id),
+            60,
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+    let err = v.build_injection_with_grant(&grant.id, "x").unwrap_err();
+    assert!(
+        err.to_string().contains("no configured env mappings"),
+        "{err}"
+    );
+    // The grant is still fully usable once configured.
+    v.set_env_mapping("app", &cred.id, "OPENAI_API_KEY")
+        .unwrap();
+    let injection = v.build_injection_with_grant(&grant.id, "x").unwrap();
+    assert_eq!(injection.grant.launches_used, 1);
+}
+
+#[test]
+fn active_rotation_versions_survive_the_prune_and_deletion_is_blocked() {
+    let (_dir, _paths, mut v, cred_id) = openai_rotation_fixture();
+    let plan = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan.rotation.id, &master_pw()).unwrap();
+    // Reach a state where old_version is recorded.
+    let http = MockHttpClient::new(vec![created_sa_response(), resp(500, "{}")]);
+    v.rotation_advance(
+        &plan.rotation.id,
+        &master_pw(),
+        &http,
+        &NullRunner,
+        None,
+        false,
+    )
+    .unwrap();
+    // Age the retained version far past the rollback window; prune must
+    // exempt it because an ACTIVE rotation needs it.
+    v.connection()
+        .execute(
+            "UPDATE credential_versions SET created_at = '2000-01-01T00:00:00Z'
+             WHERE credential_id = ?1",
+            [&cred_id],
+        )
+        .unwrap();
+    v.replace_credential_value(
+        &cred_id,
+        &master_pw(),
+        SecretString::from("sk-proj-FAKETRIGGERPRUNE0000000000000000001"),
+    )
+    .unwrap();
+    let survivors: i64 = v
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM credential_versions WHERE credential_id = ?1 AND version = 1",
+            [&cred_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        survivors, 1,
+        "the rotation's rollback material must survive pruning"
+    );
+    // And the credential cannot be deleted mid-rotation.
+    let err = v.delete_credential(&cred_id).unwrap_err();
+    assert!(err.to_string().contains("in flight"), "{err}");
 }
 
 #[test]

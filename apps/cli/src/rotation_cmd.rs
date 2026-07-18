@@ -214,8 +214,8 @@ fn plan(ctx: &Ctx, args: PlanArgs) -> Result<()> {
     render::emit(ctx.json, &view, || {
         print_rotation(&view);
         println!(
-            "\nDry run — nothing was created, written, or revoked. Review, then \
-             `rotation approve {}`.",
+            "\nDry run — nothing was changed at any provider or destination (only this \
+             plan record was saved). Review, then `rotation approve {}`.",
             view.rotation.id
         );
     });

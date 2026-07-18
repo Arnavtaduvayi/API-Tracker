@@ -4,6 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccessGrant,
   ActivityEvent,
   Alert,
   ApiError,
@@ -25,17 +26,25 @@ import type {
   DriftFinding,
   FetchedMetadata,
   Finding,
+  GrantEndResult,
   HookStatus,
   MonitorSummary,
+  PermissionsPreview,
   Project,
   ProviderConnection,
+  ProviderKeyListing,
   ProviderKeyOverview,
   ProviderManifest,
   ProviderProjectOverview,
   ReuseWarning,
+  RotationEvent,
+  RotationSchedule,
+  RotationView,
   StoredPermissions,
   SyncPlan,
   SyncReport,
+  TestKeyResult,
+  TimelineEvent,
   UsageSnapshot,
   UsageTotals,
   ValidationResult,
@@ -323,4 +332,69 @@ export const api = {
     call<SyncPlan>("sync_plan_execute", { id, onlyDestination, password }),
   syncPlanRollback: (id: string, onlyDestination: string | null, password: string) =>
     call<SyncPlan>("sync_plan_rollback", { id, onlyDestination, password }),
+
+  rotationPlan: (args: {
+    credential: string;
+    graceMinutes: number;
+    providerProject: string | null;
+    oldKeyId: string | null;
+    note: string;
+  }) => call<RotationView>("rotation_plan", args),
+  rotationApprove: (id: string, password: string) =>
+    call<RotationView>("rotation_approve", { id, password }),
+  rotationAdvance: (
+    id: string,
+    password: string,
+    provideValue: string | null,
+    acknowledgeContinuedUse: boolean,
+  ) =>
+    call<RotationView>("rotation_advance", {
+      id,
+      password,
+      provideValue,
+      acknowledgeContinuedUse,
+    }),
+  rotationRollback: (id: string, password: string, revokeNew: boolean) =>
+    call<RotationView>("rotation_rollback", { id, password, revokeNew }),
+  rotationCompleteManual: (id: string, password: string, note: string) =>
+    call<RotationView>("rotation_complete_manual", { id, password, note }),
+  rotationCancel: (id: string, password: string) =>
+    call<RotationView>("rotation_cancel", { id, password }),
+  rotationGet: (id: string) => call<RotationView>("rotation_get", { id }),
+  rotationsList: (credential: string | null, limit: number) =>
+    call<RotationView[]>("rotations_list", { credential, limit }),
+  rotationEvents: (id: string) => call<RotationEvent[]>("rotation_events", { id }),
+  rotationScheduleSet: (credential: string, everyDays: number) =>
+    call<void>("rotation_schedule_set", { credential, everyDays }),
+  rotationScheduleRemove: (credential: string) =>
+    call<boolean>("rotation_schedule_remove", { credential }),
+  rotationSchedules: () => call<RotationSchedule[]>("rotation_schedules"),
+
+  accessGrantCreate: (args: {
+    project: string;
+    label: string;
+    credentials: string[];
+    ttlMinutes: number;
+    maxLaunches: number;
+    maxDurationSecs: number | null;
+    budgetWarn: string | null;
+  }) => call<AccessGrant>("access_grant_create", args),
+  accessGrants: (includeInactive: boolean) =>
+    call<AccessGrant[]>("access_grants", { includeInactive }),
+  accessGrantEnd: (id: string) => call<GrantEndResult>("access_grant_end", { id }),
+
+  credentialTimeline: (id: string) => call<TimelineEvent[]>("credential_timeline", { id }),
+  permissionsPreview: (id: string) => call<PermissionsPreview>("permissions_preview", { id }),
+  providerListKeys: (provider: string, providerProject: string | null) =>
+    call<ProviderKeyListing[]>("provider_list_keys", { provider, providerProject }),
+  testKeyCreate: (args: {
+    project: string;
+    provider: string;
+    providerProject: string | null;
+    name: string;
+    ttlMinutes: number;
+    password: string;
+  }) => call<TestKeyResult>("test_key_create", args),
+  credentialProviderRevoke: (id: string, password: string) =>
+    call<string>("credential_provider_revoke", { id, password }),
 };
