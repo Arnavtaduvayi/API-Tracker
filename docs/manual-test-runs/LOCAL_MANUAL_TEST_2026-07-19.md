@@ -24,6 +24,20 @@ verified against production baseline `7d81090`.
 
 ## Baseline
 
+```text
+Manual test baseline: 7d81090
+Status: comprehensive pre-remediation manual run
+This is not the final validation of merged Phase 2 main at 0ab6636.
+```
+
+The deep-audit Phase 2 security remediation has since merged to `main` as
+`0ab6636` ("Merge pull request #10 from Arnavtaduvayi/fix/security-phase-2").
+**This entire manual run was executed against the pre-remediation baseline
+`7d81090`.** It is a comprehensive pre-remediation manual run, NOT the final
+validation of the merged Phase 2 `main`. See "Tests to rerun against merged
+Phase 2 / the UI redesign" at the end for what must be re-executed on
+`0ab6636` (and again after the planned UI redesign).
+
 - Production code baseline under test: **`7d81090`** (main).
 - Branch HEAD `7605142` differs from `7d81090` by exactly the three testing
   documents (`git diff --stat 7d81090..7605142`: only
@@ -113,9 +127,19 @@ Final totals for this safe/local session:
 | PASS | 113 (112 numbered IDs + packaged-app re-check) |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (need human keychain/Wi-Fi assist) | 11 |
-| DEFERRED (out of session scope) | 5 (+7 live scripts) |
+| NOT RUN (need human keychain/Wi-Fi assist) | **12** |
+| DEFERRED (out of session scope) | 4 (+7 live scripts) |
 | DEFECTS filed | 2 (MANUAL-001 low, MANUAL-002 low) |
+
+**Count reconciliation (corrected):** the earlier draft said "11" remaining
+but listed 10 Keychain + 2 offline = **12**. The error was double-counting
+CON-03 (offline sync) as both "deferred" and "offline NOT-RUN". Corrected:
+the 12 remaining physical-action IDs are DST-02, DST-03, DST-05, DST-06,
+DST-07, DST-08, SYN-01, SYN-02, SYN-04, SYN-05 (10 Keychain) + VLT-10, CON-03
+(2 offline). CON-03 moves out of the deferred bucket, leaving **4** deferred
+numbered IDs (CRD-18, CON-02, DST-04, SYN-03) + 7 §L live scripts.
+_(This block and the counts are updated as each remaining test is run in the
+assisted pass.)_
 
 PASS (112 numbered IDs + packaged re-check): SETUP-01/02/03, VLT-01..10
 (01–09 core gate incl. 07/08/09; VLT-10 offline part pending), PRJ-01..07,
@@ -124,18 +148,20 @@ SCN-01..09, ALR-01/02/03, NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07,
 CON-01/04, ROT-01..06, SET-01, BCK-01..08, DST-01, and the packaged `.app`
 re-check.
 
-**NOT RUN (11 — need a human hand):**
-- **Destinations & Sync** DST-02, DST-03, DST-05, DST-06, DST-07, DST-08,
-  SYN-01, SYN-02, SYN-04, SYN-05 — all require writing to the **macOS
-  login Keychain**, which triggers an OS "Allow" permission dialog the
-  automation cannot click. DST-01 (catalog honesty) passed.
-- **VLT-10** (restart + offline reopening) and **CON-03** (offline sync)
-  need the machine taken **offline** (Wi-Fi off); the restart half of
-  VLT-10 was exercised many times, only the Wi-Fi-off half remains.
+**NOT RUN (12 — need a human hand; being completed in the assisted pass):**
+- **Destinations & Sync (10)** DST-02, DST-03, DST-05, DST-06, DST-07,
+  DST-08, SYN-01, SYN-02, SYN-04, SYN-05 — all write to the **macOS login
+  Keychain**, which triggers an OS "Allow" permission dialog the automation
+  cannot click. DST-01 (catalog honesty) already passed.
+- **Offline (2): VLT-10** (restart + offline reopening) and **CON-03**
+  (offline sync) — need the machine taken **offline** (Wi-Fi off); the
+  restart half of VLT-10 was exercised many times, only the Wi-Fi-off half
+  remains.
 
-**DEFERRED (out of scope this session):** CRD-18, CON-02 (live api.openai);
-DST-04, SYN-03 (live api.github + retry); CON-03 (offline) — plus the 7 §L
-live-verification scripts.
+**DEFERRED (4 numbered + 7 scripts, out of scope this session):** CRD-18,
+CON-02 (live api.openai); DST-04, SYN-03 (live api.github + retry) — plus
+the 7 §L live-verification scripts. (CON-03 is NOT here; it is an offline
+NOT-RUN being completed in the assisted pass.)
 
 **Testing method note:** SETUP-01/02, VLT-01..06, PRJ-01..05, CRD-01..05
 were **human-observed** (tester clicked and reported, with screenshots).
