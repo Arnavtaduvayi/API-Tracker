@@ -110,16 +110,16 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 84 |
+| PASS | 91 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 41 |
+| NOT RUN (eligible, not yet reached) | 34 |
 | DEFERRED (out of session scope) | 4 (+7 live scripts) |
 | DEFECTS filed | 1 (MANUAL-001, low) |
 
 PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
 PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09, ALR-01/02/03,
-NTF-01..05, ENV-01..09, TPL-01..06. DEFERRED:
+NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07. DEFERRED:
 CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
 — low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
 accessibility harness + real key events, with CLI/DB cross-checks;
@@ -1525,6 +1525,69 @@ contains a secret value.
   single repo decision was deleted).
 - Evidence: AX notices.
 - Suspected component: n/a.
+
+### ACC-01 — create a one-time grant — **PASS**
+
+- Screen/workflow: Temporary access → Create a grant (alpha-app, one-time,
+  label "manual one time")
+- Result: **PASS** — grant created; CLI `access list`: label "manual one
+  time", STATUS active, LAUNCHES 0/1, 60-min window.
+- Evidence: AX form; CLI access list.
+
+### ACC-02 — run under the grant; one-time used twice — **PASS (security-relevant)**
+
+- Result: **PASS** — 1st `run --grant` printed "Injecting 2 credential(s)…
+  GITHUB_TOKEN, OPENAI_API_KEY" then **INJECTED** (the child saw the var;
+  the **value was never printed**). 2nd run **refused**: "access grant … is
+  used_up — it cannot authorize another launch"; SHOULD-NOT-RUN never
+  appeared. Grant status used_up (1/1).
+- Evidence: CLI run output; access list.
+
+### ACC-03 — max launch count — **PASS**
+
+- Result: **PASS** — grant with max-launches 2: runs 1–2 INJECTED, run 3
+  refused (used_up); status 2/2.
+- Evidence: CLI runs; access list.
+
+### ACC-04 — grant expiry — **PASS**
+
+- Result: **PASS** — grant with ttl 1 min; after the window elapsed, run
+  refused: "access grant … is expired — it cannot authorize another
+  launch"; status expired, SHOULD-NOT-RUN never ran.
+- Evidence: CLI run after 68 s; access list.
+
+### ACC-05 — per-process kill timer — **PASS**
+
+- Result: **PASS** — grant with max-duration-secs 5; `run --grant -- sleep
+  300` was terminated after ~5 s: "Grant time limit (5s) reached —
+  terminating the child. (This is a LOCAL bound; the credential itself
+  remains valid.)"; shell exit **124**.
+- Evidence: CLI run timing + exit code.
+
+### ACC-06 — active-session listing and termination — **PASS**
+
+- Screen/workflow: start grant-less `run … -- sleep 300` → Temporary
+  access → Injection sessions → terminate → Send SIGTERM
+- Result: **PASS** — CLI `access sessions` and the UI list both show the
+  running session (no grant, PID, "sleep 300"); terminate → confirm dialog
+  "Terminate session process" with the honest text "Send SIGTERM to
+  session … (pid …)? This is a local control: values already in the
+  process's environment cannot be clawed back, and the provider credential
+  stays valid."; Send SIGTERM → notice "SIGTERM sent to pid …. The provider
+  credential stays valid."; the CLI `run` exited (signal 15). Session
+  listing includes non-grant runs; values never shown (names/PIDs only).
+- Evidence: CLI sessions; AX dialog + notice; the run's exit.
+
+### ACC-07 — end a grant with a running process — **PASS**
+
+- Screen/workflow: new grant → `run --grant -- sleep 300` → end grant
+- Result: **PASS** — end → confirm "End grant 'acc07-endgrant' (…)? New
+  launches are refused immediately. Running processes keep running —
+  terminate them separately"; after: "Grant … ended. New launches are
+  refused immediately."; grant status **revoked**; the `sleep 300`
+  **kept running** (surfaced, not silently killed) until cleaned up.
+- Evidence: AX confirm+notice; CLI access list (revoked); process still
+  present after end.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
 
