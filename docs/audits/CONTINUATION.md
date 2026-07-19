@@ -12,13 +12,17 @@
 
 ## Status by phase
 - [x] **Phase 0** — environment/provenance reported; model discrepancy surfaced and resolved (proceed on Fable 5).
-- [~] **Phase 1** — evidence validated & internally consistent; dedup started (CRYPTO-01≡CONC-03). **FINDINGS_INDEX.md still to write.**
-- [x] **Phase 3 — CRYPTO-01/CONC-03**: RESOLVED. Deterministic reproduction (25/25 orphan+wedge) + transaction proof + defense control (5/5). See `evidence/crypto01/RESOLUTION.md`, `evidence/crypto01/repro_run.log`, harness files. Consolidated CONC-03 into CRYPTO-01.
-- [ ] **Phase 4 — ROT-001** (High, unverified): lost-revoke/crash wedge. Source: `vault.rs:7057-7077,7244-7278,7343-7353,7386-7396,7421-7427`. Cross-check ROT-010 (404-as-success). Per provider (OpenAI, Supabase, others).
-- [ ] **Phase 5 — OBS-001** (High, unverified): exposure-alert auto-resolve when evidence disappears. Source: `vault.rs:2044-2082,2102-2112,5121-5153` + `monitor.rs:140-150`.
-- [ ] **Phase 2/6 — material leads**: PI-02/CONC-11 (PID reuse term), PI-06 (pid<=0), IPC-01/FS-09 (arbitrary file write), IPC-02 (delete no reauth), PI-05/CONC-02 (clock), NET-01/NET-02 (SSRF), GScan-03/CONC-05 (git-history memory), CONC-04/CRYPTO-03 (backup), DEST-01..03 (destination semantics), M-6 (CI action pinning).
-- [ ] **Phase 8 — SOURCE_REVIEW_LEDGER.md**: 62 prod Rust (41 core + 19 CLI + 2 desktop) + 31 FE + 9 scripts + 2 CI + Tauri/pkg config.
-- [ ] **Phase 9 — reports**: DEEP_TECHNICAL_AUDIT (update), THREAT_MODEL_DELTA, TEST_COVERAGE_GAPS, REMEDIATION_PLAN, MANUAL_SECURITY_TESTS, FINDINGS_INDEX.
+- [x] **Phase 1** — evidence validated & internally consistent; **FINDINGS_INDEX.md** written (96 dispositions, 10 dedup consolidations).
+- [x] **Phase 3 — CRYPTO-01/CONC-03**: RESOLVED. 25/25 reproduction + proof + 5/5 defense control. `evidence/crypto01/`. Promoted Med→High.
+- [x] **Phase 4 — ROT-001 (+ROT-010)**: VERIFIED (state proof + provider matrix). `evidence/ROT-001_RESOLUTION.md`. Refined High→Med.
+- [x] **Phase 5 — OBS-001**: VERIFIED (control-flow proof). `evidence/OBS-001_RESOLUTION.md`. Refined High→Med.
+- [x] **Phase 2/6 — material leads**: PI-02/04/05/06/07, NET-01/02/03, IPC-01/02, CONC-04 verified by inspection. `evidence/MATERIAL_LEADS_VERIFICATION.md`.
+- [x] **Phase 8 — SOURCE_REVIEW_LEDGER.md**: every production file represented once.
+- [x] **Phase 9 — reports**: DEEP_TECHNICAL_AUDIT (Session-2 addendum), THREAT_MODEL_DELTA, TEST_COVERAGE_GAPS, REMEDIATION_PLAN, FINDINGS_INDEX written. (MANUAL_SECURITY_TESTS from prior session retained.)
+
+## Residual for a future pass (not blocking completion)
+- `Ac`-status Low/Info findings (accepted on reviewer citation, not independently re-read): ROT-002..008/011, OBS-005..012, FS-01..08, CONC-07..10. Highest value: independent re-verification of the ROT-* transition races and adopting the CRYPTO-01 harness as a checked-in regression test.
+- Live-provider + destination live testing (real creds, out of scope) and Windows/Linux behavioral tests remain required before GA — see TEST_COVERAGE_GAPS.md.
 
 ## Key resolved facts (do not re-derive)
 - crypto.rs primitive layer is clean (XChaCha20-Poly1305 + Argon2id + AAD binding + version byte; no custom crypto; debug-gated fast KDF). VERIFIED.

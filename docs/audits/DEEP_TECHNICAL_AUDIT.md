@@ -12,6 +12,22 @@
 
 ---
 
+## Session 2 completion addendum (Fable 5)
+
+This audit was completed in a continuation session on **Fable 5 (`claude-fable-5`)**, effort `max`. (The continuation prompt named Opus 4.8; the user deliberately selected Fable 5 via `/model` before launch, so Fable 5 is recorded as the model and **no conclusion is attributed to Opus**; no model fallback occurred.) The interrupted verification was finished to an evidence-based standard without modifying any production file.
+
+**What changed this session (see `FINDINGS_INDEX.md` for all 96 dispositions):**
+- **CRYPTO-01 (+CONC-03) — RESOLVED with a deterministic reproduction.** A standalone concurrency harness (no repo file modified) reproduced the orphaned-ciphertext data loss **25/25** in race mode and confirmed the freshness-check defense **5/5** in control mode. The contradiction between the "SOLID" first-read and the CONFIRMED finding is resolved: the BLAKE3 wrap-hash closes the *sequential* stale-cache case but **not** the intra-operation TOCTOU window in `add_credential`/`replace_credential_value`. **Reassessed Med → High** (silent permanent data loss + rotation wedge). Evidence: `evidence/crypto01/`.
+- **ROT-001 (+ROT-010) — VERIFIED, refined.** Rigorous state-machine proof + provider matrix: a lost/failed revoke response strands the rotation in `OLD_DISABLED`; `advance` can't complete (buried crash-marker), `complete_manual`/`cancel` reject the state, and the only exit (`rollback`) restores a permanently-deleted key for OpenAI/Supabase. "No exit path" refined; **reassessed High → Med.** Evidence: `evidence/ROT-001_RESOLUTION.md`.
+- **OBS-001 — VERIFIED.** Control-flow proof: repo-scan `PossibleExposure` alerts auto-resolve when the incremental scan stops re-emitting the finding (unchanged/unavailable repo, secret only in older history), decoupled from remediation. **Reassessed High → Med.** Evidence: `evidence/OBS-001_RESOLUTION.md`.
+- **Material leads personally verified** (PI-02/04/05/06/07, NET-01/02/03, IPC-01/02, CONC-04): `evidence/MATERIAL_LEADS_VERIFICATION.md`.
+
+**Completion artifacts:** `FINDINGS_INDEX.md` (canonical registry, dedup, dispositions), `SOURCE_REVIEW_LEDGER.md` (per-file), `REMEDIATION_PLAN.md` (release blockers + order), `THREAT_MODEL_DELTA.md`, `TEST_COVERAGE_GAPS.md`, `CONTINUATION.md`.
+
+**Post-audit severity (this session):** 0 Critical, **1 High (CRYPTO-01)**, ~23 Medium, ~30 Low, ~27 Info, **2 Refuted** (CRYPTO-02, IPC-03), 0 Inconclusive. Residual `Ac`-status Lows/Info (accepted on reviewer citation, not independently re-read) are listed in `FINDINGS_INDEX.md` for the next pass.
+
+---
+
 ## Method & honest limitations
 
 Two independent, complementary passes were run and reconciled:
