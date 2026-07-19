@@ -600,6 +600,31 @@ FROM pricing_overrides;
 DROP TABLE pricing_overrides;
 "#,
     },
+    Migration {
+        version: 9,
+        name: "project templates and local stack-detection preferences",
+        sql: r#"
+-- Which templates were applied to which projects (informational).
+CREATE TABLE project_templates (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    template_id TEXT NOT NULL,
+    applied_at  TEXT NOT NULL,
+    PRIMARY KEY (project_id, template_id)
+) STRICT;
+
+-- Locally learned stack-detection decisions: the user's explicit
+-- confirm/dismiss history per repository and template. Deterministic
+-- rules + this table are the entire "learning" mechanism (no ML), and the
+-- table can be reset or cleared entirely at any time.
+CREATE TABLE stack_preferences (
+    repo_path   TEXT NOT NULL,
+    template_id TEXT NOT NULL,
+    decision    TEXT NOT NULL,
+    decided_at  TEXT NOT NULL,
+    PRIMARY KEY (repo_path, template_id)
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

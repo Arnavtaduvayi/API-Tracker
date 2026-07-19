@@ -54,8 +54,10 @@ pub mod scanner;
 pub mod secret;
 pub mod session;
 pub mod settings;
+pub mod stackdetect;
 pub mod status;
 pub mod syncplan;
+pub mod templates;
 pub mod usage;
 pub mod vault;
 

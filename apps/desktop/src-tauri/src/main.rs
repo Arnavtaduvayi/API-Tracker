@@ -1137,6 +1137,68 @@ fn pricing_export(state: State<'_, AppState>, provider: Option<String>) -> CmdRe
 }
 
 #[tauri::command]
+fn template_list() -> Vec<api_tracker_core::templates::Template> {
+    api_tracker_core::templates::catalog()
+}
+
+#[tauri::command]
+fn template_apply(
+    state: State<'_, AppState>,
+    template_id: String,
+    project: String,
+    write_example_dir: Option<String>,
+) -> CmdResult<api_tracker_core::vault::TemplateApplyOutcome> {
+    with_vault(&state, |vault| {
+        vault.template_apply(
+            &template_id,
+            &project,
+            write_example_dir.as_deref().map(std::path::Path::new),
+        )
+    })
+}
+
+#[tauri::command]
+fn stack_detect(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    repo: Option<String>,
+) -> CmdResult<Vec<api_tracker_core::stackdetect::DetectionReport>> {
+    with_vault(&state, |vault| match (project, repo) {
+        (_, Some(repo)) => Ok(vec![vault.stack_detect_path(std::path::Path::new(&repo))?]),
+        (Some(project), None) => vault.stack_detect_project(&project),
+        (None, None) => Err(api_tracker_core::error::CoreError::InvalidInput(
+            "pass a project or a repository path".into(),
+        )),
+    })
+}
+
+#[tauri::command]
+fn stack_decide(
+    state: State<'_, AppState>,
+    repo: String,
+    template_id: String,
+    decision: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.stack_decide(std::path::Path::new(&repo), &template_id, &decision)
+    })
+}
+
+#[tauri::command]
+fn stack_prefs(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::vault::StackPreference>> {
+    with_vault(&state, |vault| vault.stack_preferences())
+}
+
+#[tauri::command]
+fn stack_prefs_reset(state: State<'_, AppState>, repo: Option<String>) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.stack_preferences_reset(repo.as_deref().map(std::path::Path::new))
+    })
+}
+
+#[tauri::command]
 fn budget_cost_source_set(state: State<'_, AppState>, value: String) -> CmdResult<()> {
     with_vault(&state, |vault| {
         let source: api_tracker_core::usage::CostSource = value.parse()?;
@@ -1983,6 +2045,12 @@ fn main() {
             pricing_remove_override,
             pricing_import,
             pricing_export,
+            template_list,
+            template_apply,
+            stack_detect,
+            stack_decide,
+            stack_prefs,
+            stack_prefs_reset,
             usage_report,
             usage_record_manual,
             budget_set,

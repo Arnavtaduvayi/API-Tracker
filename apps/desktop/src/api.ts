@@ -36,8 +36,12 @@ import type {
   SessionKillResult,
   Suppression,
   PermissionsPreview,
+  DetectionReport,
   PricingImportOutcome,
   PricingRecord,
+  StackPreference,
+  Template,
+  TemplateApplyOutcome,
   Project,
   ProviderConnection,
   ProviderKeyListing,
@@ -301,6 +305,15 @@ export const api = {
     call<number>("pricing_remove_override", { provider, model }),
   pricingImport: (json: string) => call<PricingImportOutcome>("pricing_import", { json }),
   pricingExport: (provider: string | null) => call<string>("pricing_export", { provider }),
+  templateList: () => call<Template[]>("template_list"),
+  templateApply: (templateId: string, project: string, writeExampleDir: string | null) =>
+    call<TemplateApplyOutcome>("template_apply", { templateId, project, writeExampleDir }),
+  stackDetect: (project: string | null, repo: string | null) =>
+    call<DetectionReport[]>("stack_detect", { project, repo }),
+  stackDecide: (repo: string, templateId: string, decision: "confirmed" | "dismissed") =>
+    call<void>("stack_decide", { repo, templateId, decision }),
+  stackPrefs: () => call<StackPreference[]>("stack_prefs"),
+  stackPrefsReset: (repo: string | null) => call<number>("stack_prefs_reset", { repo }),
   usageRecordManual: (
     credential: string,
     model: string | null,

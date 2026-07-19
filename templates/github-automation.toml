@@ -1,0 +1,31 @@
+# Project template: GitHub automation (CI, bots, release tooling).
+id = "github-automation"
+name = "GitHub automation"
+description = "Automation using GitHub tokens (Actions, bots, release scripts)."
+providers = ["github"]
+environments = ["development", "production"]
+docs = [
+    "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens",
+]
+destinations = ["env_mapping", "github_actions"]
+credential_separation = """
+Use FINE-GRAINED personal access tokens scoped to the specific repositories
+and permissions each automation needs, with an expiration. Never share one
+broad classic PAT across automations — a leak burns everything at once. In
+GitHub Actions, prefer the built-in GITHUB_TOKEN over a PAT wherever it
+suffices."""
+permission_guidance = """
+Fine-grained tokens: choose per-repository access and the minimal
+permission set. Classic PATs expose scopes via the API (API Tracker reads
+them); fine-grained permissions are not API-readable — record them in
+notes."""
+rotation_guidance = """
+Tokens are regenerated in the web UI; fine-grained tokens should carry an
+expiration so GitHub forces rotation. API Tracker records the
+provider-reported expiration and alerts before it lapses."""
+
+[[env]]
+name = "GITHUB_TOKEN"
+provider = "github"
+secret = true
+description = "Personal access token (github_pat_... or ghp_...)."

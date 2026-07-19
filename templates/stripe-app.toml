@@ -1,0 +1,40 @@
+# Project template: application accepting payments with Stripe.
+id = "stripe-app"
+name = "Stripe application"
+description = "An application processing payments through Stripe."
+providers = ["stripe"]
+environments = ["development", "production"]
+docs = [
+    "https://docs.stripe.com/keys",
+]
+destinations = ["env_mapping", "github_actions", "vercel"]
+credential_separation = """
+Stripe separates test mode (sk_test_...) and live mode (sk_live_...) —
+never configure a live key in development. Prefer RESTRICTED keys
+(rk_live_...) scoped to exactly the operations the app performs over the
+account-wide secret key."""
+permission_guidance = """
+Create restricted keys in the dashboard with the minimum permissions
+(e.g. charges write, customers read). The account secret key should stay
+out of application code entirely where a restricted key suffices."""
+rotation_guidance = """
+Stripe keys are rolled in the dashboard (a roll issues a replacement with a
+grace period). API Tracker's rotation workflow guides the manual roll and
+tracks the deployment of the new value."""
+
+[[env]]
+name = "STRIPE_SECRET_KEY"
+provider = "stripe"
+secret = true
+description = "Secret or restricted key (sk_live_/sk_test_/rk_...)."
+
+[[env]]
+name = "STRIPE_WEBHOOK_SECRET"
+provider = "stripe"
+secret = true
+description = "Webhook signing secret (whsec_...)."
+
+[[env]]
+name = "STRIPE_PUBLISHABLE_KEY"
+secret = false
+description = "Publishable key (pk_...); designed for client code."

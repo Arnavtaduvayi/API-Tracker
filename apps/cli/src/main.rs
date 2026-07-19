@@ -19,6 +19,7 @@ mod rotation_cmd;
 mod run_cmd;
 mod scan_cmd;
 mod sync_cmd;
+mod template_cmd;
 mod usage_cmd;
 mod vault_cmd;
 
@@ -65,6 +66,9 @@ enum Commands {
     /// Manage projects (folders of credentials).
     #[command(subcommand)]
     Project(project_cmd::ProjectCmd),
+    /// Project templates and local stack detection.
+    #[command(subcommand)]
+    Template(template_cmd::TemplateCmd),
     /// Manage credentials.
     #[command(subcommand)]
     Key(key_cmd::KeyCmd),
@@ -146,6 +150,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Settings(cmd) => vault_cmd::settings(&ctx, cmd),
         Commands::Provider(cmd) => provider_cmd::run(&ctx, cmd),
         Commands::Project(cmd) => project_cmd::run(&ctx, cmd),
+        Commands::Template(cmd) => template_cmd::run(&ctx, cmd),
         Commands::Key(cmd) => key_cmd::run(&ctx, cmd),
         Commands::Scan(args) => scan_cmd::scan(&ctx, args),
         Commands::Hooks(cmd) => scan_cmd::hooks(&ctx, cmd),

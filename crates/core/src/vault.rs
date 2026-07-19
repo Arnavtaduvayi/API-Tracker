@@ -31,7 +31,7 @@ use crate::status::{self, StatusInputs};
 use crate::usage;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Minimum length for newly chosen master, project, and backup passwords.
@@ -3732,6 +3732,211 @@ impl UnlockedVault {
     /// A proposed-update template for one provider, for review and import.
     pub fn pricing_propose(&self, provider: &str) -> Result<String> {
         crate::pricing::proposal_template(&self.conn, provider)
+    }
+
+    // --- Project templates and stack detection ---
+
+    /// Apply a project template: create the project if it does not exist
+    /// (with the template's environment classifications), record the
+    /// application, and optionally write a `.env.example` (names only)
+    /// into a directory. Never creates credentials — the returned
+    /// `next_steps` are the explicit commands that do.
+    pub fn template_apply(
+        &mut self,
+        template_id: &str,
+        project_name: &str,
+        write_example_dir: Option<&Path>,
+    ) -> Result<TemplateApplyOutcome> {
+        let template = crate::templates::find(template_id).ok_or_else(|| {
+            CoreError::InvalidInput(format!(
+                "unknown template '{template_id}' (see `template list`)"
+            ))
+        })?;
+        let project = match self.get_project(project_name) {
+            Ok(p) => p,
+            Err(CoreError::NotFound { .. }) => {
+                let environments = template
+                    .environments
+                    .iter()
+                    .filter_map(|e| e.parse::<crate::model::Environment>().ok())
+                    .collect();
+                self.create_project(NewProject {
+                    name: project_name.to_string(),
+                    description: template.description.clone(),
+                    notes: String::new(),
+                    environments,
+                    repo_paths: Vec::new(),
+                })?
+            }
+            Err(e) => return Err(e),
+        };
+        self.conn.execute(
+            "INSERT INTO project_templates (project_id, template_id, applied_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_id, template_id) DO UPDATE SET
+             applied_at = excluded.applied_at",
+            params![project.id, template.id, clock::now_rfc3339()],
+        )?;
+        let example_content = crate::templates::render_env_example(&template);
+        let example_path = match write_example_dir {
+            None => None,
+            Some(dir) => {
+                let path = dir.join(".env.example");
+                // Refuse to overwrite: an existing example may carry the
+                // user's own entries. They can merge manually.
+                crate::envgov::write_new(&path, &example_content).map_err(|e| {
+                    CoreError::InvalidInput(format!(
+                        "could not write {} ({e}); if it already exists, merge the \
+                         template's entries manually",
+                        path.display()
+                    ))
+                })?;
+                Some(path.display().to_string())
+            }
+        };
+        crate::audit::record(
+            &self.conn,
+            "template_applied",
+            Some(&project.id),
+            None,
+            &format!("template {}", template.id),
+        )?;
+        Ok(TemplateApplyOutcome {
+            next_steps: crate::templates::next_steps(&template, &project.name),
+            project,
+            template,
+            example_path,
+            example_content,
+        })
+    }
+
+    /// Which templates have been applied to a project.
+    pub fn project_templates(&self, project: &str) -> Result<Vec<(String, String)>> {
+        let p = self.project_row_by_ident(project)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT template_id, applied_at FROM project_templates
+             WHERE project_id = ?1 ORDER BY applied_at",
+        )?;
+        let rows = stmt
+            .query_map(params![p.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn stack_repo_key(repo: &Path) -> String {
+        repo.canonicalize()
+            .unwrap_or_else(|_| repo.to_path_buf())
+            .display()
+            .to_string()
+    }
+
+    /// Detect the stack of one repository directory: deterministic rules
+    /// over static files, combined with this vault's stored confirm/dismiss
+    /// history. Nothing is executed and nothing leaves the machine.
+    pub fn stack_detect_path(&self, repo: &Path) -> Result<crate::stackdetect::DetectionReport> {
+        if !repo.is_dir() {
+            return Err(CoreError::InvalidInput(format!(
+                "'{}' is not a directory",
+                repo.display()
+            )));
+        }
+        let key = Self::stack_repo_key(repo);
+        let signals = crate::stackdetect::detect(repo)?;
+        let mut prior = std::collections::BTreeMap::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT template_id, decision FROM stack_preferences WHERE repo_path = ?1")?;
+        for row in stmt.query_map(params![key], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (t, d) = row?;
+            prior.insert(t, d);
+        }
+        let suggestions = crate::stackdetect::suggest(&signals, &prior);
+        Ok(crate::stackdetect::DetectionReport {
+            repo_path: key,
+            signals,
+            suggestions,
+        })
+    }
+
+    /// Detect the stack of every repository registered on a project.
+    pub fn stack_detect_project(
+        &self,
+        project: &str,
+    ) -> Result<Vec<crate::stackdetect::DetectionReport>> {
+        let p = self.get_project(project)?;
+        let mut out = Vec::new();
+        for repo in &p.repo_paths {
+            match self.stack_detect_path(Path::new(repo)) {
+                Ok(report) => out.push(report),
+                Err(CoreError::InvalidInput(_)) => continue, // missing dir
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record the user's decision about a suggestion. `confirmed` boosts
+    /// the suggestion in future runs; `dismissed` hides it (still listed
+    /// with its decision). This decision history is the entire "learning"
+    /// store and can be reset at any time.
+    pub fn stack_decide(&self, repo: &Path, template_id: &str, decision: &str) -> Result<()> {
+        if decision != "confirmed" && decision != "dismissed" {
+            return Err(CoreError::InvalidInput(
+                "decision must be 'confirmed' or 'dismissed'".into(),
+            ));
+        }
+        if crate::templates::find(template_id).is_none() {
+            return Err(CoreError::InvalidInput(format!(
+                "unknown template '{template_id}'"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO stack_preferences (repo_path, template_id, decision, decided_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(repo_path, template_id) DO UPDATE SET
+             decision = excluded.decision, decided_at = excluded.decided_at",
+            params![
+                Self::stack_repo_key(repo),
+                template_id.to_lowercase(),
+                decision,
+                clock::now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every stored stack-detection decision.
+    pub fn stack_preferences(&self) -> Result<Vec<StackPreference>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT repo_path, template_id, decision, decided_at
+             FROM stack_preferences ORDER BY repo_path, template_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(StackPreference {
+                    repo_path: r.get(0)?,
+                    template_id: r.get(1)?,
+                    decision: r.get(2)?,
+                    decided_at: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete learned stack decisions — for one repository, or all of them
+    /// (`repo = None`). Returns how many rows were removed.
+    pub fn stack_preferences_reset(&self, repo: Option<&Path>) -> Result<usize> {
+        let n = match repo {
+            Some(r) => self.conn.execute(
+                "DELETE FROM stack_preferences WHERE repo_path = ?1",
+                params![Self::stack_repo_key(r)],
+            )?,
+            None => self.conn.execute("DELETE FROM stack_preferences", [])?,
+        };
+        Ok(n)
     }
 
     // --- Process injection ---
@@ -7779,6 +7984,28 @@ pub struct RotationView {
     pub credential_name: String,
     pub project_name: String,
     pub waiting_on: Option<String>,
+}
+
+/// The outcome of applying a project template.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TemplateApplyOutcome {
+    pub project: Project,
+    pub template: crate::templates::Template,
+    /// Where `.env.example` was written, if requested.
+    pub example_path: Option<String>,
+    /// The rendered `.env.example` content (names only, never values).
+    pub example_content: String,
+    /// The explicit commands that add the template's secret credentials.
+    pub next_steps: Vec<String>,
+}
+
+/// One stored stack-detection decision.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StackPreference {
+    pub repo_path: String,
+    pub template_id: String,
+    pub decision: String,
+    pub decided_at: String,
 }
 
 /// A provider connection's stored state (no secrets; the key is masked).

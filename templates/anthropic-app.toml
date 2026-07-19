@@ -1,0 +1,29 @@
+# Project template: application calling the Anthropic API.
+id = "anthropic-app"
+name = "Anthropic application"
+description = "An application that calls the Anthropic API (Claude models)."
+providers = ["anthropic"]
+environments = ["development", "production"]
+docs = [
+    "https://platform.claude.com/docs/en/api/overview",
+    "https://platform.claude.com/docs/en/about-claude/pricing",
+]
+destinations = ["env_mapping", "github_actions", "vercel"]
+credential_separation = """
+Create a separate API key per environment, in separate workspaces where
+possible: Anthropic usage reports group by API key and workspace, so
+separation gives you exact attribution. Keys can be given an expiration at
+creation — use it for anything temporary."""
+permission_guidance = """
+Anthropic keys are scoped by workspace membership; there are no per-key
+scopes to reduce. Keep production keys in a dedicated workspace."""
+rotation_guidance = """
+New keys must be created in the console (no create API); API Tracker's
+rotation workflow guides the manual creation and then disables/archives the
+old key via the Admin API."""
+
+[[env]]
+name = "ANTHROPIC_API_KEY"
+provider = "anthropic"
+secret = true
+description = "API key used by the SDK (sk-ant-api...)."

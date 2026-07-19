@@ -836,6 +836,64 @@ export interface PricingImportOutcome {
   replaced: number;
 }
 
+export interface TemplateEnvVar {
+  name: string;
+  provider: string | null;
+  secret: boolean;
+  description: string;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  description: string;
+  providers: string[];
+  environments: string[];
+  docs: string[];
+  destinations: string[];
+  credential_separation: string;
+  permission_guidance: string;
+  rotation_guidance: string;
+  env: TemplateEnvVar[];
+}
+
+export interface TemplateApplyOutcome {
+  project: Project;
+  template: Template;
+  example_path: string | null;
+  /** Names only — never values. */
+  example_content: string;
+  next_steps: string[];
+}
+
+export interface StackSignal {
+  file: string;
+  evidence: string;
+  template_id: string | null;
+  provider: string | null;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface StackSuggestion {
+  template_id: string;
+  confidence: "low" | "medium" | "high";
+  evidence: string[];
+  prior_decision: "confirmed" | "dismissed" | null;
+}
+
+export interface DetectionReport {
+  repo_path: string;
+  signals: StackSignal[];
+  suggestions: StackSuggestion[];
+}
+
+export interface StackPreference {
+  repo_path: string;
+  template_id: string;
+  decision: string;
+  decided_at: string;
+}
+
 export interface ApiError {
   code: string;
   message: string;
