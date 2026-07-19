@@ -13,7 +13,7 @@ import type {
   StoredPermissions,
   TimelineEvent,
 } from "../types";
-import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
+import { formatTimestamp, safeExternalUrl, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
 import { ConfirmDialog, PromptDialog } from "./ConfirmDialog";
 
@@ -232,13 +232,27 @@ export function CredentialDetail(props: {
         <dd>{formatTimestamp(c.last_used_at)}</dd>
         <dt>Documentation</dt>
         <dd>
-          {c.docs_url ? (
-            <a href={c.docs_url} target="_blank" rel="noreferrer">
-              {c.docs_url}
-            </a>
-          ) : (
-            "—"
-          )}
+          {(() => {
+            // Only render an anchor for an explicitly-safe external scheme
+            // (http/https/mailto). A javascript:/file:/data: docs_url is
+            // shown as inert text, never a clickable href (IPC-05).
+            const safe = safeExternalUrl(c.docs_url);
+            if (safe) {
+              return (
+                <a href={safe} target="_blank" rel="noreferrer">
+                  {safe}
+                </a>
+              );
+            }
+            if (c.docs_url) {
+              return (
+                <span className="muted" title="unsupported or unsafe URL scheme — not linked">
+                  {c.docs_url} (not a safe link)
+                </span>
+              );
+            }
+            return "—";
+          })()}
         </dd>
         <dt>Notes</dt>
         <dd>{c.notes || "—"}</dd>

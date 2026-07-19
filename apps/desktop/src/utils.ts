@@ -102,3 +102,29 @@ export function driftSeverity(kind: DriftKind): "high" | "medium" | "low" | "inf
       return "info";
   }
 }
+
+/**
+ * Whether `url` is safe to place in an anchor `href` that opens externally.
+ * Only `http:`, `https:`, and `mailto:` are allowed. A `javascript:`,
+ * `data:`, `file:`, `vbscript:`, or otherwise unusual scheme — which a
+ * user- or vault-supplied `docs_url` could carry (IPC-05) — is rejected so
+ * it can never execute or read local files when clicked. Relative or
+ * unparseable values are treated as unsafe (we only render absolute,
+ * explicitly-safe external links).
+ */
+export function safeExternalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (trimmed === "") return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null; // relative or malformed: not a safe absolute external link
+  }
+  const scheme = parsed.protocol.toLowerCase();
+  if (scheme === "http:" || scheme === "https:" || scheme === "mailto:") {
+    return trimmed;
+  }
+  return null;
+}
