@@ -254,6 +254,43 @@ export interface MonitorFullReport {
   new_alert_severities: string[];
 }
 
+/** When monitoring last ran and how it went (no run performed). */
+export interface MonitorStatus {
+  last_run_at: string | null;
+  last_success_at: string | null;
+  last_failure_at: string | null;
+  last_error: string;
+  last_detail: string;
+}
+
+/** A stored scan suppression (no secret material). */
+export interface Suppression {
+  suppression_key: string;
+  rule: string;
+  path: string;
+  reason: string;
+  created_at: string;
+}
+
+/** A recorded injection session from `run` (names and PIDs only). */
+export interface ProcessSession {
+  id: string;
+  project_id: string;
+  started_at: string;
+  ended_at: string | null;
+  command: string;
+  injected_vars: string;
+  exit_code: number | null;
+  pid: number | null;
+  grant_id: string | null;
+}
+
+export interface SessionKillResult {
+  session_id: string;
+  pid: number;
+  signalled: boolean;
+}
+
 /**
  * A user-configured webhook channel. The URL may embed a token, so only the
  * masked form ever reaches the frontend; delivery payloads carry alert

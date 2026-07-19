@@ -288,23 +288,39 @@ fn notification_channels_deliver_metadata_only_and_record_failures() {
     );
 
     v.run_monitor().unwrap();
-    let http = MockHttpClient::json(r#"{"ok":true}"#);
-    let delivered = v.deliver_notifications(&http).unwrap();
-    assert!(delivered >= 1);
-    let req = http.last_request().unwrap();
-    assert_eq!(req.url, url);
-    let body = String::from_utf8_lossy(req.body.as_ref().unwrap()).into_owned();
-    assert!(body.contains("expired"));
-    assert!(!body.contains(FAKE_KEY), "payloads carry metadata only");
 
-    // A failing webhook records the error and does not fail the caller.
+    // A failing webhook records the error, does not fail the caller, and
+    // does NOT mark the alert delivered — so the next run retries it.
     let http = MockHttpClient::with(500, vec![], "{}");
     v.deliver_notifications(&http).unwrap();
     let channels = v.notification_channels().unwrap();
     assert!(channels[0].last_error.contains("500"));
 
-    // Severity floor: an info-only channel would deliver more; a critical
-    // floor delivers nothing for a high alert.
+    let http = MockHttpClient::json(r#"{"ok":true}"#);
+    let delivered = v.deliver_notifications(&http).unwrap();
+    assert!(delivered >= 1, "a failed delivery must be retried next run");
+    let req = http.last_request().unwrap();
+    assert_eq!(req.url, url);
+    let body = String::from_utf8_lossy(req.body.as_ref().unwrap()).into_owned();
+    assert!(body.contains("expired"));
+    assert!(!body.contains(FAKE_KEY), "payloads carry metadata only");
+    let channels = v.notification_channels().unwrap();
+    assert!(
+        channels[0].last_error.is_empty(),
+        "success clears the error"
+    );
+
+    // Once-per-alert dedup: the same open alert at the same severity is NOT
+    // re-delivered on the next run (regression test — the monitor runs every
+    // `monitor_interval_minutes`, and each run used to re-send everything
+    // observed within the previous hour).
+    let http = MockHttpClient::json(r#"{"ok":true}"#);
+    let delivered = v.deliver_notifications(&http).unwrap();
+    assert_eq!(delivered, 0, "already-delivered alerts must not repeat");
+    assert!(http.last_request().is_none(), "no request should be made");
+
+    // Severity floor: a critical-floor channel delivers nothing for a high
+    // alert (and 'team' stays deduplicated).
     v.notification_channel_add(
         "quiet",
         &SecretString::from("https://q.example.com/h"),
@@ -316,8 +332,19 @@ fn notification_channels_deliver_metadata_only_and_record_failures() {
         MockHttpClient::json_response("{}"),
     ]);
     let delivered = v.deliver_notifications(&http).unwrap();
-    // Only the 'team' channel (floor high) received the high alert.
-    assert_eq!(delivered, 1);
+    assert_eq!(delivered, 0);
+
+    // The delivery history records both the failure and the success —
+    // channel names and outcomes only, never the URL.
+    let history = v.notification_history(20).unwrap();
+    assert!(history.iter().any(|e| e.detail.contains("FAILED")));
+    assert!(history
+        .iter()
+        .any(|e| e.detail.contains("delivered") && e.detail.contains("channel=team")));
+    assert!(
+        history.iter().all(|e| !e.detail.contains("FAKE-token")),
+        "history must never contain the webhook URL"
+    );
 }
 
 #[test]
@@ -368,4 +395,91 @@ fn doc_watch_scheduling_and_history() {
     let history = v.doc_watch_history(None, 10).unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].outcome, "changed");
+}
+
+#[test]
+fn monitor_cycle_records_status_and_offline_skips_network() {
+    let (_dir, _paths, mut v) = new_vault();
+    add_project(&mut v, "app");
+
+    // Nothing recorded before the first cycle.
+    let st = v.monitor_status().unwrap();
+    assert!(st.last_run_at.is_none());
+    assert!(st.last_success_at.is_none());
+
+    // Offline cycle: no transports, network phases skipped, status recorded.
+    let report = v.run_monitor_cycle(None).unwrap();
+    assert!(report.offline);
+    assert_eq!(report.doc_checks, 0);
+    assert_eq!(report.webhooks_delivered, 0);
+    let st = v.monitor_status().unwrap();
+    assert!(st.last_run_at.is_some());
+    assert!(st.last_success_at.is_some());
+    assert!(st.last_failure_at.is_none());
+    assert!(st.last_error.is_empty());
+    assert!(st.last_detail.contains("offline"), "{}", st.last_detail);
+}
+
+#[test]
+fn suppressions_can_be_listed_and_removed() {
+    let (_dir, _paths, v) = new_vault();
+    v.add_suppression("k1", "manual", "src/a.env", "test fixture")
+        .unwrap();
+    let listed = v.list_suppressions().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].suppression_key, "k1");
+
+    v.remove_suppression("k1").unwrap();
+    assert!(v.list_suppressions().unwrap().is_empty());
+    // Removing an unknown key errors instead of silently succeeding.
+    assert!(v.remove_suppression("k1").is_err());
+}
+
+#[test]
+fn process_sessions_list_with_pids_and_termination_is_guarded() {
+    let (_dir, _paths, mut v) = new_vault();
+    let project = add_project(&mut v, "app");
+
+    let conn = v.connection();
+    let s1 = api_tracker_core::inject::start_session(
+        conn,
+        &project.id,
+        "npm test",
+        &["OPENAI_API_KEY".into()],
+    )
+    .unwrap();
+    // A real child process we control, so SIGTERM has a live target.
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    api_tracker_core::inject::set_session_pid(conn, &s1, child.id(), None).unwrap();
+
+    let s2 =
+        api_tracker_core::inject::start_session(conn, &project.id, "npm run dev", &[]).unwrap();
+    api_tracker_core::inject::end_session(conn, &s2, Some(0)).unwrap();
+
+    // Active-only filtering hides the ended session.
+    let active = v.list_process_sessions(50, true).unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, s1);
+    assert_eq!(active[0].pid, Some(i64::from(child.id())));
+    let all = v.list_process_sessions(50, false).unwrap();
+    assert_eq!(all.len(), 2);
+    // Session rows never contain values — only names.
+    assert!(all.iter().all(|s| !s.injected_vars.contains("sk-")));
+
+    // Termination refuses ended sessions and unknown ids.
+    assert!(v.terminate_process_session(&s2).is_err());
+    assert!(v.terminate_process_session("no-such-session").is_err());
+
+    // Terminating the live session signals the recorded PID.
+    let (id, pid, signalled) = v.terminate_process_session(&s1).unwrap();
+    assert_eq!(id, s1);
+    assert_eq!(pid, i64::from(child.id()));
+    assert!(signalled, "SIGTERM to a live child must be accepted");
+    // The child actually dies (SIGTERM), proving the signal was real.
+    let mut child = child;
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "sleep must have been terminated");
 }

@@ -59,7 +59,7 @@ pub struct PlanArgs {
     /// Supabase project ref). Derived from the linked key when omitted.
     #[arg(long)]
     pub provider_project: Option<String>,
-    /// Provider-side id of the OLD key (see `provider list-keys`).
+    /// Provider-side id of the OLD key (see `provider keys`).
     #[arg(long)]
     pub old_key_id: Option<String>,
     #[arg(long, default_value = "")]

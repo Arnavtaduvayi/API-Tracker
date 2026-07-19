@@ -1,18 +1,22 @@
-// Repository scanning: pick a path, choose a mode, view redacted findings
-// (with vault matches), install/remove the pre-commit hook, and suppress
-// false positives with a reason.
+// Repository scanning: pick a path, choose a mode (staged, working tree, or
+// Git history with a user-chosen depth including full history), view redacted
+// findings (with vault matches), install/remove the pre-commit hook, and
+// manage suppressions (add with a reason, list, remove).
 
 import { useState } from "react";
 import { api, isApiError } from "../api";
-import type { Finding, HookStatus } from "../types";
+import type { Finding, HookStatus, Suppression } from "../types";
 import { PromptDialog } from "./ConfirmDialog";
 
 export function ScanView() {
   const [path, setPath] = useState("");
   const [mode, setMode] = useState<"working" | "staged" | "history">("staged");
+  const [historyDepth, setHistoryDepth] = useState("50");
+  const [fullHistory, setFullHistory] = useState(false);
   const [markExposed, setMarkExposed] = useState(true);
   const [findings, setFindings] = useState<Finding[] | null>(null);
   const [hook, setHook] = useState<HookStatus | null>(null);
+  const [suppressions, setSuppressions] = useState<Suppression[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -37,7 +41,16 @@ export function ScanView() {
         setError("Enter a repository or directory path.");
         return;
       }
-      const result = await api.scanPath(path.trim(), mode, markExposed);
+      let depth: number | null = null;
+      if (mode === "history" && !fullHistory) {
+        const n = Number.parseInt(historyDepth, 10);
+        if (!Number.isFinite(n) || n < 1) {
+          setError("History depth must be a positive number of commits.");
+          return;
+        }
+        depth = n;
+      }
+      const result = await api.scanPath(path.trim(), mode, markExposed, depth);
       setFindings(result);
       const matched = result.filter((f) => f.vault_match).length;
       if (matched > 0) {
@@ -52,6 +65,18 @@ export function ScanView() {
       setHook(await api.hookStatus(path.trim()));
     });
 
+  const refreshSuppressions = () =>
+    run(async () => {
+      setSuppressions(await api.suppressionList());
+    });
+
+  const removeSuppression = (key: string) =>
+    run(async () => {
+      await api.suppressionRemove(key);
+      setSuppressions(await api.suppressionList());
+      setNotice("Suppression removed; future scans report this finding again.");
+    });
+
   const confirmSuppress = (reason: string) => {
     const f = suppressing;
     setSuppressing(null);
@@ -63,6 +88,9 @@ export function ScanView() {
       }
       await api.suppressionAdd(f.suppression_key, f.file, reason);
       setNotice("Suppressed. Re-run the scan to confirm it is hidden.");
+      if (suppressions !== null) {
+        setSuppressions(await api.suppressionList());
+      }
     });
   };
 
@@ -88,9 +116,32 @@ export function ScanView() {
           <select value={mode} onChange={(e) => setMode(e.target.value as typeof mode)}>
             <option value="staged">Staged changes (Git)</option>
             <option value="working">Working tree</option>
-            <option value="history">Recent history (Git)</option>
+            <option value="history">History (Git)</option>
           </select>
         </label>
+        {mode === "history" && (
+          <div style={{ display: "flex", gap: "1rem", alignItems: "center" }}>
+            <label>
+              <input
+                type="checkbox"
+                checked={fullHistory}
+                onChange={(e) => setFullHistory(e.target.checked)}
+              />{" "}
+              full history (every commit; can be slow on large repositories)
+            </label>
+            {!fullHistory && (
+              <label className="field" style={{ maxWidth: "10rem" }}>
+                Most recent commits
+                <input
+                  type="number"
+                  min="1"
+                  value={historyDepth}
+                  onChange={(e) => setHistoryDepth(e.target.value)}
+                />
+              </label>
+            )}
+          </div>
+        )}
         <label>
           <input
             type="checkbox"
@@ -105,6 +156,9 @@ export function ScanView() {
           </button>
           <button onClick={() => void refreshHook()} disabled={busy}>
             Check hook status
+          </button>
+          <button onClick={() => void refreshSuppressions()} disabled={busy}>
+            Show suppressions
           </button>
         </div>
       </div>
@@ -141,6 +195,45 @@ export function ScanView() {
 
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
+
+      {suppressions && (
+        <div style={{ marginTop: "1rem" }}>
+          <h2>Suppressions ({suppressions.length})</h2>
+          {suppressions.length === 0 ? (
+            <p>No suppressions stored.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Key</th>
+                  <th>Path</th>
+                  <th>Reason</th>
+                  <th>Since</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {suppressions.map((s) => (
+                  <tr key={s.suppression_key}>
+                    <td className="mono">{s.suppression_key.slice(0, 12)}</td>
+                    <td className="mono">{s.path || "—"}</td>
+                    <td>{s.reason}</td>
+                    <td>{s.created_at.slice(0, 10)}</td>
+                    <td>
+                      <button
+                        className="link"
+                        onClick={() => void removeSuppression(s.suppression_key)}
+                      >
+                        remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
 
       {findings && (
         <div style={{ marginTop: "1rem" }}>

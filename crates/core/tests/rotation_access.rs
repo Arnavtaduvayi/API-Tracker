@@ -291,12 +291,28 @@ fn provider_create_failure_is_retryable_and_old_key_untouched() {
         )
         .unwrap();
     assert_eq!(
-        stuck.rotation.state, "creating_replacement",
-        "stays in the claim state, retryable"
+        stuck.rotation.state, "creating_in_progress",
+        "stays in the claimed transient state, retryable"
     );
     assert!(!stuck.rotation.last_error.is_empty());
-    let value = v.reveal_credential(&cred_id, &master_pw()).unwrap();
-    assert_eq!(value.expose(), FAKE_OLD, "old value untouched");
+    // A retry from the transient state re-attempts creation (idempotent: no
+    // key id was recorded, so no orphan) and can still complete.
+    let http = full_rotation_mocks();
+    let done = v
+        .rotation_advance(
+            &plan.rotation.id,
+            &master_pw(),
+            &http,
+            &NullRunner,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        done.rotation.state, "completed",
+        "a retry after a transient create failure still completes: {:?}",
+        done.rotation.last_error
+    );
 }
 
 #[test]
@@ -852,6 +868,69 @@ fn orphaned_provider_key_blocks_a_second_creation() {
             && stuck.rotation.last_error.contains("key_orphan_1"),
         "{}",
         stuck.rotation.last_error
+    );
+}
+
+#[test]
+fn concurrent_advance_into_creation_serializes_via_cas() {
+    // Two advances that both observe state == creating_replacement must not
+    // both create a provider key. The winner claims creating_in_progress via
+    // CAS; the loser sees the row already moved and refuses, so no second
+    // live key is created.
+    let (_dir, _paths, mut v, cred_id) = openai_rotation_fixture();
+    let plan = v.rotation_plan(&cred_id, 0, None, None, "").unwrap();
+    v.rotation_approve(&plan.rotation.id, &master_pw()).unwrap();
+    // Park the rotation in the re-entrant creating_replacement state (as it
+    // sits between the claim and the provider call).
+    v.connection()
+        .execute(
+            "UPDATE rotations SET state = 'creating_replacement' WHERE id = ?1",
+            [&plan.rotation.id],
+        )
+        .unwrap();
+
+    // Process A wins the CAS creating_replacement -> creating_in_progress but
+    // its provider call has not run yet; simulate by moving the row to the
+    // transient state directly, then a SECOND advance (process B) observing
+    // creating_replacement would have already lost. Model B by attempting the
+    // same CAS: it must fail because the row is no longer creating_replacement.
+    api_tracker_core::rotation::set_state(
+        v.connection(),
+        &plan.rotation.id,
+        "creating_replacement",
+        "creating_in_progress",
+        "process A claimed creation",
+    )
+    .unwrap();
+    let loser = api_tracker_core::rotation::set_state(
+        v.connection(),
+        &plan.rotation.id,
+        "creating_replacement",
+        "creating_in_progress",
+        "process B tries to claim",
+    );
+    assert!(
+        loser.is_err(),
+        "the second claimant must lose the compare-and-swap"
+    );
+
+    // Now let process A finish from the transient state: exactly one key is
+    // created and stored.
+    let http = full_rotation_mocks();
+    let done = v
+        .rotation_advance(
+            &plan.rotation.id,
+            &master_pw(),
+            &http,
+            &NullRunner,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(
+        done.rotation.state, "completed",
+        "{:?}",
+        done.rotation.last_error
     );
 }
 

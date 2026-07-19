@@ -586,6 +586,14 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
 }
 
 pub fn migrate_with(conn: &mut Connection, migrations: &[Migration]) -> Result<()> {
+    // A database from a NEWER build must not be opened read/write: this
+    // build does not know the newer schema's invariants, and writing could
+    // silently corrupt data the newer build depends on.
+    let found = user_version(conn)?;
+    let supported = migrations.last().map(|m| m.version).unwrap_or(0);
+    if found > supported {
+        return Err(crate::error::CoreError::SchemaTooNew { found, supported });
+    }
     for migration in migrations {
         let current = user_version(conn)?;
         if migration.version <= current {

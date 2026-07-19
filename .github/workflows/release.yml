@@ -11,8 +11,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+# Least privilege at the workflow level: build jobs only read. The jobs that
+# attach artifacts to the release request `contents: write` for themselves.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   cli:
@@ -64,6 +66,9 @@ jobs:
 
   desktop:
     name: Desktop (${{ matrix.os }})
+    # tauri-action creates/updates the draft release, so this job needs write.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +107,9 @@ jobs:
   cli-release:
     name: Attach CLI artifacts + checksums
     needs: cli
+    # This job attaches the CLI archives + SHA256SUMS.txt to the release.
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -109,8 +117,10 @@ jobs:
           pattern: cli-*
           merge-multiple: true
           path: dist
+      # No `|| true`: if checksum generation fails, fail the job rather than
+      # publishing artifacts without an integrity manifest.
       - name: Combined checksums
-        run: (cd dist && sha256sum api-tracker-* > SHA256SUMS.txt) || true
+        run: cd dist && sha256sum api-tracker-* > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
           draft: true

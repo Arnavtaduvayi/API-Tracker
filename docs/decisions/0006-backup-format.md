@@ -1,6 +1,8 @@
 # ADR 0006: Encrypted backup format and restore semantics
 
-Status: accepted (2026-07-17)
+Status: accepted (2026-07-17); payload design superseded in part by
+ADR 0015 (2026-07-18): format v2 carries every table generically, and
+older-schema backups are migrated after import as intended here.
 
 ## Decision
 

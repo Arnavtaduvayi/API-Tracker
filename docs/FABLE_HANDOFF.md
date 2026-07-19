@@ -4,11 +4,59 @@ This document hands the repository off to a fresh session. **"Verified"**
 means exercised by a passing test or a manual end-to-end run this session;
 **"planned"** means designed/labeled but not yet implemented.
 
-_Last updated for the cross-provider observability milestone wrap-up._
+_Last updated for the **alpha-completion** session (branch
+`release/alpha-completion`)._
 
 ---
 
-## 1. Where things stand
+## 0. Alpha-completion session (most recent)
+
+Branch `release/alpha-completion` off `main` (post PR #6). What it did, and
+where to look:
+
+- **Evidence audit** re-classified all 19 product requirements against the
+  actual code (`docs/FEATURE_MATRIX.md` is the source of truth; corrected the
+  rule count to 20, noted `credential_activated` is a live producer, added a
+  direct `cost_spike` test).
+- **Live-verification scripts** for Anthropic/GitHub/Stripe
+  (`scripts/live_verify_*.sh`) matching the OpenAI safety pattern; read-only,
+  opt-in, self-cleaning, never in CI.
+- **Desktop/CLI parity** closed: suppression list+remove, user-chosen Git
+  history depth incl. full history, injection-session listing + SIGTERM
+  termination (`access sessions`/`access kill`), `monitor --status` + desktop
+  last-run surface, `notify history`, doc-watch last-changed,
+  rotation-needs-attention flag. Shared `run_monitor_cycle` orchestration now
+  records last-run/success/failure (`vault.rs`).
+- **Backup format v2** (ADR 0015): captures EVERY table generically (the old
+  format silently dropped everything past v1 on restore); older backups
+  restore + migrate forward; newer schema refused (`CoreError::SchemaTooNew`
+  guards all open paths). `crates/core/tests/migration_safety.rs` covers
+  populated v1/v5/v6 upgrades, interrupted/corrupted migrations, and
+  full-table restore completeness.
+- **Six-pass adversarial security review**; confirmed medium findings fixed
+  with regression tests (AWS region authority-injection, docwatch redirect
+  SSRF, rotation create-step CAS, desktop file-write IPC gating, opener
+  scope, CLI terminal-escape sanitization, git scan bounds/hex endpoints,
+  backup aside collision, webhook once-per-alert dedup). Residuals documented
+  in `THREAT_MODEL.md`.
+- **Smoke suite → 108 checks** including real localhost webhook delivery and a
+  hook-blocked commit. Test totals: **356 Rust** (core+CLI) + 108 smoke +
+  frontend suite, all green under `API_TRACKER_INSECURE_FAST_KDF=1`, clippy
+  `-D warnings` clean on `+1.97.0`.
+- **Packaging**: macOS arm64 `.app`+`.dmg` and release CLI built and
+  leak-swept locally; other platforms are CI-built (host toolchain only
+  here). Docs: `docs/DESTINATION_SUPPORT.md`, `docs/RELEASE_NOTES.md`, upgrade
+  guide in `INSTALL.md`, `PACKAGING.md` verification status.
+- **Release recommendation: ready for PUBLIC ALPHA** (unsigned, honestly
+  labeled). See §7 below and the PR description.
+
+Setup that still must not be repeated: npm cache `~/.npm` root-owned →
+`--cache <scratchpad>`; Rust tests need `API_TRACKER_INSECURE_FAST_KDF=1`; CI
+clippy needs `cargo +1.97.0 clippy`.
+
+---
+
+## 1. Where things stand (prior context, pre-this-session)
 
 - **`main`** contains milestones 1–5 (vault, catalog/scanning/monitoring,
   provider integrations, OpenAI usage/cost sync, `.env` governance +

@@ -76,7 +76,19 @@ pub fn staged_files(repo: &Path) -> Result<Vec<String>> {
 }
 
 /// The staged content of a file (the version that would be committed).
+/// Blobs above the scanner's working-tree size cap are skipped (returning
+/// `None`) instead of being buffered whole — the same bound the
+/// working-tree scan applies, so a multi-GB staged file cannot OOM the
+/// pre-commit hook.
 pub fn staged_blob(repo: &Path, path: &str) -> Result<Option<Vec<u8>>> {
+    let size = run_git(repo, &["cat-file", "-s", &format!(":{path}")])?;
+    if size.status.success() {
+        if let Ok(bytes) = String::from_utf8_lossy(&size.stdout).trim().parse::<u64>() {
+            if bytes > MAX_FILE_BYTES {
+                return Ok(None);
+            }
+        }
+    }
     let out = run_git(repo, &["show", &format!(":{path}")])?;
     if !out.status.success() {
         return Ok(None);
@@ -116,11 +128,29 @@ pub fn head_commit(repo: &Path) -> Result<String> {
 
 /// Added lines from the commits in `old..new` only (incremental scanning).
 pub fn range_added_units(repo: &Path, old: &str, new: &str) -> Result<Vec<ScanUnit>> {
-    // Both endpoints are commit hashes we recorded/resolved ourselves.
+    // Both endpoints are commit hashes we recorded/resolved ourselves, but
+    // require them to be plain hex so a tampered stored value (e.g.
+    // `--output=…`) can never be parsed by git as an option, and pass
+    // `--end-of-options` before the range for defense in depth.
+    for endpoint in [old, new] {
+        if endpoint.is_empty() || !endpoint.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CoreError::InvalidInput(
+                "commit range endpoints must be hex commit ids".into(),
+            ));
+        }
+    }
     let range = format!("{old}..{new}");
     let out = run_git(
         repo,
-        &["log", "-p", "--no-color", "-U0", "--no-merges", &range],
+        &[
+            "log",
+            "-p",
+            "--no-color",
+            "-U0",
+            "--no-merges",
+            "--end-of-options",
+            &range,
+        ],
     )?;
     if !out.status.success() {
         return Err(CoreError::InvalidInput(
@@ -162,8 +192,31 @@ fn parse_log_added_lines(log: &str) -> Vec<ScanUnit> {
                 return;
             }
             // Reconstruct a sparse text where each added line sits at its real
-            // line number so scanner line numbers stay meaningful.
-            let max = buffer.iter().map(|(n, _)| *n).max().unwrap_or(0);
+            // line number so scanner line numbers stay meaningful. A hunk
+            // header carries the line NUMBER, which is decoupled from the
+            // number of buffered lines: with `-U0` one changed line deep in a
+            // huge file yields a large line number but a single entry. Cap the
+            // reconstructed length so a crafted diff cannot amplify one line
+            // into a multi-hundred-MB allocation; beyond the cap, real line
+            // numbers no longer matter for scanning.
+            const MAX_RECONSTRUCTED_LINES: usize = 200_000;
+            let raw_max = buffer.iter().map(|(n, _)| *n).max().unwrap_or(0);
+            if raw_max > MAX_RECONSTRUCTED_LINES {
+                // Fall back to dense packing (line numbers become approximate)
+                // rather than allocating a vector sized by the line number.
+                let content = buffer
+                    .iter()
+                    .map(|(_, text)| text.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                units.push(ScanUnit {
+                    label: format!("commit {}:{}", commit.get(..8).unwrap_or(commit), file),
+                    content,
+                });
+                buffer.clear();
+                return;
+            }
+            let max = raw_max;
             let mut lines = vec![String::new(); max];
             for (n, text) in buffer.iter() {
                 if *n >= 1 && *n <= max {
@@ -307,6 +360,38 @@ diff --git a/.env b/.env
             units[0].content.lines().next().unwrap(),
             "OPENAI_API_KEY=sk-proj-FAKE"
         );
+    }
+
+    #[test]
+    fn huge_line_number_does_not_allocate_a_giant_vector() {
+        // A hunk header claiming line 50,000,000 with a single added line must
+        // not allocate a 50M-entry vector; it falls back to dense packing.
+        let log = "\
+commit abcdef1234567890
+diff --git a/big.txt b/big.txt
+--- a/big.txt
++++ b/big.txt
+@@ -49999999,0 +50000000,1 @@
++OPENAI_API_KEY=sk-proj-FAKE
+";
+        let units = parse_log_added_lines(log);
+        assert_eq!(units.len(), 1);
+        // The content is present (dense-packed) rather than sitting behind
+        // 50M blank lines.
+        assert!(units[0].content.contains("OPENAI_API_KEY=sk-proj-FAKE"));
+        assert!(units[0].content.lines().count() < 10);
+    }
+
+    #[test]
+    fn range_endpoints_must_be_hex() {
+        let dir = tempfile::tempdir().unwrap();
+        // Option-looking endpoints are refused before git ever runs.
+        for (old, new) in [("--output=/tmp/x", "HEAD"), ("abc123", "..evil")] {
+            match range_added_units(dir.path(), old, new) {
+                Err(CoreError::InvalidInput(_)) => {}
+                _ => panic!("expected InvalidInput for {old:?}..{new:?}, got Ok/other"),
+            }
+        }
     }
 
     #[test]

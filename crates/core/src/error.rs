@@ -61,6 +61,13 @@ pub enum CoreError {
     #[error("the vault database is damaged: {0}")]
     VaultCorrupted(&'static str),
 
+    #[error(
+        "this vault uses database schema v{found}, but this build supports up to v{supported} — \
+         it was created or upgraded by a newer version of API Tracker; upgrade this installation \
+         instead of opening the vault with an older build"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
+
     #[error("{provider} does not support '{capability}' this way: {hint}")]
     Unsupported {
         provider: String,
@@ -118,6 +125,7 @@ impl CoreError {
             CoreError::Crypto { .. } => "crypto_error",
             CoreError::BackupInvalid(_) => "backup_invalid",
             CoreError::VaultCorrupted(_) => "vault_corrupted",
+            CoreError::SchemaTooNew { .. } => "schema_too_new",
             CoreError::Unsupported { .. } => "unsupported",
             CoreError::Provider(_) => "provider_error",
             CoreError::ProviderAuth { .. } => "provider_auth_error",

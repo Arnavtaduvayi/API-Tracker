@@ -22,6 +22,8 @@ type ActionKind = "approve" | "advance" | "rollback" | "complete_manual" | "canc
 /** States in which Advance can still make progress (mirrors core is_active). */
 const ADVANCEABLE = [
   "approved",
+  "creating_replacement",
+  "creating_in_progress",
   "awaiting_manual_key",
   "replacement_stored",
   "updating_destinations",
@@ -29,6 +31,14 @@ const ADVANCEABLE = [
   "grace_period",
   "old_disabled",
 ];
+
+/** An in-flight rotation idle for over a day needs human attention (the
+ * monitor raises a rotation_stuck alert on the same condition). */
+function needsAttention(state: string, updatedAt: string): boolean {
+  if (!ADVANCEABLE.includes(state) && state !== "planned") return false;
+  const idleMs = Date.now() - Date.parse(updatedAt);
+  return Number.isFinite(idleMs) && idleMs > 24 * 60 * 60 * 1000;
+}
 
 function stateBadge(state: string) {
   const cls =
@@ -402,7 +412,17 @@ export function RotationView() {
                 <td>
                   {r.project_name}/{r.credential_name}
                 </td>
-                <td>{stateBadge(r.state)}</td>
+                <td>
+                  {stateBadge(r.state)}
+                  {needsAttention(r.state, r.updated_at) && (
+                    <>
+                      {" "}
+                      <span className="badge warn" title="in flight and idle for over 24h">
+                        needs attention
+                      </span>
+                    </>
+                  )}
+                </td>
                 <td className="mono">{r.mode}</td>
                 <td>{formatTimestamp(r.created_at)}</td>
                 <td>{r.waiting_on ?? "—"}</td>

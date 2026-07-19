@@ -5,7 +5,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { api, isApiError } from "../api";
-import type { NotificationChannel } from "../types";
+import type { ActivityEvent, NotificationChannel } from "../types";
 import { formatTimestamp } from "../utils";
 import { ConfirmDialog } from "./ConfirmDialog";
 
@@ -18,6 +18,7 @@ export function NotifyView() {
   const [url, setUrl] = useState("");
   const [minSeverity, setMinSeverity] = useState("high");
   const [removing, setRemoving] = useState<NotificationChannel | null>(null);
+  const [history, setHistory] = useState<ActivityEvent[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -192,6 +193,41 @@ export function NotifyView() {
           </tbody>
         </table>
       )}
+
+      <div style={{ marginTop: "1.5rem" }}>
+        <h2>Delivery history</h2>
+        <p className="muted">
+          Every delivery attempt is recorded — successes and failures — with channel name, alert
+          kind, and outcome only. URLs and secret values are never recorded.
+        </p>
+        <button
+          disabled={busy}
+          onClick={() => void act(async () => setHistory(await api.notificationHistory(50)))}
+        >
+          {history === null ? "Show history" : "Refresh history"}
+        </button>
+        {history !== null &&
+          (history.length === 0 ? (
+            <p>No webhook deliveries recorded yet.</p>
+          ) : (
+            <table style={{ marginTop: "0.75rem" }}>
+              <thead>
+                <tr>
+                  <th>At</th>
+                  <th>Outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((e) => (
+                  <tr key={e.id}>
+                    <td>{formatTimestamp(e.at)}</td>
+                    <td className={e.detail.includes("FAILED") ? "error" : ""}>{e.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ))}
+      </div>
 
       {removing && (
         <ConfirmDialog

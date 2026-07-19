@@ -70,6 +70,8 @@ pub enum SuppressCmd {
     },
     /// List local suppressions.
     List,
+    /// Remove a suppression so future scans report the finding again.
+    Remove { suppression_key: String },
 }
 
 fn build_units(args: &ScanArgs) -> Result<Vec<gitrepo::ScanUnit>> {
@@ -107,11 +109,11 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
         for f in &high {
             eprintln!(
                 "  {}:{}  [{}] {} ({})",
-                f.file,
+                render::sanitize(&f.file),
                 f.line,
                 f.confidence.label(),
                 f.redacted,
-                f.provider.as_deref().unwrap_or("unknown provider")
+                render::sanitize(f.provider.as_deref().unwrap_or("unknown provider"))
             );
         }
         eprintln!();
@@ -189,20 +191,24 @@ fn report(ctx: &Ctx, findings: &[Finding], marked_exposed: usize) {
         for f in findings {
             println!(
                 "{}:{}  [{}] {}",
-                f.file,
+                render::sanitize(&f.file),
                 f.line,
                 f.confidence.label(),
-                f.provider.as_deref().unwrap_or("unknown")
+                render::sanitize(f.provider.as_deref().unwrap_or("unknown"))
             );
             println!("    value:   {}", f.redacted);
-            println!("    reason:  {}", f.reason);
+            println!("    reason:  {}", render::sanitize(&f.reason));
             if let Some(m) = &f.vault_match {
                 print!(
                     "    IN VAULT: matches '{}/{}'",
-                    m.project_name, m.credential_name
+                    render::sanitize(&m.project_name),
+                    render::sanitize(&m.credential_name)
                 );
                 if !m.other_projects.is_empty() {
-                    print!(" (also in: {})", m.other_projects.join(", "));
+                    print!(
+                        " (also in: {})",
+                        render::sanitize(&m.other_projects.join(", "))
+                    );
                 }
                 println!();
             }
@@ -275,6 +281,11 @@ pub fn suppress(ctx: &Ctx, cmd: SuppressCmd) -> Result<()> {
                     render::table(&["KEY", "PATH", "REASON"], &rows);
                 }
             });
+        }
+        SuppressCmd::Remove { suppression_key } => {
+            let (vault, _t) = ctx.unlocked()?;
+            vault.remove_suppression(&suppression_key)?;
+            println!("Suppression removed; future scans report this finding again.");
         }
     }
     Ok(())

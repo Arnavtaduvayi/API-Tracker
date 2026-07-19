@@ -3,11 +3,12 @@
 // enforces auto-lock; this component reacts to `vault_locked` errors and
 // polls the status so the UI locks visibly too.
 //
-// While unlocked, a single background timer runs the full monitor (local
-// checks + due documentation checks + webhook delivery) every
+// While the app is OPEN and UNLOCKED, a single timer runs the full monitor
+// (local checks + due documentation checks + webhook delivery) every
 // `monitor_interval_minutes` and raises a native notification for new
-// alerts of medium severity or above. The timer is disarmed on lock and
-// re-armed when the setting changes — one timer, no polling storms.
+// alerts of medium severity or above. This is not an OS background service:
+// nothing runs when the app is closed or the vault is locked. The timer is
+// disarmed on lock and re-armed when the setting changes.
 
 import { useCallback, useEffect, useState } from "react";
 import {

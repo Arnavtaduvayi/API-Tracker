@@ -21,6 +21,11 @@ use uuid::Uuid;
 pub const PLANNED: &str = "planned";
 pub const APPROVED: &str = "approved";
 pub const CREATING_REPLACEMENT: &str = "creating_replacement";
+/// Transient: exactly one advance has claimed the provider-side key
+/// creation and is performing the (non-idempotent) HTTP call. Reaching this
+/// state requires winning a compare-and-swap out of `CREATING_REPLACEMENT`,
+/// so two concurrent `rotation advance` processes cannot both create a key.
+pub const CREATING_IN_PROGRESS: &str = "creating_in_progress";
 pub const AWAITING_MANUAL_KEY: &str = "awaiting_manual_key";
 pub const REPLACEMENT_STORED: &str = "replacement_stored";
 pub const UPDATING_DESTINATIONS: &str = "updating_destinations";
@@ -43,6 +48,7 @@ pub fn is_active(state: &str) -> bool {
         state,
         APPROVED
             | CREATING_REPLACEMENT
+            | CREATING_IN_PROGRESS
             | AWAITING_MANUAL_KEY
             | REPLACEMENT_STORED
             | UPDATING_DESTINATIONS

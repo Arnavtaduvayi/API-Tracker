@@ -19,14 +19,19 @@ pub fn emit<T: Serialize>(json: bool, value: &T, human: impl FnOnce()) {
     }
 }
 
-/// Strip control characters (incl. ANSI escape introducers) from a cell.
-/// Provider-controlled strings (key names, event types, units) reach the
-/// terminal through here; a compromised provider account must not be able
-/// to inject escape sequences.
-fn sanitize_cell(cell: &str) -> String {
-    cell.chars()
+/// Strip control characters (incl. ANSI escape introducers) from a string.
+/// Any terminal-bound string that could carry attacker-influenced content —
+/// repository file paths, provider-side key names, raw scopes, `.env`
+/// variable names — must pass through here so a crafted value cannot inject
+/// escape sequences that hide or spoof output.
+pub fn sanitize(text: &str) -> String {
+    text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
+}
+
+fn sanitize_cell(cell: &str) -> String {
+    sanitize(cell)
 }
 
 /// Minimal fixed-width table.
@@ -248,13 +253,15 @@ pub fn print_permissions(p: &api_tracker_core::permissions::StoredPermissions) {
         "Permissions (source: {}, confidence: {}):",
         p.source, p.confidence
     );
-    println!("  Summary:   {}", p.normalized.summary);
+    println!("  Summary:   {}", sanitize(&p.normalized.summary));
     if !p.raw_scopes.is_empty() {
-        println!("  Raw scopes: {}", p.raw_scopes.join(", "));
+        // Raw scopes come verbatim from the provider account — sanitize
+        // before they reach the terminal.
+        println!("  Raw scopes: {}", sanitize(&p.raw_scopes.join(", ")));
     }
     let show = |label: &str, list: &[String]| {
         if !list.is_empty() {
-            println!("  {label}: {}", list.join(", "));
+            println!("  {label}: {}", sanitize(&list.join(", ")));
         }
     };
     show("Read      ", &p.normalized.read);

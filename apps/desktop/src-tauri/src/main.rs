@@ -199,12 +199,14 @@ fn scan_path(
     path: String,
     mode: String,
     mark_exposed: bool,
+    history_depth: Option<u32>,
 ) -> CmdResult<Vec<Finding>> {
     let p = std::path::PathBuf::from(&path);
     with_vault(&state, |vault| {
         let mut findings = match mode.as_str() {
             "staged" => vault.scan_staged(&p)?,
-            "history" => vault.scan_history(&p, Some(50))?,
+            // Depth is user-chosen; None scans the FULL history.
+            "history" => vault.scan_history(&p, history_depth.map(|n| n as usize))?,
             _ => vault.scan_working_tree(&p)?,
         };
         if mark_exposed {
@@ -228,27 +230,52 @@ fn suppression_add(
 }
 
 #[tauri::command]
+fn suppression_list(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::vault::Suppression>> {
+    with_vault(&state, |vault| vault.list_suppressions())
+}
+
+#[tauri::command]
+fn suppression_remove(state: State<'_, AppState>, suppression_key: String) -> CmdResult<()> {
+    with_vault(&state, |vault| vault.remove_suppression(&suppression_key))
+}
+
+#[tauri::command]
 fn hook_status(path: String) -> CmdResult<api_tracker_core::hooks::HookStatus> {
     api_tracker_core::hooks::status(std::path::Path::new(&path)).map_err(Into::into)
 }
 
+// hook_install/hook_remove write to a repo's `.git/hooks`, so they are gated
+// behind an unlocked vault: a locked session must not mutate the filesystem.
 #[tauri::command]
-fn hook_install(path: String, force: bool) -> CmdResult<api_tracker_core::hooks::HookStatus> {
-    api_tracker_core::hooks::install(std::path::Path::new(&path), force)?;
-    api_tracker_core::hooks::status(std::path::Path::new(&path)).map_err(Into::into)
+fn hook_install(
+    state: State<'_, AppState>,
+    path: String,
+    force: bool,
+) -> CmdResult<api_tracker_core::hooks::HookStatus> {
+    with_vault(&state, |_vault| {
+        api_tracker_core::hooks::install(std::path::Path::new(&path), force)?;
+        api_tracker_core::hooks::status(std::path::Path::new(&path))
+    })
 }
 
 #[tauri::command]
-fn hook_remove(path: String) -> CmdResult<api_tracker_core::hooks::HookStatus> {
-    api_tracker_core::hooks::remove(std::path::Path::new(&path))?;
-    api_tracker_core::hooks::status(std::path::Path::new(&path)).map_err(Into::into)
+fn hook_remove(
+    state: State<'_, AppState>,
+    path: String,
+) -> CmdResult<api_tracker_core::hooks::HookStatus> {
+    with_vault(&state, |_vault| {
+        api_tracker_core::hooks::remove(std::path::Path::new(&path))?;
+        api_tracker_core::hooks::status(std::path::Path::new(&path))
+    })
 }
 
 // --- Monitoring + alerts ---
 
 #[tauri::command]
-fn monitor_run(state: State<'_, AppState>) -> CmdResult<api_tracker_core::vault::MonitorSummary> {
-    with_vault(&state, |vault| vault.run_monitor())
+fn monitor_status(state: State<'_, AppState>) -> CmdResult<api_tracker_core::vault::MonitorStatus> {
+    with_vault(&state, |vault| vault.monitor_status())
 }
 
 /// Local monitoring plus the network phases, mirroring the CLI's
@@ -274,15 +301,12 @@ fn monitor_run_full(state: State<'_, AppState>) -> CmdResult<FullMonitorReport> 
                 .into_iter()
                 .map(|a| a.id)
                 .collect();
-        let summary = vault.run_monitor()?;
         let fetcher = HttpFetcher::new();
-        let doc_checks = vault
-            .check_due_doc_watches(&fetcher)
-            .map(|results| results.len())
-            .unwrap_or(0);
         let http = UreqClient::new();
-        let delivered = vault.deliver_notifications(&http).unwrap_or(0);
-        let new_alert_severities = if summary.alerts_created > 0 {
+        // Shared core orchestration: local rules + best-effort network
+        // phases, recording last-run status for `monitor_status`.
+        let report = vault.run_monitor_cycle(Some((&fetcher, &http)))?;
+        let new_alert_severities = if report.summary.alerts_created > 0 {
             api_tracker_core::alerts::list(vault.connection(), false)?
                 .into_iter()
                 .filter(|a| !before.contains(&a.id))
@@ -292,9 +316,9 @@ fn monitor_run_full(state: State<'_, AppState>) -> CmdResult<FullMonitorReport> 
             Vec::new()
         };
         Ok(FullMonitorReport {
-            summary,
-            doc_checks,
-            delivered,
+            summary: report.summary,
+            doc_checks: report.doc_checks,
+            delivered: report.webhooks_delivered,
             new_alert_severities,
         })
     })
@@ -1169,11 +1193,16 @@ struct EnvExampleProposal {
 /// Compute (without writing) the `.env.example` sibling for a values file.
 /// Purely local file work; no vault access and no secret values involved —
 /// the proposal carries variable names only and the diff is masked.
+///
+/// Gated behind an unlocked vault (`with_vault`): these commands read and
+/// write arbitrary host paths, so — even though they touch no vault data —
+/// they must not be callable while the vault is locked. That bounds the
+/// filesystem-write primitive to a trusted, unlocked session.
 #[tauri::command]
-fn env_example_preview(file: String) -> CmdResult<EnvExampleProposal> {
+fn env_example_preview(state: State<'_, AppState>, file: String) -> CmdResult<EnvExampleProposal> {
     use api_tracker_core::{envfile::EnvDocument, envgov};
     let file = PathBuf::from(&file);
-    let inner = || -> Result<EnvExampleProposal, CoreError> {
+    with_vault(&state, |_vault| {
         let content = std::fs::read_to_string(&file)?;
         let values = EnvDocument::parse(&content);
         let example_path = file
@@ -1193,15 +1222,20 @@ fn env_example_preview(file: String) -> CmdResult<EnvExampleProposal> {
             example_path: example_path.display().to_string(),
             changed,
         })
-    };
-    inner().map_err(Into::into)
+    })
 }
 
-/// Write a previously previewed `.env.example` (atomic, owner-only).
+/// Write a previously previewed `.env.example` (atomic, owner-only). Gated
+/// behind an unlocked vault so a locked session cannot write host files.
 #[tauri::command]
-fn env_example_write(example_path: String, content: String) -> CmdResult<()> {
-    api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
-        .map_err(Into::into)
+fn env_example_write(
+    state: State<'_, AppState>,
+    example_path: String,
+    content: String,
+) -> CmdResult<()> {
+    with_vault(&state, |_vault| {
+        api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
+    })
 }
 
 #[tauri::command]
@@ -1646,6 +1680,46 @@ fn access_grant_end(state: State<'_, AppState>, id: String) -> CmdResult<GrantEn
 }
 
 #[tauri::command]
+fn access_sessions(
+    state: State<'_, AppState>,
+    include_ended: bool,
+    limit: u32,
+) -> CmdResult<Vec<api_tracker_core::inject::ProcessSession>> {
+    with_vault(&state, |vault| {
+        vault.list_process_sessions(limit, !include_ended)
+    })
+}
+
+#[derive(Serialize)]
+struct SessionKillDto {
+    session_id: String,
+    pid: i64,
+    signalled: bool,
+}
+
+/// Best-effort local SIGTERM to a recorded session PID. The frontend must
+/// confirm first; this is a local control and never touches the provider.
+#[tauri::command]
+fn access_session_kill(state: State<'_, AppState>, id: String) -> CmdResult<SessionKillDto> {
+    with_vault(&state, |vault| {
+        let (session_id, pid, signalled) = vault.terminate_process_session(&id)?;
+        Ok(SessionKillDto {
+            session_id,
+            pid,
+            signalled,
+        })
+    })
+}
+
+#[tauri::command]
+fn notification_history(
+    state: State<'_, AppState>,
+    limit: u32,
+) -> CmdResult<Vec<api_tracker_core::activity::ActivityEvent>> {
+    with_vault(&state, |vault| vault.notification_history(limit))
+}
+
+#[tauri::command]
 fn credential_timeline(
     state: State<'_, AppState>,
     id: String,
@@ -1784,10 +1858,12 @@ fn main() {
             credential_copy,
             scan_path,
             suppression_add,
+            suppression_list,
+            suppression_remove,
             hook_status,
             hook_install,
             hook_remove,
-            monitor_run,
+            monitor_status,
             monitor_run_full,
             alerts_list,
             alert_acknowledge,
@@ -1802,6 +1878,7 @@ fn main() {
             notification_channel_remove,
             notification_channel_enable,
             notification_channel_test,
+            notification_history,
             credential_validate,
             credential_metadata,
             credential_permissions,
@@ -1865,6 +1942,8 @@ fn main() {
             access_grant_create,
             access_grants,
             access_grant_end,
+            access_sessions,
+            access_session_kill,
             credential_timeline,
             permissions_preview,
             provider_list_keys,

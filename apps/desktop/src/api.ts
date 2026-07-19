@@ -30,8 +30,11 @@ import type {
   GrantEndResult,
   HookStatus,
   MonitorFullReport,
-  MonitorSummary,
+  MonitorStatus,
   NotificationChannel,
+  ProcessSession,
+  SessionKillResult,
+  Suppression,
   PermissionsPreview,
   Project,
   ProviderConnection,
@@ -90,16 +93,23 @@ export const api = {
   providersList: () => call<ProviderManifest[]>("providers_list"),
   providerGet: (id: string) => call<ProviderManifest>("provider_get", { id }),
 
-  scanPath: (path: string, mode: "working" | "staged" | "history", markExposed: boolean) =>
-    call<Finding[]>("scan_path", { path, mode, markExposed }),
+  scanPath: (
+    path: string,
+    mode: "working" | "staged" | "history",
+    markExposed: boolean,
+    historyDepth: number | null,
+  ) => call<Finding[]>("scan_path", { path, mode, markExposed, historyDepth }),
   suppressionAdd: (suppressionKey: string, path: string, reason: string) =>
     call<void>("suppression_add", { suppressionKey, path, reason }),
+  suppressionList: () => call<Suppression[]>("suppression_list"),
+  suppressionRemove: (suppressionKey: string) =>
+    call<void>("suppression_remove", { suppressionKey }),
   hookStatus: (path: string) => call<HookStatus>("hook_status", { path }),
   hookInstall: (path: string, force: boolean) =>
     call<HookStatus>("hook_install", { path, force }),
   hookRemove: (path: string) => call<HookStatus>("hook_remove", { path }),
 
-  monitorRun: () => call<MonitorSummary>("monitor_run"),
+  monitorStatus: () => call<MonitorStatus>("monitor_status"),
   monitorRunFull: () => call<MonitorFullReport>("monitor_run_full"),
   alertsList: (includeResolved: boolean) => call<Alert[]>("alerts_list", { includeResolved }),
   alertAcknowledge: (id: string) => call<Alert>("alert_acknowledge", { id }),
@@ -122,6 +132,8 @@ export const api = {
     call<void>("notification_channel_enable", { ident, enabled }),
   notificationChannelTest: (ident: string) =>
     call<string>("notification_channel_test", { ident }),
+  notificationHistory: (limit: number) =>
+    call<ActivityEvent[]>("notification_history", { limit }),
 
   projectList: (includeArchived: boolean) =>
     call<Project[]>("project_list", { includeArchived }),
@@ -398,6 +410,9 @@ export const api = {
   accessGrants: (includeInactive: boolean) =>
     call<AccessGrant[]>("access_grants", { includeInactive }),
   accessGrantEnd: (id: string) => call<GrantEndResult>("access_grant_end", { id }),
+  accessSessions: (includeEnded: boolean, limit: number) =>
+    call<ProcessSession[]>("access_sessions", { includeEnded, limit }),
+  accessSessionKill: (id: string) => call<SessionKillResult>("access_session_kill", { id }),
 
   credentialTimeline: (id: string) => call<TimelineEvent[]>("credential_timeline", { id }),
   permissionsPreview: (id: string) => call<PermissionsPreview>("permissions_preview", { id }),

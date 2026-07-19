@@ -16,6 +16,20 @@ Every artifact is accompanied by a SHA-256 checksum; the CLI job also produces
 a combined `SHA256SUMS.txt`. Users should verify checksums before running (see
 `docs/INSTALL.md`).
 
+## Local build verification status
+
+At alpha-completion the **macOS arm64** artifacts were built and inspected
+locally: the release CLI (`cargo build --release -p api-tracker-cli`) and the
+Tauri desktop bundle (`npx tauri build` → `API Tracker.app` + a `.dmg`). The
+bundle was swept for leaked dev vaults, `.env` files, backups, logs,
+machine-specific paths, test-fixture secrets, and Claude attribution — clean.
+
+The **Windows, Linux, and macOS x64** artifacts are produced by
+`release.yml` in CI and were **not** built on the alpha-completion machine
+(only the host `aarch64-apple-darwin` toolchain is installed here). Their
+build configuration is verified by review; download and smoke-test each
+platform artifact from the draft release before publishing.
+
 ## Signing & notarization — NOT configured (alpha)
 
 **These builds are UNSIGNED.** Do not represent them as signed or notarized.

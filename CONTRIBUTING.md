@@ -9,8 +9,11 @@ Thanks for helping build a trustworthy local-first credential manager.
   and zeroize). Any new code path that touches secrets needs a test proving
   it does not leak them.
 - **Local-first.** No telemetry, no analytics, no calls to any
-  API-Tracker-operated service — the current core performs no network I/O
-  at all. Future provider calls go directly from the user's device.
+  API-Tracker-operated service. All network I/O (provider connectors,
+  destination adapters, the documentation watcher, webhook channels) goes
+  directly from the user's device to endpoints the user explicitly
+  configured, and is mockable in tests (`HttpClient`) — tests never make
+  real network requests.
 - **Shared core.** Business logic lives in `crates/core` only. The CLI and
   desktop app are thin frontends; do not duplicate logic in TypeScript.
 - **Honesty about capabilities.** Never present a provider feature, status,

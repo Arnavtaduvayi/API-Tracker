@@ -9,7 +9,8 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { api, isApiError } from "../api";
-import type { Alert } from "../types";
+import type { Alert, MonitorStatus } from "../types";
+import { formatTimestamp } from "../utils";
 
 function severityClass(sev: Alert["severity"]): "ok" | "warn" | "bad" {
   if (sev === "critical" || sev === "high") return "bad";
@@ -38,12 +39,14 @@ async function notify(count: number) {
 export function AlertsView() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [includeResolved, setIncludeResolved] = useState(false);
+  const [status, setStatus] = useState<MonitorStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     try {
       setAlerts(await api.alertsList(includeResolved));
+      setStatus(await api.monitorStatus());
     } catch (e) {
       setError(isApiError(e) ? e.message : String(e));
     }
@@ -98,6 +101,17 @@ export function AlertsView() {
           include acknowledged &amp; resolved
         </label>
       </p>
+      {status && (status.last_run_at || status.last_failure_at) && (
+        <p className="muted">
+          Checks last ran {status.last_run_at ? formatTimestamp(status.last_run_at) : "never"}
+          {status.last_success_at &&
+            ` · last success ${formatTimestamp(status.last_success_at)}`}
+          {status.last_failure_at &&
+            ` · last failure ${formatTimestamp(status.last_failure_at)}`}
+          {status.last_error && ` (${status.last_error})`}
+          {status.last_detail && ` — ${status.last_detail}`}
+        </p>
+      )}
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
       {alerts.length === 0 ? (

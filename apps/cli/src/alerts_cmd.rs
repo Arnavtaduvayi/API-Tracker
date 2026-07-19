@@ -64,31 +64,50 @@ pub fn alerts(ctx: &Ctx, cmd: AlertsCmd) -> Result<()> {
     Ok(())
 }
 
-pub fn monitor_run(ctx: &Ctx, offline: bool) -> Result<()> {
+pub fn monitor_run(ctx: &Ctx, offline: bool, status_only: bool) -> Result<()> {
     let (vault, _t) = ctx.unlocked()?;
-    let summary = vault.run_monitor()?;
+    if status_only {
+        let status = vault.monitor_status()?;
+        render::emit(ctx.json, &status, || {
+            let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "never".into());
+            println!("Last run:      {}", show(&status.last_run_at));
+            println!("Last success:  {}", show(&status.last_success_at));
+            println!("Last failure:  {}", show(&status.last_failure_at));
+            if !status.last_error.is_empty() {
+                println!("Last error:    {}", status.last_error);
+            }
+            if !status.last_detail.is_empty() {
+                println!("Last result:   {}", status.last_detail);
+            }
+        });
+        return Ok(());
+    }
     // Network phases are best-effort and offline-safe: due documentation
     // checks and webhook notification delivery. --offline skips them.
-    let mut doc_checks = 0usize;
-    let mut delivered = 0usize;
-    if !offline {
-        let fetcher = api_tracker_core::docwatch::HttpFetcher::new();
-        if let Ok(results) = vault.check_due_doc_watches(&fetcher) {
-            doc_checks = results.len();
-        }
-        let http = api_tracker_core::http::UreqClient::new();
-        delivered = vault.deliver_notifications(&http).unwrap_or(0);
-    }
-    render::emit(ctx.json, &summary, || {
+    let fetcher = api_tracker_core::docwatch::HttpFetcher::new();
+    let http = api_tracker_core::http::UreqClient::new();
+    let report = if offline {
+        vault.run_monitor_cycle(None)?
+    } else {
+        vault.run_monitor_cycle(Some((&fetcher, &http)))?
+    };
+    render::emit(ctx.json, &report, || {
+        let summary = &report.summary;
         println!(
             "Checked {} credential(s): {} new alert(s), {} resolved, {} open.",
             summary.checked, summary.alerts_created, summary.alerts_resolved, summary.open_alerts
         );
-        if doc_checks > 0 {
-            println!("Documentation checks performed: {doc_checks} (due per interval).");
+        if report.doc_checks > 0 {
+            println!(
+                "Documentation checks performed: {} (due per interval).",
+                report.doc_checks
+            );
         }
-        if delivered > 0 {
-            println!("Webhook notifications delivered: {delivered}.");
+        if report.webhooks_delivered > 0 {
+            println!(
+                "Webhook notifications delivered: {}.",
+                report.webhooks_delivered
+            );
         }
     });
     Ok(())
@@ -111,6 +130,12 @@ pub enum NotifyCmd {
     },
     /// Send a test notification through a channel.
     Test { channel: String },
+    /// Delivery and failure history (channel names and outcomes only —
+    /// never URLs, never secret values).
+    History {
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
 }
 
 #[derive(clap::Args)]
@@ -200,6 +225,20 @@ pub fn notify(ctx: &Ctx, cmd: NotifyCmd) -> Result<()> {
             let http = api_tracker_core::http::UreqClient::new();
             let detail = vault.notification_channel_test(&ch.id, &http)?;
             println!("OK: {detail}");
+        }
+        NotifyCmd::History { limit } => {
+            let events = vault.notification_history(limit)?;
+            render::emit(ctx.json, &events, || {
+                if events.is_empty() {
+                    println!("No webhook deliveries recorded yet.");
+                    return;
+                }
+                let rows: Vec<Vec<String>> = events
+                    .iter()
+                    .map(|e| vec![e.at.clone(), e.detail.clone()])
+                    .collect();
+                render::table(&["AT", "OUTCOME"], &rows);
+            });
         }
     }
     Ok(())

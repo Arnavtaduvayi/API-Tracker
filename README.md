@@ -23,6 +23,7 @@ to an API Tracker server.
 > [provider support matrix](docs/PROVIDER_SUPPORT.md).
 >
 > Guides: [Install](docs/INSTALL.md) · [Provider support](docs/PROVIDER_SUPPORT.md)
+> · [Destination support](docs/DESTINATION_SUPPORT.md)
 > · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Backup & recovery](docs/BACKUP_RECOVERY.md)
 > · [Packaging/signing](docs/PACKAGING.md) · [Changelog](CHANGELOG.md)
 
@@ -184,7 +185,7 @@ npx tauri dev            # or run it in development mode
 
 ```bash
 bash scripts/demo.sh --keep   # isolated demo vault, fake credentials only
-bash scripts/smoke.sh         # automated end-to-end smoke test (47 checks)
+bash scripts/smoke.sh         # automated end-to-end smoke test
 ```
 
 The demo builds a throwaway vault with a development project, a
