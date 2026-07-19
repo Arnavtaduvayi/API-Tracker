@@ -834,6 +834,14 @@ pub struct ImportOutcome {
 /// only when provider, model, and effective date all match — other history
 /// is preserved.
 pub fn import_records(conn: &Connection, json: &str) -> Result<ImportOutcome> {
+    // A pricing file is small by nature; refuse absurd inputs before
+    // parsing rather than allocating for them.
+    const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
+    if json.len() > MAX_IMPORT_BYTES {
+        return Err(CoreError::InvalidInput(
+            "the pricing file exceeds 4 MiB; that is not a pricing dataset".into(),
+        ));
+    }
     let parsed: Vec<InterchangeRecord> = serde_json::from_str(json)
         .map_err(|e| CoreError::InvalidInput(format!("pricing JSON did not parse: {e}")))?;
     if parsed.is_empty() {

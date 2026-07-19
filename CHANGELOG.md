@@ -28,8 +28,8 @@ All notable changes to API Tracker are documented here. The project is in
   URLs in every manifest. `provider account [--sync]`.
 - **Destination completion**: AWS Secrets Manager delete (30-day recovery
   window, never forced), Linux Secret Service (secret-tool, stdin),
-  Windows Credential Manager (keyring crate; compiled + tested on real
-  Windows in CI), reauthenticated `destination delete-secret` (CLI +
+  Windows Credential Manager (keyring crate; a windows-latest CI job
+  compiles and tests the core crate), reauthenticated `destination delete-secret` (CLI +
   desktop), and per-kind declarations of verification method, required
   plan, possible charges, and testing status. Doppler/1Password/HashiCorp
   Vault evaluated and deferred (ADR 0016).

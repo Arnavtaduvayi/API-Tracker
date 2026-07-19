@@ -94,7 +94,8 @@ fn project_password_changes_rotate_the_project_key() {
 
     // Setting a password rotates the key: every ciphertext changes.
     let project_pw = SecretString::from("prod-project-password-1");
-    v.set_project_password("prod", &project_pw).unwrap();
+    v.set_project_password("prod", &project_pw, &master_pw())
+        .unwrap();
     let after_set = credential_ciphertext(&v, &paths, "k1");
     assert_ne!(before, after_set, "ciphertext unchanged — key not rotated");
 
@@ -215,5 +216,54 @@ fn dead_injection_sessions_are_swept_by_monitor() {
     assert!(
         open_after.is_empty(),
         "dead-PID session row was not closed by the sweep"
+    );
+}
+
+#[test]
+fn stale_cached_project_key_is_rejected_after_rotation() {
+    // Two vault instances over the same database: A holds the project
+    // unlocked; B changes the project password (rotating the key). A's
+    // cached key is now stale and must be REFUSED — not silently used to
+    // encrypt new data under a key that no longer has any wrap.
+    let (_dir, paths, mut a) = new_vault();
+    add_project(&mut a, "prod");
+    add_cred(&mut a, "prod", "k1", "FAKE-TEST-NOT-A-REAL-KEY-000007");
+    let pw1 = SecretString::from("prod-project-password-1");
+    a.set_project_password("prod", &pw1, &master_pw()).unwrap();
+    // A has the project unlocked (set keeps it unlocked in-session).
+
+    let mut b = vault::unlock_vault(&paths, &master_pw()).unwrap();
+    b.unlock_project("prod", &pw1).unwrap();
+    let pw2 = SecretString::from("prod-project-password-2");
+    b.set_project_password("prod", &pw2, &master_pw()).unwrap();
+    drop(b);
+
+    // A's cached key predates the rotation: adding a credential must fail
+    // with ProjectLocked instead of writing unrecoverable ciphertext.
+    let err = a
+        .add_credential(AddCredential {
+            project: "prod".into(),
+            provider: "other".into(),
+            name: "k2".into(),
+            environment: Environment::Development,
+            value: SecretString::from("FAKE-TEST-NOT-A-REAL-KEY-000008"),
+            credential_type: None,
+            key_created_at: None,
+            expires_at: None,
+            docs_url: String::new(),
+            notes: String::new(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(err, api_tracker_core::error::CoreError::ProjectLocked(_)),
+        "expected ProjectLocked, got: {err}"
+    );
+    // Re-unlocking with the NEW password restores full function.
+    a.unlock_project("prod", &pw2).unwrap();
+    assert_eq!(
+        a.reveal_credential("prod/k1", &master_pw())
+            .unwrap()
+            .expose(),
+        "FAKE-TEST-NOT-A-REAL-KEY-000007"
     );
 }

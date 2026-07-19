@@ -42,7 +42,7 @@ material decision. Migrations v8–v10. What landed, and where to look:
   (secret-tool via CommandRunner; stderr distinguishes locked-keyring from
   absent), `windows_credential_manager` (keyring crate — core stays
   `forbid(unsafe_code)`; a new windows-latest CI job compiles + tests core
-  on real Windows), `destination delete-secret` (reauth + confirm, CLI +
+  — it first runs with this PR), `destination delete-secret` (reauth + confirm, CLI +
   desktop), catalog extended with verify_method/required_plan/charges/
   testing per kind. Doppler/1Password/Vault deferred with reasoning
   (ADR 0016).
@@ -66,7 +66,7 @@ material decision. Migrations v8–v10. What landed, and where to look:
   THREAT_MODEL rewritten where residuals closed; new PRICING.md +
   TEMPLATES.md; DESTINATION_SUPPORT rewritten; PROVIDER_SUPPORT gained
   account-identity + live-test-requirements tables; ADR 0016; CHANGELOG.
-- **Smoke: 126 checks** (was 108): pricing (6), templates/detection (5),
+- **Smoke: 126 checks** (was 108): pricing (6), templates/detection (6),
   destination honesty (3), master-password change (3), plus the transient
   vault password change at the END of the script (ordering matters).
 

@@ -340,10 +340,10 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 if let Some(at) = &status.account_synced_at {
                     println!(
                         "Account:       {} <{}> id={} plan={}",
-                        status.account_name.as_deref().unwrap_or("-"),
-                        status.account_email.as_deref().unwrap_or("-"),
-                        status.account_id.as_deref().unwrap_or("-"),
-                        status.account_plan.as_deref().unwrap_or("-"),
+                        render::sanitize(status.account_name.as_deref().unwrap_or("-")),
+                        render::sanitize(status.account_email.as_deref().unwrap_or("-")),
+                        render::sanitize(status.account_id.as_deref().unwrap_or("-")),
+                        render::sanitize(status.account_plan.as_deref().unwrap_or("-")),
                     );
                     println!(
                         "               provider-reported via {} at {at}",

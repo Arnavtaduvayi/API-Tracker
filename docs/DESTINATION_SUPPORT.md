@@ -35,9 +35,9 @@ Secret Service (GNOME Keyring / KWallet). A locked keyring is reported as
 an error, never as "secret absent". Not yet exercised against a live
 Secret Service — the catalog entry says so.
 ⁴ Windows Credential Manager uses the `keyring` crate (CredWrite/CredRead/
-CredDelete underneath); the core crate stays `forbid(unsafe_code)`. The
-adapter compiles and core tests run on real Windows in CI; it is not yet
-exercised against a live Credential Manager by CI.
+CredDelete underneath); the core crate stays `forbid(unsafe_code)`. A
+windows-latest CI job compiles and tests the core crate (it runs with the
+pull request); nothing exercises a live Credential Manager in CI.
 ⁵ AWS delete schedules deletion with the standard **30-day recovery
 window** (cancellable with RestoreSecret until the deletion date);
 `ForceDeleteWithoutRecovery` is never sent — a fixture test proves it.
@@ -70,8 +70,9 @@ bash scripts/live_verify_github_actions.sh   # free (use a throwaway repo)
 bash scripts/live_verify_vercel.sh           # free (use a throwaway project)
 ```
 
-macOS Keychain is exercised through a mockable `CommandRunner` and on real
-macOS in CI; Linux Secret Service uses the same runner abstraction.
+macOS Keychain is exercised through a mockable `CommandRunner` in the core
+test suite (the desktop backend is compiled on macOS in CI); Linux Secret
+Service uses the same runner abstraction.
 
 ## Evaluated and deferred kinds
 

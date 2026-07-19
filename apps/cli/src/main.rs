@@ -137,7 +137,10 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     if let Err(err) = run(cli) {
-        eprintln!("error: {err:#}");
+        // Error text can embed attacker-influenced content (imported file
+        // fields, provider responses, paths); strip control characters so a
+        // crafted value cannot inject terminal escapes through an error.
+        eprintln!("error: {}", render::sanitize(&format!("{err:#}")));
         std::process::exit(1);
     }
 }

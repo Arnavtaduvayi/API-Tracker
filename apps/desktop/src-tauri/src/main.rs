@@ -99,7 +99,13 @@ fn with_vault_impl<T>(
     if auto_lock_minutes > 0
         && slot.last_activity.elapsed() >= Duration::from_secs(u64::from(auto_lock_minutes) * 60)
     {
-        slot.vault = None; // drop -> keys zeroized
+        // Take the vault out and drop it AFTER releasing the mutex: the
+        // drop checkpoints the WAL (bounded, but it can wait for a
+        // concurrent reader), and holding the state mutex through that
+        // would stall every other vault command.
+        let expired = slot.vault.take(); // drop -> keys zeroized
+        drop(slot);
+        drop(expired);
         return Err(locked_err());
     }
     if touch_activity {
@@ -158,7 +164,11 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
 #[tauri::command]
 fn vault_lock(state: State<'_, AppState>) -> CmdResult<()> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
-    slot.vault = None;
+    // Drop after releasing the mutex — the drop checkpoints the WAL and can
+    // briefly wait for a concurrent reader.
+    let vault = slot.vault.take();
+    drop(slot);
+    drop(vault);
     Ok(())
 }
 
@@ -539,10 +549,12 @@ fn project_set_password(
     state: State<'_, AppState>,
     ident: String,
     password: String,
+    master: String,
 ) -> CmdResult<()> {
     let password = SecretString::new(password);
+    let master = SecretString::new(master);
     with_vault(&state, |vault| {
-        vault.set_project_password(&ident, &password)
+        vault.set_project_password(&ident, &password, &master)
     })
 }
 

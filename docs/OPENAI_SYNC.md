@@ -114,11 +114,12 @@ them strictly separate:
   as reported: amount, currency (kept verbatim; non-USD rows are excluded
   from USD totals with a note rather than silently converted), reporting
   window, and line item.
-- **Estimated cost** is computed locally from synced token counts and a
-  bundled, versioned price table. Estimates can differ from the bill:
-  cached-token discounts, batch pricing, service tiers, price changes, and
-  non-completions products are not fully modeled. Estimates are always
-  labeled.
+- **Estimated cost** is computed locally from synced token counts and the
+  versioned, effective-dated pricing dataset (bundled + imported + manual
+  overrides — see [PRICING.md](PRICING.md); price changes are modeled by
+  effective date). Estimates can still differ from the bill: cached-token
+  discounts, batch pricing, service tiers, and non-completions products are
+  not fully modeled. Estimates are always labeled.
 
 Budgets consume **one** configurable source — never the sum of both, which
 would double-count the same consumption:

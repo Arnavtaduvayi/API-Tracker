@@ -28,7 +28,9 @@ use zeroize::Zeroize;
 /// Decrypted key material carried by a session.
 pub struct SessionKeys {
     pub vault_key: SecretBytes,
-    pub project_keys: HashMap<String, SecretBytes>,
+    /// Project key paired with the BLAKE3 hash of the wrapped-key blob it
+    /// was unwrapped from (the vault checks it for freshness before use).
+    pub project_keys: HashMap<String, (SecretBytes, [u8; 32])>,
 }
 
 /// The random per-session secret handed to the user (env var), never stored.
@@ -126,7 +128,14 @@ pub fn save(
         project_keys_hex: keys
             .project_keys
             .iter()
-            .map(|(id, key)| (id.clone(), hex::encode(key.expose())))
+            .map(|(id, (key, wrap_hash))| {
+                // key bytes || wrap-hash bytes, hex-encoded together.
+                let mut buf = key.expose().to_vec();
+                buf.extend_from_slice(wrap_hash);
+                let encoded = hex::encode(&buf);
+                buf.zeroize();
+                (id.clone(), encoded)
+            })
             .collect(),
     };
     let mut payload_json = serde_json::to_vec(&payload)?;
@@ -181,10 +190,17 @@ pub fn load_and_refresh(paths: &VaultPaths, token: &SessionToken) -> Result<Sess
     );
     let mut project_keys = HashMap::new();
     for (id, key_hex) in &payload.project_keys_hex {
-        project_keys.insert(
-            id.clone(),
-            SecretBytes::new(hex::decode(key_hex).map_err(|_| CoreError::SessionInvalid)?),
-        );
+        let mut bytes = hex::decode(key_hex).map_err(|_| CoreError::SessionInvalid)?;
+        // key bytes || wrap-hash. Entries without a wrap hash (older
+        // sessions) are dropped: without it the key's freshness cannot be
+        // proven, and the project simply needs its password again.
+        if bytes.len() != crypto::KEY_LEN + 32 {
+            bytes.zeroize();
+            continue;
+        }
+        let hash_part: [u8; 32] = bytes[crypto::KEY_LEN..].try_into().expect("length checked");
+        bytes.truncate(crypto::KEY_LEN);
+        project_keys.insert(id.clone(), (SecretBytes::new(bytes), hash_part));
     }
     // Sliding expiry refresh.
     file.expires_at = expiry_from_now(file.ttl_minutes);

@@ -71,6 +71,11 @@ read -r -s AWS_SECRET; echo
 printf "Session token (hidden; empty if none): "
 read -r -s AWS_TOKEN; echo
 [ -n "$AWS_KEY_ID" ] && [ -n "$AWS_SECRET" ] || { echo "missing credentials; aborting."; exit 1; }
+# Real IAM material never contains quotes or backslashes; refuse anything
+# that would break the JSON we build below rather than mangling it.
+case "$AWS_KEY_ID$AWS_SECRET$AWS_TOKEN" in
+  *'"'*|*'\'*) echo "credentials contain characters that are not valid IAM material; aborting."; exit 1 ;;
+esac
 
 RAND="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 SECRET_NAME="api-tracker-live-verify-$RAND"

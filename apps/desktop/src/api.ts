@@ -166,8 +166,8 @@ export const api = {
   ) => call<Project>("project_update", { ident, ...args }),
   projectSetArchived: (ident: string, archived: boolean) =>
     call<Project>("project_set_archived", { ident, archived }),
-  projectSetPassword: (ident: string, password: string) =>
-    call<void>("project_set_password", { ident, password }),
+  projectSetPassword: (ident: string, password: string, master: string) =>
+    call<void>("project_set_password", { ident, password, master }),
   projectRemovePassword: (ident: string, password: string) =>
     call<void>("project_remove_password", { ident, password }),
   projectUnlock: (ident: string, password: string) =>

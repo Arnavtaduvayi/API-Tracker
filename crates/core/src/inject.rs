@@ -185,9 +185,12 @@ pub fn sweep_dead_sessions(conn: &Connection) -> Result<usize> {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            // Only a clean "ps ran and found nothing" closes the row; a
-            // failure to run ps proves nothing and changes nothing.
-            let gone = matches!(probe, Ok(status) if !status.success());
+            // Only ps's definitive "no matching process" (exit code exactly
+            // 1) closes the row. A ps that failed to spawn, was signal-
+            // killed, or exited with any other code proves nothing and
+            // changes nothing — a live session must never be closed by an
+            // environmental ps failure.
+            let gone = matches!(probe, Ok(status) if status.code() == Some(1));
             if gone {
                 conn.execute(
                     "UPDATE process_sessions SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",

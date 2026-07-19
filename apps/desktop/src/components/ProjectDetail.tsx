@@ -19,6 +19,7 @@ export function ProjectDetail(props: {
   );
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [master, setMaster] = useState("");
 
   const reload = useCallback(async () => {
     try {
@@ -53,13 +54,15 @@ export function ProjectDetail(props: {
     const entered = password;
     setPassword("");
     setConfirmPassword("");
+    const masterPassword = master;
+    setMaster("");
     if (mode === "set") {
       if (entered !== confirmPassword) {
         setError("The passwords do not match.");
         return;
       }
       await run(
-        () => api.projectSetPassword(props.ident, entered),
+        () => api.projectSetPassword(props.ident, entered, masterPassword),
         "Project password set. Keep it safe: losing it makes this project's credential values unrecoverable.",
       );
     } else if (mode === "unlock") {
@@ -184,6 +187,17 @@ export function ProjectDetail(props: {
                   type="password"
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
+                  required
+                />
+              </label>
+            )}
+            {passwordPrompt === "set" && (
+              <label className="field">
+                Master password (reauthentication)
+                <input
+                  type="password"
+                  value={master}
+                  onChange={(e) => setMaster(e.target.value)}
                   required
                 />
               </label>

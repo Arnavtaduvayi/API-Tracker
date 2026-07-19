@@ -460,8 +460,12 @@ pub struct UnlockedVault {
     vault_id: String,
     vault_key: SecretBytes,
     fingerprint_key: SecretBytes,
-    /// Session-unlocked keys of password-locked projects.
-    project_keys: HashMap<String, SecretBytes>,
+    /// Session-unlocked keys of password-locked projects, each paired with
+    /// a BLAKE3 hash of the wrapped-key blob it was unwrapped from. The
+    /// hash is checked against the freshly-read row before every use, so a
+    /// key made stale by a concurrent password change (which rotates the
+    /// project key) can never encrypt new data into an unrecoverable state.
+    project_keys: HashMap<String, (SecretBytes, [u8; 32])>,
     settings: VaultSettings,
     paths: VaultPaths,
 }
@@ -641,7 +645,11 @@ impl UnlockedVault {
             repo_paths: self.repo_paths(&row.id)?,
             archived: row.archived,
             password_locked,
-            unlocked: !password_locked || self.project_keys.contains_key(&row.id),
+            unlocked: !password_locked
+                || self
+                    .project_keys
+                    .get(&row.id)
+                    .is_some_and(|(_, h)| blake3::hash(&row.wrapped_project_key).as_bytes() == h),
             created_at: row.created_at.clone(),
             updated_at: row.updated_at.clone(),
             credential_count,
@@ -843,11 +851,20 @@ impl UnlockedVault {
                 &row.wrapped_project_key,
                 "project key",
             ),
-            "vault+password" => self
-                .project_keys
-                .get(&row.id)
-                .cloned()
-                .ok_or_else(|| CoreError::ProjectLocked(row.name.clone())),
+            "vault+password" => {
+                let (key, wrap_hash) = self
+                    .project_keys
+                    .get(&row.id)
+                    .ok_or_else(|| CoreError::ProjectLocked(row.name.clone()))?;
+                // A concurrent session may have changed the project password
+                // (rotating the key). The cached key must match the wrap it
+                // was unwrapped from, or it would encrypt new values under a
+                // key that no longer has any wrap anywhere.
+                if blake3::hash(&row.wrapped_project_key).as_bytes() != wrap_hash {
+                    return Err(CoreError::ProjectLocked(row.name.clone()));
+                }
+                Ok(key.clone())
+            }
             _ => Err(CoreError::VaultCorrupted("unknown project key wrap mode")),
         }
     }
@@ -908,7 +925,17 @@ impl UnlockedVault {
     /// (which may survive in WAL remnants or old backups) cannot unlock the
     /// data. Losing the password makes the project's credential values
     /// unrecoverable (documented recovery limitation).
-    pub fn set_project_password(&mut self, ident: &str, password: &SecretString) -> Result<()> {
+    pub fn set_project_password(
+        &mut self,
+        ident: &str,
+        password: &SecretString,
+        master_password: &SecretString,
+    ) -> Result<()> {
+        // Setting/changing a project password rotates the project key and
+        // destroys the old wrap on disk — a sensitive, hard-to-reverse
+        // change, so it requires proving the master password like every
+        // other secret-changing operation.
+        self.verify_master_password(master_password)?;
         validate_password(password, "the project password")?;
         let row = self.project_row_by_ident(ident)?;
         let old_key = self.project_key_for_row(&row)?;
@@ -940,8 +967,9 @@ impl UnlockedVault {
         )?;
         tx.commit()?;
         // The caller just proved knowledge of the password; keep it unlocked
-        // for this session.
-        self.project_keys.insert(row.id.clone(), new_key);
+        // for this session (paired with the new wrap's hash).
+        self.project_keys
+            .insert(row.id.clone(), (new_key, *blake3::hash(&outer).as_bytes()));
         audit::record(
             &self.conn,
             "project_password_set",
@@ -991,7 +1019,13 @@ impl UnlockedVault {
             )));
         }
         let project_key = self.unwrap_project_key_with_password(&row, password)?;
-        self.project_keys.insert(row.id.clone(), project_key);
+        self.project_keys.insert(
+            row.id.clone(),
+            (
+                project_key,
+                *blake3::hash(&row.wrapped_project_key).as_bytes(),
+            ),
+        );
         audit::record(&self.conn, "project_unlocked", Some(&row.id), None, "")?;
         self.project_model(&row)
     }

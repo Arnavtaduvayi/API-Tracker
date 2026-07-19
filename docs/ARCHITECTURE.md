@@ -38,7 +38,7 @@ parity throughout.
 │  permissions/activity    scopes + suspicious-activity rules  │
 │  inject    credential→env mappings, process sessions         │
 │  envfile/envgov          lossless .env parsing + governance  │
-│  destinations            deployment adapters (keychain, AWS, │
+│  destinations            deployment adapters (OS stores, AWS,  │
 │                          GitHub Actions, Vercel) + catalog   │
 │  syncplan  reviewable value-change rollout plans             │
 │  templates/stackdetect  stack templates + local detection    │

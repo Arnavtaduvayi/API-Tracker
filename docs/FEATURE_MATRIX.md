@@ -83,8 +83,8 @@ in any official API. OpenAI token detail covers the completions endpoint
 Destination adapters (`destinations.rs`) with per-kind capability honesty:
 macOS Keychain (secret via stdin), **Linux Secret Service** (secret-tool,
 value via stdin, locked-keyring failures never misreported as absent),
-**Windows Credential Manager** (keyring crate; compiled + tested on real
-Windows in CI), AWS Secrets Manager (SigV4 verified against the official
+**Windows Credential Manager** (keyring crate; a windows-latest CI job
+compiles and tests the core crate), AWS Secrets Manager (SigV4 verified against the official
 test vector; **delete implemented** with the 30-day recovery window and
 never ForceDeleteWithoutRecovery), GitHub Actions repository secrets
 (sealed box), Vercel env vars, plus local vault/mapping/export kinds.

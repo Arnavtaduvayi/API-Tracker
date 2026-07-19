@@ -33,7 +33,7 @@ fn backup_create_verify_restore_roundtrip() {
         Environment::Development,
     );
     vault
-        .set_project_password("beta", &SecretString::from(PROJECT_PW))
+        .set_project_password("beta", &SecretString::from(PROJECT_PW), &master_pw())
         .unwrap();
 
     let backup_path = dir.path().join("vault-backup.json");
@@ -276,7 +276,7 @@ fn session_roundtrip_and_wrong_token() {
         Environment::Development,
     );
     vault
-        .set_project_password("locked", &SecretString::from(PROJECT_PW))
+        .set_project_password("locked", &SecretString::from(PROJECT_PW), &master_pw())
         .unwrap();
 
     let token = SessionToken::generate();

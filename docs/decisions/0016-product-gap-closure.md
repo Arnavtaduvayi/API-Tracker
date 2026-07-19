@@ -92,7 +92,8 @@ material, and browser session data remain **intentionally excluded**
   guarantee, and shelling out (cmdkey/PowerShell) would put secrets in
   argument lists or script text. Encapsulating the unsafe FFI in an
   audited dependency preserves both properties. A new `windows-latest` CI
-  job compiles and tests the core crate on real Windows.
+  job compiles and tests the core crate on real Windows (first run: this
+  branch's pull request).
 - **Deleting a secret AT a destination** is now a real workflow
   (`destination delete-secret`, desktop action): confirmed,
   reauthentication-gated, never touches the vault value.
@@ -151,3 +152,27 @@ egress: none — account sync uses the same provider endpoints and admin
 credentials as existing syncs; detection and templates are fully local.
 The keyring dependency is the one new security-sensitive dependency,
 Windows-only, chosen precisely to preserve `forbid(unsafe_code)`.
+
+## Adversarial-review outcomes (this milestone's diff)
+
+Three independent review passes (crypto/vault correctness, secret-leak and
+parsing surfaces, documentation accuracy) produced one medium and three
+low findings — all fixed with regression coverage:
+
+- **Medium**: a concurrent session's cached project key survived a
+  password change (which rotates the key), and `add_credential` — the one
+  path that encrypts without first decrypting — could write a value under
+  a key with no remaining wrap. Fixed: every cached project key carries a
+  BLAKE3 hash of the wrap it came from (including through CLI session
+  files; older session entries without a hash are dropped), and the vault
+  refuses a stale key with `ProjectLocked` before any use. Regression:
+  `stale_cached_project_key_is_rejected_after_rotation`.
+- **Low**: `set_project_password` now requires master-password
+  reauthentication (rotation + WAL truncation made a hostile lockout from
+  an unlocked machine irreversible); the dead-session sweep only closes a
+  row on ps's definitive exit code 1; the desktop drops the vault outside
+  the state mutex so the WAL checkpoint cannot stall other commands;
+  provider-reported account fields are terminal-sanitized in every CLI
+  path and the CLI's top-level error printer strips control characters;
+  pricing imports are size-capped before parsing; the AWS live-verify
+  script refuses credentials that would break its JSON construction.
