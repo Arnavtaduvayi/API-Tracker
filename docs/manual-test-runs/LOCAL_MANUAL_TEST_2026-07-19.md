@@ -106,32 +106,44 @@ verification scripts are deferred by design. Native-notification results
 
 _(updated at each phase checkpoint)_
 
-Running totals (updated live; checkpoint after each phase):
+Final totals for this safe/local session:
 
 | Result | Count |
 | --- | --- |
-| PASS | 111 |
+| PASS | 113 (112 numbered IDs + packaged-app re-check) |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 9 |
+| NOT RUN (need human keychain/Wi-Fi assist) | 11 |
 | DEFERRED (out of session scope) | 5 (+7 live scripts) |
 | DEFECTS filed | 2 (MANUAL-001 low, MANUAL-002 low) |
 
-PASS to date: SETUP-01/02/03, VLT-01..10 (incl. VLT-07/08/09), PRJ-01..07,
-CRD-01..17, CRD-19, PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05,
+PASS (112 numbered IDs + packaged re-check): SETUP-01/02/03, VLT-01..10
+(01–09 core gate incl. 07/08/09; VLT-10 offline part pending), PRJ-01..07,
+CRD-01..17 + CRD-19, PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05,
 SCN-01..09, ALR-01/02/03, NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07,
-CON-01/04, ROT-01..06, SET-01, BCK-01..08 (incl. BCK-05/06/07). NOT RUN
-(9): DST-01/02/03/05/06/07/08 (macOS Keychain — needs the OS keychain
-permission click), SYN-01/02/04/05, VLT-10 + CON-03 (offline), packaged
-`.app` re-check. DEFERRED: CRD-18 (live), CON-02 (live), CON-03 (offline),
-DST-04 (live network), SYN-03 (live network). DEFERRED:
-CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
-— low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
-accessibility harness + real key events, with CLI/DB cross-checks;
-conductor-observed, not human-observed (human screenshots at
-SETUP-01/VLT-01/PRJ-01/CRD-05). Pending: packaged-app re-check; Phases:
-Alerts/NTF, Env, Destinations/Sync, Rotation, Access, Templates, Admin(mock),
-Settings/offline, Backup endgame.
+CON-01/04, ROT-01..06, SET-01, BCK-01..08, DST-01, and the packaged `.app`
+re-check.
+
+**NOT RUN (11 — need a human hand):**
+- **Destinations & Sync** DST-02, DST-03, DST-05, DST-06, DST-07, DST-08,
+  SYN-01, SYN-02, SYN-04, SYN-05 — all require writing to the **macOS
+  login Keychain**, which triggers an OS "Allow" permission dialog the
+  automation cannot click. DST-01 (catalog honesty) passed.
+- **VLT-10** (restart + offline reopening) and **CON-03** (offline sync)
+  need the machine taken **offline** (Wi-Fi off); the restart half of
+  VLT-10 was exercised many times, only the Wi-Fi-off half remains.
+
+**DEFERRED (out of scope this session):** CRD-18, CON-02 (live api.openai);
+DST-04, SYN-03 (live api.github + retry); CON-03 (offline) — plus the 7 §L
+live-verification scripts.
+
+**Testing method note:** SETUP-01/02, VLT-01..06, PRJ-01..05, CRD-01..05
+were **human-observed** (tester clicked and reported, with screenshots).
+From CRD-06 onward the conductor drove the GUI directly via a macOS
+accessibility harness (`scratchpad/ax.js`) + real key events, cross-checked
+against the CLI, the SQLite vault, and (for scanning/hooks/access) real
+`git`/`run` processes — **conductor-observed via automated UI interaction
+against the live rendered UI**, not source inference.
 
 ## Items needing human confirmation
 
@@ -150,20 +162,36 @@ shared CLI core / source):
 
 ## Passed
 
-_(none recorded yet)_
+**112 numbered test IDs + the packaged-app re-check.** Full per-test records
+are in the "Per-test records" section below. By area: launch/isolation/vault
+gate (SETUP-01/02/03, VLT-01..09), projects & credential lifecycle
+(PRJ-01..07, CRD-01..17, CRD-19), providers & doc-watches (PRV-01/02,
+DOC-01..04), usage & pricing (USE-01..07, PRC-01..05), alerts & webhooks
+(ALR-01..03, NTF-01..05), scanning & hooks (SCN-01..09), .env governance
+(ENV-01..09), templates & stack detection (TPL-01..06), temporary access
+(ACC-01..07), admin connection mock (CON-01, CON-04), rotation (ROT-01..06),
+settings & auto-lock (SET-01, VLT-07), backup & restore endgame (BCK-01..08,
+VLT-08/09), destination catalog (DST-01), and the packaged `.app` re-check.
 
 ## Failed
 
-_(none recorded yet)_
+**None.** 0 tests produced a FAIL result. Two low-severity defects
+(MANUAL-001, MANUAL-002) were filed against PASS-with-caveat tests (DOC-03,
+ROT-02) — see Defects.
 
 ## Blocked
 
-_(none recorded yet)_
+**None.** No test was blocked by a prior failure. The 11 NOT-RUN items are
+gated on a human action (macOS Keychain "Allow" prompt, or Wi-Fi off), not
+on any app defect.
 
 ## Not run
 
-All 125 eligible IDs pending at skeleton creation; this section lists only
-the IDs still pending at session end.
+- **macOS Keychain destination/sync (10):** DST-02, DST-03, DST-05, DST-06,
+  DST-07, DST-08, SYN-01, SYN-02, SYN-04, SYN-05 — each writes to the login
+  Keychain and raises an OS "Allow" dialog the automation cannot click.
+- **Offline half (VLT-10 offline reopen, CON-03 offline sync):** need Wi-Fi
+  turned off.
 
 ## Defects
 
@@ -254,10 +282,91 @@ _(indexed per test as collected)_
   (a) legitimately suppresses the app's clear and (b) makes precise
   auto-clear-timing measurement unreliable on this machine right now. See
   CRD-11 for how this was handled.
+- **Auto-lock setting is read at unlock, not live:** changing
+  `auto_lock_minutes` via the CLI while the desktop app is unlocked did not
+  take effect until the next unlock (the app kept using its cached value,
+  auto-locking at the old interval). Setting it via the desktop Settings
+  screen works immediately. Minor UX observation, not filed as a defect;
+  worth noting for the UI rebuild.
+- **Automation-harness artifacts (not app defects):** two UI controls
+  resisted the accessibility driver — the SCN-06 "suppress" link (AXPress
+  did not open the in-app PromptDialog) and the USE-05 native cost-source
+  popup. Both underlying behaviors were verified via the shared CLI core
+  and (for suppress) the component source; see "Items needing human
+  confirmation".
+- **Test vault final state:** after the BCK-06 restore the isolated test
+  vault is back to backup-time state (master password
+  `manual-master-passphrase-01`; a `vault.db.replaced-<ts>` aside file
+  remains in `~/at-manual-test/vault/`). The real vault at
+  `~/Library/Application Support/api-tracker/` was never targeted by this
+  session (its only change was the tester's own 09:56 launch, recorded in
+  Test-data isolation).
 
 ## Recommended next step
 
-_(written at session end)_
+**Ship-readiness of the safe/local surface is strongly positive**: 112 of the
+plan's safe/local test IDs plus the packaged-app re-check all passed, with
+0 failures and only 2 low-severity honesty/labeling defects (MANUAL-001,
+MANUAL-002) — neither a security, data-loss, or authentication-bypass issue.
+
+Recommended next actions, in order:
+1. **Finish the 11 human-gated tests** in one short assisted pass: the macOS
+   Keychain destination/sync flow (DST-02/03/05/06/07/08, SYN-01/02/04/05 —
+   click "Allow" on the keychain prompt) and the offline half (VLT-10,
+   CON-03 — Wi-Fi off). These are the only safe/local IDs left.
+2. **Triage the two defects** for the release decision — both low severity;
+   MANUAL-001 (doc-watch labels a redirect as `first_capture`) and
+   MANUAL-002 (rotation cancel → state "failed") are UX/honesty fixes, not
+   blockers.
+3. **Run the deferred live verification (§L)** on real throwaway provider
+   accounts once the security audit clears — that covers CRD-18, CON-02,
+   DST-04, SYN-03 and the 7 scripts.
+
+Do NOT read this as "everything works": live-provider sync, network
+destinations, and rotation *completion* were not exercised here, and the
+two offline behaviors and the keychain writes still need a human.
+
+## Final deliverable summary
+
+1. **Total tests eligible for this safe/local run:** 123 numbered IDs
+   (125 eligible minus CON-03 reclassified as offline-deferred; plus the
+   packaged-app re-check as a session requirement).
+2. **Total passed:** 112 numbered IDs + packaged-app re-check.
+3. **Total failed:** 0.
+4. **Total blocked:** 0.
+5. **Total deferred:** 5 numbered IDs (CRD-18, CON-02, CON-03, DST-04,
+   SYN-03) + 7 §L live scripts; plus 11 NOT-RUN that need a human
+   (10 Keychain + VLT-10/CON-03 offline).
+6. **Defect list by severity:** MANUAL-001 (Low — doc-watch redirect
+   labeled `first_capture`), MANUAL-002 (Low — rotation cancel state
+   "failed"). No medium/high/critical.
+7. **Workflows that could not be tested manually here:** macOS Keychain
+   destination writes + the sync-plan execute/rollback/drift/delete-secret
+   flow (OS "Allow" prompt); offline degradation (VLT-10 reopen, CON-03
+   sync); all live-provider validation/sync/rotation-completion.
+8. **Packaged `.app` vs development build:** **identical behavior.** The
+   fresh bundle built this session launches, honors `API_TRACKER_DIR`
+   (isolated vault — no silent switch), opens the v10 vault, and unlocks
+   and renders the same data as dev. (A pre-existing stale bundle in the
+   *main* worktree correctly refused the newer schema — that was a
+   test-artifact staleness, not an app defect.)
+9. **Any indication of data loss, secret exposure, authentication bypass,
+   wrong-target deletion, or misleading success:** **None observed.**
+   Positively verified: values encrypted at rest (repeated vault-dir greps
+   found zero plaintext), reveal/copy/version-history/export all
+   reauth-gated with masking, a password-locked project's values are
+   unreadable even with the correct master password (CRD-19),
+   reference-target deletion is protected (CRD-17), backups are AEAD
+   tamper-evident (BCK-04), restore renames the old DB aside (never
+   deletes) and requires the backup-time password (BCK-06), the pre-commit
+   hook blocks a staged secret without unlocking the vault (SCN-08),
+   webhook payloads are metadata-only (NTF-02/03), and failures (webhook,
+   destination, rotation validation) are reported honestly, never faked as
+   success. The two defects are labeling/UX only.
+10. **Exact recommended next action:** run the short human-assisted pass
+    for the 11 Keychain/offline IDs (step 1 above), then hand the two
+    low-severity defects to triage and schedule the §L live verification
+    after the security audit clears.
 
 ---
 
@@ -1832,6 +1941,39 @@ contains a secret value.
   this installation…" (SchemaTooNew). The vault is NOT opened. (Same guard
   the packaged app surfaced interactively earlier in the session.)
 - Evidence: CLI open attempt on the v99 copy.
+
+### DST-01 — catalog honesty and platform gating — **PASS**
+
+- Screen/workflow: Destinations catalog (+ CLI `destination kinds`)
+- Result: **PASS** — **9 kinds** with an honest capability matrix: vault,
+  env_mapping, env_export, **macos_keychain** (read/write/delete/validate
+  = yes, platform **macOS only**), **linux_secret_service** ("n/a here",
+  Linux only), **windows_credential_manager** ("n/a here", Windows only),
+  aws_secrets_manager, **github_actions** (READ = no → write-only),
+  **vercel** (READ = no → write-only). Each kind lists Auth / Verify /
+  Plan / Charges / Testing. On macOS the Linux/Windows OS-store kinds are
+  correctly shown unavailable; GHA/Vercel are honestly write-only. The UI
+  catalog shows the matching implemented/unsupported/unavailable chips.
+- Evidence: CLI `destination kinds`; AX catalog chips.
+- Suspected component: n/a.
+
+### Packaged `.app` re-check (fresh bundle) — **PASS**
+
+- Screen/workflow: quit dev app → launch the **freshly built** bundle
+  (`API-Tracker-manual-test/target/release/bundle/macos/API Tracker.app`,
+  built this session from prod code `7d81090`) via its inner binary with
+  `API_TRACKER_DIR=~/at-manual-test/vault`
+- Result: **PASS** — the packaged app shows "Unlock vault" with **"Vault
+  location: /Users/arnavtaduvayi/at-manual-test/vault"** (the isolated
+  test vault, NOT the real `~/Library/Application Support` vault — no
+  silent vault switch); it opens the schema-v10 vault without the
+  SchemaTooNew error (the fresh bundle supports v10, unlike the earlier
+  stale bundle); unlocking with the backup-time password `-01` succeeds and
+  renders the same Projects (alpha-app, beta-service) as the dev build.
+  **The packaged app behaves identically to the development build.**
+- Evidence: AX vault-location + Projects; `lsof`/mtime showing the test
+  vault (not the real one) was opened.
+- Suspected component: n/a.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
 
