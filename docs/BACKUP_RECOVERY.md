@@ -34,7 +34,10 @@ api-tracker backup restore ~/api-tracker-backup.json        # into an empty vaul
 api-tracker backup restore --force ~/api-tracker-backup.json  # replace an existing vault
 ```
 `--force` renames the current database aside (`vault.db.replaced-<ts>`) rather
-than deleting it. After restore, unlock with the **master password that was in
+than deleting it. On Windows, close the desktop app (and any CLI session)
+first: the OS refuses to rename a database that is still open, so a
+force-restore against an in-use vault fails with a clear error and changes
+nothing. After restore, unlock with the **master password that was in
 effect when the backup was created**.
 
 A backup made by an **older** version of API Tracker restores fine: the data
