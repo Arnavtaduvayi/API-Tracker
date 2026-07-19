@@ -110,16 +110,18 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 91 |
+| PASS | 99 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 34 |
-| DEFERRED (out of session scope) | 4 (+7 live scripts) |
-| DEFECTS filed | 1 (MANUAL-001, low) |
+| NOT RUN (eligible, not yet reached) | 21 |
+| DEFERRED (out of session scope) | 5 (+7 live scripts) |
+| DEFECTS filed | 2 (MANUAL-001 low, MANUAL-002 low) |
 
 PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
 PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09, ALR-01/02/03,
-NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07. DEFERRED:
+NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07, CON-01, CON-04, ROT-01..06.
+DEFERRED: CRD-18 (live), CON-02 (live), CON-03 (needs offline), DST-04
+(live network), SYN-03 (live network). DEFERRED:
 CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
 — low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
 accessibility harness + real key events, with CLI/DB cross-checks;
@@ -196,7 +198,33 @@ the IDs still pending at session end.
 - **Data-loss relevance:** none.
 - **Blocks further testing:** no.
 
-_(further defects appended as found: MANUAL-002, …)_
+### MANUAL-002 — cancelling a planned rotation records terminal state "failed" instead of "cancelled"
+
+- **Title:** A user-cancelled rotation is stored/reported with state
+  "failed"; the CLI message "Cancelled (state: failed)" is
+  self-contradictory (and the plan expects state "cancelled").
+- **Severity recommendation:** **Low** (honesty/UX; no security or data
+  impact — the credential is untouched and the cancel correctly aborts).
+- **Test ID:** ROT-02.
+- **Preconditions:** a rotation in state "planned" (nothing changed yet).
+- **Reproduction steps:** `rotation plan alpha-app/openai-main …` →
+  `rotation cancel <id> --yes`.
+- **Expected result (per plan):** "Cancelled (state: cancelled)."; the
+  rotation list shows state **cancelled**.
+- **Actual result:** message "Cancelled (state: failed)."; `rotation
+  list` shows STATE **failed**. Reproduced 2/2 with fresh rotations.
+- **Reproduction rate:** 2/2.
+- **Logs:** CLI `rotation cancel`/`list`/`show` output.
+- **Screenshot reference:** —
+- **Possible affected files/symbols:** the rotation state machine's cancel
+  transition (core) — the terminal state for a clean user cancellation
+  should be a distinct "cancelled", not "failed".
+- **Security relevance:** none (credential value verified unchanged after
+  cancel).
+- **Data-loss relevance:** none.
+- **Blocks further testing:** no.
+
+_(further defects appended as found: MANUAL-003, …)_
 
 ## Screenshots/evidence
 
@@ -1588,6 +1616,112 @@ contains a secret value.
   **kept running** (surfaced, not silently killed) until cleaned up.
 - Evidence: AX confirm+notice; CLI access list (revoked); process still
   present after end.
+
+### CON-01 — offline admin connect (CLI) renders in the desktop panel — **PASS**
+
+- Screen/workflow: CLI `provider connect openai --org manual-org
+  --key-stdin --no-verify` → Providers → OpenAI → Administrative connection
+- Result: **PASS** — the panel shows Admin key **"sk-a…EY"**
+  "(administrative; encrypted at rest)" — masked; Organization "manual-org"
+  "(user-entered label, not provider-verified)" — honest; Last successful
+  sync "never"; buttons Replace admin key… / Sync now / Test connection /
+  Disconnect. The admin key is never displayed after storage; grep of the
+  vault dir finds no plaintext key.
+- Evidence: CLI `provider connection-status openai` (masked, connected);
+  AX panel; negative plaintext scan.
+- Suspected component: n/a.
+
+### CON-02 — live test / sync with the fake key — **DEFERRED**
+
+- Reason: Test connection / Sync now send a direct request to
+  api.openai.com; live-provider contact is prohibited this session.
+  Deferred, not failed.
+
+### CON-03 — offline sync attempt changes nothing — **DEFERRED (needs offline state)**
+
+- Reason: requires Wi-Fi off + a Sync attempt (a network-touching action).
+  Batched with the offline/restart checks (VLT-10) that need the machine
+  taken offline; deferred pending that toggle. The related honesty
+  property (rejected/failed syncs never show fake success, no partial
+  data) is covered by NTF-04-style failure recording and the deferred
+  live variants.
+
+### CON-04 — disconnect (reauth) — **PASS**
+
+- Screen/workflow: Providers → OpenAI → Disconnect → reauth
+- Result: **PASS** — reauth dialog "Remove the administrative connection"
+  / "Confirm your master password to continue."; after the password:
+  "Disconnected. Previously synced data remains viewable offline."; panel
+  "Not connected."; CLI `connection-status` → Admin key "(not connected)".
+  Removal reauthenticated; encrypted key deleted.
+- Evidence: AX notice + panel; CLI connection-status.
+- Suspected component: n/a.
+
+### ROT-01 — plan a rotation (dry run) — **PASS**
+
+- Screen/workflow: Rotation → Plan rotation (dry run) (alpha-app/openai-main)
+- Result: **PASS** — "State: planned, Mode: manual creation (provider
+  dashboard), New value validated: not yet"; writes nothing anywhere
+  ("Build a rotation dry run (writes nothing anywhere)"); the UI Rotation
+  screen renders the planned rotation ("openai-main / planned / approval").
+- Evidence: CLI `rotation plan`/`list`; AX Rotation screen.
+- Suspected component: n/a.
+
+### ROT-02 — cancel before anything changed — **PASS (function) / MANUAL-002 (state label)**
+
+- Result: the cancel **works** (aborts the planned rotation; the
+  credential value is untouched, masked sk-p…EY unchanged). **However**,
+  the resulting terminal state is **"failed"**, and the message reads
+  "Cancelled (state: failed)" — self-contradictory and not the plan's
+  expected "cancelled". Filed as **MANUAL-002** (low). Reproduced 2/2.
+- Evidence: CLI cancel/list/show; credential value unchanged.
+- Suspected component: rotation cancel transition (core).
+
+### ROT-03 — approve, advance, provide the manual key — **PASS (to the validation boundary)**
+
+- Result: **PASS** for the guided manual path — plan → approve (reauth) →
+  advance → provide-key (reauth) all succeeded; the replacement key
+  (TD §4 ROTNEW) was stored as a **new version v3** (masked, never
+  displayed), state "destinations_verified", "New value validated: not
+  yet". The next advance triggers **live validation** against
+  api.openai.com — a live-provider touchpoint that is **deferred** this
+  session (the plan's documented honest stopping point without a real
+  account). Every step required the master password.
+- Evidence: CLI approve/advance/provide-key; `key versions` (v3 stored,
+  masked).
+- Suspected component: n/a.
+
+### ROT-04 — restart recovery mid-rotation — **PASS (durability; explicit restart at VLT-10)**
+
+- Result: **PASS** — the in-flight rotation state lives in SQLite and was
+  read consistently across many separate CLI processes (proving
+  durability across process restarts). The explicit desktop Cmd-Q →
+  relaunch → same-state check is exercised at the VLT-10 restart.
+- Evidence: CLI `rotation show` across processes.
+- Suspected component: n/a.
+
+### ROT-05 — rollback the rotation — **PASS (with state-label note)**
+
+- Result: **PASS** — rollback was **reauthenticated** and restored the
+  vault value by writing a **new version (v4) recording the restore**
+  (audit-visible, not history rewriting), exactly as the design intends.
+  Note: the terminal state reads **"manual_required"** (reflecting that
+  manual provider-side steps remain in manual mode) rather than the plan's
+  "rolled_back" — an honest-but-different label, related to MANUAL-002's
+  state-naming theme; recorded as an observation, not separately filed.
+- Evidence: CLI rollback; `key versions` (v4 current restore row).
+- Suspected component: rotation rollback terminal-state naming (core).
+
+### ROT-06 — scheduling requires one completed rotation — **PASS**
+
+- Result: **PASS** — `rotation schedule set` **fails**: "scheduling needs
+  one manually approved, successfully COMPLETED rotation for this
+  credential first — so the provider/destination combination is proven";
+  no schedule created ("No rotation schedules."). Completing one
+  synthetically is impossible (validation needs a real provider) — the
+  honest design.
+- Evidence: CLI schedule set/list.
+- Suspected component: n/a.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
 
