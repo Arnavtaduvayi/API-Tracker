@@ -110,18 +110,21 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 99 |
+| PASS | 111 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 21 |
+| NOT RUN (eligible, not yet reached) | 9 |
 | DEFERRED (out of session scope) | 5 (+7 live scripts) |
 | DEFECTS filed | 2 (MANUAL-001 low, MANUAL-002 low) |
 
-PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
-PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09, ALR-01/02/03,
-NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07, CON-01, CON-04, ROT-01..06.
-DEFERRED: CRD-18 (live), CON-02 (live), CON-03 (needs offline), DST-04
-(live network), SYN-03 (live network). DEFERRED:
+PASS to date: SETUP-01/02/03, VLT-01..10 (incl. VLT-07/08/09), PRJ-01..07,
+CRD-01..17, CRD-19, PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05,
+SCN-01..09, ALR-01/02/03, NTF-01..05, ENV-01..09, TPL-01..06, ACC-01..07,
+CON-01/04, ROT-01..06, SET-01, BCK-01..08 (incl. BCK-05/06/07). NOT RUN
+(9): DST-01/02/03/05/06/07/08 (macOS Keychain — needs the OS keychain
+permission click), SYN-01/02/04/05, VLT-10 + CON-03 (offline), packaged
+`.app` re-check. DEFERRED: CRD-18 (live), CON-02 (live), CON-03 (offline),
+DST-04 (live network), SYN-03 (live network). DEFERRED:
 CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
 — low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
 accessibility harness + real key events, with CLI/DB cross-checks;
@@ -1722,6 +1725,113 @@ contains a secret value.
   honest design.
 - Evidence: CLI schedule set/list.
 - Suspected component: n/a.
+
+### SET-01 — settings persist and drive behavior — **PASS**
+
+- Screen/workflow: Settings → change clipboard delay + auto-lock → Save
+- Result: **PASS** — "Settings saved."; CLI `settings show` confirms
+  `clipboard_clear_seconds = 5` and `auto_lock_minutes = 1` persisted. The
+  clipboard-clear behavior itself was already verified end-to-end in
+  CRD-11 (clears to empty ~30s at the default); the setting persists and
+  drives that timer.
+- Evidence: AX notice; CLI settings show.
+- Suspected component: n/a.
+
+### VLT-07 — auto-lock after inactivity — **PASS**
+
+- Screen/workflow: Settings → auto-lock 1 min → Save → idle ~95 s
+- Result: **PASS** — with auto-lock set to 1 minute and no interaction for
+  ~95 s (passive accessibility reads do not count as activity, and the
+  background monitor timer does not keep the vault awake), the app flipped
+  to "Unlock vault" **by itself**. Unlocking restored everything. Settings
+  reset afterwards to auto-lock 15 / clipboard 30.
+- Evidence: AX read after the idle window showed "Unlock vault"; CLI
+  settings show.
+- Suspected component: n/a.
+
+### BCK-01 — create an encrypted backup — **PASS (security-relevant)**
+
+- Screen/workflow: Backup → Create (path, master pw reauth, backup pw ×2)
+- Result: **PASS** — "Backup created. Restoring will require BOTH this
+  backup password and the master password in use when the backup was
+  made…"; file `backup-1.json` **mode 600**; `grep` for
+  `MANUAL-TEST`/`sk-proj-MANUAL-FAKE` finds **0** plaintext hits
+  (encrypted payload). Reauthenticated; the permanent-loss warning box is
+  on-screen.
+- Evidence: AX notice; `stat` mode 600; negative plaintext grep.
+
+### BCK-02 — verify — **PASS**
+
+- Result: **PASS** — Verify with the correct backup password → "The backup
+  decrypts and validates correctly."
+- Evidence: AX notice.
+
+### BCK-03 — wrong backup password — **PASS**
+
+- Result: **PASS** — wrong backup password → "decryption failed for backup
+  (wrong backup password, corruption, or tampering)…"; nothing changes.
+- Evidence: AX notice.
+
+### BCK-04 — tampered backup detected — **PASS (AEAD)**
+
+- Result: **PASS** — a bit-flipped copy fails verification with the same
+  "decryption failed … corruption, or tampering" error — never a success
+  on tampered input (authenticated encryption).
+- Evidence: AX notice on the tampered copy.
+
+### BCK-08 — create refuses to overwrite silently — **PASS**
+
+- Result: **PASS** — Create over the existing path with overwrite OFF →
+  "backup file named '…/backup-1.json' already exists"; the create is
+  refused (overwrite ON would proceed).
+- Evidence: AX error.
+
+### VLT-09 — change with a wrong current password — **PASS**
+
+- Result: **PASS** — Settings → Change master password with a wrong
+  current password → "incorrect password"; nothing changes.
+- Evidence: AX notice.
+
+### VLT-08 — change the master password — **PASS**
+
+- Result: **PASS** — current `-01` → new `-02` (twice) → "Master password
+  changed. Create a fresh backup when convenient." After the change, CLI
+  unlock with `-01` **fails** ("incorrect password") and `-02` succeeds —
+  the change re-wrapped the vault key; the old password is dead for the
+  live vault. (The backup made in BCK-01 still opens with `-01`, verified
+  by BCK-06.)
+- Evidence: CLI key list with -01 (fail) and -02 (ok).
+
+### BCK-05 — restore collision (unforced restore refused) — **PASS**
+
+- Result: **PASS** — Restore with "Replace the existing vault" **unchecked**
+  → "a vault already exists at …/vault/vault.db"; the current vault
+  (password -02) is untouched. Restore never silently overwrites a vault.
+- Evidence: AX error.
+
+### BCK-06 — forced restore; backup-time password applies — **PASS (security-relevant)**
+
+- Screen/workflow: Restore → check "Replace the existing vault" → Restore
+  backup → confirm "Replace the current vault?" → Replace and restore
+- Result: **PASS** — confirm dialog "Replace the current vault?"; after:
+  the app returns to **Unlock vault** (restored vault locked). Unlocking
+  with the current post-change password **-02 fails**; unlocking with the
+  **backup-time password -01 succeeds** — proving the restored vault uses
+  the master password from when the backup was made. Backup-time data is
+  present (8 credentials via CLI). The old database is **renamed aside**:
+  `vault.db.replaced-1784486754` (+ -shm/-wal) exists (not deleted). Two
+  explicit gates (checkbox + confirm) preceded the replacement.
+- Evidence: AX (confirm dialog + return to Unlock); CLI key list with -01
+  (works, 8 creds) vs -02 (fails); `ls` shows the renamed-aside DB.
+
+### BCK-07 — future database schema rejected — **PASS**
+
+- Result: **PASS** — a vault copy with `PRAGMA user_version=99` is refused:
+  "this vault uses database schema v99, but this build supports up to v10
+  — it was created or upgraded by a newer version of API Tracker; upgrade
+  this installation…" (SchemaTooNew). The vault is NOT opened. (Same guard
+  the packaged app surfaced interactively earlier in the session.)
+- Evidence: CLI open attempt on the v99 copy.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
 
