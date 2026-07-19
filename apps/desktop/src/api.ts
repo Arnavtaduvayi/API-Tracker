@@ -49,6 +49,7 @@ import type {
   ProviderKeyOverview,
   ProviderManifest,
   ProviderProjectOverview,
+  RepoReverifyReport,
   ReuseWarning,
   RotationEvent,
   RotationSchedule,
@@ -108,6 +109,7 @@ export const api = {
     markExposed: boolean,
     historyDepth: number | null,
   ) => call<Finding[]>("scan_path", { path, mode, markExposed, historyDepth }),
+  scanReverify: (path: string) => call<RepoReverifyReport>("scan_reverify", { path }),
   suppressionAdd: (suppressionKey: string, path: string, reason: string) =>
     call<void>("suppression_add", { suppressionKey, path, reason }),
   suppressionList: () => call<Suppression[]>("suppression_list"),

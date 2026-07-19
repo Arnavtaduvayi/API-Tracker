@@ -36,6 +36,12 @@ pub struct ScanArgs {
     /// Do not mark matched vault credentials as possibly exposed.
     #[arg(long)]
     pub no_mark: bool,
+    /// Re-verify: run a FULL history + working-tree scan and, only if it is
+    /// clean, resolve this repository's outstanding exposure alerts. Exposure
+    /// alerts never auto-resolve on their own; this is the qualifying clean
+    /// re-scan that clears them.
+    #[arg(long)]
+    pub reverify: bool,
 }
 
 #[derive(Subcommand)]
@@ -90,6 +96,26 @@ fn build_units(args: &ScanArgs) -> Result<Vec<gitrepo::ScanUnit>> {
 }
 
 pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
+    // Re-verify: an explicit, unlock-gated full re-scan that resolves this
+    // repo's exposure alerts only if nothing is found (history included).
+    if args.reverify {
+        let (vault, _token) = ctx.unlocked()?;
+        let report = vault.reverify_repo_exposure(&args.path)?;
+        if report.clean {
+            println!(
+                "Re-verification clean for {}: {} exposure alert(s) resolved.",
+                report.repo_path, report.resolved_alerts
+            );
+        } else {
+            println!(
+                "Re-verification found {} likely secret(s) in {}; exposure alert(s) kept open. \
+                 Remediate (rotate + scrub history), then re-verify again.",
+                report.findings, report.repo_path
+            );
+        }
+        return Ok(());
+    }
+
     // Hook mode: no unlock, detection + suppression only, block on high.
     if args.hook {
         let units = build_units(&args)?;

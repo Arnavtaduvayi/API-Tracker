@@ -238,6 +238,18 @@ fn scan_path(
     })
 }
 
+/// Re-verify a repository's outstanding exposure alerts with a full scan,
+/// resolving them only if it is clean (OBS-001). Exposure alerts never
+/// auto-resolve on their own; this is the qualifying clean re-scan.
+#[tauri::command]
+fn scan_reverify(
+    state: State<'_, AppState>,
+    path: String,
+) -> CmdResult<api_tracker_core::vault::RepoReverifyReport> {
+    let p = std::path::PathBuf::from(&path);
+    with_vault(&state, |vault| vault.reverify_repo_exposure(&p))
+}
+
 #[tauri::command]
 fn suppression_add(
     state: State<'_, AppState>,
@@ -2071,6 +2083,7 @@ fn main() {
             credential_reveal,
             credential_copy,
             scan_path,
+            scan_reverify,
             suppression_add,
             suppression_list,
             suppression_remove,

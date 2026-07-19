@@ -2103,19 +2103,22 @@ impl UnlockedVault {
                 repos_scanned += 1;
                 repo_findings += report.findings;
                 if report.findings > 0 {
+                    // Repo-scoped dedup key (NOT keyed by head commit): a
+                    // persistent secret keeps ONE stable alert as the head
+                    // advances, instead of a new key per commit that the old
+                    // alert can never match (OBS-001). The kind is excluded
+                    // from auto-resolve, so this never clears just because a
+                    // later run didn't re-emit it.
                     let alert = alerts::NewAlert {
-                        kind: alerts::AlertKind::PossibleExposure,
+                        kind: alerts::AlertKind::RepoSecretExposure,
                         severity: alerts::Severity::High,
-                        dedup_key: format!(
-                            "repo_scan_findings:{}:{}",
-                            report.repo_path, report.head_commit
-                        ),
+                        dedup_key: format!("repo_scan_exposure:{}", report.repo_path),
                         title: format!(
                             "likely secret(s) in new commits: {}",
                             report.repo_path
                         ),
                         detail: format!(
-                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect.",
+                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect. This alert stays open until an                              explicit remediation or a clean full re-scan.",
                             report.findings, report.head_commit, report.repo_path
                         ),
                         evidence: format!(
@@ -2124,13 +2127,15 @@ impl UnlockedVault {
                         ),
                         confidence: crate::providers::Confidence::Medium,
                         recommended_action:
-                            "inspect the findings; rotate anything real and scrub history"
+                            "inspect the findings; rotate anything real and scrub history, \
+                             then re-scan to confirm"
                                 .into(),
                         project_id: None,
                         credential_id: None,
                         observed_at: now.clone(),
                     };
-                    active_keys.push(alert.dedup_key.clone());
+                    // Not pushed to active_keys: its kind is excluded from
+                    // auto_resolve_stale, so membership would be inert anyway.
                     if alerts::upsert(&self.conn, &alert)? {
                         created += 1;
                     }
@@ -5322,20 +5327,26 @@ impl UnlockedVault {
                             Err(_) => (Vec::new(), false),
                         };
                     if !range_ok {
+                        // Repo-scoped, dedicated coverage-gap kind: this is a
+                        // "coverage unavailable" signal, not a clean result.
+                        // It is excluded from auto-resolve so it persists (the
+                        // old head-keyed PossibleExposure key was never added
+                        // to active_keys and so auto-resolved in the SAME run
+                        // — OBS-001).
                         let _ = alerts::upsert(
                             &self.conn,
                             &alerts::NewAlert {
-                                kind: alerts::AlertKind::PossibleExposure,
+                                kind: alerts::AlertKind::RepoScanCoverageGap,
                                 severity: alerts::Severity::Medium,
-                                dedup_key: format!("repo_rebaselined:{path}:{head}"),
+                                dedup_key: format!("repo_scan_coverage_gap:{path}"),
                                 title: format!("repository re-baselined: {path}"),
                                 detail: format!(
-                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --history` if secrets may have landed there."
+                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --all-history` if secrets may have landed there."
                                 ),
                                 evidence: format!("last={last} head={head}"),
                                 confidence: crate::providers::Confidence::Medium,
                                 recommended_action:
-                                    "run an explicit history scan of this repository".into(),
+                                    "run an explicit full history scan of this repository".into(),
                                 project_id: None,
                                 credential_id: None,
                                 observed_at: clock::now_rfc3339(),
@@ -5391,6 +5402,80 @@ impl UnlockedVault {
             });
         }
         Ok(reports)
+    }
+
+    /// Re-verify a repository's outstanding exposure and coverage-gap alerts
+    /// with a FULL scan (entire git history + working tree), and resolve them
+    /// only if that scan is clean.
+    ///
+    /// This is the "sufficiently strong re-verification" that OBS-001
+    /// requires: repository-scan exposure alerts are excluded from the
+    /// incremental monitor's re-emission-driven auto-resolve, so they never
+    /// clear merely because a later run didn't re-report the finding
+    /// (unchanged / unavailable / failed / skipped repo, or the secret left
+    /// the working tree but remains in history). They clear only here — on an
+    /// explicit full re-scan that finds nothing (history included, so a secret
+    /// still in history keeps the alert open) — or on explicit user
+    /// resolution. An incremental or working-tree-only result is never
+    /// accepted as proof of remediation.
+    ///
+    /// The dedup keys use the repository path exactly as registered on a
+    /// project; `repo` is matched to that registered string by canonical
+    /// path so a differently-spelled argument still resolves the right alerts.
+    pub fn reverify_repo_exposure(&self, repo: &std::path::Path) -> Result<RepoReverifyReport> {
+        let canon = repo.canonicalize().map_err(|e| {
+            CoreError::InvalidInput(format!("cannot access {}: {e}", repo.display()))
+        })?;
+        // Resolve to the registered repo-path spelling used in dedup keys.
+        let registered: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT path FROM project_repos ORDER BY path")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        let repo_path = registered
+            .into_iter()
+            .find(|p| {
+                std::path::Path::new(p)
+                    .canonicalize()
+                    .map(|c| c == canon)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| repo.to_string_lossy().into_owned());
+
+        // A FULL re-scan: entire history plus the working tree. A secret that
+        // remains anywhere in history keeps the exposure alert open.
+        let mut findings = self.scan_history(repo, None)?;
+        findings.extend(self.scan_working_tree(repo)?);
+        let count = findings.len();
+
+        let mut resolved = 0;
+        if count == 0 {
+            for key in [
+                format!("repo_scan_exposure:{repo_path}"),
+                format!("repo_scan_coverage_gap:{repo_path}"),
+            ] {
+                resolved += alerts::resolve_by_dedup(&self.conn, &key)?;
+            }
+            if resolved > 0 {
+                audit::record(
+                    &self.conn,
+                    "repo_exposure_reverified_clean",
+                    None,
+                    None,
+                    &format!("repo={repo_path} resolved={resolved}"),
+                )?;
+            }
+        }
+        Ok(RepoReverifyReport {
+            repo_path,
+            findings: count,
+            clean: count == 0,
+            resolved_alerts: resolved,
+        })
     }
 
     // ------------------------------------------------------------------
@@ -8458,6 +8543,17 @@ pub struct RepoScanReport {
     pub head_commit: String,
     pub findings: usize,
     pub baseline_only: bool,
+}
+
+/// Result of an explicit re-verification of a repository's exposure alerts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoReverifyReport {
+    pub repo_path: String,
+    /// Unsuppressed likely-secret findings across full history + working tree.
+    pub findings: usize,
+    /// Whether the scan was clean and therefore resolved the exposure alerts.
+    pub clean: bool,
+    pub resolved_alerts: usize,
 }
 
 /// One event in a credential's merged lifecycle timeline (metadata only).
