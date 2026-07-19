@@ -1,0 +1,8 @@
+harness build/run environment
+  audited production commit : 7d81090a1068476291546963e68ca8c7de1a7145
+  audit branch/HEAD         : audit/deep-pressure-test @ be8bfd3
+  model                     : Fable 5 (claude-fable-5)
+  rustc                     : rustc 1.96.1 (31fca3adb 2026-06-26)
+  os                        : Darwin 25.5.0 arm64
+  harness location          : scratchpad (standalone, path-dep on crates/core); NO repo file modified
+  reproduction              : 25/25 orphaned+wedged (race mode); 5/5 refused (defense/control mode)

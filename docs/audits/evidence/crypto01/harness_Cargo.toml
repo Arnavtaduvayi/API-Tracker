@@ -1,0 +1,15 @@
+[package]
+name = "crypto01_repro"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Audit-only reproduction harness for CRYPTO-01 / CONC-03.
+# Standalone project OUTSIDE the API-Tracker workspace; path-depends on the
+# core crate so it exercises the real production key-management code without
+# modifying any repository file. rusqlite is pinned to the SAME version+feature
+# the core crate uses, so both handles share one bundled SQLite build.
+
+[dependencies]
+api-tracker-core = { path = "/Users/arnavtaduvayi/Documents/GitHub/API-Tracker-deep-audit/crates/core" }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
