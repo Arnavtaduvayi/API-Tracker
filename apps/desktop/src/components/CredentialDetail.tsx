@@ -200,8 +200,14 @@ export function CredentialDetail(props: {
         <dd>{formatTimestamp(c.key_created_at)}</dd>
         <dt>Expires</dt>
         <dd>
-          {formatTimestamp(c.expires_at)}
-          {c.expires_at && (
+          {c.expires_at_invalid ? (
+            <span className="badge bad" title={c.expires_at ?? ""}>
+              invalid date
+            </span>
+          ) : (
+            formatTimestamp(c.expires_at)
+          )}
+          {c.expires_at && !c.expires_at_invalid && (
             <>
               {" "}
               <span className="muted">(entered by you — a local reminder)</span>
@@ -210,9 +216,15 @@ export function CredentialDetail(props: {
         </dd>
         <dt>Expires (provider-reported)</dt>
         <dd>
-          {c.provider_expires_at
-            ? formatTimestamp(c.provider_expires_at)
-            : "not reported by the provider"}
+          {c.provider_expires_at_invalid ? (
+            <span className="badge bad" title={c.provider_expires_at ?? ""}>
+              invalid value reported by provider (ignored)
+            </span>
+          ) : c.provider_expires_at ? (
+            formatTimestamp(c.provider_expires_at)
+          ) : (
+            "not reported by the provider"
+          )}
         </dd>
         <dt>Last validated</dt>
         <dd>{formatTimestamp(c.last_validated_at)}</dd>

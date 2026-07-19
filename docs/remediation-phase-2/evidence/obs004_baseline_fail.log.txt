@@ -1,0 +1,14 @@
+
+---- one_malformed_provider_expiry_breaks_whole_listing stdout ----
+
+thread 'one_malformed_provider_expiry_breaks_whole_listing' (20753956) panicked at crates/core/tests/obs004_baseline.rs:15:5:
+OBS-004 baseline: one malformed provider_expires_at fails the entire listing: Some(InvalidInput("'not-a-date' is not an RFC 3339 timestamp"))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    one_malformed_provider_expiry_breaks_whole_listing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p api-tracker-core --test obs004_baseline`

@@ -65,8 +65,12 @@ export interface Credential {
   updated_at: string;
   key_created_at: string | null;
   expires_at: string | null;
+  /** True when expires_at is present but unparseable (shown as invalid). */
+  expires_at_invalid: boolean;
   /** Expiration reported by the provider itself (recorded during validation). */
   provider_expires_at: string | null;
+  /** True when provider_expires_at is present but unparseable (OBS-004). */
+  provider_expires_at_invalid: boolean;
   last_validated_at: string | null;
   last_used_at: string | null;
   docs_url: string;

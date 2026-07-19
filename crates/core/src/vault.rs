@@ -1445,12 +1445,27 @@ impl UnlockedVault {
             }
             None => None,
         };
+        // Timestamps stored verbatim from providers (chiefly
+        // `provider_expires_at`, written unparsed from provider sync) must
+        // never fail the whole credential model — one malformed value would
+        // otherwise break every listing, alert pass, and detail view
+        // vault-wide (OBS-004). Parse leniently: a bad value contributes no
+        // date (no fabrication) and is flagged so the UI can show "invalid".
+        // `created_at` stays strict: it is always API-Tracker-generated, so a
+        // bad value is genuine vault corruption, not untrusted provider input.
+        let (expires_at_ts, expires_at_invalid) =
+            parse_optional_ts_lenient(row.expires_at.as_deref());
+        let (provider_expires_at_ts, provider_expires_at_invalid) =
+            parse_optional_ts_lenient(row.provider_expires_at.as_deref());
+        let (last_validated_ts, _) = parse_optional_ts_lenient(row.last_validated_at.as_deref());
+        let (last_used_ts, _) = parse_optional_ts_lenient(row.last_used_at.as_deref());
         let inputs = StatusInputs {
             created_at: clock::parse_rfc3339(&row.created_at)?,
-            expires_at: parse_optional_ts(row.expires_at.as_deref())?,
-            provider_expires_at: parse_optional_ts(row.provider_expires_at.as_deref())?,
-            last_validated_at: parse_optional_ts(row.last_validated_at.as_deref())?,
-            last_used_at: parse_optional_ts(row.last_used_at.as_deref())?,
+            expires_at: expires_at_ts,
+            provider_expires_at: provider_expires_at_ts,
+            last_validated_at: last_validated_ts,
+            last_used_at: last_used_ts,
+            expiration_unparseable: expires_at_invalid || provider_expires_at_invalid,
             manually_disabled: row.manually_disabled,
             revoked: row.revoked,
             marked_invalid: row.marked_invalid,
@@ -1477,7 +1492,9 @@ impl UnlockedVault {
             updated_at: row.updated_at.clone(),
             key_created_at: row.key_created_at.clone(),
             expires_at: row.expires_at.clone(),
+            expires_at_invalid,
             provider_expires_at: row.provider_expires_at.clone(),
+            provider_expires_at_invalid,
             last_validated_at: row.last_validated_at.clone(),
             last_used_at: row.last_used_at.clone(),
             docs_url: row.docs_url.clone(),
@@ -9077,9 +9094,18 @@ fn parse_optional_date(value: Option<&str>) -> Result<Option<String>> {
     }
 }
 
-fn parse_optional_ts(value: Option<&str>) -> Result<Option<time::OffsetDateTime>> {
+/// Parse a stored optional timestamp WITHOUT failing on a malformed value.
+/// A value that does not parse yields `(None, true)`: no date is fabricated,
+/// the field simply has no usable timestamp and is flagged invalid. This is
+/// how one credential's malformed provider `expires_at` is isolated so it
+/// cannot fail an entire listing (OBS-004). `None`/empty → `(None, false)`.
+fn parse_optional_ts_lenient(value: Option<&str>) -> (Option<time::OffsetDateTime>, bool) {
     match value {
-        None => Ok(None),
-        Some(s) => Ok(Some(clock::parse_rfc3339(s)?)),
+        None => (None, false),
+        Some(s) if s.trim().is_empty() => (None, false),
+        Some(s) => match clock::parse_rfc3339(s) {
+            Ok(ts) => (Some(ts), false),
+            Err(_) => (None, true),
+        },
     }
 }
