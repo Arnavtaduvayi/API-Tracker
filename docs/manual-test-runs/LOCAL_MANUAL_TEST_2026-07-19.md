@@ -110,22 +110,37 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 51 |
+| PASS | 61 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 74 |
+| NOT RUN (eligible, not yet reached) | 64 |
 | DEFERRED (out of session scope) | 4 (+7 live scripts) |
 | DEFECTS filed | 1 (MANUAL-001, low) |
 
-PASS to date: SETUP-01/02/03, VLT-01..06 (6), PRJ-01..07 (7), CRD-01..17
-(17), CRD-19, PRV-01/02, DOC-01/02/03/04, USE-01..07 (7), PRC-01..05 (5).
-DEFERRED: CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled
-first_capture — low). Note: from CRD-06 onward, GUI driven by the conductor
-via a macOS accessibility harness + real key events, with CLI/DB
-cross-checks; conductor-observed, not human-observed (screenshots at
-SETUP-01/VLT-01/PRJ-01/CRD-05 were human). Pending: packaged-app re-check;
-Phases: Alerts/NTF, Scanning, Env, Destinations/Sync, Rotation, Access,
-Templates, Admin(mock), Settings/offline, Backup endgame.
+PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
+PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09. DEFERRED:
+CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
+— low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
+accessibility harness + real key events, with CLI/DB cross-checks;
+conductor-observed, not human-observed (human screenshots at
+SETUP-01/VLT-01/PRJ-01/CRD-05). Pending: packaged-app re-check; Phases:
+Alerts/NTF, Env, Destinations/Sync, Rotation, Access, Templates, Admin(mock),
+Settings/offline, Backup endgame.
+
+## Items needing human confirmation
+
+Two UI interactions could not be driven by the accessibility automation and
+are low-risk to eyeball manually (the underlying logic is verified via the
+shared CLI core / source):
+
+1. **SCN-06 suppress dialog** — clicking a finding's "suppress" link should
+   open an in-app dialog titled "Suppress this finding" with a reason input
+   (placeholder "why this is not a real secret"); submitting empty shows "A
+   reason is required to suppress." AXPress did not open it in automation.
+   (Suppression add/list/remove + required-reason are proven via CLI.)
+2. **USE-05 budget-cost-source popup** — the native select changes the
+   "Used" figure between provider-reported ($0.00) and estimated ($12.50).
+   Verified via CLI; the popup renders its current value in the UI.
 
 ## Passed
 
@@ -1095,6 +1110,140 @@ contains a secret value.
   before/after; the 4 sonnet-5 rows are 2×bundled + 2×imported with
   identical prices.
 - Suspected component: n/a (pricing import origin-layering; by design).
+
+### SCN-01 — working-tree scan (fixtures found, placeholders not) — **PASS**
+
+- Screen/workflow: Scan → path + Mode "Working tree" → Scan
+- Result: **PASS** (conductor-observed via AX UI + CLI JSON)
+- Actual: the UI shows **"Findings (8)"** with all values **redacted**
+  (ghp_…11, ghp_…22, sk_l…11 on .env.local; sk-p…KE, ghp_…00, sk_l…00 on
+  leaky.env; sk-p…EY, ghp_…11 on .env), every finding "high" confidence,
+  with file names shown. The placeholders (`your-key-here`, `<REPLACE_ME>`,
+  `pk_live_notasecret…`) are **not** listed; blob.bin and big.txt produce
+  no findings and no crash. CLI `scan … --json` returns the identical 8
+  findings with file:line and redacted values.
+- Expected: matched (plan SCN-01) — fixtures found, placeholders excluded,
+  values redacted, no crash on binary/large files.
+- Evidence: AX capture "Findings (8)" + rows; CLI `scan --json` (8
+  findings: 3 leaky.env, 2 .env, 3 .env.local; all high/redacted).
+- Suspected component: n/a.
+
+### SCN-02 — staged scan — **PASS**
+
+- Screen/workflow: Scan → Mode "Staged changes (Git)" → Scan (staged
+  `staged-secret.txt`)
+- Result: **PASS** — UI shows "Findings (1)": only staged-secret.txt
+  (sk-p…KE redacted); the committed leaky.env does NOT appear (correct —
+  it is committed, not staged).
+- Evidence: AX capture "Findings (1)".
+- Suspected component: n/a.
+
+### SCN-03 — recent-commit history scan — **PASS**
+
+- Screen/workflow: Scan → Mode "History (Git)" (default depth) → Scan
+- Result: **PASS** — "Findings (4)": leaky.env's 3 secrets
+  (commit 6b0ed4e1, sk-p…KE/ghp_…00/sk_l…00) plus the **deleted**
+  old-secret.txt token (commit 5a408626, ghp_…11 — history remembers a
+  removed secret), each with commit:file references.
+- Evidence: AX capture.
+- Suspected component: n/a.
+
+### SCN-04 — full-history scan — **PASS**
+
+- Screen/workflow: Scan → History mode → check "full history" → Scan
+- Result: **PASS** — checking "full history" **hides the depth field**
+  and the scan returns the same "Findings (4)" (small repo).
+- Evidence: AX capture (depth label count 0; Findings (4)).
+- Suspected component: n/a.
+
+### SCN-05 — vault match marks the credential possibly exposed — **PASS**
+
+- Screen/workflow: commit oops-committed.txt (C5 value) → Scan → Working
+  tree, "mark matched vault credentials as possibly exposed" checked
+- Result: **PASS** (conductor-observed via AX UI + CLI)
+- Actual: UI "Findings (10)"; the oops-committed.txt row shows **In vault
+  = alpha-app/shared-payments**; notice "1 finding(s) match a stored
+  credential. Matched credentials were marked possibly exposed — removing
+  a secret from a file…". CLI `key status alpha-app/shared-payments` →
+  "possibly exposed (Medium confidence), Reason: … matched during a
+  repository scan in oops-committed.txt (line 1)". Recommendation is
+  rotation; nothing auto-revoked.
+- Expected: matched (plan SCN-05).
+- Evidence: AX capture (In vault row + notice); CLI `key status`.
+- Suspected component: n/a. (Feeds the possible_exposure alert in ALR.)
+
+### SCN-06 — suppression with a required reason — **PASS (core via CLI; UI dialog see note)**
+
+- Screen/workflow: suppress a finding with/without a reason
+- Result: **PASS** for the suppression mechanism (shared core).
+- Actual (CLI, shared core): empty reason → rejected ("a suppression
+  reason is required"); with reason "test fixture, documented fake" →
+  "Suppression added.", listed via `suppress list`; a re-scan **hides**
+  the suppressed leaky.env stripe finding (10 → 9, finding absent).
+- Expected: matched (plan SCN-06) — reason required, suppressed finding
+  disappears.
+- **UI-automation note (not a defect):** the desktop suppress-reason uses
+  an in-app `PromptDialog` (source: ScanView.tsx line 287 — title
+  "Suppress this finding", placeholder "why this is not a real secret",
+  confirmLabel "Suppress"; empty-reason guard "A reason is required to
+  suppress." at line 85). AXPress on the `className="link"` suppress
+  button did **not** open the dialog under the accessibility driver
+  (other buttons open their dialogs fine), so the UI reason-prompt itself
+  was not driven from automation; the mechanism was verified via the
+  shared CLI core. **Flagged for a quick human eyeball** (see "Items
+  needing human confirmation").
+- Evidence: CLI `suppress add`/`list`, re-scan JSON; source of the dialog.
+- Suspected component: ScanView.tsx suppress button / AX interaction with
+  link-styled buttons (not modified).
+
+### SCN-07 — remove the suppression — **PASS**
+
+- Result: **PASS** — `suppress remove` → "Suppression removed; future
+  scans report this finding again."; re-scan shows the leaky.env stripe
+  finding again (9 → 10).
+- Evidence: CLI remove + re-scan JSON.
+- Suspected component: n/a.
+
+### SCN-08 — pre-commit hook blocks a staged secret — **PASS (security-critical)**
+
+- Screen/workflow: Scan → Check hook status → Install (UI) → `git commit`
+  with a staged secret (api-tracker on PATH)
+- Result: **PASS** (conductor-observed via AX UI + real git)
+- Actual: UI "Check hook status" showed the hook path; "Install" → state
+  "installed"; the generated `.git/hooks/pre-commit` contains the
+  sentinel block calling `api-tracker scan --staged --hook`. Staging a new
+  file with an OpenAI-shaped fake secret and running `git commit` was
+  **blocked**: "api-tracker: blocking commit — 1 high-confidence
+  secret(s) found: leak-attempt.txt:1 [high] **sk-p…KE** (openai)" (value
+  **redacted**, file:line shown), then "error: commit blocked by
+  api-tracker pre-commit hook"; **no commit created** (git log count
+  unchanged at 6). The hook ran **without unlocking the vault** (no
+  master password supplied) and never printed the full secret.
+- Expected: matched (plan SCN-08).
+- Evidence: installed hook file; real `git commit` output (blocked,
+  redacted); log-count before/after.
+- Suspected component: n/a.
+
+### SCN-09 — existing foreign hook is preserved — **PASS**
+
+- Screen/workflow: hooks remove → foreign hook → status/install(refuse)/
+  install --force/commit/remove (UI has the matching Install / Install
+  (force / chain) / Remove buttons; force/chain/remove exercised via the
+  shared CLI core)
+- Result: **PASS**
+- Actual: with a custom `echo CUSTOM-HOOK-RAN` hook present, status =
+  "Foreign"; **plain install REFUSES** ("a pre-commit hook already
+  exists… Re-run with --force… your existing hook is preserved");
+  **force** install → "ChainedIntoForeign", the file now holds both the
+  custom line and the API-Tracker sentinel block, and a clean
+  `git commit --allow-empty` **prints CUSTOM-HOOK-RAN and succeeds**;
+  **Remove** deletes only the API-Tracker block, leaving the file as
+  exactly the original custom script (0 api-tracker markers, custom line
+  intact).
+- Expected: matched (plan SCN-09) — foreign hooks are never clobbered.
+- Evidence: CLI status/install/remove output; hook-file contents at each
+  step; the CUSTOM-HOOK-RAN commit.
+- Suspected component: n/a.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
 
