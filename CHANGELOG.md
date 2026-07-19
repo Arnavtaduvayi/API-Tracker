@@ -5,6 +5,44 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — alpha hardening & completion
+- **Live-verification scripts** for Anthropic, GitHub, and Stripe
+  (`scripts/live_verify_{anthropic,github,stripe}.sh`), matching the OpenAI
+  pattern: throwaway vault, hidden prompt, read-only by default, no secret in
+  argv or plaintext on disk, self-cleaning, never run in CI.
+- **Desktop/CLI parity**: secret-scan suppression list + removal (CLI
+  `suppress remove`, desktop list/remove); user-chosen Git history depth incl.
+  full history in the desktop scan (was fixed at 50); injection-session
+  listing incl. non-grant runs and per-session SIGTERM termination
+  (`access sessions`/`access kill`, desktop Sessions table); `monitor
+  --status` and a desktop last-run/success/failure surface; webhook
+  delivery/failure history (`notify history`, desktop table); doc-watch
+  last-changed column; in-flight-rotation "needs attention" flag.
+- **Complete encrypted backups (format v2)**: the payload now captures every
+  table generically, so provider connections, usage/cost history, alerts,
+  destinations, sync plans, rotations, access grants, env mappings,
+  credential versions, and notification channels are preserved on restore
+  (they were silently dropped before). Older-schema backups restore and
+  migrate forward; newer-schema backups and newer-schema live vaults are
+  refused loudly. Backup files are written owner-only (0600). ADR 0015.
+- **Migration & data-safety test suite**: populated v1/v5/v6 upgrades (direct
+  and stepwise), v7 backfill, interrupted-migration resume, corrupted-input
+  rollback, future-schema refusal via the real unlock path, and full
+  backup/restore completeness.
+
+### Fixed — security (adversarial review)
+- Webhook delivery enforces once-per-alert dedup (alerts no longer re-post on
+  every monitor run within their first hour) and retries after a failure.
+- AWS region validated before it reaches the request authority (off-host
+  exfiltration guard); documentation watcher no longer follows redirects
+  (SSRF/downgrade guard); rotation provider-key creation serialized via
+  compare-and-swap (no duplicate live keys under concurrent advance); desktop
+  file-writing IPC commands gated behind an unlocked vault; opener capability
+  scoped to http/https/mailto; CLI direct-print paths sanitize
+  attacker-influenced strings (terminal-escape guard); Git scan bounds staged
+  blobs and caps diff reconstruction; backup restore --force never clobbers a
+  prior aside.
+
 ### Added — cross-provider observability
 - **Anthropic per-key sync engine**: daily usage grouped by API-key id ×
   workspace × model via the Admin API (officially supported grouping),

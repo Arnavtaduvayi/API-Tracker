@@ -23,6 +23,7 @@ to an API Tracker server.
 > [provider support matrix](docs/PROVIDER_SUPPORT.md).
 >
 > Guides: [Install](docs/INSTALL.md) · [Provider support](docs/PROVIDER_SUPPORT.md)
+> · [Destination support](docs/DESTINATION_SUPPORT.md)
 > · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Backup & recovery](docs/BACKUP_RECOVERY.md)
 > · [Packaging/signing](docs/PACKAGING.md) · [Changelog](CHANGELOG.md)
 

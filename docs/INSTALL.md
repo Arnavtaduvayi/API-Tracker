@@ -88,6 +88,25 @@ api-tracker backup verify ~/api-tracker-backup.json
 Restoring needs **both** the backup password and the master password in effect
 when the backup was made. See [BACKUP_RECOVERY.md](BACKUP_RECOVERY.md).
 
+## Upgrade
+
+To upgrade, replace the app/binary with a newer build — your vault stays put
+in the data directory and is **not** touched by installing a new version.
+
+- **Schema migrations run automatically** the first time a newer build opens
+  the vault. Migrations are append-only and forward-only; there is no
+  downgrade. A vault upgraded by a newer build **cannot** be opened by an
+  older build afterward (you will get a clear "schema is newer than this
+  build" error) — upgrade, don't downgrade.
+- **Back up first.** Run `api-tracker backup create <path>` (or the desktop
+  Backup screen) before a major upgrade. A backup made by an older build
+  restores into a newer build and migrates forward; a backup made by a newer
+  build cannot be restored by an older one.
+- **CLI**: unpack the new archive and replace the binary on your `PATH`; run
+  `api-tracker --version` to confirm.
+- **Desktop**: install the new `.dmg`/`.msi`/`.AppImage`/`.deb` over the old
+  one (or drag the new `.app` to Applications, replacing the old).
+
 ## Uninstall
 
 1. Remove the app (drag to Trash on macOS / uninstall on Windows / remove the
