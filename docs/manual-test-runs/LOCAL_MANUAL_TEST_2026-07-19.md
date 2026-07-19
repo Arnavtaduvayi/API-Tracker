@@ -110,16 +110,16 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 69 |
+| PASS | 78 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 56 |
+| NOT RUN (eligible, not yet reached) | 47 |
 | DEFERRED (out of session scope) | 4 (+7 live scripts) |
 | DEFECTS filed | 1 (MANUAL-001, low) |
 
 PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
 PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09, ALR-01/02/03,
-NTF-01..05. DEFERRED:
+NTF-01..05, ENV-01..09. DEFERRED:
 CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
 — low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
 accessibility harness + real key events, with CLI/DB cross-checks;
@@ -1348,6 +1348,116 @@ contains a secret value.
 - Note: "disabled channel receives nothing" was inferred from STATE=off
   (no new alerts existed to deliver during the disabled window, so an
   explicit silent-delivery cycle was not separately forced).
+- Suspected component: n/a.
+
+### ENV-01 — discover with Git status badges — **PASS**
+
+- Screen/workflow: Env files → Discover .env files (project alpha-app;
+  .env.local committed/tracked first)
+- Result: **PASS** — discovery table rows: `.env` class "values", Git
+  badge "untracked"; `.env.local` class "values", **red** badge "tracked
+  — committed secrets risk" + "in Git history — deleting the file does not
+  remove past commits". Git/Vars/Problems columns present. No values on
+  screen at this stage.
+- Evidence: AX capture.
+- Suspected component: n/a.
+
+### ENV-02 — masked preview with classification — **PASS**
+
+- Screen/workflow: Env files → .env preview
+- Result: **PASS** — OPENAI_API_KEY (Secret, import checkbox **checked**),
+  GITHUB_TOKEN (Secret, **checked**), APP_DEBUG (not secret, unchecked),
+  EXAMPLE_KEY (placeholder, unchecked); every value **masked** (••••).
+  Secrets pre-selected; non-secret/placeholder excluded.
+- Evidence: AX capture (checkbox states + masked values).
+- Suspected component: n/a.
+
+### ENV-03 — selective import creates credentials + mappings — **PASS**
+
+- Screen/workflow: .env preview → Import 2 variable(s)… → Import (confirm)
+- Result: **PASS** — confirm dialog "Import variables into the vault";
+  then "2 variable(s) imported or mapped. **The file was not modified.**"
+  Two new credentials appear under alpha-app: `openai-api-key` (sk-p…EY)
+  and `github-token` (ghp_…11) — named from the variables lowercased with
+  underscores→hyphens; mappings created (OPENAI_API_KEY → openai-api-key,
+  GITHUB_TOKEN → github-token). The `.env` file's **bytes are unchanged**
+  (md5 identical before/after).
+- Evidence: AX notice; CLI `key list` (2 new masked rows), `mapping list`
+  (2 mappings); md5 of .env unchanged.
+- Suspected component: n/a.
+
+### ENV-04 — malformed + duplicate `.env` — **PASS**
+
+- Screen/workflow: Env files → .env.local preview
+- Result: **PASS** — preview lists **GITHUB_TOKEN twice** (duplicate
+  visible), the quoted STRIPE_SECRET_KEY (mask handles quotes + inline
+  comment), and a "Problems" column reporting the malformed line (not
+  silently dropped).
+- Evidence: AX capture.
+- Suspected component: n/a.
+
+### ENV-05 — `.env.example` proposal and write — **PASS**
+
+- Screen/workflow: .env panel → Write .env.example… → confirm
+- Result: **PASS** — masked diff preview ("names only; secret values in
+  the diff are masked"); confirm dialog; then "Wrote …/.env.example
+  (names only, never values)." + "is already up to date." on recheck. The
+  file on disk lists variable **names only** with empty values
+  (`OPENAI_API_KEY=""`, `GITHUB_TOKEN=""`, `APP_DEBUG=""`,
+  `EXAMPLE_KEY=""`) — **no secret value written**.
+- Evidence: AX capture; file contents; negative value scan.
+- Suspected component: n/a.
+
+### ENV-06 — reauthenticated temporary export — **PASS (security-relevant)**
+
+- Screen/workflow: Env files → Exports → Export .env… (target .env.tmp,
+  lifetime 1) → Export (reauth)
+- Result: **PASS** — reauth dialog "Write plaintext secrets to …/.env.tmp"
+  / "Confirm your master password to continue."; after the password:
+  "Exported 2 variable(s) to …/.env.tmp…" with warnings. The file is
+  **mode 600**, begins with a PLAINTEXT-secrets warning banner ("This
+  file contains PLAINTEXT secrets."), and contains the mapped values; the
+  Exports table gains a row with Expires set. Refused without the master
+  password (reauth-gated).
+- Evidence: AX reauth dialog; `stat` mode 600; file banner+contents.
+- Suspected component: n/a.
+
+### ENV-07 — export cleanup (expired; force semantics) — **PASS**
+
+- Screen/workflow: (wait > 1 min; append a line to .env.tmp) → Clean up
+  expired… (force OFF, then force ON)
+- Result: **PASS** — force **OFF**: "0 exported file(s) removed." — the
+  changed file is **kept** (guard against deleting user edits); force
+  **ON**: "1 exported file(s) removed.", .env.tmp deleted, "No live
+  exports." The changed-content guard prevented deletion without consent.
+- Evidence: AX notices; file present/absent before/after.
+- Suspected component: n/a.
+
+### ENV-08 — drift: file vs vault + unmapped secret — **PASS**
+
+- Screen/workflow: edit .env OPENAI_API_KEY to the drifted value → Env
+  files → Drift → Check drift
+- Result: **PASS** (UI + CLI) — drift findings: **[medium] value differs
+  from vault** for OPENAI_API_KEY (.env — file edited after import,
+  file-to-vault drift) and GITHUB_TOKEN (.env.local); **[high] unmapped
+  secret** for STRIPE_SECRET_KEY (.env.local); **[medium]
+  SameValueInMultipleFiles** for GITHUB_TOKEN (across .env / .env.local /
+  .env.tmp) — each with File, Variable, Detail, Recommendation. Comparison
+  is by keyed fingerprint; **no plaintext** in the drift table. (The
+  symmetric vault-to-file direction uses the same fingerprint comparison;
+  the file-to-vault direction was exercised directly.)
+- Evidence: AX capture; CLI `env drift --project alpha-app`.
+- Suspected component: n/a.
+
+### ENV-09 — export refuses a Git-tracked target — **PASS**
+
+- Screen/workflow: Export .env… → target .env.local (tracked), overwrite
+  ON → Export (reauth)
+- Result: **PASS** — the export **fails**: "invalid input: …/.env.local
+  is tracked by Git; exporting secrets into a tracked file…"; `.env.local`
+  is unchanged (`git diff` empty). Never writes plaintext into a tracked
+  file.
+- Evidence: AX error; git diff empty.
 - Suspected component: n/a.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
