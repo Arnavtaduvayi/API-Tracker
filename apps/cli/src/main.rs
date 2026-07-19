@@ -55,6 +55,8 @@ enum Commands {
     Unlock(vault_cmd::UnlockArgs),
     /// End the current session (lock the vault for the CLI).
     Lock,
+    /// Change the master password (re-wraps the vault key; reauthenticated).
+    ChangePassword,
     /// Check vault health: paths, schema, integrity, session state.
     Doctor,
     /// Show or change vault settings (auto-lock, status thresholds).
@@ -146,6 +148,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Init => vault_cmd::init(&ctx),
         Commands::Unlock(args) => vault_cmd::unlock(&ctx, args),
         Commands::Lock => vault_cmd::lock(&ctx),
+        Commands::ChangePassword => vault_cmd::change_password(&ctx),
         Commands::Doctor => vault_cmd::doctor(&ctx),
         Commands::Settings(cmd) => vault_cmd::settings(&ctx, cmd),
         Commands::Provider(cmd) => provider_cmd::run(&ctx, cmd),

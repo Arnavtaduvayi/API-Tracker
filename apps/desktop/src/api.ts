@@ -94,6 +94,8 @@ export const api = {
   vaultUnlock: (password: string) => call<void>("vault_unlock", { password }),
   vaultLock: () => call<void>("vault_lock"),
   reauth: (password: string) => call<void>("reauth", { password }),
+  vaultChangePassword: (current: string, newPassword: string) =>
+    call<void>("vault_change_password", { current, new: newPassword }),
 
   settingsGet: () => call<VaultSettings>("settings_get"),
   settingsSet: (settings: VaultSettings) => call<void>("settings_set", { settings }),

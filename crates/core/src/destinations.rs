@@ -262,7 +262,7 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
             verify_method: "value read-back via CredRead",
             required_plan: "none",
             charges: "none",
-            testing: "portable naming/limit logic unit-tested; Win32 calls compile-checked for the Windows target, not yet exercised by CI",
+            testing: "portable naming logic unit-tested; the keyring-backed adapter compiles and core tests run on Windows in CI, not yet exercised against a live Credential Manager by CI",
             config_help: "none",
         },
         DestinationKindInfo {
@@ -982,18 +982,20 @@ pub fn wincred_target(secret_name: &str) -> Result<String> {
     Ok(format!("api-tracker/{secret_name}"))
 }
 
-/// Generic credentials in the current user's Windows Credential Manager via
-/// `CredWriteW`/`CredReadW`/`CredDeleteW`. Compiled only on Windows; the
-/// catalog reports the kind as platform-unavailable elsewhere. The blob is
-/// the UTF-8 secret value; persistence is `LOCAL_MACHINE` (this user, this
-/// machine, surviving reboots — the standard choice for stored secrets).
+/// Generic credentials in the current user's Windows Credential Manager
+/// (CredWrite/CredRead/CredDelete under the hood). The Win32 FFI lives in
+/// the audited `keyring` crate — this crate stays `forbid(unsafe_code)`.
+/// Compiled only on Windows; the catalog reports the kind as
+/// platform-unavailable elsewhere.
 #[cfg(windows)]
 pub struct WindowsCredentialDestination;
 
 #[cfg(windows)]
 impl WindowsCredentialDestination {
-    fn to_wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
+    fn entry(secret_name: &str) -> Result<keyring::Entry> {
+        let target = wincred_target(secret_name)?;
+        keyring::Entry::new(&target, "api-tracker")
+            .map_err(|e| CoreError::Provider(format!("Credential Manager entry failed: {e}")))
     }
 }
 
@@ -1004,70 +1006,23 @@ impl DestinationAdapter for WindowsCredentialDestination {
     }
 
     fn write(&self, secret_name: &str, value: &SecretString) -> Result<String> {
-        use windows_sys::Win32::Security::Credentials::{
-            CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
-        };
-        let target = wincred_target(secret_name)?;
-        let mut target_w = Self::to_wide(&target);
-        let mut user_w = Self::to_wide("api-tracker");
-        let blob = value.expose().as_bytes();
-        if blob.len() > 2560 {
-            // CRED_MAX_CREDENTIAL_BLOB_SIZE is 5*512 bytes.
-            return Err(CoreError::InvalidInput(
-                "the value exceeds the Credential Manager blob limit (2560 bytes)".into(),
-            ));
-        }
-        let mut blob_copy = blob.to_vec();
-        let cred = CREDENTIALW {
-            Flags: 0,
-            Type: CRED_TYPE_GENERIC,
-            TargetName: target_w.as_mut_ptr(),
-            Comment: std::ptr::null_mut(),
-            LastWritten: unsafe { std::mem::zeroed() },
-            CredentialBlobSize: blob_copy.len() as u32,
-            CredentialBlob: blob_copy.as_mut_ptr(),
-            Persist: CRED_PERSIST_LOCAL_MACHINE,
-            AttributeCount: 0,
-            Attributes: std::ptr::null_mut(),
-            TargetAlias: std::ptr::null_mut(),
-            UserName: user_w.as_mut_ptr(),
-        };
-        let ok = unsafe { CredWriteW(&cred, 0) };
-        // Best-effort: clear the plaintext copy we handed to the API.
-        blob_copy.iter_mut().for_each(|b| *b = 0);
-        if ok == 0 {
-            return Err(CoreError::Provider(format!(
-                "CredWriteW failed (error {})",
-                std::io::Error::last_os_error()
-            )));
-        }
-        Ok(format!("stored Credential Manager entry {target}"))
+        Self::entry(secret_name)?
+            .set_password(value.expose())
+            .map_err(|e| CoreError::Provider(format!("Credential Manager write failed: {e}")))?;
+        Ok(format!(
+            "stored Credential Manager entry {}",
+            wincred_target(secret_name)?
+        ))
     }
 
     fn read(&self, secret_name: &str) -> Result<Option<SecretString>> {
-        use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
-        use windows_sys::Win32::Security::Credentials::{
-            CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
-        };
-        let target = wincred_target(secret_name)?;
-        let target_w = Self::to_wide(&target);
-        let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
-        let ok = unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut pcred) };
-        if ok == 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
-                return Ok(Some(SecretString::new(String::new()))); // absent
-            }
-            return Err(CoreError::Provider(format!("CredReadW failed ({err})")));
+        match Self::entry(secret_name)?.get_password() {
+            Ok(v) => Ok(Some(SecretString::new(v))),
+            Err(keyring::Error::NoEntry) => Ok(Some(SecretString::new(String::new()))),
+            Err(e) => Err(CoreError::Provider(format!(
+                "Credential Manager read failed: {e}"
+            ))),
         }
-        let value = unsafe {
-            let c = &*pcred;
-            let bytes = std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize);
-            let s = String::from_utf8_lossy(bytes).to_string();
-            CredFree(pcred as *mut _);
-            s
-        };
-        Ok(Some(SecretString::new(value)))
     }
 
     fn exists(&self, secret_name: &str) -> Result<Option<bool>> {
@@ -1076,19 +1031,12 @@ impl DestinationAdapter for WindowsCredentialDestination {
     }
 
     fn delete(&self, secret_name: &str) -> Result<()> {
-        use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
-        use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
-        let target = wincred_target(secret_name)?;
-        let target_w = Self::to_wide(&target);
-        let ok = unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) };
-        if ok == 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
-                return Ok(()); // idempotent
-            }
-            return Err(CoreError::Provider(format!("CredDeleteW failed ({err})")));
+        match Self::entry(secret_name)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()), // idempotent
+            Err(e) => Err(CoreError::Provider(format!(
+                "Credential Manager delete failed: {e}"
+            ))),
         }
-        Ok(())
     }
 
     fn test(&self) -> Result<String> {

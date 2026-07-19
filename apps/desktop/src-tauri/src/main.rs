@@ -169,6 +169,17 @@ fn reauth(state: State<'_, AppState>, password: String) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn vault_change_password(
+    state: State<'_, AppState>,
+    current: String,
+    new: String,
+) -> CmdResult<()> {
+    let current = SecretString::new(current);
+    let new = SecretString::new(new);
+    with_vault(&state, |vault| vault.change_master_password(&current, &new))
+}
+
+#[tauri::command]
 fn settings_get(state: State<'_, AppState>) -> CmdResult<VaultSettings> {
     with_vault(&state, |vault| Ok(vault.settings().clone()))
 }
@@ -2007,6 +2018,7 @@ fn main() {
             vault_create,
             vault_unlock,
             vault_lock,
+            vault_change_password,
             reauth,
             settings_get,
             settings_set,

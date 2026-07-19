@@ -648,7 +648,40 @@ ALTER TABLE provider_connections ADD COLUMN account_synced_at TEXT;
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
+    restrict_db_permissions(path);
     Ok(conn)
+}
+
+/// Owner-only permissions on the database and its WAL/SHM sidecars
+/// (defense in depth on top of the 0700 data directory). Best-effort;
+/// a no-op on non-Unix, where OS-inherited ACLs govern (documented).
+fn restrict_db_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for candidate in [
+            path.to_path_buf(),
+            path.with_extension("db-wal"),
+            path.with_extension("db-shm"),
+        ] {
+            if candidate.exists() {
+                let _ =
+                    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Checkpoint and truncate the WAL so committed frames (which may hold
+/// pages from before a key rotation or secure delete) do not linger in the
+/// sidecar file. Best-effort by design: with a concurrent reader the
+/// checkpoint degrades gracefully instead of failing the caller.
+pub fn checkpoint_truncate(conn: &Connection) {
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
 fn configure(conn: &Connection) -> Result<()> {

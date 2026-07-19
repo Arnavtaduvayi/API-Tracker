@@ -275,6 +275,9 @@ pub fn resume_session(paths: &VaultPaths, token: &SessionToken) -> Result<Unlock
     let fingerprint_key = unwrap_fingerprint_key(&conn, &vault_id, &keys.vault_key)
         .map_err(|_| CoreError::SessionInvalid)?;
     let settings = VaultSettings::load(&conn)?;
+    // Session-token CLI use must sweep expired temporary exports too — a
+    // user who only ever resumes sessions would otherwise never clean them.
+    let _ = crate::envgov::cleanup_exports(&conn, false, false, &clock::now_rfc3339());
     Ok(UnlockedVault {
         conn,
         vault_id,
@@ -463,6 +466,16 @@ pub struct UnlockedVault {
     paths: VaultPaths,
 }
 
+impl Drop for UnlockedVault {
+    fn drop(&mut self) {
+        // Locking the vault checkpoints and truncates the WAL so freed or
+        // rewritten pages (secure_delete overwrites, key rotations) do not
+        // linger in the sidecar file. Best-effort: a concurrent reader in
+        // the other frontend degrades this gracefully.
+        db::checkpoint_truncate(&self.conn);
+    }
+}
+
 impl std::fmt::Debug for UnlockedVault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never expose key material; only non-secret identifiers.
@@ -505,6 +518,39 @@ impl UnlockedVault {
         let kek = crypto::derive_key(master_password, &salt, &kdf)?;
         crypto::decrypt(&kek, &aad::vault_key(&vault_id), &wrapped, "vault key")
             .map_err(|_| CoreError::WrongPassword)?;
+        Ok(())
+    }
+
+    /// Change the master password: verify the current one, then re-wrap the
+    /// vault key under a key derived from the new password (fresh salt,
+    /// current KDF parameters). The vault key itself does not change, so no
+    /// data is re-encrypted and existing CLI sessions keep working; backups
+    /// made earlier still open with the password in effect when they were
+    /// created (stated wherever backups are restored). The WAL is
+    /// checkpointed afterwards so the old wrap does not linger in the
+    /// sidecar file.
+    pub fn change_master_password(
+        &mut self,
+        current: &SecretString,
+        new: &SecretString,
+    ) -> Result<()> {
+        self.verify_master_password(current)?;
+        validate_password(new, "the new master password")?;
+        let kdf = KdfParams::recommended();
+        let salt = crypto::new_salt();
+        let kek = crypto::derive_key(new, &salt, &kdf)?;
+        let wrapped = crypto::encrypt(
+            &kek,
+            &aad::vault_key(&self.vault_id),
+            self.vault_key.expose(),
+        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        meta_set(&tx, "kdf_params", &serde_json::to_string(&kdf)?)?;
+        meta_set(&tx, "master_salt", &hex::encode(&salt))?;
+        meta_set(&tx, "wrapped_vault_key", &hex::encode(&wrapped))?;
+        tx.commit()?;
+        audit::record(&self.conn, "master_password_changed", None, None, "")?;
+        db::checkpoint_truncate(&self.conn);
         Ok(())
     }
 
@@ -806,27 +852,82 @@ impl UnlockedVault {
         }
     }
 
-    /// Add (or change) a project password. The project key gets an inner
-    /// password wrap; losing the password makes the project's credential
-    /// values unrecoverable (documented recovery limitation).
+    /// Generate a fresh project key and re-encrypt every credential value
+    /// (and retained version) of the project under it, inside the given
+    /// transaction. Called whenever a project password is set, changed, or
+    /// removed: re-wrapping the *same* key would leave the previous wrap —
+    /// recoverable from WAL remnants or old backups by whoever could open
+    /// it — as a live path to the data. Rotation makes old wraps worthless.
+    fn rotate_project_key(
+        tx: &rusqlite::Transaction<'_>,
+        vault_id: &str,
+        project_id: &str,
+        old_key: &SecretBytes,
+    ) -> Result<SecretBytes> {
+        let new_key = crypto::new_key();
+        let creds: Vec<(String, Vec<u8>)> = tx
+            .prepare(
+                "SELECT id, ciphertext FROM credentials
+                 WHERE project_id = ?1 AND ciphertext IS NOT NULL",
+            )?
+            .query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (cred_id, ciphertext) in creds {
+            let aad = aad::credential_value(vault_id, project_id, &cred_id);
+            let plain = crypto::decrypt(old_key, &aad, &ciphertext, "credential value")?;
+            let reencrypted = crypto::encrypt(&new_key, &aad, plain.expose())?;
+            tx.execute(
+                "UPDATE credentials SET ciphertext = ?1 WHERE id = ?2",
+                params![reencrypted, cred_id],
+            )?;
+        }
+        let versions: Vec<(String, i64, Vec<u8>)> = tx
+            .prepare(
+                "SELECT v.credential_id, v.version, v.ciphertext
+                 FROM credential_versions v
+                 JOIN credentials c ON c.id = v.credential_id
+                 WHERE c.project_id = ?1",
+            )?
+            .query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (cred_id, version, ciphertext) in versions {
+            let aad = aad::credential_version(vault_id, project_id, &cred_id, version);
+            let plain = crypto::decrypt(old_key, &aad, &ciphertext, "credential version")?;
+            let reencrypted = crypto::encrypt(&new_key, &aad, plain.expose())?;
+            tx.execute(
+                "UPDATE credential_versions SET ciphertext = ?1
+                 WHERE credential_id = ?2 AND version = ?3",
+                params![reencrypted, cred_id, version],
+            )?;
+        }
+        Ok(new_key)
+    }
+
+    /// Add (or change) a project password. A FRESH project key is generated
+    /// and every value re-encrypted, so wraps that predate the password
+    /// (which may survive in WAL remnants or old backups) cannot unlock the
+    /// data. Losing the password makes the project's credential values
+    /// unrecoverable (documented recovery limitation).
     pub fn set_project_password(&mut self, ident: &str, password: &SecretString) -> Result<()> {
         validate_password(password, "the project password")?;
         let row = self.project_row_by_ident(ident)?;
-        let project_key = self.project_key_for_row(&row)?;
+        let old_key = self.project_key_for_row(&row)?;
         let kdf = KdfParams::recommended();
         let salt = crypto::new_salt();
         let kek = crypto::derive_key(password, &salt, &kdf)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let inner = crypto::encrypt(
             &kek,
             &aad::project_key_password(&self.vault_id, &row.id),
-            project_key.expose(),
+            new_key.expose(),
         )?;
         let outer = crypto::encrypt(
             &self.vault_key,
             &aad::project_key(&self.vault_id, &row.id),
             &inner,
         )?;
-        self.conn.execute(
+        tx.execute(
             "UPDATE projects SET wrapped_project_key = ?1, key_wrap_mode = 'vault+password',
              project_kdf_params = ?2, project_salt = ?3, updated_at = ?4 WHERE id = ?5",
             params![
@@ -837,10 +938,19 @@ impl UnlockedVault {
                 row.id
             ],
         )?;
+        tx.commit()?;
         // The caller just proved knowledge of the password; keep it unlocked
         // for this session.
-        self.project_keys.insert(row.id.clone(), project_key);
-        audit::record(&self.conn, "project_password_set", Some(&row.id), None, "")?;
+        self.project_keys.insert(row.id.clone(), new_key);
+        audit::record(
+            &self.conn,
+            "project_password_set",
+            Some(&row.id),
+            None,
+            "project key rotated",
+        )?;
+        // Old wraps and old ciphertexts must not linger in the WAL.
+        db::checkpoint_truncate(&self.conn);
         Ok(())
     }
 
@@ -910,25 +1020,29 @@ impl UnlockedVault {
                 row.name
             )));
         }
-        let project_key = self.unwrap_project_key_with_password(&row, password)?;
+        let old_key = self.unwrap_project_key_with_password(&row, password)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let wrapped = crypto::encrypt(
             &self.vault_key,
             &aad::project_key(&self.vault_id, &row.id),
-            project_key.expose(),
+            new_key.expose(),
         )?;
-        self.conn.execute(
+        tx.execute(
             "UPDATE projects SET wrapped_project_key = ?1, key_wrap_mode = 'vault',
              project_kdf_params = NULL, project_salt = NULL, updated_at = ?2 WHERE id = ?3",
             params![wrapped, clock::now_rfc3339(), row.id],
         )?;
+        tx.commit()?;
         self.project_keys.remove(&row.id);
         audit::record(
             &self.conn,
             "project_password_removed",
             Some(&row.id),
             None,
-            "",
+            "project key rotated",
         )?;
+        db::checkpoint_truncate(&self.conn);
         Ok(())
     }
 
@@ -1801,6 +1915,9 @@ impl UnlockedVault {
     /// and reuse, and auto-resolve conditions that no longer hold.
     pub fn run_monitor(&self) -> Result<MonitorSummary> {
         let now = clock::now_rfc3339();
+        // Close injection-session rows whose recorded process died with its
+        // launcher (best-effort liveness probe; Unix only).
+        let _ = crate::inject::sweep_dead_sessions(&self.conn);
         let cost_source = self.budget_cost_source()?;
         let credentials = self.list_credentials(None)?;
         let mut active_keys: Vec<String> = Vec::new();
@@ -4815,6 +4932,19 @@ impl UnlockedVault {
         let path = &parent.join(path.file_name().ok_or_else(|| {
             CoreError::InvalidInput("the export target must be a file path".into())
         })?);
+        // Refuse a symlink target outright: the atomic rename would replace
+        // the link node rather than follow it, but an export "through" a
+        // link is almost certainly a mistake (or an attempt to redirect the
+        // plaintext), so it gets a clear refusal instead of surprises.
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is a symbolic link; refusing to export secrets through it — \
+                     remove the link or export to the real file path",
+                    path.display()
+                )));
+            }
+        }
         if path.exists() && !overwrite {
             return Err(CoreError::InvalidInput(format!(
                 "{} already exists; pass the overwrite flag to replace it",

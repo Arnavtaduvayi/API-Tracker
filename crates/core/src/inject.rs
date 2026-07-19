@@ -159,6 +159,52 @@ pub fn end_session(conn: &Connection, session_id: &str, exit_code: Option<i32>) 
     Ok(())
 }
 
+/// Close session rows whose recorded process no longer exists. A launcher
+/// that crashed leaves its row "running" forever otherwise. Detection is a
+/// `ps -p <pid>` liveness probe (POSIX; reports any user's process without
+/// signal-permission ambiguity): only a definitive "not found" closes the
+/// row. Unix only; on other platforms this is a no-op and rows close on
+/// child exit as before. Returns how many rows were closed.
+pub fn sweep_dead_sessions(conn: &Connection) -> Result<usize> {
+    #[cfg(unix)]
+    {
+        let rows: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT id, pid FROM process_sessions
+                 WHERE ended_at IS NULL AND pid IS NOT NULL",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut closed = 0usize;
+        for (id, pid) in rows {
+            if pid <= 0 {
+                continue;
+            }
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // Only a clean "ps ran and found nothing" closes the row; a
+            // failure to run ps proves nothing and changes nothing.
+            let gone = matches!(probe, Ok(status) if !status.success());
+            if gone {
+                conn.execute(
+                    "UPDATE process_sessions SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",
+                    params![clock::now_rfc3339(), id],
+                )?;
+                closed += 1;
+            }
+        }
+        Ok(closed)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = conn;
+        Ok(0)
+    }
+}
+
 pub fn list_sessions(
     conn: &Connection,
     limit: u32,

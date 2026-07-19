@@ -31,10 +31,9 @@ walkdir = "2.5.0"
 zeroize = { version = "1.9.0", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.60", features = [
-    "Win32_Foundation",
-    "Win32_Security_Credentials",
-] }
+# Windows Credential Manager access with the Win32 FFI encapsulated in an
+# audited dependency; this crate itself stays forbid(unsafe_code).
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
