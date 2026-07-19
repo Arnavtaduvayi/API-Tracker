@@ -273,6 +273,121 @@ check $? "a channel can be removed"
 "$BIN" provider docs-history >/dev/null 2>&1
 check $? "documentation change history is queryable"
 
+echo "-- credential version history --"
+printf 'sk-proj-SMOKE-FAKE-REPLACEMENT-0002-NOT-A-REAL-KEY' | \
+  "$BIN" key update smoke-dev/main-key --new-value --value-stdin >/dev/null 2>&1
+check $? "credential value replaced (reauthentication via env)"
+VERS_OUT=$("$BIN" key versions smoke-dev/main-key 2>/dev/null)
+echo "$VERS_OUT" | grep -q "v1"
+check $? "version history lists the retained previous version"
+{ echo "$VERS_OUT" | grep -qF "$FAKE_KEY" || echo "$VERS_OUT" | grep -qF "REPLACEMENT-0002"; } \
+  && bad "version listing exposes a value" || ok "version listing is masked"
+
+echo "-- git scanning end to end (staged, history, full history, hook) --"
+SCAN_REPO=$(mktemp -d)
+git -C "$SCAN_REPO" init -q
+git -C "$SCAN_REPO" config user.email smoke@example.invalid
+git -C "$SCAN_REPO" config user.name smoke
+echo "just a readme" > "$SCAN_REPO/README.md"
+git -C "$SCAN_REPO" add . && git -C "$SCAN_REPO" commit -qm init
+GIT_FAKE="sk-proj-SMOKEGIT-FAKE-00000000000000000000-NOT-REAL"
+printf 'OPENAI_API_KEY=%s\n' "$GIT_FAKE" > "$SCAN_REPO/config.env"
+git -C "$SCAN_REPO" add .
+STAGED_OUT=$("$BIN" --json scan --staged "$SCAN_REPO" 2>/dev/null)
+echo "$STAGED_OUT" | python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if len(d)>=1 else 1)' 2>/dev/null
+check $? "staged scan detects the planted secret"
+echo "$STAGED_OUT" | grep -qF "$GIT_FAKE" && bad "scan output contains the raw secret" || ok "scan findings are redacted"
+"$BIN" hooks install "$SCAN_REPO" >/dev/null 2>&1
+check $? "pre-commit hook installs"
+( cd "$SCAN_REPO" && PATH="$(dirname "$BIN"):$PATH" git commit -qm leak ) >/dev/null 2>&1 \
+  && bad "the hook allowed a commit containing a high-confidence secret" \
+  || ok "the pre-commit hook blocks the secret-bearing commit"
+( cd "$SCAN_REPO" && git commit -qm leak --no-verify ) >/dev/null 2>&1
+check $? "--no-verify bypass works (documented Git behavior)"
+"$BIN" --json scan --history 5 "$SCAN_REPO" 2>/dev/null | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if len(d)>=1 else 1)' 2>/dev/null
+check $? "recent-history scan finds the committed secret"
+"$BIN" --json scan --all-history "$SCAN_REPO" 2>/dev/null | \
+  python3 -c 'import json,sys; d=json.load(sys.stdin); raise SystemExit(0 if len(d)>=1 else 1)' 2>/dev/null
+check $? "full-history scan finds the committed secret"
+SUPP_KEY=$(echo "$STAGED_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["suppression_key"])' 2>/dev/null)
+"$BIN" suppress add "$SUPP_KEY" --reason "smoke fixture" >/dev/null 2>&1 && \
+  "$BIN" suppress list 2>/dev/null | grep -q "smoke fixture" && \
+  "$BIN" suppress remove "$SUPP_KEY" >/dev/null 2>&1
+check $? "suppressions can be added, listed, and removed"
+
+echo "-- .env discovery on a registered repository --"
+"$BIN" project edit smoke-dev --add-repo "$SCAN_REPO" >/dev/null 2>&1
+printf 'SMOKE_DISCOVER_KEY=sk-proj-SMOKE-DISCOVER-FAKE-0000-NOT-REAL\n' > "$SCAN_REPO/.env"
+"$BIN" env discover --project smoke-dev 2>/dev/null | grep -q ".env"
+check $? "env discover finds the .env file in the registered repository"
+rm -rf "$SCAN_REPO"
+
+echo "-- provider catalog and documentation-watch surfaces (offline) --"
+"$BIN" provider list 2>/dev/null | grep -qi "openai" && \
+  "$BIN" provider list 2>/dev/null | grep -qi "anthropic"
+check $? "provider catalog lists the built-in providers"
+CAP_OUT=$("$BIN" provider capabilities supabase 2>/dev/null)
+echo "$CAP_OUT" | grep -qi "not impl\|unsupported\|manual"
+check $? "capability matrix reports honest non-implemented states"
+"$BIN" provider docs stripe 2>/dev/null | grep -q "https://"
+check $? "provider docs prints official links"
+"$BIN" provider docs-status >/dev/null 2>&1
+check $? "documentation-watch status is queryable offline"
+
+echo "-- monitor status and injection-session listing --"
+"$BIN" monitor --status 2>/dev/null | grep -q "Last success"
+check $? "monitor --status reports the last successful run"
+"$BIN" access sessions --all 2>/dev/null | grep -q "SESSION\|No .*sessions"
+check $? "injection sessions are listable (names and PIDs only)"
+
+echo "-- webhook delivery to a local test server --"
+HOOK_LOG="$WORK/webhook_bodies.log"
+: > "$HOOK_LOG"
+python3 - "$HOOK_LOG" "$WORK/webhook_port" <<'WEBEOF' &
+import http.server, socketserver, sys
+log, portfile = sys.argv[1], sys.argv[2]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('Content-Length', 0))
+        with open(log, 'ab') as f:
+            f.write(self.rfile.read(n) + b"\n")
+        self.send_response(200); self.end_headers(); self.wfile.write(b'{}')
+    def log_message(self, *a): pass
+with socketserver.TCPServer(("127.0.0.1", 0), H) as srv:
+    with open(portfile, 'w') as f:
+        f.write(str(srv.server_address[1]))
+    srv.timeout = 2
+    for _ in range(20):
+        srv.handle_request()
+WEBEOF
+WEBHOOK_SERVER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$WORK/webhook_port" ] && break; sleep 0.2; done
+HOOK_PORT=$(cat "$WORK/webhook_port" 2>/dev/null)
+printf 'http://127.0.0.1:%s/hook' "$HOOK_PORT" | \
+  "$BIN" notify add --name smoke-local --min-severity high --url-stdin >/dev/null 2>&1
+check $? "a localhost webhook channel is accepted (http allowed for 127.0.0.1)"
+"$BIN" monitor >/dev/null 2>&1
+check $? "monitor runs its network phase against the local server only"
+sleep 0.5
+grep -q '"severity"' "$HOOK_LOG" 2>/dev/null
+check $? "the local server received alert metadata"
+{ grep -qF "$FAKE_KEY" "$HOOK_LOG" || grep -qF "REPLACEMENT-0002" "$HOOK_LOG"; } 2>/dev/null \
+  && bad "webhook payload contained a secret value" \
+  || ok "webhook payloads carry metadata only (no secret values)"
+"$BIN" notify history 2>/dev/null | grep -q "delivered"
+check $? "notify history records the delivery"
+"$BIN" notify remove smoke-local >/dev/null 2>&1
+{ kill "$WEBHOOK_SERVER_PID" && wait "$WEBHOOK_SERVER_PID"; } >/dev/null 2>&1
+
+echo "-- migration/data-safety and mocked provider-sync suites --"
+(cd "$REPO_ROOT" && cargo test --release --quiet -p api-tracker-core --test migration_safety 2>&1 | grep -q "test result: ok. 8")
+check $? "migration + backup-completeness suite passes against the release core"
+(cd "$REPO_ROOT" && API_TRACKER_INSECURE_FAST_KDF=1 cargo test --quiet -p api-tracker-core \
+    --test openai_sync --test anthropic_sync --test env_destinations --test rotation_access 2>&1 | \
+    grep -c "test result: ok" | grep -q "4")
+check $? "mocked provider sync, destination, and rotation suites pass"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do
