@@ -841,8 +841,34 @@ impl UnlockedVault {
         self.get_project(&row.id)
     }
 
+    /// Begin a write (IMMEDIATE) transaction, taking SQLite's single write
+    /// lock up front. Every span that reads a project-key wrap, encrypts
+    /// under the unwrapped key, and persists the ciphertext must run inside
+    /// one of these, with the wrap read AFTER the transaction begins:
+    /// holding the write lock from before the wrap is read until commit
+    /// means a concurrent project-key rotation cannot destroy the wrap
+    /// mid-operation, so committed ciphertext is always decryptable under
+    /// the persisted key. Waiting out the busy timeout surfaces as the
+    /// typed [`CoreError::Busy`], never as a partial write.
+    fn write_txn(&self) -> Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::DatabaseBusy
+                        || f.code == rusqlite::ErrorCode::DatabaseLocked =>
+                {
+                    CoreError::Busy
+                }
+                other => other.into(),
+            })
+    }
+
     /// The decrypted key for a project. Fails with [`CoreError::ProjectLocked`]
     /// for password-locked projects that have not been unlocked this session.
+    ///
+    /// Callers that persist ciphertext produced under the returned key must
+    /// read `row` inside a [`Self::write_txn`] so the wrap cannot be rotated
+    /// away between this check and their write.
     fn project_key_for_row(&self, row: &ProjectRow) -> Result<SecretBytes> {
         match row.key_wrap_mode.as_str() {
             "vault" => crypto::decrypt(
@@ -937,12 +963,18 @@ impl UnlockedVault {
         // other secret-changing operation.
         self.verify_master_password(master_password)?;
         validate_password(password, "the project password")?;
-        let row = self.project_row_by_ident(ident)?;
-        let old_key = self.project_key_for_row(&row)?;
+        // The memory-hard derivation depends only on the new password, so it
+        // runs before the write lock is taken.
         let kdf = KdfParams::recommended();
         let salt = crypto::new_salt();
         let kek = crypto::derive_key(password, &salt, &kdf)?;
-        let tx = self.conn.unchecked_transaction()?;
+        // Row read, old-key unwrap, re-encryption, and the wrap update share
+        // one write transaction: a concurrent add/replace either committed
+        // before it (and is re-encrypted below) or waits behind it and then
+        // sees the new wrap (see `write_txn`).
+        let tx = self.write_txn()?;
+        let row = self.project_row_by_ident(ident)?;
+        let old_key = self.project_key_for_row(&row)?;
         let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let inner = crypto::encrypt(
             &kek,
@@ -1047,15 +1079,28 @@ impl UnlockedVault {
     /// Remove a project's password lock (requires the current project
     /// password, proving authorization).
     pub fn remove_project_password(&mut self, ident: &str, password: &SecretString) -> Result<()> {
-        let row = self.project_row_by_ident(ident)?;
-        if row.key_wrap_mode != "vault+password" {
+        let pre = self.project_row_by_ident(ident)?;
+        if pre.key_wrap_mode != "vault+password" {
             return Err(CoreError::InvalidInput(format!(
                 "project '{}' has no password lock",
-                row.name
+                pre.name
             )));
         }
-        let old_key = self.unwrap_project_key_with_password(&row, password)?;
-        let tx = self.conn.unchecked_transaction()?;
+        // The memory-hard unwrap runs against a pre-read of the row so the
+        // write lock is not held for the KDF; the wrap it unlocked is then
+        // required to still be current inside the transaction below.
+        let old_key = self.unwrap_project_key_with_password(&pre, password)?;
+        let tx = self.write_txn()?;
+        let row = self.project_row_by_ident(&pre.id)?;
+        if row.key_wrap_mode != "vault+password"
+            || row.wrapped_project_key != pre.wrapped_project_key
+        {
+            // Another session rotated the project key after the unwrap above;
+            // `old_key` no longer matches what is on disk. Re-encrypting with
+            // it would corrupt the project, so refuse and let the caller
+            // retry against the current state.
+            return Err(CoreError::Busy);
+        }
         let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let wrapped = crypto::encrypt(
             &self.vault_key,
@@ -1205,13 +1250,6 @@ impl UnlockedVault {
         &mut self,
         add: AddCredential,
     ) -> Result<(Credential, Vec<ReuseWarning>)> {
-        let project = self.project_row_by_ident(&add.project)?;
-        if project.archived {
-            return Err(CoreError::InvalidInput(format!(
-                "project '{}' is archived; restore it before adding credentials",
-                project.name
-            )));
-        }
         let name = add.name.trim().to_owned();
         if name.is_empty() {
             return Err(CoreError::InvalidInput(
@@ -1222,6 +1260,19 @@ impl UnlockedVault {
             return Err(CoreError::InvalidInput(
                 "credential value must not be empty".into(),
             ));
+        }
+        // The project row (and with it the key wrap) is read under the write
+        // lock, so a concurrent project-key rotation either committed before
+        // this transaction (caught by the wrap-hash freshness check) or waits
+        // behind it and re-encrypts this row too. Ciphertext can never be
+        // committed under a destroyed key.
+        let tx = self.write_txn()?;
+        let project = self.project_row_by_ident(&add.project)?;
+        if project.archived {
+            return Err(CoreError::InvalidInput(format!(
+                "project '{}' is archived; restore it before adding credentials",
+                project.name
+            )));
         }
         self.ensure_credential_name_free(&project.id, &name, None)?;
 
@@ -1271,6 +1322,7 @@ impl UnlockedVault {
             Some(&id),
             &format!("name={name}"),
         )?;
+        tx.commit()?;
         Ok((self.get_credential(&id)?, warnings))
     }
 
@@ -1656,16 +1708,20 @@ impl UnlockedVault {
         new_value: SecretString,
     ) -> Result<(Credential, Vec<ReuseWarning>)> {
         self.verify_master_password(master_password)?;
+        if new_value.expose().trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "credential value must not be empty".into(),
+            ));
+        }
+        // Row read, key derivation, version retention, and the ciphertext
+        // update share one write transaction so a concurrent project-key
+        // rotation cannot commit in between (see `write_txn`).
+        let tx = self.write_txn()?;
         let row = self.resolve_credential(selector)?;
         if row.linked_credential_id.is_some() {
             return Err(CoreError::InvalidInput(
                 "this record is a reference; replace the value on the credential it points to"
                     .into(),
-            ));
-        }
-        if new_value.expose().trim().is_empty() {
-            return Err(CoreError::InvalidInput(
-                "credential value must not be empty".into(),
             ));
         }
         let project = self.project_row_by_ident(&row.project_id)?;
@@ -1710,6 +1766,7 @@ impl UnlockedVault {
             Some(&row.id),
             "",
         )?;
+        tx.commit()?;
         Ok((self.get_credential(&row.id)?, warnings))
     }
 

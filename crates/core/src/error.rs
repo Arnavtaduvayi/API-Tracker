@@ -55,6 +55,9 @@ pub enum CoreError {
     #[error("decryption failed for {context}: wrong key/password, corrupted data, or tampering")]
     Crypto { context: &'static str },
 
+    #[error("another API Tracker process is writing to the vault; try again")]
+    Busy,
+
     #[error("backup file is not valid: {0}")]
     BackupInvalid(String),
 
@@ -123,6 +126,7 @@ impl CoreError {
             CoreError::InvalidLink(_) => "invalid_link",
             CoreError::InvalidInput(_) => "invalid_input",
             CoreError::Crypto { .. } => "crypto_error",
+            CoreError::Busy => "vault_busy",
             CoreError::BackupInvalid(_) => "backup_invalid",
             CoreError::VaultCorrupted(_) => "vault_corrupted",
             CoreError::SchemaTooNew { .. } => "schema_too_new",

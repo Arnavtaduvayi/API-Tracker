@@ -1,0 +1,39 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running tests/crypto01_rotation_race.rs (target/debug/deps/crypto01_rotation_race-7b008114b0f4a376)
+
+running 4 tests
+test crypto01_multiprocess_child_worker ... ok
+test concurrent_rotation_during_add_never_orphans_across_processes ... FAILED
+test concurrent_rotation_during_add_never_orphans ... FAILED
+test concurrent_rotation_during_replace_never_orphans ... FAILED
+
+failures:
+
+---- concurrent_rotation_during_add_never_orphans_across_processes stdout ----
+process-race iter 0: armed=true outcome=ok
+
+thread 'concurrent_rotation_during_add_never_orphans_across_processes' (20228090) panicked at crates/core/tests/crypto01_rotation_race.rs:124:21:
+CRYPTO-01 regression: the raced write reported success but its ciphertext does not decrypt under the persisted project key (orphaned): Crypto { context: "credential value" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- concurrent_rotation_during_add_never_orphans stdout ----
+add-race iter 0: armed=true outcome=committed
+
+thread 'concurrent_rotation_during_add_never_orphans' (20228089) panicked at crates/core/tests/crypto01_rotation_race.rs:124:21:
+CRYPTO-01 regression: the raced write reported success but its ciphertext does not decrypt under the persisted project key (orphaned): Crypto { context: "credential value" }
+
+---- concurrent_rotation_during_replace_never_orphans stdout ----
+replace-race iter 0: armed=true outcome=committed
+
+thread 'concurrent_rotation_during_replace_never_orphans' (20228091) panicked at crates/core/tests/crypto01_rotation_race.rs:241:17:
+CRYPTO-01 regression: the raced replacement left c0 undecryptable under the persisted project key (orphaned): Crypto { context: "credential value" }
+
+
+failures:
+    concurrent_rotation_during_add_never_orphans
+    concurrent_rotation_during_add_never_orphans_across_processes
+    concurrent_rotation_during_replace_never_orphans
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+
+error: test failed, to rerun pass `-p api-tracker-core --test crypto01_rotation_race`
