@@ -214,6 +214,15 @@ fn provider_get(id: String) -> CmdResult<&'static ProviderManifest> {
 
 // --- Scanning + hooks ---
 
+#[derive(Serialize)]
+struct ScanPathReport {
+    findings: Vec<Finding>,
+    /// False when a history scan hit a time/size limit — the result is then
+    /// NOT a clean full scan and the warnings say what was skipped.
+    coverage_complete: bool,
+    coverage_warnings: Vec<String>,
+}
+
 #[tauri::command]
 fn scan_path(
     state: State<'_, AppState>,
@@ -221,33 +230,64 @@ fn scan_path(
     mode: String,
     mark_exposed: bool,
     history_depth: Option<u32>,
-) -> CmdResult<Vec<Finding>> {
+) -> CmdResult<ScanPathReport> {
     let p = std::path::PathBuf::from(&path);
+    // Collect content OUTSIDE the vault lock: git subprocess time (bounded
+    // but potentially minutes on a big history) must not stall every other
+    // vault command behind the shared mutex (CONC-06/CONC-01).
+    let (units, complete, warnings) = match mode.as_str() {
+        "staged" => {
+            let root = api_tracker_core::gitrepo::repo_root(&p).map_err(ErrDto::from)?;
+            (
+                api_tracker_core::gitrepo::staged_units(&root).map_err(ErrDto::from)?,
+                true,
+                Vec::new(),
+            )
+        }
+        // Depth is user-chosen; None scans the FULL history.
+        "history" => {
+            let root = api_tracker_core::gitrepo::repo_root(&p).map_err(ErrDto::from)?;
+            let scan = api_tracker_core::gitrepo::history_added_units(
+                &root,
+                history_depth.map(|n| n as usize),
+            )
+            .map_err(ErrDto::from)?;
+            (scan.units, scan.complete, scan.warnings)
+        }
+        _ => (
+            api_tracker_core::gitrepo::working_tree_units(&p).map_err(ErrDto::from)?,
+            true,
+            Vec::new(),
+        ),
+    };
     with_vault(&state, |vault| {
-        let mut findings = match mode.as_str() {
-            "staged" => vault.scan_staged(&p)?,
-            // Depth is user-chosen; None scans the FULL history.
-            "history" => vault.scan_history(&p, history_depth.map(|n| n as usize))?,
-            _ => vault.scan_working_tree(&p)?,
-        };
+        let mut findings = vault.scan_units(units)?;
         if mark_exposed {
             vault.mark_findings_exposed(&findings)?;
         }
         findings.sort_by_key(|f| std::cmp::Reverse(f.confidence));
-        Ok(findings)
+        Ok(ScanPathReport {
+            findings,
+            coverage_complete: complete,
+            coverage_warnings: warnings,
+        })
     })
 }
 
 /// Re-verify a repository's outstanding exposure alerts with a full scan,
-/// resolving them only if it is clean (OBS-001). Exposure alerts never
-/// auto-resolve on their own; this is the qualifying clean re-scan.
+/// resolving them only if it is clean AND complete (OBS-001). Exposure
+/// alerts never auto-resolve on their own; this is the qualifying clean
+/// re-scan. The slow git collection runs outside the vault lock.
 #[tauri::command]
 fn scan_reverify(
     state: State<'_, AppState>,
     path: String,
 ) -> CmdResult<api_tracker_core::vault::RepoReverifyReport> {
     let p = std::path::PathBuf::from(&path);
-    with_vault(&state, |vault| vault.reverify_repo_exposure(&p))
+    let collected = api_tracker_core::gitrepo::collect_full_repo_scan(&p).map_err(ErrDto::from)?;
+    with_vault(&state, |vault| {
+        vault.reverify_repo_exposure_collected(&p, collected)
+    })
 }
 
 #[tauri::command]

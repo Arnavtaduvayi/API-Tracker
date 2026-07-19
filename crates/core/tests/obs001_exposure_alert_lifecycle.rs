@@ -127,10 +127,12 @@ fn exposure_open(vault: &UnlockedVault) -> bool {
 }
 
 fn coverage_gap_open(vault: &UnlockedVault) -> bool {
+    // Match the stable dedup identity, not the display title (which now
+    // also covers partially-scanned ranges, Phase 2 CONC-06/GScan-03).
     alerts::list(vault.connection(), false)
         .unwrap()
         .iter()
-        .any(|a| a.title.starts_with("repository re-baselined"))
+        .any(|a| format!("{:?}", a.kind).contains("repo_scan_coverage_gap"))
 }
 
 #[test]

@@ -1827,7 +1827,14 @@ impl UnlockedVault {
 
     /// Run the detection engine over scan units, match each finding against
     /// the vault (by keyed fingerprint), and drop suppressed findings.
-    fn scan_units(&self, units: Vec<crate::gitrepo::ScanUnit>) -> Result<Vec<scanner::Finding>> {
+    /// Public so callers (e.g. the desktop app) can collect units WITHOUT
+    /// holding the vault lock — git subprocess time must not stall every
+    /// other vault command — and then run only this fast, DB-bound step
+    /// under the lock.
+    pub fn scan_units(
+        &self,
+        units: Vec<crate::gitrepo::ScanUnit>,
+    ) -> Result<Vec<scanner::Finding>> {
         let suppressed = self.suppression_keys()?;
         let mut out = Vec::new();
         for unit in units {
@@ -1882,15 +1889,20 @@ impl UnlockedVault {
         self.scan_units(units)
     }
 
-    /// Scan Git history (last `n` commits, or all when `None`).
-    pub fn scan_history(
-        &self,
-        repo: &std::path::Path,
-        n: Option<usize>,
-    ) -> Result<Vec<scanner::Finding>> {
+    /// Scan Git history (last `n` commits, or all when `None`). The
+    /// returned outcome states honestly whether the WHOLE requested history
+    /// was examined: a scan cut short by a time/size limit reports
+    /// `complete == false` with warnings and must never be presented as a
+    /// verified-clean full scan.
+    pub fn scan_history(&self, repo: &std::path::Path, n: Option<usize>) -> Result<ScanOutcome> {
         let root = crate::gitrepo::repo_root(repo)?;
-        let units = crate::gitrepo::history_added_units(&root, n)?;
-        self.scan_units(units)
+        let history = crate::gitrepo::history_added_units(&root, n)?;
+        let findings = self.scan_units(history.units)?;
+        Ok(ScanOutcome {
+            findings,
+            complete: history.complete,
+            warnings: history.warnings,
+        })
     }
 
     /// Mark every credential matched by a scan finding as possibly exposed,
@@ -5371,31 +5383,52 @@ impl UnlockedVault {
                 None => 0, // baseline only
                 Some(last) if last == &head => continue,
                 Some(last) => {
-                    // History rewritten or range unreadable: re-baseline
-                    // rather than failing the whole monitor run — but say
-                    // so, because commits in the unread range were NOT
-                    // scanned.
-                    let (units, range_ok) =
+                    // History rewritten, range unreadable, or the bounded
+                    // range scan hit a time/size limit: re-baseline rather
+                    // than failing (or stalling) the whole monitor run — but
+                    // say so persistently, because commits in the unread
+                    // range were NOT (fully) scanned.
+                    let (units, gap_detail) =
                         match crate::gitrepo::range_added_units(repo, last, &head) {
-                            Ok(units) => (units, true),
-                            Err(_) => (Vec::new(), false),
+                            Ok(scan) if scan.complete => (scan.units, None),
+                            Ok(scan) => {
+                                let why = scan.warnings.join("; ");
+                                (
+                                    scan.units,
+                                    Some(format!(
+                                        "the commit range {last}..{head} was only PARTIALLY \
+                                         scanned ({why}). Commits in that range may contain \
+                                         unexamined secrets."
+                                    )),
+                                )
+                            }
+                            Err(_) => (
+                                Vec::new(),
+                                Some(format!(
+                                    "the commit range {last}..{head} could not be read \
+                                     (history rewritten, or git failed). Commits in that \
+                                     range were NOT scanned."
+                                )),
+                            ),
                         };
-                    if !range_ok {
+                    if let Some(detail) = gap_detail {
                         // Repo-scoped, dedicated coverage-gap kind: this is a
                         // "coverage unavailable" signal, not a clean result.
                         // It is excluded from auto-resolve so it persists (the
                         // old head-keyed PossibleExposure key was never added
                         // to active_keys and so auto-resolved in the SAME run
-                        // — OBS-001).
+                        // — OBS-001) and clears only on a verified-complete
+                        // clean full re-scan (`scan --reverify`).
                         let _ = alerts::upsert(
                             &self.conn,
                             &alerts::NewAlert {
                                 kind: alerts::AlertKind::RepoScanCoverageGap,
                                 severity: alerts::Severity::Medium,
                                 dedup_key: format!("repo_scan_coverage_gap:{path}"),
-                                title: format!("repository re-baselined: {path}"),
+                                title: format!("repository scan coverage gap: {path}"),
                                 detail: format!(
-                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --all-history` if secrets may have landed there."
+                                    "{detail} Run `api-tracker scan --reverify` for a full \
+                                     history re-scan."
                                 ),
                                 evidence: format!("last={last} head={head}"),
                                 confidence: crate::providers::Confidence::Medium,
@@ -5477,6 +5510,18 @@ impl UnlockedVault {
     /// project; `repo` is matched to that registered string by canonical
     /// path so a differently-spelled argument still resolves the right alerts.
     pub fn reverify_repo_exposure(&self, repo: &std::path::Path) -> Result<RepoReverifyReport> {
+        let collected = crate::gitrepo::collect_full_repo_scan(repo)?;
+        self.reverify_repo_exposure_collected(repo, collected)
+    }
+
+    /// Variant taking pre-collected scan content, so the (slow, git-bound)
+    /// collection can happen without holding the desktop vault lock. The
+    /// resolution rules are identical to [`Self::reverify_repo_exposure`].
+    pub fn reverify_repo_exposure_collected(
+        &self,
+        repo: &std::path::Path,
+        collected: crate::gitrepo::FullRepoScan,
+    ) -> Result<RepoReverifyReport> {
         let canon = repo.canonicalize().map_err(|e| {
             CoreError::InvalidInput(format!("cannot access {}: {e}", repo.display()))
         })?;
@@ -5501,13 +5546,18 @@ impl UnlockedVault {
             .unwrap_or_else(|| repo.to_string_lossy().into_owned());
 
         // A FULL re-scan: entire history plus the working tree. A secret that
-        // remains anywhere in history keeps the exposure alert open.
-        let mut findings = self.scan_history(repo, None)?;
-        findings.extend(self.scan_working_tree(repo)?);
+        // remains anywhere in history keeps the exposure alert open — and so
+        // does INCOMPLETE COVERAGE: a history scan cut short by a time or
+        // size limit found nothing only in what it examined, which is not
+        // proof of remediation. Alerts resolve only on a complete, clean scan.
+        let coverage_complete = collected.history.complete;
+        let coverage_warnings = collected.history.warnings;
+        let mut findings = self.scan_units(collected.history.units)?;
+        findings.extend(self.scan_units(collected.working_tree)?);
         let count = findings.len();
 
         let mut resolved = 0;
-        if count == 0 {
+        if count == 0 && coverage_complete {
             for key in [
                 format!("repo_scan_exposure:{repo_path}"),
                 format!("repo_scan_coverage_gap:{repo_path}"),
@@ -5527,8 +5577,10 @@ impl UnlockedVault {
         Ok(RepoReverifyReport {
             repo_path,
             findings: count,
-            clean: count == 0,
+            clean: count == 0 && coverage_complete,
             resolved_alerts: resolved,
+            coverage_complete,
+            coverage_warnings,
         })
     }
 
@@ -8687,9 +8739,25 @@ pub struct RepoReverifyReport {
     pub repo_path: String,
     /// Unsuppressed likely-secret findings across full history + working tree.
     pub findings: usize,
-    /// Whether the scan was clean and therefore resolved the exposure alerts.
+    /// Whether the scan found nothing AND covered the whole history —
+    /// incomplete coverage is never presented as clean.
     pub clean: bool,
     pub resolved_alerts: usize,
+    /// False when the history scan hit a time/size limit; alerts are then
+    /// NOT resolved and the warnings say what was skipped.
+    pub coverage_complete: bool,
+    pub coverage_warnings: Vec<String>,
+}
+
+/// Findings from a scan plus an honest statement of coverage. `complete ==
+/// false` means part of the requested content was NOT examined (time or
+/// size limit); such a result must never be presented as a verified-clean
+/// scan.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScanOutcome {
+    pub findings: Vec<scanner::Finding>,
+    pub complete: bool,
+    pub warnings: Vec<String>,
 }
 
 /// One event in a credential's merged lifecycle timeline (metadata only).

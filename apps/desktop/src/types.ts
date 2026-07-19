@@ -207,8 +207,19 @@ export interface Finding {
 export interface RepoReverifyReport {
   repo_path: string;
   findings: number;
+  /** Clean means zero findings AND complete coverage. */
   clean: boolean;
   resolved_alerts: number;
+  /** False when the history scan hit a time/size limit; alerts stay open. */
+  coverage_complete: boolean;
+  coverage_warnings: string[];
+}
+
+/** Findings plus an honest statement of scan coverage. */
+export interface ScanPathReport {
+  findings: Finding[];
+  coverage_complete: boolean;
+  coverage_warnings: string[];
 }
 
 export type HookState =

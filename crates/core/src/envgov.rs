@@ -13,7 +13,6 @@ use crate::secret::SecretString;
 use rusqlite::{params, Connection, Row};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use uuid::Uuid;
 
 /// How a discovered file participates in governance.
@@ -98,18 +97,22 @@ pub fn environment_from_name(file_name: &str) -> Option<Environment> {
     None
 }
 
+// All git probes route through the bounded runner (CONC-06): a hung git —
+// dead network mount, wedged lock — must degrade to "no answer" for one
+// probe, never hang env governance forever or leave an orphan child.
 fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    if out.status.success() {
+    let out = crate::gitrepo::run_git_probe(dir, args).ok()?;
+    if out.success {
         Some(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         None
     }
+}
+
+fn git_probe_success(dir: &Path, args: &[&str]) -> bool {
+    crate::gitrepo::run_git_probe(dir, args)
+        .map(|o| o.success)
+        .unwrap_or(false)
 }
 
 fn git_status_of(dir: &Path, rel: &str) -> (GitStatus, bool) {
@@ -119,30 +122,15 @@ fn git_status_of(dir: &Path, rel: &str) -> (GitStatus, bool) {
     if !inside {
         return (GitStatus::NotInRepo, false);
     }
-    let tracked = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["ls-files", "--error-unmatch", "--", rel])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    let in_history = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["log", "--oneline", "-n", "1", "--all", "--", rel])
-        .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false);
+    let tracked = git_probe_success(dir, &["ls-files", "--error-unmatch", "--", rel]);
+    let in_history =
+        crate::gitrepo::run_git_probe(dir, &["log", "--oneline", "-n", "1", "--all", "--", rel])
+            .map(|o| o.success && !o.stdout.is_empty())
+            .unwrap_or(false);
     if tracked {
         return (GitStatus::Tracked, true);
     }
-    let ignored = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["check-ignore", "-q", "--", rel])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let ignored = git_probe_success(dir, &["check-ignore", "-q", "--", rel]);
     if ignored {
         (GitStatus::Ignored, in_history)
     } else {
@@ -612,6 +600,7 @@ pub fn gitignore_protects(repo_dir: &Path, rel: &str) -> GitStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn classifies_env_file_names() {

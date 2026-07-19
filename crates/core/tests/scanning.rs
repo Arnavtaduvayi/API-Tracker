@@ -179,11 +179,13 @@ fn history_scan_detects_committed_secret() {
     // Remove it in the working tree, but it stays in history.
     std::fs::remove_file(repo.join("config.yaml")).unwrap();
 
-    let findings = vault.scan_history(&repo, Some(10)).unwrap();
-    assert!(findings
+    let outcome = vault.scan_history(&repo, Some(10)).unwrap();
+    assert!(outcome.complete, "a small history scan must be complete");
+    assert!(outcome
+        .findings
         .iter()
         .any(|f| f.provider.as_deref() == Some("openai")));
-    assert!(findings[0].file.contains("config.yaml"));
+    assert!(outcome.findings[0].file.contains("config.yaml"));
 }
 
 #[test]
