@@ -2703,7 +2703,17 @@ impl UnlockedVault {
     /// legacy credential reference) and the connection state are deleted.
     /// Previously synchronized usage snapshots are kept for offline viewing.
     /// Callers must confirm and reauthenticate first.
-    pub fn provider_admin_disconnect(&self, provider: &str) -> Result<bool> {
+    /// Remove a provider's administrative connection (destructive: deletes
+    /// the stored admin credential). Reauthentication is enforced HERE in
+    /// core — matching credential deletion (IPC-02) — so no caller (desktop
+    /// IPC, CLI, or a future one) can perform it without the master password,
+    /// and no UI sequencing is load-bearing for the authorization.
+    pub fn provider_admin_disconnect(
+        &self,
+        provider: &str,
+        master_password: &SecretString,
+    ) -> Result<bool> {
+        self.verify_master_password(master_password)?;
         let provider = crate::providers::normalize(provider);
         let n = self.conn.execute(
             "DELETE FROM provider_connections WHERE provider = ?1",

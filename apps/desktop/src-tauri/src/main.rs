@@ -998,8 +998,8 @@ fn provider_admin_disconnect(
     password: String,
 ) -> CmdResult<bool> {
     with_vault(&state, |vault| {
-        vault.verify_master_password(&SecretString::new(password))?;
-        vault.provider_admin_disconnect(&provider)
+        // Reauth is enforced in core (a direct invoke cannot bypass it).
+        vault.provider_admin_disconnect(&provider, &SecretString::new(password))
     })
 }
 

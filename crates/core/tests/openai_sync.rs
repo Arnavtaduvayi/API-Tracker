@@ -127,7 +127,9 @@ fn admin_connection_is_encrypted_masked_and_removable() {
 
     // Disconnect deletes the connection outright.
     let vault = api_tracker_core::vault::unlock_vault(&paths, &master_pw()).unwrap();
-    assert!(vault.provider_admin_disconnect("openai").unwrap());
+    assert!(vault
+        .provider_admin_disconnect("openai", &master_pw())
+        .unwrap());
     let status = vault.provider_connection_status("openai").unwrap();
     assert!(!status.connected);
     assert!(status.admin_key_masked.is_none());

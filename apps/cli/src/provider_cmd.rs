@@ -245,8 +245,7 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
             }
             eprintln!("Reauthentication required to remove the administrative connection.");
             let password = ctx::master_password()?;
-            vault.verify_master_password(&password)?;
-            if vault.provider_admin_disconnect(&m.id)? {
+            if vault.provider_admin_disconnect(&m.id, &password)? {
                 println!(
                     "Disconnected {}. Previously synced usage remains viewable offline.",
                     m.name
