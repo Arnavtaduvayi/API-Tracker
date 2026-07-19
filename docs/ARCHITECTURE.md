@@ -41,6 +41,7 @@ parity throughout.
 │  destinations            deployment adapters (keychain, AWS, │
 │                          GitHub Actions, Vercel) + catalog   │
 │  syncplan  reviewable value-change rollout plans             │
+│  templates/stackdetect  stack templates + local detection    │
 └──────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -73,6 +74,12 @@ platform default otherwise), so they operate on the same vault concurrently
 - v5: `credential_versions` (retained encrypted prior values),
   `env_exports`, `destinations` (encrypted write-only auth),
   `credential_destinations`, `sync_plans`, `sync_plan_steps`.
+- v6: rotations, rotation schedules, access grants, PID columns.
+- v7: usage units, first-seen tracking, doc history, repo scan state,
+  notification channels.
+- v8: `pricing_records` (effective-dated; legacy overrides migrated).
+- v9: `project_templates`, `stack_preferences` (local decision history).
+- v10: provider-account identity columns on `provider_connections`.
 
 Timestamps are RFC 3339 UTC strings. Schema changes are append-only
 migrations tracked via SQLite `user_version`.

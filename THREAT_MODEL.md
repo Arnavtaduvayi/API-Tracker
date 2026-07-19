@@ -80,7 +80,8 @@ integrations land.
   exposes recent *old* values as well as current ones; old values are
   normally revoked at the provider after rotation, and the history is what
   makes destination rollback real instead of aspirational.
-- **Destinations** (macOS Keychain, AWS Secrets Manager, GitHub Actions,
+- **Destinations** (macOS Keychain, Linux Secret Service, Windows
+  Credential Manager, AWS Secrets Manager, GitHub Actions,
   Vercel) receive values only through an explicitly executed sync-plan step
   or an explicit export — never automatically. Destination administrative
   credentials (IAM keys, PATs, tokens) are encrypted under the vault key,
@@ -152,8 +153,10 @@ integrations land.
 ## Known trade-offs and open items
 
 - **Metadata is not encrypted.** Project and credential names, providers,
-  environments, notes, repository paths, timestamps, masked values, and
-  fingerprints are stored as plaintext columns. Reading *credential values*
+  environments, notes, repository paths, timestamps, masked values,
+  fingerprints — and, since gap closure, provider-reported account identity
+  (organization ids/names, account email, plan) — are stored as plaintext
+  columns. Reading *credential values*
   still requires unlocking the vault (they are encrypted), but a database
   thief learns all the metadata, and `doctor` deliberately reports
   project/credential counts without unlocking. Listing and revealing
@@ -176,23 +179,28 @@ integrations land.
   password as sufficient to learn value-equality across all projects.
 - Audit events are plaintext rows in the same database and are not
   tamper-evident.
-- **Adding a project password does not rotate the project key.** A project is
-  created with its key wrapped under the vault key; setting a project password
-  adds an *outer* wrap but keeps the same underlying key. The vault-only wrap
-  that existed before the password was set may therefore survive in
-  uncheckpointed WAL frames or in any backup taken while the project was
-  unprotected — so a holder of the *master* password could, in principle,
-  recover a later-locked project's key from those historical artifacts. The
-  live in-memory protection is intact (a locked project's values need its own
-  password to reveal), and this is consistent with the stated model that the
-  master password already learns value-equality across all projects
-  (ADR 0005). Treat a project password as protection against an attacker who
-  has *some* session but not the master password, not against the
-  master-password holder examining old on-disk remnants.
-- **Backup files and `vault.db` are written owner-only (0600) on Unix**; the
-  data directory is 0700. On Windows/non-Unix these permission tightenings are
-  no-ops (no ACL is set), so the OS-inherited ACLs govern — treat the data
-  directory as sensitive there. Backup contents are AEAD-encrypted regardless.
+- **Setting, changing, or removing a project password ROTATES the project
+  key** (since ADR 0016): a fresh key is generated and every credential
+  value and retained version re-encrypted, and the WAL is checkpointed and
+  truncated afterwards — so wraps that predate the password (in WAL
+  remnants of the live file) become worthless. One artifact class remains
+  outside this fix, by nature: a **backup taken before the password was
+  set** still contains the old wrap and old ciphertexts, openable by
+  whoever holds the backup password plus the master password from backup
+  time. Treat old backups with the sensitivity of the data they contained
+  when they were made.
+- **The master password can be changed** (`change-password`, desktop
+  Settings): the vault key is re-wrapped under the new password and the
+  WAL truncated. Backups made before the change still open with their
+  original password (stated in-product); live CLI sessions keep working
+  until they expire (the vault key itself is unchanged).
+- **Backup files, `vault.db`, and its WAL/SHM sidecars are written
+  owner-only (0600) on Unix**; the data directory is 0700, and locking the
+  vault checkpoints and truncates the WAL so freed or rewritten pages do
+  not linger in the sidecar. On Windows/non-Unix these permission
+  tightenings are no-ops (no ACL is set), so the OS-inherited ACLs govern —
+  `doctor` warns about this, and the data directory should be treated as
+  sensitive there. Backup contents are AEAD-encrypted regardless.
 - **The session file's TTL/expiry is plaintext** (only the session id is in
   the AEAD associated data); an attacker with write access to the session file
   could extend the auto-lock window, but still cannot decrypt anything without
@@ -204,3 +212,13 @@ integrations land.
   per-platform integration).
 - The UI reveals values into DOM memory when explicitly requested; the
   webview's memory is not zeroized.
+- **Templates, stack detection, pricing records, and account metadata add
+  no secret material.** Detection reads a bounded set of static repository
+  files locally (values in `.env` files never leave the redacting parser),
+  its learned confirm/dismiss history is plain local data the user can
+  delete entirely, and pricing/account records are non-secret metadata.
+- **Crash residue is swept**: expired temporary exports are cleaned on
+  unlock *and* session resume, orphaned atomic-write temp files (older
+  than an hour, only in recorded export directories) are removed, and the
+  monitor closes injection-session rows whose recorded process died with
+  its launcher (liveness probe; only a definitive not-found closes a row).

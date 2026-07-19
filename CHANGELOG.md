@@ -5,6 +5,54 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Added — product gap closure (migrations v8–v10)
+- **Versioned pricing**: effective-dated records (bundled current
+  OpenAI/Anthropic prices with per-entry source + verification date,
+  validated JSON imports, manual overrides; cached/batch/per-request
+  fields). Usage is priced as of its own date — updates never silently
+  reprice history; unknown models never get invented estimates; stale
+  records (45+ days) are flagged and raise a `pricing_stale` alert.
+  CLI `pricing` group (list/show/set-override/remove-override/import/
+  export/propose) + desktop Pricing screen.
+- **Project templates & local stack detection**: nine embedded templates
+  (no values, ever — enforced by test); names-only `.env.example`
+  generation; deterministic detection over static repository signals with
+  per-suggestion evidence/confidence, explicit confirm/dismiss, and a
+  listable, resettable, fully deletable local decision history (labeled
+  rules + stored decisions, not ML). CLI `template` group + desktop
+  Templates screen.
+- **Provider-account identity** from official endpoints only (GitHub
+  /user, Stripe /v1/account, Supabase /v1/organizations, Anthropic
+  /v1/organizations/me), stored with source + sync time; OpenAI reported
+  honestly as having no such endpoint. Console-login and billing-portal
+  URLs in every manifest. `provider account [--sync]`.
+- **Destination completion**: AWS Secrets Manager delete (30-day recovery
+  window, never forced), Linux Secret Service (secret-tool, stdin),
+  Windows Credential Manager (keyring crate; compiled + tested on real
+  Windows in CI), reauthenticated `destination delete-secret` (CLI +
+  desktop), and per-kind declarations of verification method, required
+  plan, possible charges, and testing status. Doppler/1Password/HashiCorp
+  Vault evaluated and deferred (ADR 0016).
+- **Opt-in destination live-verification scripts** for AWS, GitHub
+  Actions, and Vercel: throwaway vault, hidden prompts, one disposable
+  FAKE-value secret, typed confirmation before any write, strongest
+  supported verification, loud cleanup. Never in CI.
+- Smoke suite grown to **126 checks** (pricing, templates/detection,
+  extended destination honesty, master-password change).
+
+### Security — residual hardening
+- **Master-password change** (CLI `change-password`, desktop Settings).
+- **Project-key rotation** whenever a project password is set, changed,
+  or removed: fresh key, full re-encryption of values and retained
+  versions — wraps predating the password become worthless.
+- WAL checkpoint-truncate on lock and after password operations; 0600
+  permissions on `vault.db` and sidecars (Unix); `doctor` warns where
+  permissions are OS-inherited (Windows).
+- `.env` export refuses symlink targets; expired temporary exports are
+  swept on session resume too; orphaned atomic-write temp files are
+  removed (bounded, age-gated); the monitor closes injection-session rows
+  whose recorded process died with its launcher.
+
 ### Added — alpha hardening & completion
 - **Live-verification scripts** for Anthropic, GitHub, and Stripe
   (`scripts/live_verify_{anthropic,github,stripe}.sh`), matching the OpenAI

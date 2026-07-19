@@ -23,7 +23,8 @@ to an API Tracker server.
 > [provider support matrix](docs/PROVIDER_SUPPORT.md).
 >
 > Guides: [Install](docs/INSTALL.md) · [Provider support](docs/PROVIDER_SUPPORT.md)
-> · [Destination support](docs/DESTINATION_SUPPORT.md)
+> · [Destination support](docs/DESTINATION_SUPPORT.md) · [Pricing](docs/PRICING.md)
+> · [Templates & stack detection](docs/TEMPLATES.md)
 > · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Backup & recovery](docs/BACKUP_RECOVERY.md)
 > · [Packaging/signing](docs/PACKAGING.md) · [Changelog](CHANGELOG.md)
 
@@ -77,6 +78,24 @@ Implemented and tested today:
   cost and locally estimated cost are kept strictly separate; budgets pick
   one configurable source (best-available, provider-reported, or estimated)
   and never sum both; month-end projection and over-budget alerts.
+- **Versioned pricing** — effective-dated records for current OpenAI and
+  Anthropic models (source URL + verification date per entry), manual
+  overrides, validated import/export, and a reviewable propose → review →
+  import update loop. Usage is priced as of its own date, so price updates
+  never silently reprice history; unknown models get no invented estimate;
+  stale records (45+ days unverified) are flagged and alerted. See
+  [docs/PRICING.md](docs/PRICING.md).
+- **Project templates & stack detection** — nine stack templates
+  (variables, environments, separation/permission/rotation guidance;
+  never any values) and deterministic local stack detection with
+  per-suggestion evidence, explicit confirmation, and a fully deletable
+  local decision history — not ML, and labeled as such. See
+  [docs/TEMPLATES.md](docs/TEMPLATES.md).
+- **Provider-account identity** — provider-reported org/account id, name,
+  email, and plan from official endpoints only (GitHub, Stripe, Supabase,
+  Anthropic), each stored with its source and sync time; OpenAI has no such
+  endpoint and the app says so. No provider passwords, MFA material, or
+  browser sessions — ever.
 - **Permissions** — raw scopes plus a normalized read/write/admin/sensitive
   view; read-only GitHub scope sync.
 - **Suspicious-activity rules** — over-budget, cost-spike, and
@@ -105,14 +124,18 @@ Implemented and tested today:
   cleanup.
 - **Destinations & sync plans** — a destination-adapter system (separate
   from provider connectors) with an honest per-kind capability matrix:
-  macOS Keychain, AWS Secrets Manager (SigV4, verified against the official
-  test vector), GitHub Actions repository secrets (sealed-box), and Vercel
-  environment variables, plus the local vault/mappings/exports. Destination
-  admin credentials are stored encrypted and write-only. Changing a
-  credential value generates a reviewable **synchronization plan** (dry run
-  by default) with per-destination execution, verification, partial-failure
-  handling, retry, and **rollback** to retained previous versions — never
-  an automatic write, never an automatic revoke.
+  macOS Keychain, **Linux Secret Service**, **Windows Credential Manager**,
+  AWS Secrets Manager (SigV4, verified against the official test vector;
+  delete uses the official 30-day recovery window), GitHub Actions
+  repository secrets (sealed-box), and Vercel environment variables, plus
+  the local vault/mappings/exports. Destination admin credentials are
+  stored encrypted and write-only. Changing a credential value generates a
+  reviewable **synchronization plan** (dry run by default) with
+  per-destination execution, verification, partial-failure handling,
+  retry, and **rollback** to retained previous versions — never an
+  automatic write, never an automatic revoke. Deleting a secret AT a
+  destination is a confirmed, reauthenticated action, and opt-in
+  live-verification scripts exist for AWS/GitHub Actions/Vercel.
 - **Credential version history** — replacing a value retains the previous
   versions encrypted (bounded by count and a configurable rollback window,
   purged with the credential) so destination rollback restores real
@@ -146,15 +169,20 @@ Implemented and tested today:
   same Rust core crate and the same SQLite database.
 - **Auto-lock** — configurable inactivity lock for the desktop app and CLI
   sessions.
+- **Master-password change & project-key rotation** — `change-password`
+  re-wraps the vault key; setting/changing/removing a project password
+  rotates the project key and re-encrypts its values, and the WAL is
+  checkpointed so old material does not linger.
 
 Not implemented yet (planned, see `docs/PRODUCT_SPEC.md`): programmatic
-permission *changes* and credential create/rotate/revoke (no provider offers a
-safe documented per-key method today — the app links to the official page
-instead); OpenAI token detail beyond the completions endpoint
-(embeddings/images/audio usage endpoints — total *spend* is still complete via
-the costs API); more than one OpenAI organization per vault; and
-**signed/notarized** installers (the alpha artifacts are unsigned — see
-[docs/PACKAGING.md](docs/PACKAGING.md)).
+permission *changes* (no provider offers a safe documented per-key method
+today — the app links to the official page or routes through rotation);
+OpenAI token detail beyond the completions endpoint (embeddings/images/audio
+usage endpoints — total *spend* is still complete via the costs API); more
+than one OpenAI organization per vault; live-account exercise of the
+AWS/GitHub Actions/Vercel destination paths (fixture-tested; opt-in scripts
+provided); and **signed/notarized** installers (the alpha artifacts are
+unsigned — see [docs/PACKAGING.md](docs/PACKAGING.md)).
 
 ## Install and build
 
@@ -269,6 +297,15 @@ api-tracker rotation plan my-app/openai-main --grace-minutes 60
 api-tracker rotation approve <rotation-id>
 api-tracker rotation advance <rotation-id>      # repeat until completed
 api-tracker rotation schedule set my-app/openai-main --every-days 90
+
+# Pricing, templates, and stack detection
+api-tracker pricing list                       # versioned, effective-dated records
+api-tracker pricing propose openai --out p.json   # review against the official page
+api-tracker pricing import p.json              # validated; history preserved
+api-tracker template list
+api-tracker template apply openai-app --project my-app --write-example ~/code/my-app
+api-tracker template detect --repo ~/code/my-app   # evidence + confidence; local only
+api-tracker provider account github --sync     # provider-reported identity only
 
 # Temporary local access (bounds what THIS machine injects; not provider-side)
 api-tracker access grant --project my-app --one-time --ttl-minutes 30
