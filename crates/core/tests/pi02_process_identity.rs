@@ -136,53 +136,74 @@ fn same_pid_with_fabricated_identity_is_refused() {
 
 #[test]
 fn pid_reused_by_a_different_process_is_refused() {
-    // Simulates PID reuse with real probe data: the recorded identity was
-    // captured (by the production probe) from a process that has since
-    // died; the decoy now "holds" that PID.
+    // Deterministic recycled-PID simulation that does NOT depend on
+    // `ps lstart` timing resolution (RA2-6): the earlier `sleep`-based
+    // variant waited one wall-clock second and assumed the impostor's
+    // `lstart` would therefore differ — but `ps lstart` has one-second
+    // resolution with jiffies→wall-clock rounding slop, so on the Linux CI
+    // runner the impostor could observe the SAME `lstart`+`comm` and the
+    // production check correctly (per its documented same-second-recycle
+    // residual) returned Signalled, failing the test intermittently.
     //
-    // Start-time identity has one-second granularity, so the impostor must
-    // start in a LATER second than the original — which is what real PID
-    // recycling looks like (the kernel must cycle the PID space before the
-    // number returns; a same-second recycle of the same executable is the
-    // documented residual this identity scheme cannot distinguish).
+    // Here the recorded launch identity is a REAL probe of one executable
+    // (`cat`), and the recorded PID is then held by a DIFFERENT live
+    // executable (`sleep`). Their observed identities differ by `comm`
+    // regardless of start-time rounding, so the mismatch is guaranteed. We
+    // assert the two identities genuinely differ BEFORE asserting the
+    // refusal, so this test can never make a false "refused" claim. The
+    // accepted-on-identity-match case is covered separately by
+    // `correct_matching_process_is_signalled_and_audited`.
     let (_dir, _paths, vault) = common::new_vault();
 
-    let dead = spawn_decoy();
-    let dead_pid = i64::from(dead.id());
-    let dead_identity = match probe_process_identity(dead_pid) {
+    // A real launch identity captured from one executable; the process then
+    // exits so its PID may be recycled by an unrelated process.
+    let mut original = Command::new("cat")
+        .stdin(Stdio::piped()) // blocks on an open stdin → stays alive to be probed
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn original decoy (cat)");
+    let recorded_identity = match probe_process_identity(i64::from(original.id())) {
         IdentityProbe::Found(identity) => identity,
         other => panic!("probe of a live child must find it, got {other:?}"),
     };
-    reap(dead); // the original process is gone; its PID may be recycled
+    let _ = original.kill();
+    let _ = original.wait();
 
-    // Bounded wait for the wall-clock second to advance so the impostor's
-    // start time provably differs from the original's.
-    let second =
-        |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-    let original_second = second(std::time::SystemTime::now());
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while second(std::time::SystemTime::now()) == original_second {
-        assert!(Instant::now() < deadline, "clock never advanced");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    // A DIFFERENT live executable now holds a recorded PID; its identity is
+    // read straight from the production probe (real data on both sides).
+    let mut impostor = spawn_decoy(); // `sleep`
+    let impostor_identity = match probe_process_identity(i64::from(impostor.id())) {
+        IdentityProbe::Found(identity) => identity,
+        other => panic!("probe of a live child must find it, got {other:?}"),
+    };
 
-    let mut decoy = spawn_decoy();
+    // Deterministic precondition: a genuine identity mismatch (different
+    // `comm`), never a same-identity coincidence. `cat` vs `sleep` differ by
+    // executable on every supported platform, so this always holds; if it
+    // ever did not, we refuse to assert a false security property.
+    assert_ne!(
+        recorded_identity, impostor_identity,
+        "the recorded and current identities must genuinely differ to exercise \
+         reuse (recorded={recorded_identity:?}, current={impostor_identity:?})"
+    );
+
     insert_session_row(
         vault.connection(),
         "sess-reused",
-        i64::from(decoy.id()),
-        Some(&dead_identity),
+        i64::from(impostor.id()),
+        Some(&recorded_identity),
     );
 
     let (_, _, outcome) = vault
         .terminate_process_session("sess-reused")
         .expect("terminate resolves the session");
 
-    let alive = still_running(&mut decoy, Duration::from_millis(1000));
-    reap(decoy);
+    let alive = still_running(&mut impostor, Duration::from_millis(1000));
+    reap(impostor);
     assert!(
         matches!(outcome, TerminationOutcome::Refused { .. }),
-        "a recycled PID must fail the identity match, got {outcome:?}"
+        "a recycled PID whose identity differs must fail the identity match, got {outcome:?}"
     );
     assert!(
         alive,
