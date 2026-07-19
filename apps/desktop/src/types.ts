@@ -65,8 +65,12 @@ export interface Credential {
   updated_at: string;
   key_created_at: string | null;
   expires_at: string | null;
+  /** True when expires_at is present but unparseable (shown as invalid). */
+  expires_at_invalid: boolean;
   /** Expiration reported by the provider itself (recorded during validation). */
   provider_expires_at: string | null;
+  /** True when provider_expires_at is present but unparseable (OBS-004). */
+  provider_expires_at_invalid: boolean;
   last_validated_at: string | null;
   last_used_at: string | null;
   docs_url: string;
@@ -207,16 +211,35 @@ export interface Finding {
 export interface RepoReverifyReport {
   repo_path: string;
   findings: number;
+  /** Clean means zero findings AND complete coverage. */
   clean: boolean;
   resolved_alerts: number;
+  /** False when the history scan hit a time/size limit; alerts stay open. */
+  coverage_complete: boolean;
+  coverage_warnings: string[];
 }
 
-export type HookState = "absent" | "installed" | "foreign" | "chained_into_foreign";
+/** Findings plus an honest statement of scan coverage. */
+export interface ScanPathReport {
+  findings: Finding[];
+  coverage_complete: boolean;
+  coverage_warnings: string[];
+}
+
+export type HookState =
+  "absent" | "installed" | "foreign" | "chained_into_foreign" | "overridden" | "unsupported";
 
 export interface HookStatus {
   repo: string;
+  /** The hook file git will actually use (honours core.hooksPath). */
   hook_path: string;
+  /** Raw core.hooksPath value when configured. */
+  hooks_path_override: string | null;
   state: HookState;
+  /** True only when git will genuinely execute the scan on commit. */
+  active: boolean;
+  /** Honest explanation of the state. */
+  detail: string;
 }
 
 export type AlertKind =
@@ -294,12 +317,28 @@ export interface ProcessSession {
   exit_code: number | null;
   pid: number | null;
   grant_id: string | null;
+  /** Launch-time process identity; null means termination will be refused. */
+  proc_identity: string | null;
 }
+
+/**
+ * Truthful result of a termination request. The backend re-verifies the
+ * launch identity before signalling and refuses when the PID can no longer
+ * be confirmed as the launched process.
+ */
+export type TerminationOutcome =
+  | { kind: "refused"; reason: string }
+  | { kind: "already_exited" }
+  | { kind: "signalled" }
+  | { kind: "signal_failed" };
 
 export interface SessionKillResult {
   session_id: string;
   pid: number;
+  /** True only when the identity matched and the signal was accepted. */
   signalled: boolean;
+  outcome: TerminationOutcome;
+  outcome_text: string;
 }
 
 /**
@@ -673,6 +712,17 @@ export interface Attachment {
   last_synced_at: string | null;
   last_verified_at: string | null;
   drift: string;
+}
+
+/**
+ * An attachment plus whether THIS drift check actually reached it. When
+ * `checked` is false the drift/verified fields are prior state, not a fresh
+ * result — the UI must not present them as newly verified (DEST-03).
+ * Fields are flattened, so all Attachment fields are present here too.
+ */
+export interface DriftCheckOutcome extends Attachment {
+  checked: boolean;
+  check_error: string | null;
 }
 
 // --- Synchronization plans (masked versions only, never values) ---

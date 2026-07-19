@@ -101,8 +101,15 @@ pub struct Credential {
     pub updated_at: String,
     pub key_created_at: Option<String>,
     pub expires_at: Option<String>,
+    /// True when `expires_at` is present but not a parseable timestamp: the
+    /// raw string is preserved above for diagnostics, but no expiration date
+    /// is fabricated and expiry status is not computed from it (OBS-004).
+    pub expires_at_invalid: bool,
     /// Expiration reported by the provider (recorded during validation).
     pub provider_expires_at: Option<String>,
+    /// True when `provider_expires_at` (stored verbatim from the provider) is
+    /// present but unparseable — isolated to THIS credential (OBS-004).
+    pub provider_expires_at_invalid: bool,
     pub last_validated_at: Option<String>,
     pub last_used_at: Option<String>,
     pub docs_url: String,

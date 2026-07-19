@@ -1445,12 +1445,27 @@ impl UnlockedVault {
             }
             None => None,
         };
+        // Timestamps stored verbatim from providers (chiefly
+        // `provider_expires_at`, written unparsed from provider sync) must
+        // never fail the whole credential model — one malformed value would
+        // otherwise break every listing, alert pass, and detail view
+        // vault-wide (OBS-004). Parse leniently: a bad value contributes no
+        // date (no fabrication) and is flagged so the UI can show "invalid".
+        // `created_at` stays strict: it is always API-Tracker-generated, so a
+        // bad value is genuine vault corruption, not untrusted provider input.
+        let (expires_at_ts, expires_at_invalid) =
+            parse_optional_ts_lenient(row.expires_at.as_deref());
+        let (provider_expires_at_ts, provider_expires_at_invalid) =
+            parse_optional_ts_lenient(row.provider_expires_at.as_deref());
+        let (last_validated_ts, _) = parse_optional_ts_lenient(row.last_validated_at.as_deref());
+        let (last_used_ts, _) = parse_optional_ts_lenient(row.last_used_at.as_deref());
         let inputs = StatusInputs {
             created_at: clock::parse_rfc3339(&row.created_at)?,
-            expires_at: parse_optional_ts(row.expires_at.as_deref())?,
-            provider_expires_at: parse_optional_ts(row.provider_expires_at.as_deref())?,
-            last_validated_at: parse_optional_ts(row.last_validated_at.as_deref())?,
-            last_used_at: parse_optional_ts(row.last_used_at.as_deref())?,
+            expires_at: expires_at_ts,
+            provider_expires_at: provider_expires_at_ts,
+            last_validated_at: last_validated_ts,
+            last_used_at: last_used_ts,
+            expiration_unparseable: expires_at_invalid || provider_expires_at_invalid,
             manually_disabled: row.manually_disabled,
             revoked: row.revoked,
             marked_invalid: row.marked_invalid,
@@ -1477,7 +1492,9 @@ impl UnlockedVault {
             updated_at: row.updated_at.clone(),
             key_created_at: row.key_created_at.clone(),
             expires_at: row.expires_at.clone(),
+            expires_at_invalid,
             provider_expires_at: row.provider_expires_at.clone(),
+            provider_expires_at_invalid,
             last_validated_at: row.last_validated_at.clone(),
             last_used_at: row.last_used_at.clone(),
             docs_url: row.docs_url.clone(),
@@ -1827,7 +1844,14 @@ impl UnlockedVault {
 
     /// Run the detection engine over scan units, match each finding against
     /// the vault (by keyed fingerprint), and drop suppressed findings.
-    fn scan_units(&self, units: Vec<crate::gitrepo::ScanUnit>) -> Result<Vec<scanner::Finding>> {
+    /// Public so callers (e.g. the desktop app) can collect units WITHOUT
+    /// holding the vault lock — git subprocess time must not stall every
+    /// other vault command — and then run only this fast, DB-bound step
+    /// under the lock.
+    pub fn scan_units(
+        &self,
+        units: Vec<crate::gitrepo::ScanUnit>,
+    ) -> Result<Vec<scanner::Finding>> {
         let suppressed = self.suppression_keys()?;
         let mut out = Vec::new();
         for unit in units {
@@ -1882,15 +1906,20 @@ impl UnlockedVault {
         self.scan_units(units)
     }
 
-    /// Scan Git history (last `n` commits, or all when `None`).
-    pub fn scan_history(
-        &self,
-        repo: &std::path::Path,
-        n: Option<usize>,
-    ) -> Result<Vec<scanner::Finding>> {
+    /// Scan Git history (last `n` commits, or all when `None`). The
+    /// returned outcome states honestly whether the WHOLE requested history
+    /// was examined: a scan cut short by a time/size limit reports
+    /// `complete == false` with warnings and must never be presented as a
+    /// verified-clean full scan.
+    pub fn scan_history(&self, repo: &std::path::Path, n: Option<usize>) -> Result<ScanOutcome> {
         let root = crate::gitrepo::repo_root(repo)?;
-        let units = crate::gitrepo::history_added_units(&root, n)?;
-        self.scan_units(units)
+        let history = crate::gitrepo::history_added_units(&root, n)?;
+        let findings = self.scan_units(history.units)?;
+        Ok(ScanOutcome {
+            findings,
+            complete: history.complete,
+            warnings: history.warnings,
+        })
     }
 
     /// Mark every credential matched by a scan finding as possibly exposed,
@@ -2674,7 +2703,17 @@ impl UnlockedVault {
     /// legacy credential reference) and the connection state are deleted.
     /// Previously synchronized usage snapshots are kept for offline viewing.
     /// Callers must confirm and reauthenticate first.
-    pub fn provider_admin_disconnect(&self, provider: &str) -> Result<bool> {
+    /// Remove a provider's administrative connection (destructive: deletes
+    /// the stored admin credential). Reauthentication is enforced HERE in
+    /// core — matching credential deletion (IPC-02) — so no caller (desktop
+    /// IPC, CLI, or a future one) can perform it without the master password,
+    /// and no UI sequencing is load-bearing for the authorization.
+    pub fn provider_admin_disconnect(
+        &self,
+        provider: &str,
+        master_password: &SecretString,
+    ) -> Result<bool> {
+        self.verify_master_password(master_password)?;
         let provider = crate::providers::normalize(provider);
         let n = self.conn.execute(
             "DELETE FROM provider_connections WHERE provider = ?1",
@@ -4386,35 +4425,81 @@ impl UnlockedVault {
         crate::inject::list_sessions(&self.conn, limit, active_only)
     }
 
-    /// Terminate a recorded injection session's process (best-effort local
-    /// SIGTERM to the PID recorded at spawn). This is a LOCAL control: it
-    /// cannot claw back values the process already received and never
-    /// touches the provider credential. Refuses sessions that already ended
-    /// or that recorded no PID. The session row itself is closed by the
-    /// launching `run` process when the child exits.
-    pub fn terminate_process_session(&self, ident: &str) -> Result<(String, i64, bool)> {
+    /// Terminate a recorded injection session's process. This is the ONLY
+    /// path by which a recorded PID may be signalled — CLI `access kill`,
+    /// CLI `access end --kill`, and the desktop terminate command all route
+    /// here — and it verifies the identity recorded at launch immediately
+    /// before signalling (see [`crate::inject::terminate_verified`]): a PID
+    /// recycled to an unrelated process, a tampered record, or a session
+    /// with no recorded identity is refused, never signalled. Only the
+    /// recorded process itself is signalled — descendants it spawned are
+    /// not (documented limitation). This is a LOCAL control: it cannot claw
+    /// back values the process already received and never touches the
+    /// provider credential. Refuses sessions that already ended or that
+    /// recorded no PID; a session whose process provably exited is closed
+    /// truthfully. Every request is audited with its outcome.
+    pub fn terminate_process_session(
+        &self,
+        ident: &str,
+    ) -> Result<(String, i64, crate::inject::TerminationOutcome)> {
+        use crate::inject::TerminationOutcome;
         let session = crate::inject::get_session(&self.conn, ident)?;
         if session.ended_at.is_some() {
+            audit::record(
+                &self.conn,
+                "process_session_termination_refused",
+                None,
+                None,
+                &format!("session={} reason=already-ended", session.id),
+            )?;
             return Err(CoreError::InvalidInput(format!(
                 "session {} already ended",
                 session.id
             )));
         }
         let Some(pid) = session.pid else {
+            audit::record(
+                &self.conn,
+                "process_session_termination_refused",
+                None,
+                None,
+                &format!("session={} reason=no-recorded-pid", session.id),
+            )?;
             return Err(CoreError::InvalidInput(format!(
                 "session {} recorded no PID (started by an older build?)",
                 session.id
             )));
         };
-        let signalled = crate::inject::terminate_pid(pid);
-        audit::record(
-            &self.conn,
-            "process_session_terminated",
-            None,
-            None,
-            &format!("session={} pid={pid} signalled={signalled}", session.id),
-        )?;
-        Ok((session.id, pid, signalled))
+        let outcome = crate::inject::terminate_verified(pid, session.proc_identity.as_deref());
+        let (kind, detail) = match &outcome {
+            TerminationOutcome::Signalled => (
+                "process_session_terminated",
+                format!("session={} pid={pid} outcome=signalled", session.id),
+            ),
+            TerminationOutcome::Refused { reason } => (
+                "process_session_termination_refused",
+                format!("session={} pid={pid} reason={reason}", session.id),
+            ),
+            TerminationOutcome::AlreadyExited => (
+                "process_session_termination_noop",
+                format!("session={} pid={pid} outcome=already-exited", session.id),
+            ),
+            TerminationOutcome::SignalFailed => (
+                "process_session_termination_failed",
+                format!("session={} pid={pid} outcome=signal-failed", session.id),
+            ),
+        };
+        audit::record(&self.conn, kind, None, None, &detail)?;
+        if outcome == TerminationOutcome::AlreadyExited {
+            // The platform definitively reported the process gone; close the
+            // row the same way sweep_dead_sessions would so the listing
+            // stops claiming it is running.
+            self.conn.execute(
+                "UPDATE process_sessions SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",
+                rusqlite::params![crate::clock::now_rfc3339(), session.id],
+            )?;
+        }
+        Ok((session.id, pid, outcome))
     }
 
     // ------------------------------------------------------------------
@@ -5325,31 +5410,52 @@ impl UnlockedVault {
                 None => 0, // baseline only
                 Some(last) if last == &head => continue,
                 Some(last) => {
-                    // History rewritten or range unreadable: re-baseline
-                    // rather than failing the whole monitor run — but say
-                    // so, because commits in the unread range were NOT
-                    // scanned.
-                    let (units, range_ok) =
+                    // History rewritten, range unreadable, or the bounded
+                    // range scan hit a time/size limit: re-baseline rather
+                    // than failing (or stalling) the whole monitor run — but
+                    // say so persistently, because commits in the unread
+                    // range were NOT (fully) scanned.
+                    let (units, gap_detail) =
                         match crate::gitrepo::range_added_units(repo, last, &head) {
-                            Ok(units) => (units, true),
-                            Err(_) => (Vec::new(), false),
+                            Ok(scan) if scan.complete => (scan.units, None),
+                            Ok(scan) => {
+                                let why = scan.warnings.join("; ");
+                                (
+                                    scan.units,
+                                    Some(format!(
+                                        "the commit range {last}..{head} was only PARTIALLY \
+                                         scanned ({why}). Commits in that range may contain \
+                                         unexamined secrets."
+                                    )),
+                                )
+                            }
+                            Err(_) => (
+                                Vec::new(),
+                                Some(format!(
+                                    "the commit range {last}..{head} could not be read \
+                                     (history rewritten, or git failed). Commits in that \
+                                     range were NOT scanned."
+                                )),
+                            ),
                         };
-                    if !range_ok {
+                    if let Some(detail) = gap_detail {
                         // Repo-scoped, dedicated coverage-gap kind: this is a
                         // "coverage unavailable" signal, not a clean result.
                         // It is excluded from auto-resolve so it persists (the
                         // old head-keyed PossibleExposure key was never added
                         // to active_keys and so auto-resolved in the SAME run
-                        // — OBS-001).
+                        // — OBS-001) and clears only on a verified-complete
+                        // clean full re-scan (`scan --reverify`).
                         let _ = alerts::upsert(
                             &self.conn,
                             &alerts::NewAlert {
                                 kind: alerts::AlertKind::RepoScanCoverageGap,
                                 severity: alerts::Severity::Medium,
                                 dedup_key: format!("repo_scan_coverage_gap:{path}"),
-                                title: format!("repository re-baselined: {path}"),
+                                title: format!("repository scan coverage gap: {path}"),
                                 detail: format!(
-                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --all-history` if secrets may have landed there."
+                                    "{detail} Run `api-tracker scan --reverify` for a full \
+                                     history re-scan."
                                 ),
                                 evidence: format!("last={last} head={head}"),
                                 confidence: crate::providers::Confidence::Medium,
@@ -5431,6 +5537,18 @@ impl UnlockedVault {
     /// project; `repo` is matched to that registered string by canonical
     /// path so a differently-spelled argument still resolves the right alerts.
     pub fn reverify_repo_exposure(&self, repo: &std::path::Path) -> Result<RepoReverifyReport> {
+        let collected = crate::gitrepo::collect_full_repo_scan(repo)?;
+        self.reverify_repo_exposure_collected(repo, collected)
+    }
+
+    /// Variant taking pre-collected scan content, so the (slow, git-bound)
+    /// collection can happen without holding the desktop vault lock. The
+    /// resolution rules are identical to [`Self::reverify_repo_exposure`].
+    pub fn reverify_repo_exposure_collected(
+        &self,
+        repo: &std::path::Path,
+        collected: crate::gitrepo::FullRepoScan,
+    ) -> Result<RepoReverifyReport> {
         let canon = repo.canonicalize().map_err(|e| {
             CoreError::InvalidInput(format!("cannot access {}: {e}", repo.display()))
         })?;
@@ -5455,13 +5573,18 @@ impl UnlockedVault {
             .unwrap_or_else(|| repo.to_string_lossy().into_owned());
 
         // A FULL re-scan: entire history plus the working tree. A secret that
-        // remains anywhere in history keeps the exposure alert open.
-        let mut findings = self.scan_history(repo, None)?;
-        findings.extend(self.scan_working_tree(repo)?);
+        // remains anywhere in history keeps the exposure alert open — and so
+        // does INCOMPLETE COVERAGE: a history scan cut short by a time or
+        // size limit found nothing only in what it examined, which is not
+        // proof of remediation. Alerts resolve only on a complete, clean scan.
+        let coverage_complete = collected.history.complete;
+        let coverage_warnings = collected.history.warnings;
+        let mut findings = self.scan_units(collected.history.units)?;
+        findings.extend(self.scan_units(collected.working_tree)?);
         let count = findings.len();
 
         let mut resolved = 0;
-        if count == 0 {
+        if count == 0 && coverage_complete {
             for key in [
                 format!("repo_scan_exposure:{repo_path}"),
                 format!("repo_scan_coverage_gap:{repo_path}"),
@@ -5481,8 +5604,10 @@ impl UnlockedVault {
         Ok(RepoReverifyReport {
             repo_path,
             findings: count,
-            clean: count == 0,
+            clean: count == 0 && coverage_complete,
             resolved_alerts: resolved,
+            coverage_complete,
+            coverage_warnings,
         })
     }
 
@@ -6547,9 +6672,12 @@ impl UnlockedVault {
                 let dest = crate::destinations::get(&self.conn, &step.destination_id)?;
                 let adapter = self.destination_adapter(&dest, http, runner)?;
                 let receipt = adapter.write(&step.secret_name, value)?;
-                // Verify: read-back where supported, else existence.
-                let drift = match adapter.read(&step.secret_name)? {
-                    Some(stored_value) if !stored_value.expose().is_empty() => {
+                // Verify: read-back where supported, else existence. A
+                // verification error after a successful write is recorded as
+                // `unknown` (the write happened; its state is undetermined),
+                // never as `missing` (DEST-01/DEST-04).
+                let drift = match adapter.read(&step.secret_name) {
+                    Ok(Some(stored_value)) if !stored_value.expose().is_empty() => {
                         let stored_fp = reuse::fingerprint(&self.fingerprint_key, &stored_value)?;
                         if stored_fp == cred.fingerprint {
                             "in_sync"
@@ -6557,11 +6685,12 @@ impl UnlockedVault {
                             "drifted"
                         }
                     }
-                    _ => match adapter.exists(&step.secret_name)? {
-                        Some(true) => "present_unverifiable",
-                        Some(false) => "missing",
-                        None => "unknown",
+                    Ok(_) => match adapter.exists(&step.secret_name) {
+                        Ok(Some(true)) => "present_unverifiable",
+                        Ok(Some(false)) => "missing",
+                        Ok(None) | Err(_) => "unknown",
                     },
+                    Err(_) => "unknown",
                 };
                 crate::destinations::record_sync(
                     &self.conn,
@@ -6571,19 +6700,37 @@ impl UnlockedVault {
                     plan.to_version,
                     drift,
                 )?;
-                crate::syncplan::mark_step_verified(
-                    &self.conn,
-                    &plan.id,
-                    &step.destination_id,
-                    &step.secret_name,
-                )?;
-                if drift == "drifted" {
-                    return Err(CoreError::Provider(format!(
+                // A step is VERIFIED only when verification actually
+                // succeeded: value match (`in_sync`) or confirmed existence
+                // for write-only destinations (`present_unverifiable`).
+                // `missing`/`unknown`/`drifted` must never be stamped
+                // verified (DEST-04): the write claims success, but the
+                // destination's state was not confirmed.
+                match drift {
+                    "in_sync" | "present_unverifiable" => {
+                        crate::syncplan::mark_step_verified(
+                            &self.conn,
+                            &plan.id,
+                            &step.destination_id,
+                            &step.secret_name,
+                        )?;
+                        Ok(format!("{receipt}; verification: {drift}"))
+                    }
+                    "drifted" => Err(CoreError::Provider(format!(
                         "wrote '{}' but the read-back value does not match",
                         step.secret_name
-                    )));
+                    ))),
+                    "missing" => Err(CoreError::Provider(format!(
+                        "wrote '{}' but the destination now reports it absent; \
+                         the write did not verify",
+                        step.secret_name
+                    ))),
+                    _ => Err(CoreError::Provider(format!(
+                        "wrote '{}' but verification could not be completed; \
+                         the destination's state is UNKNOWN, not verified",
+                        step.secret_name
+                    ))),
                 }
-                Ok(format!("{receipt}; verification: {drift}"))
             }
             other => Err(CoreError::InvalidInput(format!(
                 "unknown step action '{other}'"
@@ -6763,19 +6910,44 @@ impl UnlockedVault {
     }
 
     /// Check every attachment (optionally one credential's) for drift.
+    ///
+    /// Truthfulness rules (DEST-01/02/03):
+    /// - a provider/transport/auth failure yields `unknown`, never `missing`;
+    /// - an attachment whose destination cannot be loaded or whose adapter
+    ///   cannot be constructed is returned with `checked == false` and an
+    ///   explicit error — its STORED drift/verified timestamps are left
+    ///   untouched rather than re-presented as freshly verified;
+    /// - `last_verified_at` advances only when the check reached a definitive
+    ///   verdict (`in_sync`/`drifted`/`present_unverifiable`/`missing`);
+    ///   an `unknown` result never advances it.
     pub fn destination_drift_check(
         &self,
         credential: Option<&str>,
         http: &dyn crate::http::HttpClient,
         runner: &dyn crate::destinations::CommandRunner,
-    ) -> Result<Vec<crate::destinations::Attachment>> {
+    ) -> Result<Vec<crate::destinations::DriftCheckOutcome>> {
         let attachments = self.destination_attachments(credential)?;
+        let mut skipped: std::collections::HashMap<(String, String, String), String> =
+            std::collections::HashMap::new();
         for attachment in &attachments {
-            let Ok(dest) = crate::destinations::get(&self.conn, &attachment.destination_id) else {
-                continue;
+            let key = (
+                attachment.credential_id.clone(),
+                attachment.destination_id.clone(),
+                attachment.secret_name.clone(),
+            );
+            let dest = match crate::destinations::get(&self.conn, &attachment.destination_id) {
+                Ok(dest) => dest,
+                Err(e) => {
+                    skipped.insert(key, format!("destination unavailable: {e}"));
+                    continue;
+                }
             };
-            let Ok(adapter) = self.destination_adapter(&dest, http, runner) else {
-                continue;
+            let adapter = match self.destination_adapter(&dest, http, runner) {
+                Ok(adapter) => adapter,
+                Err(e) => {
+                    skipped.insert(key, format!("cannot construct adapter: {e}"));
+                    continue;
+                }
             };
             let cred_fp: Vec<u8> = self.conn.query_row(
                 "SELECT fingerprint FROM credentials WHERE id = ?1",
@@ -6806,7 +6978,23 @@ impl UnlockedVault {
                 drift,
             )?;
         }
-        self.destination_attachments(credential)
+        let refreshed = self.destination_attachments(credential)?;
+        Ok(refreshed
+            .into_iter()
+            .map(|attachment| {
+                let key = (
+                    attachment.credential_id.clone(),
+                    attachment.destination_id.clone(),
+                    attachment.secret_name.clone(),
+                );
+                let check_error = skipped.get(&key).cloned();
+                crate::destinations::DriftCheckOutcome {
+                    checked: check_error.is_none(),
+                    check_error,
+                    attachment,
+                }
+            })
+            .collect())
     }
 
     // ------------------------------------------------------------------
@@ -8641,9 +8829,25 @@ pub struct RepoReverifyReport {
     pub repo_path: String,
     /// Unsuppressed likely-secret findings across full history + working tree.
     pub findings: usize,
-    /// Whether the scan was clean and therefore resolved the exposure alerts.
+    /// Whether the scan found nothing AND covered the whole history —
+    /// incomplete coverage is never presented as clean.
     pub clean: bool,
     pub resolved_alerts: usize,
+    /// False when the history scan hit a time/size limit; alerts are then
+    /// NOT resolved and the warnings say what was skipped.
+    pub coverage_complete: bool,
+    pub coverage_warnings: Vec<String>,
+}
+
+/// Findings from a scan plus an honest statement of coverage. `complete ==
+/// false` means part of the requested content was NOT examined (time or
+/// size limit); such a result must never be presented as a verified-clean
+/// scan.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ScanOutcome {
+    pub findings: Vec<scanner::Finding>,
+    pub complete: bool,
+    pub warnings: Vec<String>,
 }
 
 /// One event in a credential's merged lifecycle timeline (metadata only).
@@ -8900,9 +9104,18 @@ fn parse_optional_date(value: Option<&str>) -> Result<Option<String>> {
     }
 }
 
-fn parse_optional_ts(value: Option<&str>) -> Result<Option<time::OffsetDateTime>> {
+/// Parse a stored optional timestamp WITHOUT failing on a malformed value.
+/// A value that does not parse yields `(None, true)`: no date is fabricated,
+/// the field simply has no usable timestamp and is flagged invalid. This is
+/// how one credential's malformed provider `expires_at` is isolated so it
+/// cannot fail an entire listing (OBS-004). `None`/empty → `(None, false)`.
+fn parse_optional_ts_lenient(value: Option<&str>) -> (Option<time::OffsetDateTime>, bool) {
     match value {
-        None => Ok(None),
-        Some(s) => Ok(Some(clock::parse_rfc3339(s)?)),
+        None => (None, false),
+        Some(s) if s.trim().is_empty() => (None, false),
+        Some(s) => match clock::parse_rfc3339(s) {
+            Ok(ts) => (Some(ts), false),
+            Err(_) => (None, true),
+        },
     }
 }

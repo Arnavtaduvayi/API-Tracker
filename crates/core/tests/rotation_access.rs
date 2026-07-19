@@ -639,7 +639,7 @@ fn scheduling_requires_a_completed_rotation_and_monitor_raises_due_alerts() {
     );
 
     // Preflight failure (admin connection removed) pauses the schedule.
-    v.provider_admin_disconnect("openai").unwrap();
+    v.provider_admin_disconnect("openai", &master_pw()).unwrap();
     v.run_monitor().unwrap();
     let schedules = v.rotation_schedules().unwrap();
     assert!(

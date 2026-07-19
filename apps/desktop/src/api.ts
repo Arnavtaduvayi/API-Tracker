@@ -10,6 +10,7 @@ import type {
   Alert,
   ApiError,
   Attachment,
+  DriftCheckOutcome,
   BackupInfo,
   BudgetReport,
   CleanupResult,
@@ -27,7 +28,6 @@ import type {
   Environment,
   DriftFinding,
   FetchedMetadata,
-  Finding,
   GrantEndResult,
   HookStatus,
   MonitorFullReport,
@@ -50,6 +50,7 @@ import type {
   ProviderManifest,
   ProviderProjectOverview,
   RepoReverifyReport,
+  ScanPathReport,
   ReuseWarning,
   RotationEvent,
   RotationSchedule,
@@ -108,7 +109,7 @@ export const api = {
     mode: "working" | "staged" | "history",
     markExposed: boolean,
     historyDepth: number | null,
-  ) => call<Finding[]>("scan_path", { path, mode, markExposed, historyDepth }),
+  ) => call<ScanPathReport>("scan_path", { path, mode, markExposed, historyDepth }),
   scanReverify: (path: string) => call<RepoReverifyReport>("scan_reverify", { path }),
   suppressionAdd: (suppressionKey: string, path: string, reason: string) =>
     call<void>("suppression_add", { suppressionKey, path, reason }),
@@ -399,7 +400,7 @@ export const api = {
   destinationAttachments: (credential: string | null) =>
     call<Attachment[]>("destination_attachments", { credential }),
   destinationDriftCheck: (credential: string | null) =>
-    call<Attachment[]>("destination_drift_check", { credential }),
+    call<DriftCheckOutcome[]>("destination_drift_check", { credential }),
 
   syncPlanCreate: (credential: string, note: string) =>
     call<SyncPlan>("sync_plan_create", { credential, note }),

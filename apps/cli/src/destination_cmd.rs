@@ -408,13 +408,59 @@ fn detach(ctx: &Ctx, args: DetachArgs) -> Result<()> {
 
 fn attachments(ctx: &Ctx, args: AttachmentsArgs, check_drift: bool) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
-    let attachments = if check_drift {
+    if check_drift {
         let http = api_tracker_core::http::UreqClient::new();
         let runner = destinations::SystemRunner;
-        vault.destination_drift_check(args.credential.as_deref(), &http, &runner)?
-    } else {
-        vault.destination_attachments(args.credential.as_deref())?
-    };
+        let outcomes = vault.destination_drift_check(args.credential.as_deref(), &http, &runner)?;
+        render::emit(ctx.json, &outcomes, || {
+            if outcomes.is_empty() {
+                println!("No attachments. Create one with `destination attach`.");
+                return;
+            }
+            let rows: Vec<Vec<String>> = outcomes
+                .iter()
+                .map(|o| {
+                    let a = &o.attachment;
+                    vec![
+                        format!("{}/{}", a.project_name, a.credential_name),
+                        a.destination_name.clone(),
+                        a.secret_name.clone(),
+                        if a.environment.is_empty() {
+                            "-".into()
+                        } else {
+                            a.environment.clone()
+                        },
+                        a.last_synced_version
+                            .map(|v| format!("v{v}"))
+                            .unwrap_or_else(|| "never".into()),
+                        // Never present a skipped attachment's stored drift as
+                        // a fresh result (DEST-03).
+                        if o.checked {
+                            a.drift.clone()
+                        } else {
+                            format!(
+                                "not checked ({})",
+                                o.check_error.as_deref().unwrap_or("skipped")
+                            )
+                        },
+                    ]
+                })
+                .collect();
+            render::table(
+                &[
+                    "CREDENTIAL",
+                    "DESTINATION",
+                    "SECRET",
+                    "ENV",
+                    "SYNCED",
+                    "DRIFT",
+                ],
+                &rows,
+            );
+        });
+        return Ok(());
+    }
+    let attachments = vault.destination_attachments(args.credential.as_deref())?;
     render::emit(ctx.json, &attachments, || {
         if attachments.is_empty() {
             println!("No attachments. Create one with `destination attach`.");

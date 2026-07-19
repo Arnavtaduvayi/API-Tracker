@@ -1,0 +1,1249 @@
+{
+  "generated_for": "API Tracker Security Remediation Phase 2 (Phase 7)",
+  "source": "apps/desktop/src-tauri/src/main.rs invoke_handler registration",
+  "total_commands": 137,
+  "legend": {
+    "security_relevance": "high | medium | low",
+    "destructive": "performs a destructive or irreversible action (delete, remote push/delete, vault replace, provider mutation)",
+    "secret_bearing": "a plaintext secret crosses the IPC boundary inbound or outbound, or is written to disk/clipboard",
+    "reauth_required": "yes | no | conditional | is_auth | creates_auth | backup_password",
+    "backend_enforcement": "core = master-password reauth verified inside the core fn (a direct invoke cannot bypass it); wrapper = reauth verified only in the Tauri command in main.rs (see NEW_FINDINGS RA-P2-1); backup_password = the backup password is the authorization; structural = protected by requiring an UnlockedVault (with_vault) but no per-call reauth; structural_unlock_gate = read/metadata command gated only by the unlocked vault",
+    "test_status": "covered:<suite> = a Rust test exercises the backend path; not_covered = no direct Rust coverage yet; not_covered_wrapper_reauth = reauth lives in the Tauri wrapper and is not reachable from a core-level test (follow-up)"
+  },
+  "caveat": "A harness exists and covers the security-sensitive/destructive command set enumerated in the Phase 2 brief. This inventory does NOT claim all 137 commands are fully secured or fully tested: low-relevance read/metadata commands are gated only by the unlocked vault and are marked not_covered; three commands (backup_create, provider_admin_connect, provider_admin_test) enforce reauth in the Tauri wrapper rather than core and are recorded as follow-ups.",
+  "commands": [
+    {
+      "command": "vault_status",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "vault_create",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "creates_auth",
+      "backend_enforcement": "structural",
+      "test_status": "covered:vault_lifecycle"
+    },
+    {
+      "command": "vault_unlock",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "is_auth",
+      "backend_enforcement": "structural",
+      "test_status": "covered:vault_lifecycle"
+    },
+    {
+      "command": "vault_lock",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "vault_change_password",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "reauth",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "settings_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "settings_set",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "providers_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "project_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "project_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "project_create",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "project_update",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "project_set_archived",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "project_set_password",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "project_remove_password",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "project_unlock",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "is_auth",
+      "backend_enforcement": "core",
+      "test_status": "covered:credentials"
+    },
+    {
+      "command": "project_lock",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_check_reuse",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:credentials"
+    },
+    {
+      "command": "credential_add",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:credentials"
+    },
+    {
+      "command": "credential_add_reference",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_update",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_mark",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_replace_value",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "credential_delete",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "credential_reveal",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "credential_copy",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "scan_path",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "scan_reverify",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "suppression_add",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "suppression_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "suppression_remove",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "hook_status",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "hook_install",
+      "security_relevance": "medium",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:gscan_hooks"
+    },
+    {
+      "command": "hook_remove",
+      "security_relevance": "medium",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:gscan_hooks"
+    },
+    {
+      "command": "monitor_status",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "monitor_run_full",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "alerts_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "alert_acknowledge",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "alert_resolve",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "doc_watch_add",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "doc_watch_remove",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "doc_watch_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "doc_watch_check",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "doc_watch_history",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "notification_channel_add",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:integrations"
+    },
+    {
+      "command": "notification_channels",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "notification_channel_remove",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "notification_channel_enable",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "notification_channel_test",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "notification_history",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_validate",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_metadata",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_permissions",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_connect",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_admin_connect",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "conditional",
+      "backend_enforcement": "wrapper",
+      "test_status": "not_covered_wrapper_reauth"
+    },
+    {
+      "command": "provider_admin_disconnect",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "provider_admin_test",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "wrapper",
+      "test_status": "not_covered_wrapper_reauth"
+    },
+    {
+      "command": "provider_sync",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_connection_status",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_keys",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_projects",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_link_key",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_unlink_key",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "usage_records",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "budget_cost_source_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "budget_cost_source_set",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "pricing_records",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "pricing_set_override",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "pricing_remove_override",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "pricing_import",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "pricing_export",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_account_sync",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "template_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "template_apply",
+      "security_relevance": "low",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "stack_detect",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "stack_decide",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "stack_prefs",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "stack_prefs_reset",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "usage_report",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "usage_record_manual",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "budget_set",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "budget_report",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "activity_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "backup_create",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "wrapper",
+      "test_status": "not_covered_wrapper_reauth"
+    },
+    {
+      "command": "backup_verify",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "backup_password",
+      "backend_enforcement": "backup_password",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "backup_restore",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "backup_password",
+      "backend_enforcement": "backup_password",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "env_discover",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "env_preview",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "env_import",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "env_drift",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "env_example_preview",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "env_example_write",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "env_export",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "env_cleanup",
+      "security_relevance": "medium",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "env_exports_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_versions",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "destination_catalog",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "destination_add",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:env_destinations"
+    },
+    {
+      "command": "destination_remove",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "destination_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "destination_test",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "destination_delete_secret",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "destination_attach",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "destination_detach",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "destination_attachments",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "destination_drift_check",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "sync_plan_create",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "sync_plan_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "sync_plans_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "sync_plan_execute",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "sync_plan_rollback",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:env_destinations"
+    },
+    {
+      "command": "rotation_plan",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "rotation_approve",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "rotation_advance",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "rotation_rollback",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "rotation_complete_manual",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "rotation_cancel",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": true,
+      "reauth_required": "yes",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "rotation_get",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "rotations_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "rotation_events",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "rotation_schedule_set",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "rotation_schedule_remove",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "rotation_schedules",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "access_grant_create",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "access_grants",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "access_grant_end",
+      "security_relevance": "medium",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:rotation_access"
+    },
+    {
+      "command": "access_sessions",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "access_session_kill",
+      "security_relevance": "high",
+      "destructive": true,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "core",
+      "test_status": "covered:pi02_process_identity+tauri_command_authz"
+    },
+    {
+      "command": "credential_timeline",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "permissions_preview",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "provider_list_keys",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "test_key_create",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    },
+    {
+      "command": "credential_provider_revoke",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "not_covered"
+    }
+  ]
+}

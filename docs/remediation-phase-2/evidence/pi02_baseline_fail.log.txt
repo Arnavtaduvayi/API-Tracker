@@ -1,0 +1,25 @@
+   Compiling argon2 v0.5.3
+   Compiling crypto_box v0.9.1
+   Compiling ureq v3.3.0
+   Compiling api-tracker-core v0.1.0 (<worktree>/crates/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.05s
+     Running tests/pi02_process_identity.rs (target/debug/deps/pi02_process_identity-6c09c7d538772f34)
+
+running 1 test
+test stale_pid_record_must_not_signal_an_unrelated_process ... FAILED
+
+failures:
+
+---- stale_pid_record_must_not_signal_an_unrelated_process stdout ----
+
+thread 'stale_pid_record_must_not_signal_an_unrelated_process' (20601935) panicked at crates/core/tests/pi02_process_identity.rs:67:13:
+PI-02 baseline: an unverified stale PID record was signalled (pid 17921)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    stale_pid_record_must_not_signal_an_unrelated_process
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `-p api-tracker-core --test pi02_process_identity`

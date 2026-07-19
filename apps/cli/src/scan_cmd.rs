@@ -80,18 +80,33 @@ pub enum SuppressCmd {
     Remove { suppression_key: String },
 }
 
-fn build_units(args: &ScanArgs) -> Result<Vec<gitrepo::ScanUnit>> {
+/// Collected units plus coverage honesty (complete? + warnings).
+fn build_units(args: &ScanArgs) -> Result<(Vec<gitrepo::ScanUnit>, bool, Vec<String>)> {
     if args.staged || args.hook {
         let root = gitrepo::repo_root(&args.path)?;
-        Ok(gitrepo::staged_units(&root)?)
+        Ok((gitrepo::staged_units(&root)?, true, Vec::new()))
     } else if args.all_history {
         let root = gitrepo::repo_root(&args.path)?;
-        Ok(gitrepo::history_added_units(&root, None)?)
+        let scan = gitrepo::history_added_units(&root, None)?;
+        Ok((scan.units, scan.complete, scan.warnings))
     } else if let Some(n) = args.history {
         let root = gitrepo::repo_root(&args.path)?;
-        Ok(gitrepo::history_added_units(&root, Some(n))?)
+        let scan = gitrepo::history_added_units(&root, Some(n))?;
+        Ok((scan.units, scan.complete, scan.warnings))
     } else {
-        Ok(gitrepo::working_tree_units(&args.path)?)
+        Ok((gitrepo::working_tree_units(&args.path)?, true, Vec::new()))
+    }
+}
+
+/// Print coverage warnings so an incomplete scan is never mistaken for a
+/// clean full scan.
+fn report_coverage(complete: bool, warnings: &[String]) {
+    if complete {
+        return;
+    }
+    eprintln!("WARNING: scan coverage is INCOMPLETE — this is not a clean full scan:");
+    for w in warnings {
+        eprintln!("  - {}", render::sanitize(w));
     }
 }
 
@@ -101,10 +116,18 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
     if args.reverify {
         let (vault, _token) = ctx.unlocked()?;
         let report = vault.reverify_repo_exposure(&args.path)?;
+        report_coverage(report.coverage_complete, &report.coverage_warnings);
         if report.clean {
             println!(
                 "Re-verification clean for {}: {} exposure alert(s) resolved.",
                 report.repo_path, report.resolved_alerts
+            );
+        } else if !report.coverage_complete {
+            println!(
+                "Re-verification of {} was INCOMPLETE ({} finding(s) in the portion \
+                 examined); exposure alert(s) kept open — incomplete coverage is not \
+                 proof of remediation.",
+                report.repo_path, report.findings
             );
         } else {
             println!(
@@ -118,7 +141,7 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
 
     // Hook mode: no unlock, detection + suppression only, block on high.
     if args.hook {
-        let units = build_units(&args)?;
+        let (units, _complete, _warnings) = build_units(&args)?;
         let suppressed = ctx.suppression_keys();
         let findings = detect(&units, &suppressed);
         let high: Vec<&Finding> = findings
@@ -156,14 +179,16 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
 
     // Rich path when unlocked: the vault scans, matches, and marks exposures.
     if let Some(vault) = ctx.try_unlocked() {
-        let mut findings = if args.staged {
-            vault.scan_staged(&args.path)?
+        let (mut findings, complete, warnings) = if args.staged {
+            (vault.scan_staged(&args.path)?, true, Vec::new())
         } else if args.all_history {
-            vault.scan_history(&args.path, None)?
+            let outcome = vault.scan_history(&args.path, None)?;
+            (outcome.findings, outcome.complete, outcome.warnings)
         } else if let Some(n) = args.history {
-            vault.scan_history(&args.path, Some(n))?
+            let outcome = vault.scan_history(&args.path, Some(n))?;
+            (outcome.findings, outcome.complete, outcome.warnings)
         } else {
-            vault.scan_working_tree(&args.path)?
+            (vault.scan_working_tree(&args.path)?, true, Vec::new())
         };
         let affected = if args.no_mark {
             Vec::new()
@@ -171,11 +196,13 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
             vault.mark_findings_exposed(&findings)?
         };
         findings.sort_by_key(|f| std::cmp::Reverse(f.confidence));
+        report_coverage(complete, &warnings);
         report(ctx, &findings, affected.len());
     } else {
-        let units = build_units(&args)?;
+        let (units, complete, warnings) = build_units(&args)?;
         let suppressed = ctx.suppression_keys();
         let findings = detect(&units, &suppressed);
+        report_coverage(complete, &warnings);
         report(ctx, &findings, 0);
         if ctx.paths.vault_exists() {
             eprintln!(
@@ -256,9 +283,15 @@ pub fn hooks(ctx: &Ctx, cmd: HooksCmd) -> Result<()> {
     match cmd {
         HooksCmd::Install { path, force } => {
             let state = hooks::install(&path, force)?;
-            render::emit(ctx.json, &hooks::status(&path)?, || {
+            let status = hooks::status(&path)?;
+            render::emit(ctx.json, &status, || {
                 println!("Pre-commit hook installed ({state:?}).");
                 println!("It runs `api-tracker scan --staged` and blocks high-confidence secrets.");
+                println!(
+                    "Active: {} — {}",
+                    if status.active { "yes" } else { "NO" },
+                    status.detail
+                );
             });
         }
         HooksCmd::Remove { path } => {
@@ -270,7 +303,12 @@ pub fn hooks(ctx: &Ctx, cmd: HooksCmd) -> Result<()> {
             render::emit(ctx.json, &status, || {
                 println!("Repository: {}", status.repo);
                 println!("Hook file:  {}", status.hook_path);
+                if let Some(over) = &status.hooks_path_override {
+                    println!("hooksPath:  {over} (git config core.hooksPath)");
+                }
                 println!("State:      {:?}", status.state);
+                println!("Active:     {}", if status.active { "yes" } else { "NO" });
+                println!("Detail:     {}", status.detail);
             });
         }
     }

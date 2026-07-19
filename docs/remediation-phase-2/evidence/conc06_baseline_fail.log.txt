@@ -1,0 +1,9 @@
+thread 'history_scan_returns_within_five_seconds_when_git_hangs' (20681735) panicked at crates/core/tests/conc06_baseline.rs:17:5:
+CONC-06 baseline: the history scan is still blocked on a hung git after 5s (no subprocess timeout exists)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    history_scan_returns_within_five_seconds_when_git_hangs
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s

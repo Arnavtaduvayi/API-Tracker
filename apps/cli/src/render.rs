@@ -176,7 +176,21 @@ pub fn print_credential(c: &Credential) {
         println!("Key created: {v}");
     }
     if let Some(v) = &c.expires_at {
-        println!("Expires:     {v}");
+        if c.expires_at_invalid {
+            println!("Expires:     {} (INVALID — not a valid date)", sanitize(v));
+        } else {
+            println!("Expires:     {v}");
+        }
+    }
+    if let Some(v) = &c.provider_expires_at {
+        if c.provider_expires_at_invalid {
+            println!(
+                "Provider expiry: {} (INVALID — malformed provider value, ignored)",
+                sanitize(v)
+            );
+        } else {
+            println!("Provider expiry: {v}");
+        }
     }
     if let Some(v) = &c.last_validated_at {
         println!("Validated:   {v}");

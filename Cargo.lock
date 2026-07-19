@@ -127,6 +127,7 @@ dependencies = [
  "clap",
  "predicates",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

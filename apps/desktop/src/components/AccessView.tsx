@@ -432,7 +432,7 @@ export function AccessView() {
               setNotice(
                 result.signalled
                   ? `SIGTERM sent to pid ${result.pid}. The provider credential stays valid.`
-                  : `kill failed for pid ${result.pid} (already gone?).`,
+                  : `pid ${result.pid}: ${result.outcome_text}`,
               );
               setSessions(await api.accessSessions(includeEndedSessions, 50));
             });

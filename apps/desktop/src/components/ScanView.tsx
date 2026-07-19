@@ -51,12 +51,21 @@ export function ScanView() {
         depth = n;
       }
       const result = await api.scanPath(path.trim(), mode, markExposed, depth);
-      setFindings(result);
-      const matched = result.filter((f) => f.vault_match).length;
+      setFindings(result.findings);
+      const notices: string[] = [];
+      if (!result.coverage_complete) {
+        notices.push(
+          `Scan coverage was INCOMPLETE — this is not a clean full scan: ${result.coverage_warnings.join("; ")}`,
+        );
+      }
+      const matched = result.findings.filter((f) => f.vault_match).length;
       if (matched > 0) {
-        setNotice(
+        notices.push(
           `${matched} finding(s) match a stored credential. Matched credentials were marked possibly exposed — removing a secret from a file does not remove it from Git history; rotate it.`,
         );
+      }
+      if (notices.length > 0) {
+        setNotice(notices.join(" "));
       }
     });
 
@@ -168,6 +177,9 @@ export function ScanView() {
           <h2>Pre-commit hook</h2>
           <p>
             State: <strong>{hook.state}</strong> ({hook.hook_path})
+          </p>
+          <p>
+            Protection: <strong>{hook.active ? "active" : "NOT active"}</strong> — {hook.detail}
           </p>
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <button

@@ -1,0 +1,15 @@
+test destinations::tests::github_exists_never_converts_errors_into_missing ... FAILED
+test destinations::tests::vercel_absent_delete_is_idempotent_and_stale_id_race_is_tolerated ... FAILED
+test destinations::tests::vercel_custom_environment_variables_are_a_different_identity ... FAILED
+test destinations::tests::vercel_delete_ambiguous_identity_fails_safe ... FAILED
+test destinations::tests::vercel_delete_refuses_other_targets_variable ... FAILED
+test destinations::tests::vercel_delete_targets_exactly_its_own_variable ... FAILED
+test destinations::tests::vercel_identity_is_key_plus_targets ... FAILED
+test destinations::tests::aws_exists_never_converts_errors_into_missing ... FAILED
+test result: FAILED. 20 passed; 8 failed; 0 ignored; 0 measured; 188 filtered out; finished in 0.02s
+test definitive_absence_is_missing_and_verified ... ok
+test auth_error_during_drift_is_unknown_never_missing_and_not_verified ... FAILED
+test transport_failure_during_drift_is_unknown_never_missing ... FAILED
+test failed_check_preserves_prior_drift_verdict_history ... FAILED
+test sync_step_is_never_verified_when_existence_check_fails ... FAILED
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s

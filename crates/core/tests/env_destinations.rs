@@ -568,10 +568,14 @@ fn sync_plan_writes_verifies_and_handles_partial_failure_with_retry() {
     // Failure details never contain the secret.
     assert!(!vercel_step.detail.contains(new_value));
 
-    // Retry just the failed destination — now it succeeds.
+    // Retry just the failed destination — now it succeeds. The verification
+    // list returns the variable with the destination's configured targets
+    // (Vercel always reports a target array; DEST-02 identity match).
     let http = MockHttpClient::new(vec![
         MockHttpClient::json_response(r#"{"created":{}}"#),
-        MockHttpClient::json_response(r#"{"envs":[{"id":"e1","key":"STRIPE_SECRET_KEY"}]}"#),
+        MockHttpClient::json_response(
+            r#"{"envs":[{"id":"e1","key":"STRIPE_SECRET_KEY","target":["production","preview","development"]}]}"#,
+        ),
     ]);
     let retried = vault
         .sync_plan_execute(&plan.id, Some("site"), &master_pw(), &http, &NullRunner)

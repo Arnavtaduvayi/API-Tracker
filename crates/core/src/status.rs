@@ -87,6 +87,10 @@ pub struct StatusInputs<'a> {
     pub provider_expires_at: Option<OffsetDateTime>,
     pub last_validated_at: Option<OffsetDateTime>,
     pub last_used_at: Option<OffsetDateTime>,
+    /// True when a stored expiration value (user or provider) was present but
+    /// could not be parsed. The classifier reports it as an explicit
+    /// unknown/invalid finding rather than fabricating an expiry (OBS-004).
+    pub expiration_unparseable: bool,
     pub manually_disabled: bool,
     pub revoked: bool,
     pub marked_invalid: bool,
@@ -186,6 +190,23 @@ pub fn evaluate(
                 });
             }
         }
+    }
+    if inputs.expiration_unparseable {
+        // A stored expiration was present but unparseable (e.g. a malformed
+        // provider value). Surface it honestly as unknown — never guess a
+        // date — so expiry cannot be silently ignored (OBS-004).
+        findings.push(Finding {
+            status: Status::Unknown,
+            reason: "a stored expiration value could not be parsed as a date; the \
+                     credential's expiry is unknown and was not used for status"
+                .into(),
+            source: "provider-reported expiration (recorded during validation)".into(),
+            observed_at: observed.clone(),
+            confidence: Confidence::Low,
+            recommended_action: "re-validate the credential to refresh its expiration, \
+                                 or set the expiration manually"
+                .into(),
+        });
     }
     if inputs.marked_invalid {
         findings.push(Finding {
@@ -342,6 +363,7 @@ mod tests {
             provider_expires_at: None,
             last_validated_at: None,
             last_used_at: None,
+            expiration_unparseable: false,
             manually_disabled: false,
             revoked: false,
             marked_invalid: false,
