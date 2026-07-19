@@ -1,0 +1,44 @@
+# Independent CRYPTO-01 reproduction against REAL baseline 7d81090
+# Re-auditor ran the checked-in crypto01_rotation_race.rs test (unmodified) against
+# baseline production code (only the rusqlite dev-dep added for the lock probe).
+# Command: cargo +1.97.0 test -p api-tracker-core --test crypto01_rotation_race
+# Baseline HEAD: 7d81090a1068476291546963e68ca8c7de1a7145
+# ---
+     Running tests/crypto01_rotation_race.rs (target/debug/deps/crypto01_rotation_race-4d8e3478134a8041)
+
+running 4 tests
+test crypto01_multiprocess_child_worker ... ok
+test concurrent_rotation_during_replace_never_orphans ... FAILED
+test concurrent_rotation_during_add_never_orphans_across_processes ... FAILED
+test concurrent_rotation_during_add_never_orphans ... FAILED
+
+failures:
+
+---- concurrent_rotation_during_replace_never_orphans stdout ----
+replace-race iter 0: armed=true outcome=committed
+
+thread 'concurrent_rotation_during_replace_never_orphans' (20549876) panicked at crates/core/tests/crypto01_rotation_race.rs:246:17:
+CRYPTO-01 regression: the raced replacement left c0 undecryptable under the persisted project key (orphaned): Crypto { context: "credential value" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- concurrent_rotation_during_add_never_orphans_across_processes stdout ----
+process-race iter 0: armed=true outcome=ok
+
+thread 'concurrent_rotation_during_add_never_orphans_across_processes' (20549875) panicked at crates/core/tests/crypto01_rotation_race.rs:128:21:
+CRYPTO-01 regression: the raced write reported success but its ciphertext does not decrypt under the persisted project key (orphaned): Crypto { context: "credential value" }
+
+---- concurrent_rotation_during_add_never_orphans stdout ----
+add-race iter 0: armed=true outcome=committed
+
+thread 'concurrent_rotation_during_add_never_orphans' (20549874) panicked at crates/core/tests/crypto01_rotation_race.rs:128:21:
+CRYPTO-01 regression: the raced write reported success but its ciphertext does not decrypt under the persisted project key (orphaned): Crypto { context: "credential value" }
+
+
+failures:
+    concurrent_rotation_during_add_never_orphans
+    concurrent_rotation_during_add_never_orphans_across_processes
+    concurrent_rotation_during_replace_never_orphans
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.59s
+
+error: test failed, to rerun pass `-p api-tracker-core --test crypto01_rotation_race`
