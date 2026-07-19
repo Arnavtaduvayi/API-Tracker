@@ -110,16 +110,16 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 78 |
+| PASS | 84 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 47 |
+| NOT RUN (eligible, not yet reached) | 41 |
 | DEFERRED (out of session scope) | 4 (+7 live scripts) |
 | DEFECTS filed | 1 (MANUAL-001, low) |
 
 PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
 PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09, ALR-01/02/03,
-NTF-01..05, ENV-01..09. DEFERRED:
+NTF-01..05, ENV-01..09, TPL-01..06. DEFERRED:
 CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
 — low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
 accessibility harness + real key events, with CLI/DB cross-checks;
@@ -1458,6 +1458,72 @@ contains a secret value.
   is unchanged (`git diff` empty). Never writes plaintext into a tracked
   file.
 - Evidence: AX error; git diff empty.
+- Suspected component: n/a.
+
+### TPL-01 — template catalog and details — **PASS**
+
+- Screen/workflow: Templates → catalog + openai-app details
+- Result: **PASS** — exactly **9 templates** (openai-app, anthropic-app,
+  supabase-web, stripe-app, github-automation, nextjs-app, node-backend,
+  python-backend, fullstack-saas). The openai-app detail lists env var
+  **names** with (secret)/(not secret) labels (OPENAI_API_KEY (secret),
+  OPENAI_ORG_ID (not secret)) plus credential-separation / permissions /
+  rotation guidance. **No actual credential values** (only format hints
+  like "sk-proj-…").
+- Evidence: CLI `template list` (9) + `template show openai-app`; AX
+  catalog.
+- Suspected component: n/a.
+
+### TPL-02 — apply a template (+ names-only .env.example) — **PASS**
+
+- Screen/workflow: Templates → openai-app → Details/apply → Apply template
+- Result: **PASS** — "Applied 'openai-app' to project 'tpl-demo'." +
+  "Wrote …" + "Next steps — credentials are only added by these explicit
+  commands…" (key add / mapping set). Project tpl-demo created with
+  environments development, production, **Credentials 0** (no credential
+  created); the .env.example on disk is names-only ("contains no
+  secrets").
+- Evidence: AX notice; CLI `project show tpl-demo` (0 credentials);
+  .env.example contents.
+- Suspected component: n/a.
+
+### TPL-03 — apply never overwrites an existing example — **PASS**
+
+- Result: **PASS** — re-applying openai-app to tpl-demo with the same
+  directory did **not** overwrite the existing .env.example (mtime
+  unchanged; write_new semantics).
+- Evidence: mtime before/after.
+- Suspected component: n/a.
+
+### TPL-04 — deterministic stack detection with evidence — **PASS**
+
+- Screen/workflow: Templates → Detect stack (repo /…/alpha-repo)
+- Result: **PASS** — report suggests OpenAI application (openai-app) under
+  "Suggestions (deterministic rules + your stored decisions — **not ML**):"
+  with Evidence "package.json: dependency 'openai' in dependencies" and
+  Confirm / Dismiss buttons. Nothing stored until a decision is made;
+  .env values never appear in evidence.
+- Evidence: AX capture.
+- Suspected component: n/a.
+
+### TPL-05 — confirm/dismiss decisions are remembered — **PASS**
+
+- Screen/workflow: Detect → Confirm the openai-app suggestion
+- Result: **PASS** — Confirm → "Confirmed 'openai-app' — remembered
+  locally; manage under Learned decisions."; the suggestion then shows
+  "— you confirmed this earlier"; a **Learned decisions** table appears
+  with the stored decision. (Confirm-persistence verified directly; the
+  dismiss path is symmetric.)
+- Evidence: AX captures.
+- Suspected component: n/a.
+
+### TPL-06 — delete learned data — **PASS**
+
+- Result: **PASS** — "Delete repo decisions" → "Deleted decisions for
+  …/alpha-repo."; the store then reports "No stored decisions." (fully
+  deletable; the "Delete ALL" control had nothing left to remove after the
+  single repo decision was deleted).
+- Evidence: AX notices.
 - Suspected component: n/a.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
