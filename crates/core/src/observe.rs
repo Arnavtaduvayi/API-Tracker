@@ -41,6 +41,7 @@ pub fn managed_kinds() -> Vec<AlertKind> {
         AlertKind::DestinationDrift,
         AlertKind::RotationAttention,
         AlertKind::AccessGrantExpired,
+        AlertKind::PricingStale,
     ]
 }
 
@@ -483,6 +484,58 @@ pub fn alerts(
                 credential_id: None,
                 observed_at: observed.clone(),
             });
+        }
+    }
+
+    // --- Stale pricing for models with recent estimated usage. Estimates
+    // keep being produced (labeled stale); this makes the staleness loud.
+    {
+        let month_ago = days_ago(now, 30);
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT provider, model FROM usage_snapshots
+             WHERE model IS NOT NULL AND estimated_cost_micros IS NOT NULL
+               AND window_start >= ?1",
+        )?;
+        let pairs = stmt
+            .query_map(params![month_ago], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (provider, model) in pairs {
+            let Some(rec) = crate::pricing::lookup_as_of(conn, &provider, &model, &observed)?
+            else {
+                continue;
+            };
+            if rec.stale {
+                out.push(NewAlert {
+                    kind: AlertKind::PricingStale,
+                    severity: Severity::Low,
+                    dedup_key: format!("pricing_stale:{provider}:{model}"),
+                    title: format!("pricing data for {provider}/{model} may be stale"),
+                    detail: format!(
+                        "the price record used for this model's estimates was last verified \
+                         {} (more than {} days ago). Estimates remain labeled and are NOT \
+                         recomputed; verify the current price and refresh with `pricing \
+                         propose {provider}` + `pricing import`, or set an override.",
+                        rec.last_verified,
+                        crate::pricing::STALE_AFTER_DAYS
+                    ),
+                    evidence: format!(
+                        "record origin={} effective_from={} last_verified={} source={}",
+                        rec.origin.as_str(),
+                        rec.effective_from,
+                        rec.last_verified,
+                        rec.source
+                    ),
+                    confidence: Confidence::High,
+                    recommended_action: "verify the provider's published price and import a \
+                                         reviewed update or an override"
+                        .into(),
+                    project_id: None,
+                    credential_id: None,
+                    observed_at: observed.clone(),
+                });
+            }
         }
     }
 

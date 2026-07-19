@@ -34,17 +34,18 @@ SQLite vault.
 
 ## Known limitations (honest)
 
-- **Product**: no project templates / stack learning; cost estimation covers a
-  small bundled price table (tokens only); one provider org per vault.
+- **Product**: one provider org per vault; cached-token discounts are not
+  modeled in local cost estimates (provider-reported cost is authoritative).
 - **Provider**: per-key usage exists only where the official API supports it
   (OpenAI, Anthropic); GitHub/Stripe are account-level; no provider issues
   short-lived credentials via API; no provider offers a documented per-key
   scope edit (changes route through the dashboard or the rotation workflow).
   None of this is faked — it is labeled everywhere.
-- **Destinations**: AWS/GitHub/Vercel network paths are fixture-tested, not yet
-  exercised against live accounts; AWS delete and Vault/Doppler/1Password /
-  Windows-Linux keychains are not implemented (labeled). See
-  [DESTINATION_SUPPORT.md](DESTINATION_SUPPORT.md).
+- **Destinations**: AWS/GitHub/Vercel network paths are fixture-tested, not
+  yet exercised against live accounts (opt-in scripts provided); the
+  Windows/Linux OS credential stores are implemented but not exercised
+  against live stores by CI; Doppler/1Password/HashiCorp Vault are deferred
+  (labeled). See [DESTINATION_SUPPORT.md](DESTINATION_SUPPORT.md).
 - **Security**: metadata (names, providers, notes) is stored unencrypted next
   to the encrypted values — treat the data directory as sensitive. Local-first
   cannot defend against malware running as you or an unlocked machine. See the

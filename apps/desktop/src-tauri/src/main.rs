@@ -99,7 +99,13 @@ fn with_vault_impl<T>(
     if auto_lock_minutes > 0
         && slot.last_activity.elapsed() >= Duration::from_secs(u64::from(auto_lock_minutes) * 60)
     {
-        slot.vault = None; // drop -> keys zeroized
+        // Take the vault out and drop it AFTER releasing the mutex: the
+        // drop checkpoints the WAL (bounded, but it can wait for a
+        // concurrent reader), and holding the state mutex through that
+        // would stall every other vault command.
+        let expired = slot.vault.take(); // drop -> keys zeroized
+        drop(slot);
+        drop(expired);
         return Err(locked_err());
     }
     if touch_activity {
@@ -158,7 +164,11 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
 #[tauri::command]
 fn vault_lock(state: State<'_, AppState>) -> CmdResult<()> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
-    slot.vault = None;
+    // Drop after releasing the mutex — the drop checkpoints the WAL and can
+    // briefly wait for a concurrent reader.
+    let vault = slot.vault.take();
+    drop(slot);
+    drop(vault);
     Ok(())
 }
 
@@ -166,6 +176,17 @@ fn vault_lock(state: State<'_, AppState>) -> CmdResult<()> {
 fn reauth(state: State<'_, AppState>, password: String) -> CmdResult<()> {
     let password = SecretString::new(password);
     with_vault(&state, |vault| vault.verify_master_password(&password))
+}
+
+#[tauri::command]
+fn vault_change_password(
+    state: State<'_, AppState>,
+    current: String,
+    new: String,
+) -> CmdResult<()> {
+    let current = SecretString::new(current);
+    let new = SecretString::new(new);
+    with_vault(&state, |vault| vault.change_master_password(&current, &new))
 }
 
 #[tauri::command]
@@ -528,10 +549,12 @@ fn project_set_password(
     state: State<'_, AppState>,
     ident: String,
     password: String,
+    master: String,
 ) -> CmdResult<()> {
     let password = SecretString::new(password);
+    let master = SecretString::new(master);
     with_vault(&state, |vault| {
-        vault.set_project_password(&ident, &password)
+        vault.set_project_password(&ident, &password, &master)
     })
 }
 
@@ -1054,6 +1077,162 @@ fn budget_cost_source_get(state: State<'_, AppState>) -> CmdResult<String> {
 }
 
 #[tauri::command]
+fn pricing_records(
+    state: State<'_, AppState>,
+    all: bool,
+) -> CmdResult<Vec<api_tracker_core::pricing::PricingRecord>> {
+    with_vault(&state, |vault| {
+        if all {
+            vault.pricing_catalog()
+        } else {
+            vault.pricing_effective(&api_tracker_core::clock::now_rfc3339())
+        }
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn pricing_set_override(
+    state: State<'_, AppState>,
+    provider: String,
+    model: String,
+    input: Option<String>,
+    output: Option<String>,
+    cached_input: Option<String>,
+    per_request: Option<String>,
+    unit: Option<String>,
+    note: Option<String>,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        let parse =
+            |v: &Option<String>| -> Result<Option<i64>, api_tracker_core::error::CoreError> {
+                match v.as_deref().map(str::trim) {
+                    None | Some("") => Ok(None),
+                    Some(s) => Ok(Some(api_tracker_core::pricing::dollars_to_micros(s)?)),
+                }
+            };
+        let unit = match unit.as_deref() {
+            None | Some("") | Some("tokens") => api_tracker_core::pricing::Unit::Tokens,
+            Some("requests") => api_tracker_core::pricing::Unit::Requests,
+            Some(other) => {
+                return Err(api_tracker_core::error::CoreError::InvalidInput(format!(
+                    "unknown unit '{other}'"
+                )))
+            }
+        };
+        let spec = api_tracker_core::pricing::OverrideSpec {
+            unit: Some(unit),
+            input_price_per_m_micros: parse(&input)?,
+            cached_input_price_per_m_micros: parse(&cached_input)?,
+            output_price_per_m_micros: parse(&output)?,
+            batch_input_price_per_m_micros: None,
+            batch_output_price_per_m_micros: None,
+            per_request_micros: parse(&per_request)?,
+            effective_from: None,
+            note: note.unwrap_or_default(),
+        };
+        vault.set_pricing_override(&provider, &model, spec)
+    })
+}
+
+#[tauri::command]
+fn pricing_remove_override(
+    state: State<'_, AppState>,
+    provider: String,
+    model: String,
+) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.remove_pricing_override(&provider, &model)
+    })
+}
+
+#[tauri::command]
+fn pricing_import(
+    state: State<'_, AppState>,
+    json: String,
+) -> CmdResult<api_tracker_core::pricing::ImportOutcome> {
+    with_vault(&state, |vault| vault.pricing_import(&json))
+}
+
+#[tauri::command]
+fn pricing_export(state: State<'_, AppState>, provider: Option<String>) -> CmdResult<String> {
+    with_vault(&state, |vault| vault.pricing_export(provider.as_deref()))
+}
+
+#[tauri::command]
+fn provider_account_sync(
+    state: State<'_, AppState>,
+    provider: String,
+) -> CmdResult<api_tracker_core::connectors::AccountInfo> {
+    with_vault(&state, |vault| {
+        let http = api_tracker_core::http::UreqClient::new();
+        vault.provider_account_sync(&provider, &http)
+    })
+}
+
+#[tauri::command]
+fn template_list() -> Vec<api_tracker_core::templates::Template> {
+    api_tracker_core::templates::catalog()
+}
+
+#[tauri::command]
+fn template_apply(
+    state: State<'_, AppState>,
+    template_id: String,
+    project: String,
+    write_example_dir: Option<String>,
+) -> CmdResult<api_tracker_core::vault::TemplateApplyOutcome> {
+    with_vault(&state, |vault| {
+        vault.template_apply(
+            &template_id,
+            &project,
+            write_example_dir.as_deref().map(std::path::Path::new),
+        )
+    })
+}
+
+#[tauri::command]
+fn stack_detect(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    repo: Option<String>,
+) -> CmdResult<Vec<api_tracker_core::stackdetect::DetectionReport>> {
+    with_vault(&state, |vault| match (project, repo) {
+        (_, Some(repo)) => Ok(vec![vault.stack_detect_path(std::path::Path::new(&repo))?]),
+        (Some(project), None) => vault.stack_detect_project(&project),
+        (None, None) => Err(api_tracker_core::error::CoreError::InvalidInput(
+            "pass a project or a repository path".into(),
+        )),
+    })
+}
+
+#[tauri::command]
+fn stack_decide(
+    state: State<'_, AppState>,
+    repo: String,
+    template_id: String,
+    decision: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.stack_decide(std::path::Path::new(&repo), &template_id, &decision)
+    })
+}
+
+#[tauri::command]
+fn stack_prefs(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_core::vault::StackPreference>> {
+    with_vault(&state, |vault| vault.stack_preferences())
+}
+
+#[tauri::command]
+fn stack_prefs_reset(state: State<'_, AppState>, repo: Option<String>) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.stack_preferences_reset(repo.as_deref().map(std::path::Path::new))
+    })
+}
+
+#[tauri::command]
 fn budget_cost_source_set(state: State<'_, AppState>, value: String) -> CmdResult<()> {
     with_vault(&state, |vault| {
         let source: api_tracker_core::usage::CostSource = value.parse()?;
@@ -1337,6 +1516,26 @@ fn destination_test(state: State<'_, AppState>, ident: String) -> CmdResult<Stri
     let runner = api_tracker_core::destinations::SystemRunner;
     with_vault(&state, |vault| {
         vault.destination_test(&ident, &http, &runner)
+    })
+}
+
+#[tauri::command]
+fn destination_delete_secret(
+    state: State<'_, AppState>,
+    ident: String,
+    secret_name: String,
+    password: String,
+) -> CmdResult<String> {
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.destination_delete_secret(
+            &ident,
+            &secret_name,
+            &SecretString::new(password.clone()),
+            &http,
+            &runner,
+        )
     })
 }
 
@@ -1831,6 +2030,7 @@ fn main() {
             vault_create,
             vault_unlock,
             vault_lock,
+            vault_change_password,
             reauth,
             settings_get,
             settings_set,
@@ -1895,6 +2095,18 @@ fn main() {
             usage_records,
             budget_cost_source_get,
             budget_cost_source_set,
+            pricing_records,
+            pricing_set_override,
+            pricing_remove_override,
+            pricing_import,
+            pricing_export,
+            provider_account_sync,
+            template_list,
+            template_apply,
+            stack_detect,
+            stack_decide,
+            stack_prefs,
+            stack_prefs_reset,
             usage_report,
             usage_record_manual,
             budget_set,
@@ -1918,6 +2130,7 @@ fn main() {
             destination_remove,
             destination_list,
             destination_test,
+            destination_delete_secret,
             destination_attach,
             destination_detach,
             destination_attachments,

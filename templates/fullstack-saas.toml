@@ -1,0 +1,61 @@
+# Project template: full-stack SaaS application.
+id = "fullstack-saas"
+name = "Full-stack SaaS application"
+description = "A SaaS stack: web frontend, Supabase or a database, Stripe billing, an LLM API."
+providers = ["stripe", "supabase", "openai"]
+environments = ["development", "staging", "production"]
+docs = [
+    "https://docs.stripe.com/keys",
+    "https://supabase.com/docs/guides/api/api-keys",
+]
+destinations = ["env_mapping", "vercel", "github_actions"]
+credential_separation = """
+This stack concentrates the highest-value secrets in one place, so
+separation matters most here: separate provider projects per environment,
+test-mode Stripe keys in development, a dedicated Supabase project per
+environment, and client-safe keys (publishable/NEXT_PUBLIC_) strictly
+distinguished from server secrets. Reference one vault entry from several
+app projects instead of pasting the same value twice."""
+permission_guidance = """
+Restricted Stripe keys for exactly the billing operations used; Supabase
+secret key server-side only with RLS on; LLM keys project-scoped with
+budgets set in API Tracker."""
+rotation_guidance = """
+Attach every production secret to its deployment destination (Vercel /
+GitHub Actions) so one reviewed sync plan rotates the whole surface;
+schedule rotation for the Stripe and LLM keys after the first manual
+rotation completes."""
+
+[[env]]
+name = "DATABASE_URL"
+secret = true
+description = "Primary database connection string."
+
+[[env]]
+name = "STRIPE_SECRET_KEY"
+provider = "stripe"
+secret = true
+description = "Stripe secret/restricted key."
+
+[[env]]
+name = "STRIPE_WEBHOOK_SECRET"
+provider = "stripe"
+secret = true
+description = "Stripe webhook signing secret."
+
+[[env]]
+name = "SUPABASE_SECRET_KEY"
+provider = "supabase"
+secret = true
+description = "Supabase server-side secret key."
+
+[[env]]
+name = "OPENAI_API_KEY"
+provider = "openai"
+secret = true
+description = "LLM API key (swap for ANTHROPIC_API_KEY if using Claude)."
+
+[[env]]
+name = "SESSION_SECRET"
+secret = true
+description = "Session/cookie signing secret; random per environment."

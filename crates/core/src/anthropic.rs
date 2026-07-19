@@ -123,6 +123,23 @@ pub fn validate_admin_key(http: &dyn HttpClient, admin: &SecretString) -> Result
     ))
 }
 
+/// The organization the admin key belongs to, from the official
+/// `GET /v1/organizations/me` endpoint: `(id, name)`.
+pub fn fetch_organization(
+    http: &dyn HttpClient,
+    admin: &SecretString,
+) -> Result<(Option<String>, Option<String>)> {
+    let resp = send_checked(http, &get(&format!("{BASE}/organizations/me"), admin))?;
+    require_success(&resp, "the organization lookup")?;
+    let json = parse_json(&resp)?;
+    Ok((
+        json.get("id").and_then(|v| v.as_str()).map(str::to_string),
+        json.get("name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    ))
+}
+
 /// Follow `has_more`/`next_page` pagination over a report endpoint.
 fn fetch_report_buckets(
     http: &dyn HttpClient,

@@ -1,0 +1,40 @@
+# Project template: web application backed by Supabase.
+id = "supabase-web"
+name = "Supabase web application"
+description = "A web app using Supabase for database, auth, and storage."
+providers = ["supabase"]
+environments = ["development", "production"]
+docs = [
+    "https://supabase.com/docs/guides/api/api-keys",
+]
+destinations = ["env_mapping", "vercel", "github_actions"]
+credential_separation = """
+Use a separate Supabase project per environment. The publishable key is
+designed to ship in client code (safety comes from row-level security); the
+secret/service key must NEVER reach the client bundle or a committed file —
+keep it server-side only and in the vault."""
+permission_guidance = """
+A key's privilege is fixed by its type: publishable (client-safe) vs secret
+(bypasses row-level security). There are no per-key scopes — choose the key
+type, and enable RLS on every table."""
+rotation_guidance = """
+New-format secret keys (sb_secret_...) rotate fully via the Management API
+through API Tracker's rotation workflow. Legacy JWT keys can only be rolled
+in the dashboard."""
+
+[[env]]
+name = "SUPABASE_URL"
+secret = false
+description = "Project URL (https://<ref>.supabase.co); not a secret."
+
+[[env]]
+name = "SUPABASE_SECRET_KEY"
+provider = "supabase"
+secret = true
+description = "Server-side secret key (sb_secret_...); bypasses RLS."
+
+[[env]]
+name = "SUPABASE_SERVICE_ROLE_KEY"
+provider = "supabase"
+secret = true
+description = "Legacy service-role JWT, if the project still uses one."

@@ -172,6 +172,12 @@ pub struct ProviderManifest {
     /// Official permission/scope documentation.
     #[serde(default)]
     pub permissions_docs_url: String,
+    /// The provider's official console/login page.
+    #[serde(default)]
+    pub login_url: String,
+    /// The provider's official billing portal page.
+    #[serde(default)]
+    pub billing_url: String,
     /// Official documentation URLs the user may watch for changes.
     #[serde(default)]
     pub watch_docs: Vec<String>,

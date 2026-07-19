@@ -33,7 +33,7 @@ fn backup_create_verify_restore_roundtrip() {
         Environment::Development,
     );
     vault
-        .set_project_password("beta", &SecretString::from(PROJECT_PW))
+        .set_project_password("beta", &SecretString::from(PROJECT_PW), &master_pw())
         .unwrap();
 
     let backup_path = dir.path().join("vault-backup.json");
@@ -207,11 +207,17 @@ fn repeated_force_restores_never_clobber_a_previous_aside() {
     );
 }
 
+#[cfg(unix)] // POSIX rename-while-open semantics; see the Windows test below.
 #[test]
 fn force_restore_preserves_a_still_open_vault_including_uncheckpointed_wal() {
     // Reproduces the data-loss case: a concurrent connection (e.g. the
     // desktop app) holds committed-but-uncheckpointed transactions in the
     // WAL. Force-restore must keep the aside copy fully openable.
+    //
+    // On Windows this scenario cannot occur the same way: the OS refuses to
+    // rename an open database file (sharing violation), so a force-restore
+    // against an in-use vault fails cleanly before anything changes — the
+    // companion test below pins that behavior.
     let (dir, paths, mut vault) = new_vault();
     add_project(&mut vault, "live-project");
     add_key(
@@ -264,6 +270,35 @@ fn force_restore_preserves_a_still_open_vault_including_uncheckpointed_wal() {
     );
 }
 
+#[cfg(windows)]
+#[test]
+fn force_restore_against_an_open_vault_fails_cleanly_on_windows() {
+    // Windows file locking refuses to rename an open database file, so a
+    // force-restore while the vault is in use must fail with a clean error
+    // BEFORE anything is modified — the live vault keeps working.
+    let (dir, paths, mut vault) = new_vault();
+    add_project(&mut vault, "live-project");
+    let backup_path = dir.path().join("b.json");
+    backup::create_backup(&vault, &backup_path, &backup_pw(), false).unwrap();
+
+    let err = backup::restore_backup(&backup_path, &backup_pw(), &paths, true);
+    assert!(
+        err.is_err(),
+        "restore over an open vault must fail on Windows"
+    );
+    // The open vault is untouched and fully functional.
+    let names: Vec<String> = vault
+        .list_projects(true)
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, vec!["live-project".to_owned()]);
+    drop(vault);
+    // Closed, the restore succeeds normally.
+    backup::restore_backup(&backup_path, &backup_pw(), &paths, true).unwrap();
+}
+
 #[test]
 fn session_roundtrip_and_wrong_token() {
     let (_dir, paths, mut vault) = new_vault();
@@ -276,7 +311,7 @@ fn session_roundtrip_and_wrong_token() {
         Environment::Development,
     );
     vault
-        .set_project_password("locked", &SecretString::from(PROJECT_PW))
+        .set_project_password("locked", &SecretString::from(PROJECT_PW), &master_pw())
         .unwrap();
 
     let token = SessionToken::generate();

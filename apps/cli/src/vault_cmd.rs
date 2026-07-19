@@ -96,6 +96,25 @@ struct DoctorReport {
     warnings: Vec<String>,
 }
 
+pub fn change_password(ctx: &Ctx) -> Result<()> {
+    let (mut vault, _token) = ctx.unlocked()?;
+    eprintln!("Changing the master password re-wraps the vault key; no data is re-encrypted.");
+    eprintln!("Note: backups made BEFORE the change still open with the OLD password.");
+    eprintln!("Current master password:");
+    let current = ctx::master_password()?;
+    eprintln!(
+        "Choose a new master password of at least {} characters.",
+        vault::MIN_PASSWORD_LEN
+    );
+    let new = ctx::new_password("new master password", "API_TRACKER_NEW_PASSWORD")?;
+    vault.change_master_password(&current, &new)?;
+    println!("Master password changed.");
+    println!("  - Existing CLI sessions keep working until they expire.");
+    println!("  - Backups made before this change still need the OLD password to restore.");
+    println!("  - Consider creating a fresh backup now: `api-tracker backup create <path>`.");
+    Ok(())
+}
+
 pub fn doctor(ctx: &Ctx) -> Result<()> {
     let mut report = DoctorReport {
         data_dir: ctx.paths.data_dir.display().to_string(),
@@ -143,6 +162,13 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
         report
             .warnings
             .push("no vault found; run `api-tracker init`".to_owned());
+    }
+    if !cfg!(unix) {
+        report.warnings.push(
+            "on this platform file permissions are OS-inherited (no owner-only mode is \
+             applied); treat the data directory itself as sensitive material"
+                .to_owned(),
+        );
     }
 
     render::emit(ctx.json, &report, || {

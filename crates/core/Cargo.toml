@@ -30,5 +30,10 @@ uuid = { version = "1.24.0", features = ["v4"] }
 walkdir = "2.5.0"
 zeroize = { version = "1.9.0", features = ["derive"] }
 
+[target.'cfg(windows)'.dependencies]
+# Windows Credential Manager access with the Win32 FFI encapsulated in an
+# audited dependency; this crate itself stays forbid(unsafe_code).
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
 [dev-dependencies]
 tempfile = "3.27.0"

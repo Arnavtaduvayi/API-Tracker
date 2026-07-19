@@ -174,6 +174,10 @@ export interface ProviderManifest {
   pricing_url: string;
   /** Official permission/scope documentation ("" when none is declared). */
   permissions_docs_url: string;
+  /** Official console/login page ("" when none is declared). */
+  login_url: string;
+  /** Official billing portal page ("" when none is declared). */
+  billing_url: string;
   watch_docs: string[];
   detection: DetectionPattern[];
   capabilities: Capabilities;
@@ -372,7 +376,23 @@ export interface ProviderConnection {
   last_error: string;
   last_status: string;
   detail: string;
+  /** Provider-reported account identity (official endpoints only). */
+  account_id: string | null;
+  account_email: string | null;
+  account_name: string | null;
+  account_plan: string | null;
+  account_source: string | null;
+  account_synced_at: string | null;
   stale: boolean;
+}
+
+/** Provider-reported account identity (official endpoints only). */
+export interface AccountInfo {
+  account_id: string | null;
+  email: string | null;
+  name: string | null;
+  plan: string | null;
+  source: string;
 }
 
 export interface SyncReport {
@@ -610,6 +630,14 @@ export interface DestinationKindInfo {
   platforms: string;
   status: string;
   capabilities: DestCapabilities;
+  /** How a write is verified: value read-back or existence only. */
+  verify_method: string;
+  /** Plan/tier the destination requires, if any. */
+  required_plan: string;
+  /** Possible charges from using this destination. */
+  charges: string;
+  /** Automated-test coverage status (fixtures vs live). */
+  testing: string;
   config_help: string;
 }
 
@@ -809,6 +837,89 @@ export interface TestKeyResult {
   credential: Credential;
   /** Honest enforcement notes from core, rendered verbatim. */
   notes: string[];
+}
+
+export interface PricingRecord {
+  provider: string;
+  model: string;
+  unit: "tokens" | "requests" | "credits";
+  input_price_per_m_micros: number | null;
+  cached_input_price_per_m_micros: number | null;
+  output_price_per_m_micros: number | null;
+  batch_input_price_per_m_micros: number | null;
+  batch_output_price_per_m_micros: number | null;
+  per_request_micros: number | null;
+  currency: string;
+  source: string;
+  effective_from: string;
+  last_verified: string;
+  origin: "bundled" | "imported" | "override";
+  version: number;
+  note: string;
+  stale: boolean;
+}
+
+export interface PricingImportOutcome {
+  added: number;
+  replaced: number;
+}
+
+export interface TemplateEnvVar {
+  name: string;
+  provider: string | null;
+  secret: boolean;
+  description: string;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  description: string;
+  providers: string[];
+  environments: string[];
+  docs: string[];
+  destinations: string[];
+  credential_separation: string;
+  permission_guidance: string;
+  rotation_guidance: string;
+  env: TemplateEnvVar[];
+}
+
+export interface TemplateApplyOutcome {
+  project: Project;
+  template: Template;
+  example_path: string | null;
+  /** Names only — never values. */
+  example_content: string;
+  next_steps: string[];
+}
+
+export interface StackSignal {
+  file: string;
+  evidence: string;
+  template_id: string | null;
+  provider: string | null;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface StackSuggestion {
+  template_id: string;
+  confidence: "low" | "medium" | "high";
+  evidence: string[];
+  prior_decision: "confirmed" | "dismissed" | null;
+}
+
+export interface DetectionReport {
+  repo_path: string;
+  signals: StackSignal[];
+  suggestions: StackSuggestion[];
+}
+
+export interface StackPreference {
+  repo_path: string;
+  template_id: string;
+  decision: string;
+  decided_at: string;
 }
 
 export interface ApiError {

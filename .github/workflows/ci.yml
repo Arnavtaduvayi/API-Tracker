@@ -27,6 +27,18 @@ jobs:
           API_TRACKER_INSECURE_FAST_KDF: "1"
         run: cargo test -p api-tracker-core -p api-tracker-cli
 
+  rust-windows:
+    name: Rust core (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tests (compiles the Credential Manager adapter on real Windows)
+        env:
+          API_TRACKER_INSECURE_FAST_KDF: "1"
+        run: cargo test -p api-tracker-core
+
   frontend:
     name: Desktop frontend
     runs-on: ubuntu-latest

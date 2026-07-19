@@ -159,6 +159,55 @@ pub fn end_session(conn: &Connection, session_id: &str, exit_code: Option<i32>) 
     Ok(())
 }
 
+/// Close session rows whose recorded process no longer exists. A launcher
+/// that crashed leaves its row "running" forever otherwise. Detection is a
+/// `ps -p <pid>` liveness probe (POSIX; reports any user's process without
+/// signal-permission ambiguity): only a definitive "not found" closes the
+/// row. Unix only; on other platforms this is a no-op and rows close on
+/// child exit as before. Returns how many rows were closed.
+pub fn sweep_dead_sessions(conn: &Connection) -> Result<usize> {
+    #[cfg(unix)]
+    {
+        let rows: Vec<(String, i64)> = conn
+            .prepare(
+                "SELECT id, pid FROM process_sessions
+                 WHERE ended_at IS NULL AND pid IS NOT NULL",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut closed = 0usize;
+        for (id, pid) in rows {
+            if pid <= 0 {
+                continue;
+            }
+            let probe = std::process::Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // Only ps's definitive "no matching process" (exit code exactly
+            // 1) closes the row. A ps that failed to spawn, was signal-
+            // killed, or exited with any other code proves nothing and
+            // changes nothing — a live session must never be closed by an
+            // environmental ps failure.
+            let gone = matches!(probe, Ok(status) if status.code() == Some(1));
+            if gone {
+                conn.execute(
+                    "UPDATE process_sessions SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",
+                    params![clock::now_rfc3339(), id],
+                )?;
+                closed += 1;
+            }
+        }
+        Ok(closed)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = conn;
+        Ok(0)
+    }
+}
+
 pub fn list_sessions(
     conn: &Connection,
     limit: u32,
@@ -214,9 +263,11 @@ pub fn get_session(conn: &Connection, ident: &str) -> Result<ProcessSession> {
     }
 }
 
-/// Send SIGTERM to a recorded PID (best-effort, Unix only). Returns whether
-/// the signal was accepted. This is a LOCAL control: it cannot claw back
-/// values the process already received, and it never touches the provider.
+/// Terminate a recorded PID (best-effort): SIGTERM on Unix; on Windows a
+/// graceful taskkill first, then a forceful one (console processes cannot
+/// receive the graceful form). Returns whether termination was accepted.
+/// This is a LOCAL control: it cannot claw back values the process already
+/// received, and it never touches the provider.
 pub fn terminate_pid(pid: i64) -> bool {
     if cfg!(unix) {
         std::process::Command::new("kill")
@@ -225,10 +276,23 @@ pub fn terminate_pid(pid: i64) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     } else {
-        // Windows has no SIGTERM; taskkill without /F requests a graceful
-        // close, matching the Unix semantics as closely as the OS allows.
-        std::process::Command::new("taskkill")
+        // Windows has no SIGTERM. A graceful taskkill (no /F) only reaches
+        // processes with a message loop — console children (the normal
+        // `run` case) reject it outright, which the Windows CI run proved.
+        // Try graceful first for GUI children, then terminate forcefully:
+        // this command exists to be a working kill switch for an injected
+        // process, and a refusal would leave the credential-bearing child
+        // running.
+        let graceful = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if graceful {
+            return true;
+        }
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)

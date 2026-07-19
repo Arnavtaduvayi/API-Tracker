@@ -181,7 +181,9 @@ pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
                 );
                 eprintln!("If you lose it, this project's credential values are unrecoverable.");
                 let password = ctx::new_password("project password", ctx::ENV_PROJECT_PASSWORD)?;
-                vault.set_project_password(&project, &password)?;
+                eprintln!("Reauthentication required to set a project password.");
+                let master = ctx::master_password()?;
+                vault.set_project_password(&project, &password, &master)?;
                 // Immediately lock so the password takes effect now.
                 vault.lock_project(&project)?;
                 ctx.persist_session(&vault, &token)?;

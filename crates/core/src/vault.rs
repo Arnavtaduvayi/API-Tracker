@@ -31,7 +31,7 @@ use crate::status::{self, StatusInputs};
 use crate::usage;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Minimum length for newly chosen master, project, and backup passwords.
@@ -275,6 +275,9 @@ pub fn resume_session(paths: &VaultPaths, token: &SessionToken) -> Result<Unlock
     let fingerprint_key = unwrap_fingerprint_key(&conn, &vault_id, &keys.vault_key)
         .map_err(|_| CoreError::SessionInvalid)?;
     let settings = VaultSettings::load(&conn)?;
+    // Session-token CLI use must sweep expired temporary exports too — a
+    // user who only ever resumes sessions would otherwise never clean them.
+    let _ = crate::envgov::cleanup_exports(&conn, false, false, &clock::now_rfc3339());
     Ok(UnlockedVault {
         conn,
         vault_id,
@@ -457,10 +460,24 @@ pub struct UnlockedVault {
     vault_id: String,
     vault_key: SecretBytes,
     fingerprint_key: SecretBytes,
-    /// Session-unlocked keys of password-locked projects.
-    project_keys: HashMap<String, SecretBytes>,
+    /// Session-unlocked keys of password-locked projects, each paired with
+    /// a BLAKE3 hash of the wrapped-key blob it was unwrapped from. The
+    /// hash is checked against the freshly-read row before every use, so a
+    /// key made stale by a concurrent password change (which rotates the
+    /// project key) can never encrypt new data into an unrecoverable state.
+    project_keys: HashMap<String, (SecretBytes, [u8; 32])>,
     settings: VaultSettings,
     paths: VaultPaths,
+}
+
+impl Drop for UnlockedVault {
+    fn drop(&mut self) {
+        // Locking the vault checkpoints and truncates the WAL so freed or
+        // rewritten pages (secure_delete overwrites, key rotations) do not
+        // linger in the sidecar file. Best-effort: a concurrent reader in
+        // the other frontend degrades this gracefully.
+        db::checkpoint_truncate(&self.conn);
+    }
 }
 
 impl std::fmt::Debug for UnlockedVault {
@@ -505,6 +522,39 @@ impl UnlockedVault {
         let kek = crypto::derive_key(master_password, &salt, &kdf)?;
         crypto::decrypt(&kek, &aad::vault_key(&vault_id), &wrapped, "vault key")
             .map_err(|_| CoreError::WrongPassword)?;
+        Ok(())
+    }
+
+    /// Change the master password: verify the current one, then re-wrap the
+    /// vault key under a key derived from the new password (fresh salt,
+    /// current KDF parameters). The vault key itself does not change, so no
+    /// data is re-encrypted and existing CLI sessions keep working; backups
+    /// made earlier still open with the password in effect when they were
+    /// created (stated wherever backups are restored). The WAL is
+    /// checkpointed afterwards so the old wrap does not linger in the
+    /// sidecar file.
+    pub fn change_master_password(
+        &mut self,
+        current: &SecretString,
+        new: &SecretString,
+    ) -> Result<()> {
+        self.verify_master_password(current)?;
+        validate_password(new, "the new master password")?;
+        let kdf = KdfParams::recommended();
+        let salt = crypto::new_salt();
+        let kek = crypto::derive_key(new, &salt, &kdf)?;
+        let wrapped = crypto::encrypt(
+            &kek,
+            &aad::vault_key(&self.vault_id),
+            self.vault_key.expose(),
+        )?;
+        let tx = self.conn.unchecked_transaction()?;
+        meta_set(&tx, "kdf_params", &serde_json::to_string(&kdf)?)?;
+        meta_set(&tx, "master_salt", &hex::encode(&salt))?;
+        meta_set(&tx, "wrapped_vault_key", &hex::encode(&wrapped))?;
+        tx.commit()?;
+        audit::record(&self.conn, "master_password_changed", None, None, "")?;
+        db::checkpoint_truncate(&self.conn);
         Ok(())
     }
 
@@ -595,7 +645,11 @@ impl UnlockedVault {
             repo_paths: self.repo_paths(&row.id)?,
             archived: row.archived,
             password_locked,
-            unlocked: !password_locked || self.project_keys.contains_key(&row.id),
+            unlocked: !password_locked
+                || self
+                    .project_keys
+                    .get(&row.id)
+                    .is_some_and(|(_, h)| blake3::hash(&row.wrapped_project_key).as_bytes() == h),
             created_at: row.created_at.clone(),
             updated_at: row.updated_at.clone(),
             credential_count,
@@ -797,36 +851,110 @@ impl UnlockedVault {
                 &row.wrapped_project_key,
                 "project key",
             ),
-            "vault+password" => self
-                .project_keys
-                .get(&row.id)
-                .cloned()
-                .ok_or_else(|| CoreError::ProjectLocked(row.name.clone())),
+            "vault+password" => {
+                let (key, wrap_hash) = self
+                    .project_keys
+                    .get(&row.id)
+                    .ok_or_else(|| CoreError::ProjectLocked(row.name.clone()))?;
+                // A concurrent session may have changed the project password
+                // (rotating the key). The cached key must match the wrap it
+                // was unwrapped from, or it would encrypt new values under a
+                // key that no longer has any wrap anywhere.
+                if blake3::hash(&row.wrapped_project_key).as_bytes() != wrap_hash {
+                    return Err(CoreError::ProjectLocked(row.name.clone()));
+                }
+                Ok(key.clone())
+            }
             _ => Err(CoreError::VaultCorrupted("unknown project key wrap mode")),
         }
     }
 
-    /// Add (or change) a project password. The project key gets an inner
-    /// password wrap; losing the password makes the project's credential
-    /// values unrecoverable (documented recovery limitation).
-    pub fn set_project_password(&mut self, ident: &str, password: &SecretString) -> Result<()> {
+    /// Generate a fresh project key and re-encrypt every credential value
+    /// (and retained version) of the project under it, inside the given
+    /// transaction. Called whenever a project password is set, changed, or
+    /// removed: re-wrapping the *same* key would leave the previous wrap —
+    /// recoverable from WAL remnants or old backups by whoever could open
+    /// it — as a live path to the data. Rotation makes old wraps worthless.
+    fn rotate_project_key(
+        tx: &rusqlite::Transaction<'_>,
+        vault_id: &str,
+        project_id: &str,
+        old_key: &SecretBytes,
+    ) -> Result<SecretBytes> {
+        let new_key = crypto::new_key();
+        let creds: Vec<(String, Vec<u8>)> = tx
+            .prepare(
+                "SELECT id, ciphertext FROM credentials
+                 WHERE project_id = ?1 AND ciphertext IS NOT NULL",
+            )?
+            .query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (cred_id, ciphertext) in creds {
+            let aad = aad::credential_value(vault_id, project_id, &cred_id);
+            let plain = crypto::decrypt(old_key, &aad, &ciphertext, "credential value")?;
+            let reencrypted = crypto::encrypt(&new_key, &aad, plain.expose())?;
+            tx.execute(
+                "UPDATE credentials SET ciphertext = ?1 WHERE id = ?2",
+                params![reencrypted, cred_id],
+            )?;
+        }
+        let versions: Vec<(String, i64, Vec<u8>)> = tx
+            .prepare(
+                "SELECT v.credential_id, v.version, v.ciphertext
+                 FROM credential_versions v
+                 JOIN credentials c ON c.id = v.credential_id
+                 WHERE c.project_id = ?1",
+            )?
+            .query_map([project_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (cred_id, version, ciphertext) in versions {
+            let aad = aad::credential_version(vault_id, project_id, &cred_id, version);
+            let plain = crypto::decrypt(old_key, &aad, &ciphertext, "credential version")?;
+            let reencrypted = crypto::encrypt(&new_key, &aad, plain.expose())?;
+            tx.execute(
+                "UPDATE credential_versions SET ciphertext = ?1
+                 WHERE credential_id = ?2 AND version = ?3",
+                params![reencrypted, cred_id, version],
+            )?;
+        }
+        Ok(new_key)
+    }
+
+    /// Add (or change) a project password. A FRESH project key is generated
+    /// and every value re-encrypted, so wraps that predate the password
+    /// (which may survive in WAL remnants or old backups) cannot unlock the
+    /// data. Losing the password makes the project's credential values
+    /// unrecoverable (documented recovery limitation).
+    pub fn set_project_password(
+        &mut self,
+        ident: &str,
+        password: &SecretString,
+        master_password: &SecretString,
+    ) -> Result<()> {
+        // Setting/changing a project password rotates the project key and
+        // destroys the old wrap on disk — a sensitive, hard-to-reverse
+        // change, so it requires proving the master password like every
+        // other secret-changing operation.
+        self.verify_master_password(master_password)?;
         validate_password(password, "the project password")?;
         let row = self.project_row_by_ident(ident)?;
-        let project_key = self.project_key_for_row(&row)?;
+        let old_key = self.project_key_for_row(&row)?;
         let kdf = KdfParams::recommended();
         let salt = crypto::new_salt();
         let kek = crypto::derive_key(password, &salt, &kdf)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let inner = crypto::encrypt(
             &kek,
             &aad::project_key_password(&self.vault_id, &row.id),
-            project_key.expose(),
+            new_key.expose(),
         )?;
         let outer = crypto::encrypt(
             &self.vault_key,
             &aad::project_key(&self.vault_id, &row.id),
             &inner,
         )?;
-        self.conn.execute(
+        tx.execute(
             "UPDATE projects SET wrapped_project_key = ?1, key_wrap_mode = 'vault+password',
              project_kdf_params = ?2, project_salt = ?3, updated_at = ?4 WHERE id = ?5",
             params![
@@ -837,10 +965,20 @@ impl UnlockedVault {
                 row.id
             ],
         )?;
+        tx.commit()?;
         // The caller just proved knowledge of the password; keep it unlocked
-        // for this session.
-        self.project_keys.insert(row.id.clone(), project_key);
-        audit::record(&self.conn, "project_password_set", Some(&row.id), None, "")?;
+        // for this session (paired with the new wrap's hash).
+        self.project_keys
+            .insert(row.id.clone(), (new_key, *blake3::hash(&outer).as_bytes()));
+        audit::record(
+            &self.conn,
+            "project_password_set",
+            Some(&row.id),
+            None,
+            "project key rotated",
+        )?;
+        // Old wraps and old ciphertexts must not linger in the WAL.
+        db::checkpoint_truncate(&self.conn);
         Ok(())
     }
 
@@ -881,7 +1019,13 @@ impl UnlockedVault {
             )));
         }
         let project_key = self.unwrap_project_key_with_password(&row, password)?;
-        self.project_keys.insert(row.id.clone(), project_key);
+        self.project_keys.insert(
+            row.id.clone(),
+            (
+                project_key,
+                *blake3::hash(&row.wrapped_project_key).as_bytes(),
+            ),
+        );
         audit::record(&self.conn, "project_unlocked", Some(&row.id), None, "")?;
         self.project_model(&row)
     }
@@ -910,25 +1054,29 @@ impl UnlockedVault {
                 row.name
             )));
         }
-        let project_key = self.unwrap_project_key_with_password(&row, password)?;
+        let old_key = self.unwrap_project_key_with_password(&row, password)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let wrapped = crypto::encrypt(
             &self.vault_key,
             &aad::project_key(&self.vault_id, &row.id),
-            project_key.expose(),
+            new_key.expose(),
         )?;
-        self.conn.execute(
+        tx.execute(
             "UPDATE projects SET wrapped_project_key = ?1, key_wrap_mode = 'vault',
              project_kdf_params = NULL, project_salt = NULL, updated_at = ?2 WHERE id = ?3",
             params![wrapped, clock::now_rfc3339(), row.id],
         )?;
+        tx.commit()?;
         self.project_keys.remove(&row.id);
         audit::record(
             &self.conn,
             "project_password_removed",
             Some(&row.id),
             None,
-            "",
+            "project key rotated",
         )?;
+        db::checkpoint_truncate(&self.conn);
         Ok(())
     }
 
@@ -1801,6 +1949,9 @@ impl UnlockedVault {
     /// and reuse, and auto-resolve conditions that no longer hold.
     pub fn run_monitor(&self) -> Result<MonitorSummary> {
         let now = clock::now_rfc3339();
+        // Close injection-session rows whose recorded process died with its
+        // launcher (best-effort liveness probe; Unix only).
+        let _ = crate::inject::sweep_dead_sessions(&self.conn);
         let cost_source = self.budget_cost_source()?;
         let credentials = self.list_credentials(None)?;
         let mut active_keys: Vec<String> = Vec::new();
@@ -2554,7 +2705,9 @@ impl UnlockedVault {
             .query_row(
                 "SELECT admin_credential_id, last_synced_at, last_status, detail,
                         admin_key_ciphertext IS NOT NULL, admin_key_masked, org_label,
-                        connected_at, last_success_at, last_failure_at, last_error
+                        connected_at, last_success_at, last_failure_at, last_error,
+                        account_id, account_email, account_name, account_plan,
+                        account_source, account_synced_at
                  FROM provider_connections WHERE provider = ?1",
                 [&provider],
                 |r| {
@@ -2573,6 +2726,12 @@ impl UnlockedVault {
                         last_success_at: r.get(8)?,
                         last_failure_at: r.get(9)?,
                         last_error: r.get(10)?,
+                        account_id: r.get(11)?,
+                        account_email: r.get(12)?,
+                        account_name: r.get(13)?,
+                        account_plan: r.get(14)?,
+                        account_source: r.get(15)?,
+                        account_synced_at: r.get(16)?,
                         stale: false,
                     })
                 },
@@ -2591,6 +2750,12 @@ impl UnlockedVault {
             last_success_at: None,
             last_failure_at: None,
             last_error: String::new(),
+            account_id: None,
+            account_email: None,
+            account_name: None,
+            account_plan: None,
+            account_source: None,
+            account_synced_at: None,
             stale: false,
         });
         status.stale = self.connection_is_stale(&status);
@@ -2610,6 +2775,71 @@ impl UnlockedVault {
             (None, Some(connected)) => connected < &threshold,
             (None, None) => true,
         }
+    }
+
+    /// Synchronize provider-account identity from the provider's official
+    /// endpoint (GitHub `/user`, Stripe `/v1/account`, Supabase
+    /// `/v1/organizations`, Anthropic `/v1/organizations/me`). Stores only
+    /// what the provider reported, with source and time. OpenAI has no
+    /// documented account-identity endpoint — reported honestly as
+    /// unsupported (the user-entered organization label stands in, labeled
+    /// as user-entered).
+    pub fn provider_account_sync(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<crate::connectors::AccountInfo> {
+        let provider = crate::providers::normalize(provider);
+        let secret = self.provider_admin_secret(&provider)?;
+        let info = match provider.as_str() {
+            "anthropic" => {
+                let (id, name) = crate::anthropic::fetch_organization(http, &secret)?;
+                crate::connectors::AccountInfo {
+                    account_id: id,
+                    email: None,
+                    name,
+                    plan: None,
+                    source: "Anthropic GET /v1/organizations/me".to_string(),
+                }
+            }
+            "openai" => {
+                return Err(CoreError::Unsupported {
+                    provider: "openai".into(),
+                    capability: "fetch_account",
+                    hint: "OpenAI's Admin API has no documented account-identity endpoint; \
+                           the organization label you entered at connect time is shown \
+                           instead (labeled user-entered)"
+                        .into(),
+                })
+            }
+            other => {
+                let connector = self.connector_for(other)?;
+                connector.fetch_account(http, &secret)?
+            }
+        };
+        self.conn.execute(
+            "UPDATE provider_connections SET
+               account_id = ?2, account_email = ?3, account_name = ?4,
+               account_plan = ?5, account_source = ?6, account_synced_at = ?7
+             WHERE provider = ?1",
+            params![
+                provider,
+                info.account_id,
+                info.email,
+                info.name,
+                info.plan,
+                info.source,
+                clock::now_rfc3339(),
+            ],
+        )?;
+        crate::audit::record(
+            &self.conn,
+            "provider_account_synced",
+            None,
+            None,
+            &format!("provider {provider} via {}", info.source),
+        )?;
+        Ok(info)
     }
 
     /// All provider connections (for monitoring and UI).
@@ -2877,14 +3107,21 @@ impl UnlockedVault {
         }
 
         // Local estimates only where the model is known — never for cost
-        // rows, which carry the provider-reported amount instead.
+        // rows, which carry the provider-reported amount instead. Pricing
+        // resolves as of the usage window's date, so re-syncs re-derive the
+        // same estimate a window originally got even after prices change.
         for row in usage_rows.iter_mut() {
             if let (Some(model), Some(inp), Some(out)) =
                 (&row.model, row.input_tokens, row.output_tokens)
             {
-                if let Some(est) =
-                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
-                {
+                if let Some(est) = crate::pricing::estimate_token_cost_as_of(
+                    &self.conn,
+                    provider,
+                    model,
+                    &row.window_start,
+                    inp,
+                    out,
+                )? {
                     row.estimated_cost_micros = Some(est.micros);
                 }
             }
@@ -3053,9 +3290,14 @@ impl UnlockedVault {
             if let (Some(model), Some(inp), Some(out)) =
                 (&row.model, row.input_tokens, row.output_tokens)
             {
-                if let Some(est) =
-                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
-                {
+                if let Some(est) = crate::pricing::estimate_token_cost_as_of(
+                    &self.conn,
+                    provider,
+                    model,
+                    &row.window_start,
+                    inp,
+                    out,
+                )? {
                     row.estimated_cost_micros = Some(est.micros);
                 }
             }
@@ -3190,9 +3432,14 @@ impl UnlockedVault {
             if let (Some(model), Some(inp), Some(out)) =
                 (&snap.model, snap.input_tokens, snap.output_tokens)
             {
-                if let Some(est) =
-                    crate::pricing::estimate_token_cost(&tx, provider, model, inp, out)?
-                {
+                if let Some(est) = crate::pricing::estimate_token_cost_as_of(
+                    &tx,
+                    provider,
+                    model,
+                    &snap.window_start,
+                    inp,
+                    out,
+                )? {
                     snap.estimated_cost_micros = Some(est.micros);
                 }
             }
@@ -3557,10 +3804,11 @@ impl UnlockedVault {
         snap.source = "manual".into();
         snap.attribution = usage::Attribution::ExactCredential;
         if let Some(m) = model {
-            if let Some(est) = crate::pricing::estimate_token_cost(
+            if let Some(est) = crate::pricing::estimate_token_cost_as_of(
                 &self.conn,
                 &cred.provider,
                 m,
+                window_start,
                 input_tokens,
                 output_tokens,
             )? {
@@ -3668,26 +3916,257 @@ impl UnlockedVault {
         crate::activity::list(&self.conn, limit, cred_id.as_deref())
     }
 
+    /// The full pricing history (bundled + imported + overrides).
     pub fn pricing_catalog(&self) -> Result<Vec<crate::pricing::PricingRecord>> {
         crate::pricing::catalog(&self.conn)
+    }
+
+    /// The record that would price each known model today.
+    pub fn pricing_effective(&self, as_of: &str) -> Result<Vec<crate::pricing::PricingRecord>> {
+        crate::pricing::effective_catalog(&self.conn, as_of)
+    }
+
+    /// The record that would price this provider/model at the given date.
+    pub fn pricing_lookup(
+        &self,
+        provider: &str,
+        model: &str,
+        as_of: &str,
+    ) -> Result<Option<crate::pricing::PricingRecord>> {
+        crate::pricing::lookup_as_of(&self.conn, provider, model, as_of)
     }
 
     pub fn set_pricing_override(
         &self,
         provider: &str,
         model: &str,
-        input_dollars_per_m: &str,
-        output_dollars_per_m: &str,
-        note: &str,
+        spec: crate::pricing::OverrideSpec,
     ) -> Result<()> {
-        crate::pricing::set_override(
+        crate::pricing::set_override(&self.conn, provider, model, spec)
+    }
+
+    pub fn remove_pricing_override(&self, provider: &str, model: &str) -> Result<usize> {
+        crate::pricing::remove_override(&self.conn, provider, model)
+    }
+
+    /// Import reviewed pricing records from interchange JSON.
+    pub fn pricing_import(&self, json: &str) -> Result<crate::pricing::ImportOutcome> {
+        crate::pricing::import_records(&self.conn, json)
+    }
+
+    /// Export pricing records (bundled + local) as interchange JSON.
+    pub fn pricing_export(&self, provider: Option<&str>) -> Result<String> {
+        crate::pricing::export_records(&self.conn, provider)
+    }
+
+    /// A proposed-update template for one provider, for review and import.
+    pub fn pricing_propose(&self, provider: &str) -> Result<String> {
+        crate::pricing::proposal_template(&self.conn, provider)
+    }
+
+    // --- Project templates and stack detection ---
+
+    /// Apply a project template: create the project if it does not exist
+    /// (with the template's environment classifications), record the
+    /// application, and optionally write a `.env.example` (names only)
+    /// into a directory. Never creates credentials — the returned
+    /// `next_steps` are the explicit commands that do.
+    pub fn template_apply(
+        &mut self,
+        template_id: &str,
+        project_name: &str,
+        write_example_dir: Option<&Path>,
+    ) -> Result<TemplateApplyOutcome> {
+        let template = crate::templates::find(template_id).ok_or_else(|| {
+            CoreError::InvalidInput(format!(
+                "unknown template '{template_id}' (see `template list`)"
+            ))
+        })?;
+        let project = match self.get_project(project_name) {
+            Ok(p) => p,
+            Err(CoreError::NotFound { .. }) => {
+                let environments = template
+                    .environments
+                    .iter()
+                    .filter_map(|e| e.parse::<crate::model::Environment>().ok())
+                    .collect();
+                self.create_project(NewProject {
+                    name: project_name.to_string(),
+                    description: template.description.clone(),
+                    notes: String::new(),
+                    environments,
+                    repo_paths: Vec::new(),
+                })?
+            }
+            Err(e) => return Err(e),
+        };
+        self.conn.execute(
+            "INSERT INTO project_templates (project_id, template_id, applied_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_id, template_id) DO UPDATE SET
+             applied_at = excluded.applied_at",
+            params![project.id, template.id, clock::now_rfc3339()],
+        )?;
+        let example_content = crate::templates::render_env_example(&template);
+        let example_path = match write_example_dir {
+            None => None,
+            Some(dir) => {
+                let path = dir.join(".env.example");
+                // Refuse to overwrite: an existing example may carry the
+                // user's own entries. They can merge manually.
+                crate::envgov::write_new(&path, &example_content).map_err(|e| {
+                    CoreError::InvalidInput(format!(
+                        "could not write {} ({e}); if it already exists, merge the \
+                         template's entries manually",
+                        path.display()
+                    ))
+                })?;
+                Some(path.display().to_string())
+            }
+        };
+        crate::audit::record(
             &self.conn,
-            provider,
-            model,
-            crate::pricing::dollars_to_micros(input_dollars_per_m)?,
-            crate::pricing::dollars_to_micros(output_dollars_per_m)?,
-            note,
-        )
+            "template_applied",
+            Some(&project.id),
+            None,
+            &format!("template {}", template.id),
+        )?;
+        Ok(TemplateApplyOutcome {
+            next_steps: crate::templates::next_steps(&template, &project.name),
+            project,
+            template,
+            example_path,
+            example_content,
+        })
+    }
+
+    /// Which templates have been applied to a project.
+    pub fn project_templates(&self, project: &str) -> Result<Vec<(String, String)>> {
+        let p = self.project_row_by_ident(project)?;
+        let mut stmt = self.conn.prepare(
+            "SELECT template_id, applied_at FROM project_templates
+             WHERE project_id = ?1 ORDER BY applied_at",
+        )?;
+        let rows = stmt
+            .query_map(params![p.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    fn stack_repo_key(repo: &Path) -> String {
+        repo.canonicalize()
+            .unwrap_or_else(|_| repo.to_path_buf())
+            .display()
+            .to_string()
+    }
+
+    /// Detect the stack of one repository directory: deterministic rules
+    /// over static files, combined with this vault's stored confirm/dismiss
+    /// history. Nothing is executed and nothing leaves the machine.
+    pub fn stack_detect_path(&self, repo: &Path) -> Result<crate::stackdetect::DetectionReport> {
+        if !repo.is_dir() {
+            return Err(CoreError::InvalidInput(format!(
+                "'{}' is not a directory",
+                repo.display()
+            )));
+        }
+        let key = Self::stack_repo_key(repo);
+        let signals = crate::stackdetect::detect(repo)?;
+        let mut prior = std::collections::BTreeMap::new();
+        let mut stmt = self
+            .conn
+            .prepare("SELECT template_id, decision FROM stack_preferences WHERE repo_path = ?1")?;
+        for row in stmt.query_map(params![key], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (t, d) = row?;
+            prior.insert(t, d);
+        }
+        let suggestions = crate::stackdetect::suggest(&signals, &prior);
+        Ok(crate::stackdetect::DetectionReport {
+            repo_path: key,
+            signals,
+            suggestions,
+        })
+    }
+
+    /// Detect the stack of every repository registered on a project.
+    pub fn stack_detect_project(
+        &self,
+        project: &str,
+    ) -> Result<Vec<crate::stackdetect::DetectionReport>> {
+        let p = self.get_project(project)?;
+        let mut out = Vec::new();
+        for repo in &p.repo_paths {
+            match self.stack_detect_path(Path::new(repo)) {
+                Ok(report) => out.push(report),
+                Err(CoreError::InvalidInput(_)) => continue, // missing dir
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Record the user's decision about a suggestion. `confirmed` boosts
+    /// the suggestion in future runs; `dismissed` hides it (still listed
+    /// with its decision). This decision history is the entire "learning"
+    /// store and can be reset at any time.
+    pub fn stack_decide(&self, repo: &Path, template_id: &str, decision: &str) -> Result<()> {
+        if decision != "confirmed" && decision != "dismissed" {
+            return Err(CoreError::InvalidInput(
+                "decision must be 'confirmed' or 'dismissed'".into(),
+            ));
+        }
+        if crate::templates::find(template_id).is_none() {
+            return Err(CoreError::InvalidInput(format!(
+                "unknown template '{template_id}'"
+            )));
+        }
+        self.conn.execute(
+            "INSERT INTO stack_preferences (repo_path, template_id, decision, decided_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(repo_path, template_id) DO UPDATE SET
+             decision = excluded.decision, decided_at = excluded.decided_at",
+            params![
+                Self::stack_repo_key(repo),
+                template_id.to_lowercase(),
+                decision,
+                clock::now_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every stored stack-detection decision.
+    pub fn stack_preferences(&self) -> Result<Vec<StackPreference>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT repo_path, template_id, decision, decided_at
+             FROM stack_preferences ORDER BY repo_path, template_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(StackPreference {
+                    repo_path: r.get(0)?,
+                    template_id: r.get(1)?,
+                    decision: r.get(2)?,
+                    decided_at: r.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete learned stack decisions — for one repository, or all of them
+    /// (`repo = None`). Returns how many rows were removed.
+    pub fn stack_preferences_reset(&self, repo: Option<&Path>) -> Result<usize> {
+        let n = match repo {
+            Some(r) => self.conn.execute(
+                "DELETE FROM stack_preferences WHERE repo_path = ?1",
+                params![Self::stack_repo_key(r)],
+            )?,
+            None => self.conn.execute("DELETE FROM stack_preferences", [])?,
+        };
+        Ok(n)
     }
 
     // --- Process injection ---
@@ -4487,6 +4966,19 @@ impl UnlockedVault {
         let path = &parent.join(path.file_name().ok_or_else(|| {
             CoreError::InvalidInput("the export target must be a file path".into())
         })?);
+        // Refuse a symlink target outright: the atomic rename would replace
+        // the link node rather than follow it, but an export "through" a
+        // link is almost certainly a mistake (or an attempt to redirect the
+        // plaintext), so it gets a clear refusal instead of surprises.
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is a symbolic link; refusing to export secrets through it — \
+                     remove the link or export to the real file path",
+                    path.display()
+                )));
+            }
+        }
         if path.exists() && !overwrite {
             return Err(CoreError::InvalidInput(format!(
                 "{} already exists; pass the overwrite flag to replace it",
@@ -5144,6 +5636,33 @@ impl UnlockedVault {
                     account: cfg("account").unwrap_or_else(|| "api-tracker".to_string()),
                 }))
             }
+            "linux_secret_service" => {
+                if !cfg!(target_os = "linux") {
+                    return Err(CoreError::Unsupported {
+                        provider: dest.kind.clone(),
+                        capability: "destination",
+                        hint: "the Secret Service is only available on Linux".into(),
+                    });
+                }
+                Ok(Box::new(d::SecretServiceDestination {
+                    runner,
+                    service: cfg("service").unwrap_or_else(|| "api-tracker".to_string()),
+                }))
+            }
+            "windows_credential_manager" => {
+                #[cfg(windows)]
+                {
+                    return Ok(Box::new(d::WindowsCredentialDestination));
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(CoreError::Unsupported {
+                        provider: dest.kind.clone(),
+                        capability: "destination",
+                        hint: "the Credential Manager is only available on Windows".into(),
+                    })
+                }
+            }
             "aws_secrets_manager" => {
                 let region = cfg("region").ok_or_else(|| {
                     CoreError::InvalidInput("AWS destination config needs a region".into())
@@ -5219,6 +5738,39 @@ impl UnlockedVault {
                 Err(e)
             }
         }
+    }
+
+    /// Delete a secret at a destination. Destructive and reauthentication-
+    /// gated; the returned message states the destination's real deletion
+    /// semantics (AWS schedules a 30-day recovery window; GitHub/Vercel and
+    /// the OS stores delete immediately).
+    pub fn destination_delete_secret(
+        &self,
+        ident: &str,
+        secret_name: &str,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<String> {
+        self.verify_master_password(master_password)?;
+        let dest = crate::destinations::get(&self.conn, ident)?;
+        let adapter = self.destination_adapter(&dest, http, runner)?;
+        adapter.delete(secret_name)?;
+        crate::audit::record(
+            &self.conn,
+            "destination_secret_deleted",
+            None,
+            None,
+            &format!("destination {} secret {secret_name}", dest.name),
+        )?;
+        Ok(if dest.kind == "aws_secrets_manager" {
+            format!(
+                "scheduled deletion of '{secret_name}' with the 30-day recovery window \
+                 (RestoreSecret in AWS can cancel until the deletion date)"
+            )
+        } else {
+            format!("deleted '{secret_name}' at destination '{}'", dest.name)
+        })
     }
 
     /// Attach a credential to a destination under a secret name.
@@ -7737,6 +8289,28 @@ pub struct RotationView {
     pub waiting_on: Option<String>,
 }
 
+/// The outcome of applying a project template.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TemplateApplyOutcome {
+    pub project: Project,
+    pub template: crate::templates::Template,
+    /// Where `.env.example` was written, if requested.
+    pub example_path: Option<String>,
+    /// The rendered `.env.example` content (names only, never values).
+    pub example_content: String,
+    /// The explicit commands that add the template's secret credentials.
+    pub next_steps: Vec<String>,
+}
+
+/// One stored stack-detection decision.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StackPreference {
+    pub repo_path: String,
+    pub template_id: String,
+    pub decision: String,
+    pub decided_at: String,
+}
+
 /// A provider connection's stored state (no secrets; the key is masked).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ProviderConnection {
@@ -7756,6 +8330,16 @@ pub struct ProviderConnection {
     pub last_error: String,
     pub last_status: String,
     pub detail: String,
+    /// Provider-reported account identity (official endpoints only; never
+    /// derived from a credential's appearance). None = never synced or the
+    /// provider does not report it.
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub account_name: Option<String>,
+    pub account_plan: Option<String>,
+    /// The official endpoint the account fields came from.
+    pub account_source: Option<String>,
+    pub account_synced_at: Option<String>,
     /// True when synced data is older than the configured staleness window.
     pub stale: bool,
 }

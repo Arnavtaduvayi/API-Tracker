@@ -88,3 +88,43 @@ Usage attribution **varies by provider** and is always labeled:
   recorded during validation and drives expiry status with a
   "provider-reported" source label. No current provider issues short-lived
   credentials via API; API Tracker says so rather than simulating it.
+
+## Provider-account identity (official endpoints only)
+
+`api-tracker provider account <id> [--sync]` (and the desktop connection
+panel) stores only what an official endpoint reports, with its source and
+sync time — never anything derived from a credential's appearance:
+
+| Provider | Endpoint | Fields stored |
+| --- | --- | --- |
+| GitHub | `GET /user` | login, numeric id, email (when the token's scope exposes it), plan name |
+| Stripe | `GET /v1/account` | account id, email, business/display name |
+| Supabase | `GET /v1/organizations` | org id + name when exactly one org is visible; otherwise only the count (never a guess) |
+| Anthropic | `GET /v1/organizations/me` | organization id + name (admin key) |
+| OpenAI | — | none: the Admin API has no documented account-identity endpoint. The org label you enter at connect time is shown, labeled "user-entered, not provider-verified". |
+
+Provider account **passwords, recovery codes, MFA material, and browser
+session data are intentionally excluded** — API Tracker is a credential
+manager, not a password manager (FEATURE_MATRIX #16). Every manifest also
+carries the provider's official console-login and billing-portal URLs
+(`provider docs`).
+
+## Optional live verification — what each test needs
+
+Normal development and CI use fixtures only. The opt-in scripts
+(`scripts/live_verify_*.sh`) each use a throwaway vault, hidden prompts,
+and self-cleaning; none runs in CI. What they require and can cost:
+
+| Script | Credential needed | Plan needed | Billable activity | Max expected cost |
+| --- | --- | --- | --- | --- |
+| `live_verify_openai.sh` | Admin API key (org settings) | any org | none (admin endpoints are free) | $0 |
+| `live_verify_anthropic.sh` | Admin API key | any org | none | $0 |
+| `live_verify_github.sh` | fine-grained PAT, Plan: read | any | none | $0 |
+| `live_verify_stripe.sh` | secret key (test mode fine) | any | none (reads) | $0 |
+| `live_verify_aws.sh` | IAM key scoped to secretsmanager on `api-tracker-live-verify-*` | any AWS account | creates + deletes ONE disposable secret | < $0.05 |
+| `live_verify_github_actions.sh` | PAT with secrets access to a THROWAWAY repo | any | none | $0 |
+| `live_verify_vercel.sh` | access token; THROWAWAY project | any | none | $0 |
+
+Each script shows the exact provider actions and asks for a typed
+confirmation before any write; disposable resources are cleaned up and
+cleanup failures are reported loudly with manual instructions.

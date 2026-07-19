@@ -19,6 +19,15 @@ pub enum ProviderCmd {
     Docs { provider: String },
     /// Show a provider's capability matrix (honest support levels).
     Capabilities { provider: String },
+    /// Show (or --sync) provider-reported account identity for a
+    /// connection. Only official endpoints; OpenAI reports none and the
+    /// user-entered organization label stands in, labeled as such.
+    Account {
+        provider: String,
+        /// Fetch fresh account identity from the provider now.
+        #[arg(long)]
+        sync: bool,
+    },
     /// Connect a provider's administrative account for usage/cost sync.
     /// Prompts for the admin key (OpenAI Admin API key) and stores it
     /// encrypted in the vault; it can later be replaced or removed but never
@@ -157,6 +166,12 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 println!("API docs:        {}", m.api_docs_url);
                 println!("Auth docs:       {}", m.auth_docs_url);
                 println!("Manage keys:     {}", m.manage_url);
+                if !m.login_url.is_empty() {
+                    println!("Console login:   {}", m.login_url);
+                }
+                if !m.billing_url.is_empty() {
+                    println!("Billing portal:  {}", m.billing_url);
+                }
                 println!("Website:         {}", m.website);
                 if !m.watch_docs.is_empty() {
                     println!("Watchable pages:");
@@ -322,12 +337,86 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 if !status.last_error.is_empty() {
                     println!("Last error:    {}", status.last_error);
                 }
+                if let Some(at) = &status.account_synced_at {
+                    println!(
+                        "Account:       {} <{}> id={} plan={}",
+                        render::sanitize(status.account_name.as_deref().unwrap_or("-")),
+                        render::sanitize(status.account_email.as_deref().unwrap_or("-")),
+                        render::sanitize(status.account_id.as_deref().unwrap_or("-")),
+                        render::sanitize(status.account_plan.as_deref().unwrap_or("-")),
+                    );
+                    println!(
+                        "               provider-reported via {} at {at}",
+                        status.account_source.as_deref().unwrap_or("?")
+                    );
+                } else if status.connected {
+                    println!(
+                        "Account:       not synced (run `provider account {} --sync`)",
+                        m.id
+                    );
+                }
                 if status.stale {
                     println!(
                         "WARNING: synced data is STALE — run `api-tracker provider sync {}`.",
                         m.id
                     );
                 }
+            });
+        }
+        ProviderCmd::Account { provider, sync } => {
+            let m = find(&provider)?;
+            let (vault, _t) = ctx.unlocked()?;
+            if sync {
+                let http = api_tracker_core::http::UreqClient::new();
+                let info = vault.provider_account_sync(&m.id, &http)?;
+                println!(
+                    "Synced account identity from {} — every field below is \
+                     provider-reported.",
+                    info.source
+                );
+            }
+            let status = vault.provider_connection_status(&m.id)?;
+            render::emit(ctx.json, &status, || {
+                println!("Provider:  {}", m.name);
+                match &status.account_synced_at {
+                    Some(at) => {
+                        println!(
+                            "Name:      {}",
+                            render::sanitize(status.account_name.as_deref().unwrap_or("-"))
+                        );
+                        println!(
+                            "Email:     {}",
+                            render::sanitize(status.account_email.as_deref().unwrap_or("-"))
+                        );
+                        println!(
+                            "Id:        {}",
+                            render::sanitize(status.account_id.as_deref().unwrap_or("-"))
+                        );
+                        println!(
+                            "Plan:      {}",
+                            render::sanitize(status.account_plan.as_deref().unwrap_or("-"))
+                        );
+                        println!(
+                            "Source:    {} (provider-reported, synced {at})",
+                            status.account_source.as_deref().unwrap_or("?")
+                        );
+                    }
+                    None => println!(
+                        "No provider-reported account identity stored. Run with --sync \
+                         (needs a connection: `provider connect {}`).",
+                        m.id
+                    ),
+                }
+                if let Some(org) = &status.org_label {
+                    println!("Org label: {} (user-entered, not provider-verified)", org);
+                }
+                if !m.login_url.is_empty() {
+                    println!("Login:     {}", m.login_url);
+                }
+                if !m.billing_url.is_empty() {
+                    println!("Billing:   {}", m.billing_url);
+                }
+                println!("Manage:    {}", m.manage_url);
             });
         }
         ProviderCmd::Keys { provider } => {

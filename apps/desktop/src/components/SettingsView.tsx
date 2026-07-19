@@ -44,6 +44,11 @@ export function SettingsView(props: { dataDir: string; onSaved?: () => void }) {
   const [settings, setSettings] = useState<VaultSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [newPw2, setNewPw2] = useState("");
+  const [pwError, setPwError] = useState<string | null>(null);
+  const [pwNotice, setPwNotice] = useState<string | null>(null);
 
   useEffect(() => {
     api
@@ -93,6 +98,69 @@ export function SettingsView(props: { dataDir: string; onSaved?: () => void }) {
         {error && <p className="error">{error}</p>}
         {notice && <p className="notice">{notice}</p>}
         <button type="submit">Save settings</button>
+      </form>
+
+      <h2>Change master password</h2>
+      <p className="muted">
+        Re-wraps the vault key under the new password; no data is re-encrypted. Backups made
+        before the change still open with the old password — consider creating a fresh backup
+        afterwards.
+      </p>
+      <form
+        className="stack"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setPwError(null);
+          setPwNotice(null);
+          if (newPw !== newPw2) {
+            setPwError("The new passwords do not match.");
+            return;
+          }
+          void (async () => {
+            try {
+              await api.vaultChangePassword(currentPw, newPw);
+              setPwNotice("Master password changed. Create a fresh backup when convenient.");
+              setCurrentPw("");
+              setNewPw("");
+              setNewPw2("");
+            } catch (err) {
+              setPwError(isApiError(err) ? err.message : String(err));
+            }
+          })();
+        }}
+      >
+        <label className="field">
+          Current master password
+          <input
+            type="password"
+            value={currentPw}
+            onChange={(e) => setCurrentPw(e.target.value)}
+            required
+          />
+        </label>
+        <label className="field">
+          New master password (12+ characters; a long passphrase is strongest)
+          <input
+            type="password"
+            value={newPw}
+            onChange={(e) => setNewPw(e.target.value)}
+            required
+          />
+        </label>
+        <label className="field">
+          Confirm new master password
+          <input
+            type="password"
+            value={newPw2}
+            onChange={(e) => setNewPw2(e.target.value)}
+            required
+          />
+        </label>
+        {pwError && <p className="error">{pwError}</p>}
+        {pwNotice && <p className="notice">{pwNotice}</p>}
+        <button type="submit" disabled={!currentPw || !newPw}>
+          Change master password
+        </button>
       </form>
     </div>
   );

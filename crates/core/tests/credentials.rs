@@ -196,7 +196,7 @@ fn short_project_password_is_rejected() {
     let (_dir, _paths, mut vault) = new_vault();
     add_project(&mut vault, "secure");
     let err = vault
-        .set_project_password("secure", &SecretString::from("elevenchars"))
+        .set_project_password("secure", &SecretString::from("elevenchars"), &master_pw())
         .unwrap_err();
     assert!(matches!(err, CoreError::InvalidInput(_)));
     assert!(!vault.get_project("secure").unwrap().password_locked);
@@ -215,7 +215,7 @@ fn project_password_lock_flow() {
     );
 
     vault
-        .set_project_password("secure", &SecretString::from(PROJECT_PW))
+        .set_project_password("secure", &SecretString::from(PROJECT_PW), &master_pw())
         .unwrap();
     // Still unlocked in this session (we just set the password).
     assert!(vault.get_project("secure").unwrap().unlocked);
@@ -545,7 +545,11 @@ fn reference_reveal_requires_source_project_unlocked() {
         })
         .unwrap();
     vault
-        .set_project_password("vault-locked", &SecretString::from(PROJECT_PW))
+        .set_project_password(
+            "vault-locked",
+            &SecretString::from(PROJECT_PW),
+            &master_pw(),
+        )
         .unwrap();
     vault.lock_project("vault-locked").unwrap();
 

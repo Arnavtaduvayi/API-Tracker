@@ -11,6 +11,8 @@ manage_url = "https://platform.openai.com/api-keys"
 changelog_url = "https://platform.openai.com/docs/changelog"
 pricing_url = "https://openai.com/api/pricing/"
 permissions_docs_url = "https://platform.openai.com/docs/api-reference/authentication"
+login_url = "https://platform.openai.com/"
+billing_url = "https://platform.openai.com/settings/organization/billing/overview"
 # env_vars lists SECRET-bearing variables only (used for scan detection);
 # non-secret vars like OPENAI_ORG_ID / OPENAI_PROJECT_ID are deliberately excluded.
 env_vars = ["OPENAI_API_KEY", "OPENAI_ADMIN_KEY"]

@@ -558,13 +558,130 @@ CREATE TABLE notification_deliveries (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 8,
+        name: "versioned pricing records",
+        sql: r#"
+-- Effective-dated pricing records (imported files and manual overrides;
+-- the bundled table lives in code with the same shape). History is
+-- append-only by design: estimation resolves the record effective at the
+-- usage date, so new prices never silently reprice older usage.
+CREATE TABLE pricing_records (
+    id        TEXT PRIMARY KEY,
+    provider  TEXT NOT NULL,
+    model     TEXT NOT NULL,
+    unit      TEXT NOT NULL DEFAULT 'tokens',
+    input_price_per_m_micros        INTEGER,
+    cached_input_price_per_m_micros INTEGER,
+    output_price_per_m_micros       INTEGER,
+    batch_input_price_per_m_micros  INTEGER,
+    batch_output_price_per_m_micros INTEGER,
+    per_request_micros INTEGER,
+    currency  TEXT NOT NULL DEFAULT 'USD',
+    source    TEXT NOT NULL DEFAULT '',
+    effective_from TEXT NOT NULL,
+    last_verified  TEXT NOT NULL,
+    origin    TEXT NOT NULL,
+    version   INTEGER NOT NULL DEFAULT 1,
+    note      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(provider, model, origin, effective_from)
+) STRICT;
+
+-- Preserve legacy manual overrides. They predate effective dating, so they
+-- keep their historical semantics: applying to all usage dates.
+INSERT INTO pricing_records (id, provider, model, unit, input_price_per_m_micros,
+    output_price_per_m_micros, currency, source, effective_from, last_verified,
+    origin, version, note, created_at)
+SELECT id, provider, model, unit, input_price_per_m_micros, output_price_per_m_micros,
+    currency, 'manual override (' || note || ')', '1970-01-01', substr(created_at, 1, 10),
+    'override', 1, note, created_at
+FROM pricing_overrides;
+DROP TABLE pricing_overrides;
+"#,
+    },
+    Migration {
+        version: 9,
+        name: "project templates and local stack-detection preferences",
+        sql: r#"
+-- Which templates were applied to which projects (informational).
+CREATE TABLE project_templates (
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    template_id TEXT NOT NULL,
+    applied_at  TEXT NOT NULL,
+    PRIMARY KEY (project_id, template_id)
+) STRICT;
+
+-- Locally learned stack-detection decisions: the user's explicit
+-- confirm/dismiss history per repository and template. Deterministic
+-- rules + this table are the entire "learning" mechanism (no ML), and the
+-- table can be reset or cleared entirely at any time.
+CREATE TABLE stack_preferences (
+    repo_path   TEXT NOT NULL,
+    template_id TEXT NOT NULL,
+    decision    TEXT NOT NULL,
+    decided_at  TEXT NOT NULL,
+    PRIMARY KEY (repo_path, template_id)
+) STRICT;
+"#,
+    },
+    Migration {
+        version: 10,
+        name: "provider-account metadata (official endpoints only)",
+        sql: r#"
+-- Account identity reported by official provider endpoints (GitHub /user,
+-- Stripe /v1/account, Supabase /v1/organizations, Anthropic
+-- /v1/organizations/me). Only provider-reported values are stored, with
+-- their source and sync time; nothing is derived from credential
+-- appearance, and no login/password material exists anywhere.
+ALTER TABLE provider_connections ADD COLUMN account_id TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_email TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_name TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_plan TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_source TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_synced_at TEXT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
+    restrict_db_permissions(path);
     Ok(conn)
+}
+
+/// Owner-only permissions on the database and its WAL/SHM sidecars
+/// (defense in depth on top of the 0700 data directory). Best-effort;
+/// a no-op on non-Unix, where OS-inherited ACLs govern (documented).
+fn restrict_db_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for candidate in [
+            path.to_path_buf(),
+            path.with_extension("db-wal"),
+            path.with_extension("db-shm"),
+        ] {
+            if candidate.exists() {
+                let _ =
+                    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// Checkpoint and truncate the WAL so committed frames (which may hold
+/// pages from before a key rotation or secure delete) do not linger in the
+/// sidecar file. Best-effort by design: with a concurrent reader the
+/// checkpoint degrades gracefully instead of failing the caller.
+pub fn checkpoint_truncate(conn: &Connection) {
+    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
 }
 
 fn configure(conn: &Connection) -> Result<()> {

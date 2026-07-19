@@ -342,7 +342,7 @@ fn reuse_alerts_survive_a_password_locked_project_across_monitor_runs() {
 
     // Lock the prod project (drop its key from the session), then re-run.
     vault
-        .set_project_password("prod", &SecretString::from(PROJECT_PW))
+        .set_project_password("prod", &SecretString::from(PROJECT_PW), &master_pw())
         .unwrap();
     vault.lock_project("prod").unwrap();
     vault.run_monitor().unwrap();

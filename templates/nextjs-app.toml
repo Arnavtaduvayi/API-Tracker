@@ -1,0 +1,28 @@
+# Project template: Next.js application.
+id = "nextjs-app"
+name = "Next.js application"
+description = "A Next.js app, typically deployed to Vercel."
+providers = []
+environments = ["development", "staging", "production"]
+docs = [
+    "https://nextjs.org/docs/app/building-your-application/configuring/environment-variables",
+]
+destinations = ["env_mapping", "vercel"]
+credential_separation = """
+Anything prefixed NEXT_PUBLIC_ is inlined into the client bundle — it is
+PUBLIC by definition and must never hold a secret. Server-only secrets stay
+unprefixed and are read only in server code. Use separate values per Vercel
+environment (development / preview / production)."""
+permission_guidance = """
+Scope each provider key you add to what the server actually calls; the
+NEXT_PUBLIC_ boundary is your enforcement line between public and secret
+configuration."""
+rotation_guidance = """
+Deploy new values through a sync plan to the Vercel destination, then
+redeploy; Vercel injects environment variables at build/runtime, so a
+rotation is complete only after a redeploy."""
+
+[[env]]
+name = "NEXT_PUBLIC_APP_URL"
+secret = false
+description = "Public app URL; safe to expose (NEXT_PUBLIC_ is public)."

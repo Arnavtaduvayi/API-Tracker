@@ -183,11 +183,14 @@ pub fn discover(root: &Path) -> Result<Vec<EnvFileInfo>> {
             let Some(class) = classify_file_name(&name) else {
                 continue;
             };
+            // Relative paths are displayed, compared against git output, and
+            // stored — normalize to forward slashes so behavior is identical
+            // across platforms (git itself always reports forward slashes).
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(&path)
                 .to_string_lossy()
-                .into_owned();
+                .replace('\\', "/");
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             let doc = EnvDocument::parse(&content);
             let (git_status, in_history) = git_status_of(&root, &rel);
@@ -553,7 +556,51 @@ pub fn cleanup_exports(
             outcome,
         });
     }
+    sweep_orphaned_temp_files(conn);
     Ok(results)
+}
+
+/// Remove `.NAME.api-tracker-tmp-UUID` files orphaned by a crash between
+/// `atomic_write`'s write and rename. The sweep is tightly bounded: only
+/// the parent directories of RECORDED exports are examined (never a general
+/// filesystem walk), only files matching the temp-name pattern are touched,
+/// and only when they are over an hour old so an in-flight export in
+/// another process is never raced. Best-effort by design.
+fn sweep_orphaned_temp_files(conn: &Connection) {
+    let dirs: Vec<String> = conn
+        .prepare("SELECT DISTINCT path FROM env_exports")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    let mut parents: Vec<PathBuf> = dirs
+        .iter()
+        .filter_map(|p| PathBuf::from(p).parent().map(|d| d.to_path_buf()))
+        .collect();
+    parents.sort();
+    parents.dedup();
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for dir in parents {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_temp = name.starts_with('.') && name.contains(".api-tracker-tmp-");
+            if !is_temp {
+                continue;
+            }
+            let old_enough = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|m| m < hour_ago)
+                .unwrap_or(false);
+            if old_enough {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Whether `path` inside `repo_dir` is protected by .gitignore (or the

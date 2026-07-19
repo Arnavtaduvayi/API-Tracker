@@ -4,6 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccountInfo,
   AccessGrant,
   ActivityEvent,
   Alert,
@@ -36,6 +37,12 @@ import type {
   SessionKillResult,
   Suppression,
   PermissionsPreview,
+  DetectionReport,
+  PricingImportOutcome,
+  PricingRecord,
+  StackPreference,
+  Template,
+  TemplateApplyOutcome,
   Project,
   ProviderConnection,
   ProviderKeyListing,
@@ -87,6 +94,8 @@ export const api = {
   vaultUnlock: (password: string) => call<void>("vault_unlock", { password }),
   vaultLock: () => call<void>("vault_lock"),
   reauth: (password: string) => call<void>("reauth", { password }),
+  vaultChangePassword: (current: string, newPassword: string) =>
+    call<void>("vault_change_password", { current, new: newPassword }),
 
   settingsGet: () => call<VaultSettings>("settings_get"),
   settingsSet: (settings: VaultSettings) => call<void>("settings_set", { settings }),
@@ -157,8 +166,8 @@ export const api = {
   ) => call<Project>("project_update", { ident, ...args }),
   projectSetArchived: (ident: string, archived: boolean) =>
     call<Project>("project_set_archived", { ident, archived }),
-  projectSetPassword: (ident: string, password: string) =>
-    call<void>("project_set_password", { ident, password }),
+  projectSetPassword: (ident: string, password: string, master: string) =>
+    call<void>("project_set_password", { ident, password, master }),
   projectRemovePassword: (ident: string, password: string) =>
     call<void>("project_remove_password", { ident, password }),
   projectUnlock: (ident: string, password: string) =>
@@ -247,6 +256,8 @@ export const api = {
     }),
   providerConnectionStatus: (provider: string) =>
     call<ProviderConnection>("provider_connection_status", { provider }),
+  providerAccountSync: (provider: string) =>
+    call<AccountInfo>("provider_account_sync", { provider }),
   providerKeys: (provider: string) =>
     call<ProviderKeyOverview[]>("provider_keys", { provider }),
   providerProjects: (provider: string) =>
@@ -274,6 +285,40 @@ export const api = {
     }),
   budgetCostSourceGet: () => call<string>("budget_cost_source_get"),
   budgetCostSourceSet: (value: string) => call<void>("budget_cost_source_set", { value }),
+  pricingRecords: (all: boolean) => call<PricingRecord[]>("pricing_records", { all }),
+  pricingSetOverride: (args: {
+    provider: string;
+    model: string;
+    unit: "tokens" | "requests";
+    input: string | null;
+    output: string | null;
+    cachedInput: string | null;
+    perRequest: string | null;
+    note: string | null;
+  }) =>
+    call<void>("pricing_set_override", {
+      provider: args.provider,
+      model: args.model,
+      unit: args.unit,
+      input: args.input,
+      output: args.output,
+      cachedInput: args.cachedInput,
+      perRequest: args.perRequest,
+      note: args.note,
+    }),
+  pricingRemoveOverride: (provider: string, model: string) =>
+    call<number>("pricing_remove_override", { provider, model }),
+  pricingImport: (json: string) => call<PricingImportOutcome>("pricing_import", { json }),
+  pricingExport: (provider: string | null) => call<string>("pricing_export", { provider }),
+  templateList: () => call<Template[]>("template_list"),
+  templateApply: (templateId: string, project: string, writeExampleDir: string | null) =>
+    call<TemplateApplyOutcome>("template_apply", { templateId, project, writeExampleDir }),
+  stackDetect: (project: string | null, repo: string | null) =>
+    call<DetectionReport[]>("stack_detect", { project, repo }),
+  stackDecide: (repo: string, templateId: string, decision: "confirmed" | "dismissed") =>
+    call<void>("stack_decide", { repo, templateId, decision }),
+  stackPrefs: () => call<StackPreference[]>("stack_prefs"),
+  stackPrefsReset: (repo: string | null) => call<number>("stack_prefs_reset", { repo }),
   usageRecordManual: (
     credential: string,
     model: string | null,
@@ -344,6 +389,8 @@ export const api = {
     secretName: string,
     environment: string,
   ) => call<void>("destination_attach", { credential, destination, secretName, environment }),
+  destinationDeleteSecret: (ident: string, secretName: string, password: string) =>
+    call<string>("destination_delete_secret", { ident, secretName, password }),
   destinationDetach: (credential: string, destination: string, secretName: string | null) =>
     call<number>("destination_detach", { credential, destination, secretName }),
   destinationAttachments: (credential: string | null) =>

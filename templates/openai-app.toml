@@ -1,0 +1,36 @@
+# Project template: application calling the OpenAI API.
+# Templates never contain credential values — only variable NAMES and guidance.
+id = "openai-app"
+name = "OpenAI application"
+description = "An application that calls the OpenAI API (chat, embeddings, images)."
+providers = ["openai"]
+environments = ["development", "production"]
+docs = [
+    "https://platform.openai.com/docs/api-reference/authentication",
+    "https://developers.openai.com/api/docs/pricing",
+]
+destinations = ["env_mapping", "github_actions", "vercel"]
+credential_separation = """
+Create a SEPARATE OpenAI project key per environment (development vs
+production) in separate provider projects, so usage and spend attribute
+cleanly and a leaked dev key never exposes production. Never reuse one key
+across unrelated projects."""
+permission_guidance = """
+Use project-scoped keys (sk-proj-...), not user keys. Grant the minimal
+endpoint permissions the app needs in the OpenAI dashboard; keys with full
+access should be reserved for administration."""
+rotation_guidance = """
+OpenAI service-account keys can be rotated fully via the rotation workflow
+(create → deploy → verify → revoke). Set a rotation schedule (e.g. every 90
+days) once one manual rotation has completed."""
+
+[[env]]
+name = "OPENAI_API_KEY"
+provider = "openai"
+secret = true
+description = "Project API key used by the SDK (sk-proj-...)."
+
+[[env]]
+name = "OPENAI_ORG_ID"
+secret = false
+description = "Optional organization id (org-...); not a secret."

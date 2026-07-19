@@ -35,6 +35,23 @@ pub struct FetchedMetadata {
     pub source: String,
 }
 
+/// Provider-account identity fetched from an official endpoint. Only what
+/// the provider actually reported is present; nothing is derived from the
+/// appearance of a credential, and no login/password material is involved.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountInfo {
+    /// The provider's own account/organization id.
+    pub account_id: Option<String>,
+    /// Account email, when the provider reports one.
+    pub email: Option<String>,
+    /// Account/organization display name or login.
+    pub name: Option<String>,
+    /// Plan or tier, when the provider reports one.
+    pub plan: Option<String>,
+    /// The official endpoint this came from.
+    pub source: String,
+}
+
 /// Raw scopes fetched for a credential.
 #[derive(Debug, Clone, Serialize)]
 pub struct FetchedPermissions {
@@ -105,6 +122,13 @@ pub trait Connector {
         _secret: &SecretString,
     ) -> Result<FetchedPermissions> {
         Err(self.unsupported("read_permissions"))
+    }
+
+    /// Fetch the account identity the credential belongs to, where an
+    /// official endpoint reports one. Never inferred from the credential's
+    /// appearance.
+    fn fetch_account(&self, _http: &dyn HttpClient, _secret: &SecretString) -> Result<AccountInfo> {
+        Err(self.unsupported("fetch_account"))
     }
 
     /// Fetch usage over the last `since_days` days. Requires an admin/org
@@ -319,6 +343,40 @@ impl Connector for GitHub {
         }
         Ok(FetchedMetadata {
             fields,
+            source: "GitHub GET /user".to_string(),
+        })
+    }
+
+    /// Account identity from the official `GET /user` endpoint. The email
+    /// and plan appear only with sufficient scope (classic `user` scope);
+    /// absent fields stay absent rather than being guessed.
+    fn fetch_account(&self, http: &dyn HttpClient, secret: &SecretString) -> Result<AccountInfo> {
+        let resp = http.send(&Self::user_request(secret))?;
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "GitHub returned status {} when fetching the account",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let str_of = |k: &str| {
+            json.get(k)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        Ok(AccountInfo {
+            account_id: json
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .map(|i| i.to_string()),
+            email: str_of("email"),
+            name: str_of("login"),
+            plan: json
+                .get("plan")
+                .and_then(|p| p.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             source: "GitHub GET /user".to_string(),
         })
     }
@@ -869,6 +927,14 @@ impl Connector for Anthropic {
 pub struct Stripe;
 
 impl Stripe {
+    fn account_request(secret: &SecretString) -> HttpRequest {
+        use base64::Engine;
+        let basic =
+            base64::engine::general_purpose::STANDARD.encode(format!("{}:", secret.expose()));
+        HttpRequest::get("https://api.stripe.com/v1/account")
+            .header("Authorization", format!("Basic {basic}"))
+    }
+
     fn balance_request(secret: &SecretString) -> HttpRequest {
         // Stripe uses HTTP Basic auth with the secret key as the username.
         use base64::Engine;
@@ -949,6 +1015,42 @@ impl Connector for Stripe {
         Ok(FetchedMetadata {
             fields,
             source: "Stripe GET /v1/balance".to_string(),
+        })
+    }
+
+    /// Account identity from the official `GET /v1/account` endpoint (the
+    /// account the secret key belongs to).
+    fn fetch_account(&self, http: &dyn HttpClient, secret: &SecretString) -> Result<AccountInfo> {
+        let resp = http.send(&Self::account_request(secret))?;
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Stripe returned status {} when fetching the account",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let name = json
+            .get("business_profile")
+            .and_then(|b| b.get("name"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                json.get("settings")
+                    .and_then(|s| s.get("dashboard"))
+                    .and_then(|d| d.get("display_name"))
+                    .and_then(|v| v.as_str())
+            })
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        Ok(AccountInfo {
+            account_id: json.get("id").and_then(|v| v.as_str()).map(str::to_string),
+            email: json
+                .get("email")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+            name,
+            plan: None, // Stripe has no plan concept for API accounts.
+            source: "Stripe GET /v1/account".to_string(),
         })
     }
 
@@ -1147,6 +1249,48 @@ impl Connector for Supabase {
         Ok(FetchedMetadata {
             fields,
             source: "Supabase Management GET /v1/projects".to_string(),
+        })
+    }
+
+    /// Organization identity from the official `GET /v1/organizations`
+    /// endpoint (personal access token). When the token sees several
+    /// organizations, no single id is claimed — the count is reported
+    /// instead of guessing which one "the" account is.
+    fn fetch_account(&self, http: &dyn HttpClient, secret: &SecretString) -> Result<AccountInfo> {
+        let req = HttpRequest::get("https://api.supabase.com/v1/organizations")
+            .header("Authorization", format!("Bearer {}", secret.expose()));
+        let resp = http.send(&req)?;
+        if !resp.is_success() {
+            return Err(CoreError::Provider(format!(
+                "Supabase returned status {} when listing organizations",
+                resp.status
+            )));
+        }
+        let json = parse_json(&resp.body)?;
+        let orgs: Vec<(Option<String>, Option<String>)> = json
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|o| {
+                        (
+                            o.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                            o.get("name").and_then(|v| v.as_str()).map(str::to_string),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (account_id, name) = match orgs.as_slice() {
+            [(id, name)] => (id.clone(), name.clone()),
+            [] => (None, None),
+            many => (None, Some(format!("{} organizations visible", many.len()))),
+        };
+        Ok(AccountInfo {
+            account_id,
+            email: None, // the organizations endpoint reports no email
+            name,
+            plan: None, // plan is not part of the documented listing
+            source: "Supabase Management GET /v1/organizations".to_string(),
         })
     }
 

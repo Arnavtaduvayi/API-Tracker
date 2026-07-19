@@ -11,6 +11,7 @@ mod ctx;
 mod destination_cmd;
 mod env_cmd;
 mod key_cmd;
+mod pricing_cmd;
 mod project_cmd;
 mod provider_cmd;
 mod render;
@@ -18,6 +19,7 @@ mod rotation_cmd;
 mod run_cmd;
 mod scan_cmd;
 mod sync_cmd;
+mod template_cmd;
 mod usage_cmd;
 mod vault_cmd;
 
@@ -53,6 +55,8 @@ enum Commands {
     Unlock(vault_cmd::UnlockArgs),
     /// End the current session (lock the vault for the CLI).
     Lock,
+    /// Change the master password (re-wraps the vault key; reauthenticated).
+    ChangePassword,
     /// Check vault health: paths, schema, integrity, session state.
     Doctor,
     /// Show or change vault settings (auto-lock, status thresholds).
@@ -64,6 +68,9 @@ enum Commands {
     /// Manage projects (folders of credentials).
     #[command(subcommand)]
     Project(project_cmd::ProjectCmd),
+    /// Project templates and local stack detection.
+    #[command(subcommand)]
+    Template(template_cmd::TemplateCmd),
     /// Manage credentials.
     #[command(subcommand)]
     Key(key_cmd::KeyCmd),
@@ -93,6 +100,9 @@ enum Commands {
     /// Set and view budgets.
     #[command(subcommand)]
     Budget(usage_cmd::BudgetCmd),
+    /// Versioned pricing records for local cost estimates.
+    #[command(subcommand)]
+    Pricing(pricing_cmd::PricingCmd),
     /// View local activity events.
     #[command(subcommand)]
     Activity(usage_cmd::ActivityCmd),
@@ -127,7 +137,10 @@ enum Commands {
 fn main() {
     let cli = Cli::parse();
     if let Err(err) = run(cli) {
-        eprintln!("error: {err:#}");
+        // Error text can embed attacker-influenced content (imported file
+        // fields, provider responses, paths); strip control characters so a
+        // crafted value cannot inject terminal escapes through an error.
+        eprintln!("error: {}", render::sanitize(&format!("{err:#}")));
         std::process::exit(1);
     }
 }
@@ -138,10 +151,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Init => vault_cmd::init(&ctx),
         Commands::Unlock(args) => vault_cmd::unlock(&ctx, args),
         Commands::Lock => vault_cmd::lock(&ctx),
+        Commands::ChangePassword => vault_cmd::change_password(&ctx),
         Commands::Doctor => vault_cmd::doctor(&ctx),
         Commands::Settings(cmd) => vault_cmd::settings(&ctx, cmd),
         Commands::Provider(cmd) => provider_cmd::run(&ctx, cmd),
         Commands::Project(cmd) => project_cmd::run(&ctx, cmd),
+        Commands::Template(cmd) => template_cmd::run(&ctx, cmd),
         Commands::Key(cmd) => key_cmd::run(&ctx, cmd),
         Commands::Scan(args) => scan_cmd::scan(&ctx, args),
         Commands::Hooks(cmd) => scan_cmd::hooks(&ctx, cmd),
@@ -150,6 +165,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Alerts(cmd) => alerts_cmd::alerts(&ctx, cmd),
         Commands::Usage(cmd) => usage_cmd::usage(&ctx, cmd),
         Commands::Budget(cmd) => usage_cmd::budget(&ctx, cmd),
+        Commands::Pricing(cmd) => pricing_cmd::run(&ctx, cmd),
         Commands::Activity(cmd) => usage_cmd::activity(&ctx, cmd),
         Commands::Mapping(cmd) => usage_cmd::mapping(&ctx, cmd),
         Commands::Run(args) => run_cmd::run(&ctx, args),

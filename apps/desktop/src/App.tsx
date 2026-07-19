@@ -27,6 +27,8 @@ import { ProjectForm } from "./components/ProjectForm";
 import { ProjectDetail } from "./components/ProjectDetail";
 import { CredentialForm } from "./components/CredentialForm";
 import { CredentialDetail } from "./components/CredentialDetail";
+import { PricingView } from "./components/PricingView";
+import { TemplatesView } from "./components/TemplatesView";
 import { SettingsView } from "./components/SettingsView";
 import { BackupView } from "./components/BackupView";
 import { ProviderCatalog } from "./components/ProviderCatalog";
@@ -60,6 +62,8 @@ export type View =
   | { name: "alerts" }
   | { name: "notify" }
   | { name: "usage" }
+  | { name: "pricing" }
+  | { name: "templates" }
   | { name: "settings" }
   | { name: "backup" };
 
@@ -215,6 +219,12 @@ export default function App() {
         <button className="link" onClick={() => setView({ name: "usage" })}>
           Usage
         </button>
+        <button className="link" onClick={() => setView({ name: "pricing" })}>
+          Pricing
+        </button>
+        <button className="link" onClick={() => setView({ name: "templates" })}>
+          Templates
+        </button>
         <button className="link" onClick={() => setView({ name: "backup" })}>
           Backup
         </button>
@@ -290,6 +300,8 @@ export default function App() {
       {view.name === "alerts" && <AlertsView />}
       {view.name === "notify" && <NotifyView />}
       {view.name === "usage" && <UsageView />}
+      {view.name === "pricing" && <PricingView />}
+      {view.name === "templates" && <TemplatesView />}
       {view.name === "settings" && (
         <SettingsView dataDir={dataDir} onSaved={() => void reloadMonitorInterval()} />
       )}

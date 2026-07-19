@@ -388,6 +388,56 @@ check $? "migration + backup-completeness suite passes against the release core"
     grep -c "test result: ok" | grep -q "4")
 check $? "mocked provider sync, destination, and rotation suites pass"
 
+echo "-- versioned pricing --"
+"$BIN" pricing list --provider anthropic | grep -q "claude-sonnet-5"
+check $? "pricing list shows effective-dated bundled records"
+"$BIN" pricing show anthropic claude-sonnet-5 --as-of 2026-09-02 | grep -q '\$3\.00'
+check $? "effective dating resolves the documented September price change"
+"$BIN" pricing set-override other smoke-model --input 1.00 --output 2.00 --note smoke >/dev/null
+check $? "a manual pricing override can be stored"
+"$BIN" pricing show other smoke-model | grep -q "override"
+check $? "the override is labeled as an override"
+"$BIN" pricing propose openai --out "$WORK/pricing-prop.json" >/dev/null && \
+  "$BIN" pricing import "$WORK/pricing-prop.json" | grep -q "Imported"
+check $? "pricing propose -> review -> import round-trips"
+"$BIN" pricing show openai no-such-model 2>&1 | grep -q "UNAVAILABLE"
+check $? "unknown models yield no estimate (never invented)"
+
+echo "-- templates and stack detection --"
+"$BIN" template list | grep -q "fullstack-saas"
+check $? "template catalog lists the stack templates"
+mkdir -p "$WORK/stackrepo"
+printf '{"dependencies":{"openai":"^4","next":"^15"}}' > "$WORK/stackrepo/package.json"
+"$BIN" template apply openai-app --project smoke-tpl --write-example "$WORK/stackrepo" >/dev/null
+check $? "template apply creates the project and writes .env.example"
+grep -q "OPENAI_API_KEY=" "$WORK/stackrepo/.env.example" && \
+  ! grep -Eq "OPENAI_API_KEY=.+" "$WORK/stackrepo/.env.example"
+check $? ".env.example carries names only, never values"
+"$BIN" template detect --repo "$WORK/stackrepo" | grep -q 'dependency "openai"'
+check $? "stack detection shows its evidence"
+"$BIN" template confirm openai-app --repo "$WORK/stackrepo" >/dev/null && \
+  "$BIN" template prefs | grep -q confirmed
+check $? "detection decisions are remembered locally"
+"$BIN" template prefs --clear-all --yes | grep -q "deleted"
+check $? "all learned stack data can be deleted"
+
+echo "-- destination capability honesty (extended matrix) --"
+"$BIN" destination kinds | grep -q "windows_credential_manager"
+check $? "the OS credential-store kinds are cataloged"
+"$BIN" destination kinds | grep -qi "recovery window"
+check $? "AWS delete declares its recovery-window semantics"
+"$BIN" destination kinds | grep -q "Charges:"
+check $? "each kind declares possible charges and testing status"
+
+echo "-- master password change --"
+API_TRACKER_NEW_PASSWORD="$MASTER-changed01" "$BIN" change-password >/dev/null 2>&1
+check $? "the master password can be changed"
+API_TRACKER_PASSWORD="$MASTER" "$BIN" key list >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "the old master password stops working"
+export API_TRACKER_PASSWORD="$MASTER-changed01"
+"$BIN" key list >/dev/null 2>&1
+check $? "the new master password unlocks the vault"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

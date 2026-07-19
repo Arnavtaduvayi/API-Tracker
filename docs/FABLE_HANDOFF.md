@@ -4,12 +4,90 @@ This document hands the repository off to a fresh session. **"Verified"**
 means exercised by a passing test or a manual end-to-end run this session;
 **"planned"** means designed/labeled but not yet implemented.
 
-_Last updated for the **alpha-completion** session (branch
-`release/alpha-completion`)._
+_Last updated for the **full-product-gap-closure** session (branch
+`feat/full-product-gap-closure`)._
 
 ---
 
-## 0. Alpha-completion session (most recent)
+## 0. Gap-closure session (most recent)
+
+Read `docs/decisions/0016-product-gap-closure.md` FIRST — it records every
+material decision. Migrations v8–v10. What landed, and where to look:
+
+- **Versioned pricing** (`pricing.rs` rewrite, migration v8): effective-
+  dated records, three origins (bundled/imported/override), as-of-date
+  estimation (re-syncs never reprice history — the four vault call sites
+  now pass `window_start`), validated import/export, `pricing propose`
+  review loop, `pricing_stale` alert (observe.rs). Bundled table verified
+  2026-07-18 against developers.openai.com/api/docs/pricing and
+  platform.claude.com/docs/en/about-claude/pricing (Sonnet 5's September
+  switch is two dated records — tested). CLI `pricing_cmd.rs`, desktop
+  `PricingView.tsx`.
+- **Templates + stack detection** (`templates.rs`, `stackdetect.rs`,
+  `templates/*.toml`, migration v9): 9 embedded validated templates (a
+  test proves no template text matches any detection regex); apply
+  creates/annotates a project + optional names-only `.env.example`
+  (write_new, never overwrites); detection = bounded static reads +
+  `stack_preferences` decision history (NOT ML — every surface says so);
+  confirm/dismiss/prefs incl. `--clear-all`. CLI `template_cmd.rs`,
+  desktop `TemplatesView.tsx`. Tests: `templates_stack.rs`.
+- **Provider-account identity** (migration v10): `fetch_account` connector
+  capability (GitHub/Stripe/Supabase) + `anthropic::fetch_organization`;
+  `provider_account_sync` stores provider-reported fields with source +
+  time; OpenAI = honest Unsupported; org label labeled "user-entered".
+  Manifests gained `login_url`/`billing_url`. Tests:
+  `account_metadata.rs` (6).
+- **Destinations**: AWS delete (RecoveryWindowInDays=30, never
+  ForceDeleteWithoutRecovery — asserted by fixture), `linux_secret_service`
+  (secret-tool via CommandRunner; stderr distinguishes locked-keyring from
+  absent), `windows_credential_manager` (keyring crate — core stays
+  `forbid(unsafe_code)`; a new windows-latest CI job compiles + tests core
+  — it first runs with this PR), `destination delete-secret` (reauth + confirm, CLI +
+  desktop), catalog extended with verify_method/required_plan/charges/
+  testing per kind. Doppler/1Password/Vault deferred with reasoning
+  (ADR 0016).
+- **Live-verify scripts** `scripts/live_verify_{aws,github_actions,vercel}.sh`:
+  throwaway vault, hidden prompts, ONE disposable FAKE-value secret, typed
+  confirmation before writes, strongest verification, loud cleanup
+  warnings. AWS max cost < $0.05; others free. Never in CI.
+- **Security closure** (tests: `security_residuals.rs`, 5):
+  `change_master_password` (CLI `change-password`, desktop Settings);
+  project-password set/change/remove now ROTATE the project key
+  (fresh key + full re-encryption in one tx — the old THREAT_MODEL
+  residual about pre-password wraps in WAL/backups is closed for the live
+  file; old backups remain what they were, stated); WAL checkpoint-
+  truncate on vault Drop + password ops; vault.db + sidecars chmod 0600
+  (Unix); env export refuses symlinks; cleanup_exports also runs on
+  resume_session and sweeps aged `.N.api-tracker-tmp-*` orphans;
+  `inject::sweep_dead_sessions` (ps -p probe) runs in run_monitor;
+  `doctor` warns about OS-inherited permissions on non-Unix.
+- **Docs**: FEATURE_MATRIX re-audited (#2 destination-limited
+  product-complete, #4 + #19 fully implemented, #15 provider-limited);
+  THREAT_MODEL rewritten where residuals closed; new PRICING.md +
+  TEMPLATES.md; DESTINATION_SUPPORT rewritten; PROVIDER_SUPPORT gained
+  account-identity + live-test-requirements tables; ADR 0016; CHANGELOG.
+- **Smoke: 126 checks** (was 108): pricing (6), templates/detection (6),
+  destination honesty (3), master-password change (3), plus the transient
+  vault password change at the END of the script (ordering matters).
+
+Setup that still must not be repeated: npm cache `~/.npm` root-owned →
+`npm install --cache <scratchpad>`; Rust tests need
+`API_TRACKER_INSECURE_FAST_KDF=1`; CI clippy needs `cargo +1.97.0 clippy`.
+New: `rustup target add x86_64-pc-windows-msvc` exists locally but cannot
+link (no Windows C toolchain) — the windows CI job is the compile gate for
+`keyring`-backed code.
+
+Honest not-done list: network destinations still not exercised against
+live accounts (scripts ready; needs user credentials + approval);
+Windows/Linux OS-store adapters not exercised against live stores (CI
+compiles + runs core tests on Windows; secret-tool path is
+fixture-tested); cached-token discounts not modeled in estimates (usage
+rows don't split cached tokens); desktop UI still needs the full manual
+pass (next session's job).
+
+---
+
+## 0-prev. Alpha-completion session (previous)
 
 Branch `release/alpha-completion` off `main` (post PR #6). What it did, and
 where to look:
