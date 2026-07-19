@@ -7,4 +7,3 @@ failures:
     history_scan_returns_within_five_seconds_when_git_hangs
 
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
-
