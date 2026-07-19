@@ -1,0 +1,6 @@
+# Independent migration v11 reproduction — output
+# Command: cargo run --release (harness path-deps the real crates/core)
+# Harness source: mig_v11_repro.rs (this directory)
+
+schema-too-new correctly refused: SchemaTooNew { found: 99, supported: 11 }
+MIG-V11-REPRO: ALL ASSERTIONS PASSED
