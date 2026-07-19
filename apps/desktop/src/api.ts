@@ -10,6 +10,7 @@ import type {
   Alert,
   ApiError,
   Attachment,
+  DriftCheckOutcome,
   BackupInfo,
   BudgetReport,
   CleanupResult,
@@ -399,7 +400,7 @@ export const api = {
   destinationAttachments: (credential: string | null) =>
     call<Attachment[]>("destination_attachments", { credential }),
   destinationDriftCheck: (credential: string | null) =>
-    call<Attachment[]>("destination_drift_check", { credential }),
+    call<DriftCheckOutcome[]>("destination_drift_check", { credential }),
 
   syncPlanCreate: (credential: string, note: string) =>
     call<SyncPlan>("sync_plan_create", { credential, note }),

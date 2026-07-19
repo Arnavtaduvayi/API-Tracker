@@ -710,6 +710,17 @@ export interface Attachment {
   drift: string;
 }
 
+/**
+ * An attachment plus whether THIS drift check actually reached it. When
+ * `checked` is false the drift/verified fields are prior state, not a fresh
+ * result — the UI must not present them as newly verified (DEST-03).
+ * Fields are flattened, so all Attachment fields are present here too.
+ */
+export interface DriftCheckOutcome extends Attachment {
+  checked: boolean;
+  check_error: string | null;
+}
+
 // --- Synchronization plans (masked versions only, never values) ---
 
 export interface SyncStep {

@@ -6645,9 +6645,12 @@ impl UnlockedVault {
                 let dest = crate::destinations::get(&self.conn, &step.destination_id)?;
                 let adapter = self.destination_adapter(&dest, http, runner)?;
                 let receipt = adapter.write(&step.secret_name, value)?;
-                // Verify: read-back where supported, else existence.
-                let drift = match adapter.read(&step.secret_name)? {
-                    Some(stored_value) if !stored_value.expose().is_empty() => {
+                // Verify: read-back where supported, else existence. A
+                // verification error after a successful write is recorded as
+                // `unknown` (the write happened; its state is undetermined),
+                // never as `missing` (DEST-01/DEST-04).
+                let drift = match adapter.read(&step.secret_name) {
+                    Ok(Some(stored_value)) if !stored_value.expose().is_empty() => {
                         let stored_fp = reuse::fingerprint(&self.fingerprint_key, &stored_value)?;
                         if stored_fp == cred.fingerprint {
                             "in_sync"
@@ -6655,11 +6658,12 @@ impl UnlockedVault {
                             "drifted"
                         }
                     }
-                    _ => match adapter.exists(&step.secret_name)? {
-                        Some(true) => "present_unverifiable",
-                        Some(false) => "missing",
-                        None => "unknown",
+                    Ok(_) => match adapter.exists(&step.secret_name) {
+                        Ok(Some(true)) => "present_unverifiable",
+                        Ok(Some(false)) => "missing",
+                        Ok(None) | Err(_) => "unknown",
                     },
+                    Err(_) => "unknown",
                 };
                 crate::destinations::record_sync(
                     &self.conn,
@@ -6669,19 +6673,37 @@ impl UnlockedVault {
                     plan.to_version,
                     drift,
                 )?;
-                crate::syncplan::mark_step_verified(
-                    &self.conn,
-                    &plan.id,
-                    &step.destination_id,
-                    &step.secret_name,
-                )?;
-                if drift == "drifted" {
-                    return Err(CoreError::Provider(format!(
+                // A step is VERIFIED only when verification actually
+                // succeeded: value match (`in_sync`) or confirmed existence
+                // for write-only destinations (`present_unverifiable`).
+                // `missing`/`unknown`/`drifted` must never be stamped
+                // verified (DEST-04): the write claims success, but the
+                // destination's state was not confirmed.
+                match drift {
+                    "in_sync" | "present_unverifiable" => {
+                        crate::syncplan::mark_step_verified(
+                            &self.conn,
+                            &plan.id,
+                            &step.destination_id,
+                            &step.secret_name,
+                        )?;
+                        Ok(format!("{receipt}; verification: {drift}"))
+                    }
+                    "drifted" => Err(CoreError::Provider(format!(
                         "wrote '{}' but the read-back value does not match",
                         step.secret_name
-                    )));
+                    ))),
+                    "missing" => Err(CoreError::Provider(format!(
+                        "wrote '{}' but the destination now reports it absent; \
+                         the write did not verify",
+                        step.secret_name
+                    ))),
+                    _ => Err(CoreError::Provider(format!(
+                        "wrote '{}' but verification could not be completed; \
+                         the destination's state is UNKNOWN, not verified",
+                        step.secret_name
+                    ))),
                 }
-                Ok(format!("{receipt}; verification: {drift}"))
             }
             other => Err(CoreError::InvalidInput(format!(
                 "unknown step action '{other}'"
@@ -6861,19 +6883,44 @@ impl UnlockedVault {
     }
 
     /// Check every attachment (optionally one credential's) for drift.
+    ///
+    /// Truthfulness rules (DEST-01/02/03):
+    /// - a provider/transport/auth failure yields `unknown`, never `missing`;
+    /// - an attachment whose destination cannot be loaded or whose adapter
+    ///   cannot be constructed is returned with `checked == false` and an
+    ///   explicit error — its STORED drift/verified timestamps are left
+    ///   untouched rather than re-presented as freshly verified;
+    /// - `last_verified_at` advances only when the check reached a definitive
+    ///   verdict (`in_sync`/`drifted`/`present_unverifiable`/`missing`);
+    ///   an `unknown` result never advances it.
     pub fn destination_drift_check(
         &self,
         credential: Option<&str>,
         http: &dyn crate::http::HttpClient,
         runner: &dyn crate::destinations::CommandRunner,
-    ) -> Result<Vec<crate::destinations::Attachment>> {
+    ) -> Result<Vec<crate::destinations::DriftCheckOutcome>> {
         let attachments = self.destination_attachments(credential)?;
+        let mut skipped: std::collections::HashMap<(String, String, String), String> =
+            std::collections::HashMap::new();
         for attachment in &attachments {
-            let Ok(dest) = crate::destinations::get(&self.conn, &attachment.destination_id) else {
-                continue;
+            let key = (
+                attachment.credential_id.clone(),
+                attachment.destination_id.clone(),
+                attachment.secret_name.clone(),
+            );
+            let dest = match crate::destinations::get(&self.conn, &attachment.destination_id) {
+                Ok(dest) => dest,
+                Err(e) => {
+                    skipped.insert(key, format!("destination unavailable: {e}"));
+                    continue;
+                }
             };
-            let Ok(adapter) = self.destination_adapter(&dest, http, runner) else {
-                continue;
+            let adapter = match self.destination_adapter(&dest, http, runner) {
+                Ok(adapter) => adapter,
+                Err(e) => {
+                    skipped.insert(key, format!("cannot construct adapter: {e}"));
+                    continue;
+                }
             };
             let cred_fp: Vec<u8> = self.conn.query_row(
                 "SELECT fingerprint FROM credentials WHERE id = ?1",
@@ -6904,7 +6951,23 @@ impl UnlockedVault {
                 drift,
             )?;
         }
-        self.destination_attachments(credential)
+        let refreshed = self.destination_attachments(credential)?;
+        Ok(refreshed
+            .into_iter()
+            .map(|attachment| {
+                let key = (
+                    attachment.credential_id.clone(),
+                    attachment.destination_id.clone(),
+                    attachment.secret_name.clone(),
+                );
+                let check_error = skipped.get(&key).cloned();
+                crate::destinations::DriftCheckOutcome {
+                    checked: check_error.is_none(),
+                    check_error,
+                    attachment,
+                }
+            })
+            .collect())
     }
 
     // ------------------------------------------------------------------

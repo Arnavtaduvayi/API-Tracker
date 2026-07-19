@@ -201,10 +201,24 @@ export function DestinationsView() {
 
   const checkDrift = () =>
     run(async () => {
-      setAttachments(await api.destinationDriftCheck(null));
-      setNotice(
-        "Drift check complete. Write-only destinations can only be verified for existence.",
-      );
+      const outcomes = await api.destinationDriftCheck(null);
+      // The outcome flattens Attachment fields, so it is display-compatible
+      // with the attachments list.
+      setAttachments(outcomes);
+      const skipped = outcomes.filter((o) => !o.checked);
+      if (skipped.length > 0) {
+        setNotice(
+          `Drift check complete, but ${skipped.length} attachment(s) could NOT be checked ` +
+            `(shown drift is prior state, not freshly verified): ` +
+            skipped
+              .map((o) => `${o.destination_name}: ${o.check_error ?? "skipped"}`)
+              .join("; "),
+        );
+      } else {
+        setNotice(
+          "Drift check complete. Write-only destinations can only be verified for existence.",
+        );
+      }
     });
 
   return (

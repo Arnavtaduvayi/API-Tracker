@@ -1652,7 +1652,7 @@ fn destination_attachments(
 fn destination_drift_check(
     state: State<'_, AppState>,
     credential: Option<String>,
-) -> CmdResult<Vec<api_tracker_core::destinations::Attachment>> {
+) -> CmdResult<Vec<api_tracker_core::destinations::DriftCheckOutcome>> {
     let http = UreqClient::new();
     let runner = api_tracker_core::destinations::SystemRunner;
     with_vault(&state, |vault| {

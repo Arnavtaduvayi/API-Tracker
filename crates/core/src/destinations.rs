@@ -632,6 +632,18 @@ pub fn record_verify(
     drift: &str,
 ) -> Result<()> {
     let now = crate::clock::now_rfc3339();
+    if drift == "unknown" {
+        // The check reached no verdict: record that the state is unknown,
+        // but never advance `last_verified_at` — a failed check must not
+        // masquerade as a fresh verification (DEST-03).
+        conn.execute(
+            "UPDATE credential_destinations
+             SET drift = ?1
+             WHERE credential_id = ?2 AND destination_id = ?3 AND secret_name = ?4",
+            params![drift, credential_id, destination_id, secret_name],
+        )?;
+        return Ok(());
+    }
     conn.execute(
         "UPDATE credential_destinations
          SET last_verified_at = ?1, drift = ?2
@@ -639,6 +651,21 @@ pub fn record_verify(
         params![now, drift, credential_id, destination_id, secret_name],
     )?;
     Ok(())
+}
+
+/// One attachment's result from a drift check: the (refreshed) attachment
+/// plus whether THIS run actually checked it. `checked == false` means the
+/// destination could not be loaded or its adapter could not be constructed;
+/// the attachment's stored drift/verified timestamps are prior state, not
+/// fresh verification (DEST-03). Serialized flat so the attachment fields
+/// stay top-level for existing consumers.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DriftCheckOutcome {
+    #[serde(flatten)]
+    pub attachment: Attachment,
+    pub checked: bool,
+    /// Why the check could not run (no secret material ever included).
+    pub check_error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,10 +1441,26 @@ impl DestinationAdapter for AwsSecretsManagerDestination<'_> {
             "DescribeSecret",
             serde_json::json!({ "SecretId": secret_name }),
         )?;
+        // Only ResourceNotFoundException is a definitive "absent"; a 2xx is
+        // a definitive "present". Access denial, throttling, server errors,
+        // and unrecognized responses are ERRORS, never absence (DEST-01).
         if resp.status == 400 && resp.error_type().contains("ResourceNotFoundException") {
             return Ok(Some(false));
         }
-        Ok(Some((200..300).contains(&resp.status)))
+        if (200..300).contains(&resp.status) {
+            return Ok(Some(true));
+        }
+        if resp.status == 403 {
+            return Err(CoreError::ProviderAuth {
+                provider: "aws_secrets_manager".into(),
+                detail: resp.error_type().to_string(),
+            });
+        }
+        Err(CoreError::Provider(format!(
+            "DescribeSecret failed ({}): {}; existence is undetermined",
+            resp.status,
+            resp.error_type()
+        )))
     }
 
     /// Schedule deletion with the default 30-day recovery window (the AWS
@@ -1576,7 +1619,21 @@ impl DestinationAdapter for GithubActionsDestination<'_> {
         let resp = self
             .http
             .send(&self.request(Method::Get, &format!("/actions/secrets/{secret_name}")))?;
-        Ok(Some(resp.is_success()))
+        // Only definitive answers become existence verdicts: 2xx = present,
+        // 404 = absent. Auth, rate-limit, and server failures are ERRORS —
+        // converting them into "absent" produced false `missing` drift
+        // (DEST-01) and invited destructive re-writes.
+        match resp.status {
+            s if (200..300).contains(&s) => Ok(Some(true)),
+            404 => Ok(Some(false)),
+            401 | 403 => Err(CoreError::ProviderAuth {
+                provider: "github_actions".into(),
+                detail: format!("status {}", resp.status),
+            }),
+            other => Err(CoreError::Provider(format!(
+                "checking the secret failed (status {other}); existence is undetermined"
+            ))),
+        }
     }
 
     fn delete(&self, secret_name: &str) -> Result<()> {
@@ -1641,7 +1698,16 @@ impl VercelDestination<'_> {
             .header("content-type", "application/json")
     }
 
-    fn find_env_id(&self, secret_name: &str) -> Result<Option<String>> {
+    /// Resolve THIS destination's variable: the entry whose key matches AND
+    /// whose target set equals the destination's configured targets AND
+    /// which is not scoped to a custom environment. A Vercel project can
+    /// hold several variables with the same key for different targets —
+    /// key-only matching once deleted or "verified" whichever the API
+    /// listed first (DEST-02). Returns:
+    /// - `Ok(Some(id))` — exactly one matching identity
+    /// - `Ok(None)` with `other_targets == false` — no variable with the key
+    /// - `Err` on transport/HTTP/parse failure or ambiguity
+    fn resolve_env_identity(&self, secret_name: &str) -> Result<VercelResolution> {
         let resp = self.http.send(&self.request(
             Method::Get,
             self.url(&format!("/v9/projects/{}/env", self.project_id)),
@@ -1654,18 +1720,67 @@ impl VercelDestination<'_> {
         }
         let parsed: serde_json::Value = serde_json::from_slice(&resp.body)
             .map_err(|_| CoreError::Provider("invalid env list response".into()))?;
-        let id = parsed
+        let empty = Vec::new();
+        let envs = parsed
             .get("envs")
             .and_then(|v| v.as_array())
-            .and_then(|envs| {
-                envs.iter()
-                    .find(|e| e.get("key").and_then(|k| k.as_str()) == Some(secret_name))
-            })
-            .and_then(|e| e.get("id"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        Ok(id)
+            .unwrap_or(&empty);
+        let mut want: Vec<&str> = self.targets.iter().map(|s| s.as_str()).collect();
+        want.sort_unstable();
+
+        let mut exact: Vec<String> = Vec::new();
+        let mut key_matches = 0usize;
+        for entry in envs {
+            if entry.get("key").and_then(|k| k.as_str()) != Some(secret_name) {
+                continue;
+            }
+            key_matches += 1;
+            // A variable scoped to a custom environment is a different
+            // identity even when its standard targets line up.
+            let custom_scoped = entry
+                .get("customEnvironmentIds")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            if custom_scoped {
+                continue;
+            }
+            let mut targets: Vec<&str> = entry
+                .get("target")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|t| t.as_str()).collect())
+                .unwrap_or_default();
+            targets.sort_unstable();
+            if targets == want {
+                if let Some(id) = entry.get("id").and_then(|v| v.as_str()) {
+                    exact.push(id.to_string());
+                }
+            }
+        }
+        match exact.len() {
+            0 => Ok(VercelResolution {
+                id: None,
+                other_targets: key_matches > 0,
+            }),
+            1 => Ok(VercelResolution {
+                id: exact.into_iter().next(),
+                other_targets: false,
+            }),
+            n => Err(CoreError::Provider(format!(
+                "'{secret_name}' is ambiguous: {n} variables share this key AND \
+                 target set; refusing to guess which one is this destination's"
+            ))),
+        }
     }
+}
+
+/// Outcome of resolving a Vercel variable identity.
+struct VercelResolution {
+    /// The uniquely matching variable id, when one exists.
+    id: Option<String>,
+    /// The key exists in the project, but only for OTHER targets or custom
+    /// environments — a different identity this destination must not touch.
+    other_targets: bool,
 }
 
 impl DestinationAdapter for VercelDestination<'_> {
@@ -1709,19 +1824,32 @@ impl DestinationAdapter for VercelDestination<'_> {
         Ok(None) // encrypted variables are write-only through this API
     }
 
+    /// True only when THIS destination's variable (key + exact target set)
+    /// exists — a same-key variable for other targets is not it (DEST-02).
     fn exists(&self, secret_name: &str) -> Result<Option<bool>> {
-        Ok(Some(self.find_env_id(secret_name)?.is_some()))
+        Ok(Some(self.resolve_env_identity(secret_name)?.id.is_some()))
     }
 
     fn delete(&self, secret_name: &str) -> Result<()> {
-        let Some(id) = self.find_env_id(secret_name)? else {
-            return Ok(());
+        let resolution = self.resolve_env_identity(secret_name)?;
+        let Some(id) = resolution.id else {
+            if resolution.other_targets {
+                // Deleting by bare key would destroy a DIFFERENT target's
+                // variable — fail safe instead (DEST-02).
+                return Err(CoreError::Provider(format!(
+                    "'{secret_name}' exists only for other targets/environments in this \
+                     project; refusing to delete a variable this destination does not manage"
+                )));
+            }
+            return Ok(()); // already absent: idempotent
         };
         let resp = self.http.send(&self.request(
             Method::Delete,
             self.url(&format!("/v9/projects/{}/env/{id}", self.project_id)),
         ))?;
-        if resp.is_success() {
+        // 404: the variable vanished between the list and the DELETE —
+        // already gone is the requested end state.
+        if resp.is_success() || resp.status == 404 {
             return Ok(());
         }
         Err(CoreError::Provider(format!(
@@ -1753,7 +1881,7 @@ impl DestinationAdapter for VercelDestination<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::MockHttpClient;
+    use crate::http::{HttpResponse, MockHttpClient};
     use std::cell::RefCell;
 
     #[test]
@@ -1776,6 +1904,241 @@ mod tests {
         ] {
             assert!(!valid_aws_region(bad), "{bad:?} must be rejected");
         }
+    }
+
+    fn github_adapter(http: &MockHttpClient) -> GithubActionsDestination<'_> {
+        GithubActionsDestination {
+            http,
+            token: SecretString::from("ghp_FAKE0000000000000000000000000000000000"),
+            owner: "octo".into(),
+            repo: "app".into(),
+        }
+    }
+
+    fn aws_adapter(http: &MockHttpClient) -> AwsSecretsManagerDestination<'_> {
+        AwsSecretsManagerDestination {
+            http,
+            creds: AwsCredentials {
+                access_key_id: "AKIAFAKE".into(),
+                secret_access_key: SecretString::from("FAKE-secret"),
+                session_token: None,
+            },
+            region: "us-east-1".into(),
+        }
+    }
+
+    fn vercel_adapter<'a>(http: &'a MockHttpClient, targets: &[&str]) -> VercelDestination<'a> {
+        VercelDestination {
+            http,
+            token: SecretString::from("FAKE-vercel-token"),
+            project_id: "prj_fake".into(),
+            team_id: None,
+            targets: targets.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // ---------------------------------------------------------------- DEST-01
+
+    #[test]
+    fn github_exists_never_converts_errors_into_missing() {
+        // Auth, rate-limit, and server failures mean "could not determine",
+        // NEVER "the secret is absent" — a false `missing` triggers false
+        // drift and invites destructive re-writes.
+        for status in [401u16, 403, 429, 500] {
+            let http = MockHttpClient::new(vec![HttpResponse {
+                status,
+                headers: vec![],
+                body: b"{}".to_vec(),
+            }]);
+            let err = github_adapter(&http).exists("NAME").expect_err(&format!(
+                "status {status} must be an error, not an existence verdict"
+            ));
+            let msg = err.to_string();
+            assert!(!msg.contains("ghp_FAKE"), "no token in errors: {msg}");
+        }
+        // Only a definitive 404 is "absent"; a definitive 2xx is "present".
+        let http = MockHttpClient::new(vec![HttpResponse {
+            status: 404,
+            headers: vec![],
+            body: Vec::new(),
+        }]);
+        assert_eq!(github_adapter(&http).exists("NAME").unwrap(), Some(false));
+        let http = MockHttpClient::json(r#"{"name":"NAME"}"#);
+        assert_eq!(github_adapter(&http).exists("NAME").unwrap(), Some(true));
+        // Transport failure propagates as an error.
+        let http = MockHttpClient::with_network_failures(1, vec![]);
+        assert!(github_adapter(&http).exists("NAME").is_err());
+    }
+
+    #[test]
+    fn aws_exists_never_converts_errors_into_missing() {
+        // Only ResourceNotFoundException is "absent".
+        let http = MockHttpClient::new(vec![HttpResponse {
+            status: 400,
+            headers: vec![],
+            body: br#"{"__type":"ResourceNotFoundException"}"#.to_vec(),
+        }]);
+        assert_eq!(aws_adapter(&http).exists("name").unwrap(), Some(false));
+        let http = MockHttpClient::json(r#"{"ARN":"arn:aws:fake"}"#);
+        assert_eq!(aws_adapter(&http).exists("name").unwrap(), Some(true));
+        // 403 / throttling / server errors / unrecognized 400s are errors.
+        for (status, body) in [
+            (403u16, r#"{"__type":"AccessDeniedException"}"#),
+            (400, r#"{"__type":"ThrottlingException"}"#),
+            (500, r#"{"__type":"InternalServiceError"}"#),
+            (400, "not-json-at-all"),
+        ] {
+            let http = MockHttpClient::new(vec![HttpResponse {
+                status,
+                headers: vec![],
+                body: body.as_bytes().to_vec(),
+            }]);
+            assert!(
+                aws_adapter(&http).exists("name").is_err(),
+                "status {status} body {body} must be an error, not an existence verdict"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------- DEST-02
+
+    fn vercel_env_list(envs: &str) -> String {
+        format!(r#"{{"envs":[{envs}]}}"#)
+    }
+
+    #[test]
+    fn vercel_identity_is_key_plus_targets() {
+        let two_targets = vercel_env_list(
+            r#"{"id":"id_prod","key":"K","target":["production"],"type":"encrypted"},
+               {"id":"id_dev","key":"K","target":["development"],"type":"encrypted"}"#,
+        );
+        // The production-targeted destination sees ONLY its own variable…
+        let http = MockHttpClient::json(&two_targets);
+        assert_eq!(
+            vercel_adapter(&http, &["production"]).exists("K").unwrap(),
+            Some(true)
+        );
+        // …and a preview-targeted destination does not claim it exists.
+        let http = MockHttpClient::json(&two_targets);
+        assert_eq!(
+            vercel_adapter(&http, &["preview"]).exists("K").unwrap(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn vercel_delete_targets_exactly_its_own_variable() {
+        let two_targets = vercel_env_list(
+            r#"{"id":"id_prod","key":"K","target":["production"],"type":"encrypted"},
+               {"id":"id_dev","key":"K","target":["development"],"type":"encrypted"}"#,
+        );
+        let http = MockHttpClient::new(vec![
+            HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: two_targets.clone().into_bytes(),
+            },
+            HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: b"{}".to_vec(),
+            },
+        ]);
+        vercel_adapter(&http, &["development"]).delete("K").unwrap();
+        let requests = http.requests.borrow();
+        let delete_req = requests.last().expect("a DELETE was issued");
+        assert!(
+            delete_req.url.contains("/env/id_dev"),
+            "must delete the DEVELOPMENT variable, got {}",
+            delete_req.url
+        );
+        assert!(
+            !delete_req.url.contains("id_prod"),
+            "the production variable must never be touched"
+        );
+    }
+
+    #[test]
+    fn vercel_delete_refuses_other_targets_variable() {
+        // The key exists, but only for targets this destination does not
+        // manage: deleting would destroy someone else's variable.
+        let other = vercel_env_list(
+            r#"{"id":"id_prod","key":"K","target":["production"],"type":"encrypted"}"#,
+        );
+        let http = MockHttpClient::json(&other);
+        let err = vercel_adapter(&http, &["development"])
+            .delete("K")
+            .expect_err("deleting another target's variable must be refused");
+        assert!(err.to_string().contains("target"), "{err}");
+        // Only the list request happened — no DELETE.
+        assert_eq!(http.requests.borrow().len(), 1);
+    }
+
+    #[test]
+    fn vercel_delete_ambiguous_identity_fails_safe() {
+        let dup = vercel_env_list(
+            r#"{"id":"id_a","key":"K","target":["production"],"type":"encrypted"},
+               {"id":"id_b","key":"K","target":["production"],"type":"encrypted"}"#,
+        );
+        let http = MockHttpClient::json(&dup);
+        let err = vercel_adapter(&http, &["production"])
+            .delete("K")
+            .expect_err("two identical identities is ambiguous; refuse");
+        assert!(err.to_string().contains("ambiguous"), "{err}");
+        assert_eq!(http.requests.borrow().len(), 1, "no DELETE was issued");
+    }
+
+    #[test]
+    fn vercel_custom_environment_variables_are_a_different_identity() {
+        let custom = vercel_env_list(
+            r#"{"id":"id_c","key":"K","target":["production"],"type":"encrypted",
+                "customEnvironmentIds":["env_custom"]}"#,
+        );
+        let http = MockHttpClient::json(&custom);
+        assert_eq!(
+            vercel_adapter(&http, &["production"]).exists("K").unwrap(),
+            Some(false),
+            "a custom-environment variable is not this destination's variable"
+        );
+    }
+
+    #[test]
+    fn vercel_absent_delete_is_idempotent_and_stale_id_race_is_tolerated() {
+        // Absent: no DELETE issued, Ok.
+        let http = MockHttpClient::json(&vercel_env_list(""));
+        vercel_adapter(&http, &["production"]).delete("K").unwrap();
+        assert_eq!(http.requests.borrow().len(), 1);
+        // Stale id (deleted between list and DELETE): 404 is already-gone.
+        let one = vercel_env_list(
+            r#"{"id":"id_x","key":"K","target":["production"],"type":"encrypted"}"#,
+        );
+        let http = MockHttpClient::new(vec![
+            HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: one.into_bytes(),
+            },
+            HttpResponse {
+                status: 404,
+                headers: vec![],
+                body: Vec::new(),
+            },
+        ]);
+        vercel_adapter(&http, &["production"])
+            .delete("K")
+            .expect("a variable that vanished between list and delete is already gone");
+    }
+
+    #[test]
+    fn vercel_exists_propagates_list_failures_and_malformed_responses() {
+        let http = MockHttpClient::new(vec![HttpResponse {
+            status: 500,
+            headers: vec![],
+            body: Vec::new(),
+        }]);
+        assert!(vercel_adapter(&http, &["production"]).exists("K").is_err());
+        let http = MockHttpClient::json("this is not json");
+        assert!(vercel_adapter(&http, &["production"]).exists("K").is_err());
     }
 
     #[test]
@@ -1964,7 +2327,9 @@ mod tests {
     fn vercel_write_upserts_and_delete_looks_up_id() {
         let mock = MockHttpClient::new(vec![
             MockHttpClient::json_response(r#"{"created":{}}"#),
-            MockHttpClient::json_response(r#"{"envs":[{"id":"env_123","key":"MY_SECRET"}]}"#),
+            MockHttpClient::json_response(
+                r#"{"envs":[{"id":"env_123","key":"MY_SECRET","target":["preview","production"]}]}"#,
+            ),
             MockHttpClient::json_response(r#"{}"#),
         ]);
         let dest = VercelDestination {
