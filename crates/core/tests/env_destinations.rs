@@ -405,7 +405,7 @@ fn deleting_a_credential_purges_its_version_history() {
             SecretString::from("sk-proj-FAKE00000000000000000000000000000002"),
         )
         .unwrap();
-    vault.delete_credential(&cred.id).unwrap();
+    vault.delete_credential(&cred.id, &master_pw()).unwrap();
     let count: i64 = vault
         .connection()
         .query_row(

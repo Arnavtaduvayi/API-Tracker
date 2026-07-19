@@ -308,6 +308,14 @@ pub fn get_session(conn: &Connection, ident: &str) -> Result<ProcessSession> {
 /// This is a LOCAL control: it cannot claw back values the process already
 /// received, and it never touches the provider.
 pub fn terminate_pid(pid: i64) -> bool {
+    // Refuse non-positive PIDs before any signal is sent. On Unix `kill 0`
+    // signals the CALLER's entire process group and a negative PID signals a
+    // process group, so a corrupted/edited/zero recorded PID could terminate
+    // API Tracker itself or an unrelated group (PI-06). A real child PID is
+    // always > 0. `taskkill` on Windows likewise must never receive 0/negative.
+    if pid <= 0 {
+        return false;
+    }
     if cfg!(unix) {
         std::process::Command::new("kill")
             .arg(pid.to_string())
@@ -349,5 +357,17 @@ mod tests {
         assert!(!valid_env_name("1BAD"));
         assert!(!valid_env_name("has-dash"));
         assert!(!valid_env_name(""));
+    }
+
+    #[test]
+    fn terminate_pid_refuses_non_positive_pids() {
+        // PI-06: 0 and negative PIDs must be refused BEFORE any signal — on
+        // Unix `kill 0` would signal API Tracker's own process group. These
+        // return false without ever spawning `kill`/`taskkill`. (A positive
+        // PID is not exercised here: it would send a real signal.)
+        assert!(!terminate_pid(0));
+        assert!(!terminate_pid(-1));
+        assert!(!terminate_pid(-12345));
+        assert!(!terminate_pid(i64::MIN));
     }
 }

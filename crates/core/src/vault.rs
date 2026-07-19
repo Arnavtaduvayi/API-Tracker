@@ -1770,10 +1770,18 @@ impl UnlockedVault {
         Ok((self.get_credential(&row.id)?, warnings))
     }
 
-    /// Delete a credential. Refuses while other records reference it or a
-    /// rotation is in flight (deleting would cascade away the tracking of a
-    /// still-live provider-side key).
-    pub fn delete_credential(&mut self, selector: &str) -> Result<Credential> {
+    /// Delete a credential. Reauthenticated (IPC-02): deletion is a
+    /// destructive, hard-to-undo operation, so — like reveal, replace, and
+    /// destination removal — it re-verifies the master password in core
+    /// rather than trusting a UI confirmation. Refuses while other records
+    /// reference it or a rotation is in flight (deleting would cascade away
+    /// the tracking of a still-live provider-side key).
+    pub fn delete_credential(
+        &mut self,
+        selector: &str,
+        master_password: &SecretString,
+    ) -> Result<Credential> {
+        self.verify_master_password(master_password)?;
         let row = self.resolve_credential(selector)?;
         let active_rotations: i64 = self.conn.query_row(
             "SELECT count(*) FROM rotations WHERE credential_id = ?1

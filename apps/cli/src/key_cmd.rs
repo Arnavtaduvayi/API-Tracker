@@ -246,7 +246,11 @@ pub fn run(ctx: &Ctx, cmd: KeyCmd) -> Result<()> {
             )? {
                 bail!("aborted");
             }
-            vault.delete_credential(&credential.id)?;
+            // Reauthentication is enforced in core; prompt (or read the
+            // scripting env var) for the master password.
+            eprintln!("Reauthentication required to delete a credential.");
+            let password = ctx::master_password()?;
+            vault.delete_credential(&credential.id, &password)?;
             println!("Deleted credential '{label}'.");
             Ok(())
         }

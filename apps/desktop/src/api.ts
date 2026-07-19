@@ -225,7 +225,8 @@ export const api = {
   ) => call<Credential>("credential_mark", { selector, ...args }),
   credentialReplaceValue: (selector: string, password: string, value: string) =>
     call<ReuseWarning[]>("credential_replace_value", { selector, password, value }),
-  credentialDelete: (selector: string) => call<void>("credential_delete", { selector }),
+  credentialDelete: (selector: string, password: string) =>
+    call<void>("credential_delete", { selector, password }),
   credentialReveal: (selector: string, password: string) =>
     call<string>("credential_reveal", { selector, password }),
   credentialCopy: (selector: string, password: string) =>

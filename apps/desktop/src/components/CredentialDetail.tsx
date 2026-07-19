@@ -126,12 +126,11 @@ export function CredentialDetail(props: {
           : "Copied to the clipboard.",
       );
     } else if (action === "delete") {
-      // Verify the master password before the destructive action — the core
-      // delete command itself does not re-check, so the reauth must happen
-      // here (throws on a wrong password, aborting the delete).
-      await api.reauth(password);
+      // The master password is re-verified in core (IPC-02) — this dialog is
+      // UX, not the authorization. Pass it through; a wrong password throws
+      // and aborts the delete.
       const projectId = credential?.project_id ?? null;
-      await api.credentialDelete(props.id);
+      await api.credentialDelete(props.id, password);
       props.onBack(projectId);
     } else if (action === "versions") {
       setVersions(await api.credentialVersions(props.id, password));

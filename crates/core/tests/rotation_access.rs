@@ -1098,7 +1098,7 @@ fn active_rotation_versions_survive_the_prune_and_deletion_is_blocked() {
         "the rotation's rollback material must survive pruning"
     );
     // And the credential cannot be deleted mid-rotation.
-    let err = v.delete_credential(&cred_id).unwrap_err();
+    let err = v.delete_credential(&cred_id, &master_pw()).unwrap_err();
     assert!(err.to_string().contains("in flight"), "{err}");
 }
 

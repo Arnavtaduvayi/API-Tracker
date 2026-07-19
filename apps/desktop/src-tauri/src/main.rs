@@ -751,10 +751,18 @@ fn credential_replace_value(
     })
 }
 
+/// Delete a credential. Reauthenticated in core (IPC-02): the React confirm
+/// dialog is UX only — the master-password re-verification below is the
+/// authorization, so a direct `invoke` cannot delete without it.
 #[tauri::command]
-fn credential_delete(state: State<'_, AppState>, selector: String) -> CmdResult<()> {
+fn credential_delete(
+    state: State<'_, AppState>,
+    selector: String,
+    password: String,
+) -> CmdResult<()> {
+    let password = SecretString::new(password);
     with_vault(&state, |vault| {
-        vault.delete_credential(&selector)?;
+        vault.delete_credential(&selector, &password)?;
         Ok(())
     })
 }

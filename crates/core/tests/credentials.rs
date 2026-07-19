@@ -138,8 +138,20 @@ fn credential_lifecycle_with_metadata() {
         .unwrap();
     assert_eq!(revealed.expose(), FAKE_KEY_2);
 
-    // Delete.
-    vault.delete_credential("app/claude-key").unwrap();
+    // Delete requires reauthentication (IPC-02): a wrong password is refused
+    // in core and the credential survives — a UI confirmation is not enough.
+    let err = vault
+        .delete_credential("app/claude-key", &SecretString::from("wrong-password"))
+        .unwrap_err();
+    assert!(matches!(err, CoreError::WrongPassword));
+    vault
+        .get_credential("app/claude-key")
+        .expect("survives a bad reauth");
+
+    // With the correct master password the delete goes through.
+    vault
+        .delete_credential("app/claude-key", &master_pw())
+        .unwrap();
     assert!(matches!(
         vault.get_credential("app/claude-key").unwrap_err(),
         CoreError::NotFound { .. }
@@ -429,11 +441,19 @@ fn intentional_references_share_one_encrypted_value() {
     assert!(matches!(err, CoreError::InvalidInput(_)));
 
     // The source cannot be deleted while references exist.
-    let err = vault.delete_credential("main/shared-api").unwrap_err();
+    let err = vault
+        .delete_credential("main/shared-api", &master_pw())
+        .unwrap_err();
     assert!(matches!(err, CoreError::HasLinkedReferences(2)));
-    vault.delete_credential("spinoff/chained").unwrap();
-    vault.delete_credential("spinoff/shared-api").unwrap();
-    vault.delete_credential("main/shared-api").unwrap();
+    vault
+        .delete_credential("spinoff/chained", &master_pw())
+        .unwrap();
+    vault
+        .delete_credential("spinoff/shared-api", &master_pw())
+        .unwrap();
+    vault
+        .delete_credential("main/shared-api", &master_pw())
+        .unwrap();
 }
 
 #[test]
