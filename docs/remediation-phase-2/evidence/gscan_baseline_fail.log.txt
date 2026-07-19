@@ -1,0 +1,30 @@
+---- husky_style_hooks_path_chains_and_preserves_foreign_hook stdout ----
+
+thread 'husky_style_hooks_path_chains_and_preserves_foreign_hook' (20644440) panicked at crates/core/tests/gscan_hooks.rs:255:5:
+assertion failed: hooks::install(&r.root, false).is_err()
+
+---- local_hooks_path_install_is_active_and_commit_scans stdout ----
+
+thread 'local_hooks_path_install_is_active_and_commit_scans' (20644441) panicked at crates/core/tests/gscan_hooks.rs:139:5:
+GScan-01: core.hooksPath is set; the installed protection must actually execute on commit
+
+---- repeated_install_is_idempotent stdout ----
+
+thread 'repeated_install_is_idempotent' (20644442) panicked at crates/core/tests/gscan_hooks.rs:276:48:
+hook written where git looks: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+
+failures:
+    broken_binary_foreign_hook_is_refused_not_corrupted
+    chained_scan_blocks_commit_even_with_permissive_foreign_hook
+    force_chain_scans_before_early_exit_foreign_hook
+    force_chain_scans_before_exec_foreign_hook
+    global_hooks_path_is_detected_and_used
+    hooks_path_with_spaces_is_safe
+    husky_style_hooks_path_chains_and_preserves_foreign_hook
+    local_hooks_path_install_is_active_and_commit_scans
+    repeated_install_is_idempotent
+
+test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+
+error: test failed, to rerun pass `-p api-tracker-core --test gscan_hooks`

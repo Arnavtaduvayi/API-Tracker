@@ -169,6 +169,9 @@ export function ScanView() {
           <p>
             State: <strong>{hook.state}</strong> ({hook.hook_path})
           </p>
+          <p>
+            Protection: <strong>{hook.active ? "active" : "NOT active"}</strong> — {hook.detail}
+          </p>
           <div style={{ display: "flex", gap: "0.5rem" }}>
             <button
               onClick={() =>

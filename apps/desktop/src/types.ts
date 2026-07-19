@@ -211,12 +211,20 @@ export interface RepoReverifyReport {
   resolved_alerts: number;
 }
 
-export type HookState = "absent" | "installed" | "foreign" | "chained_into_foreign";
+export type HookState =
+  "absent" | "installed" | "foreign" | "chained_into_foreign" | "overridden" | "unsupported";
 
 export interface HookStatus {
   repo: string;
+  /** The hook file git will actually use (honours core.hooksPath). */
   hook_path: string;
+  /** Raw core.hooksPath value when configured. */
+  hooks_path_override: string | null;
   state: HookState;
+  /** True only when git will genuinely execute the scan on commit. */
+  active: boolean;
+  /** Honest explanation of the state. */
+  detail: string;
 }
 
 export type AlertKind =

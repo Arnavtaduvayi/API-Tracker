@@ -44,6 +44,29 @@ pub fn git_available() -> bool {
         .unwrap_or(false)
 }
 
+/// The effective value of a git config key for `repo` (merged across
+/// local/global/system scopes, exactly the value git itself would use), or
+/// `None` when the key is unset. Errors only when git cannot run.
+pub fn config_get(repo: &Path, key: &str) -> Result<Option<String>> {
+    let out = run_git(repo, &["config", "--get", key])?;
+    if out.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ));
+    }
+    // `git config --get` exits 1 for an unset key. Anything else (malformed
+    // config, unusable repo) is a real failure: callers must not assume the
+    // default and over-claim what git will do.
+    if out.status.code() == Some(1) {
+        Ok(None)
+    } else {
+        Err(CoreError::InvalidInput(format!(
+            "could not read git config '{key}': {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
+}
+
 /// The repository root containing `path`, or an error if it is not a repo.
 pub fn repo_root(path: &Path) -> Result<PathBuf> {
     let out = run_git(path, &["rev-parse", "--show-toplevel"])?;

@@ -256,9 +256,15 @@ pub fn hooks(ctx: &Ctx, cmd: HooksCmd) -> Result<()> {
     match cmd {
         HooksCmd::Install { path, force } => {
             let state = hooks::install(&path, force)?;
-            render::emit(ctx.json, &hooks::status(&path)?, || {
+            let status = hooks::status(&path)?;
+            render::emit(ctx.json, &status, || {
                 println!("Pre-commit hook installed ({state:?}).");
                 println!("It runs `api-tracker scan --staged` and blocks high-confidence secrets.");
+                println!(
+                    "Active: {} — {}",
+                    if status.active { "yes" } else { "NO" },
+                    status.detail
+                );
             });
         }
         HooksCmd::Remove { path } => {
@@ -270,7 +276,12 @@ pub fn hooks(ctx: &Ctx, cmd: HooksCmd) -> Result<()> {
             render::emit(ctx.json, &status, || {
                 println!("Repository: {}", status.repo);
                 println!("Hook file:  {}", status.hook_path);
+                if let Some(over) = &status.hooks_path_override {
+                    println!("hooksPath:  {over} (git config core.hooksPath)");
+                }
                 println!("State:      {:?}", status.state);
+                println!("Active:     {}", if status.active { "yes" } else { "NO" });
+                println!("Detail:     {}", status.detail);
             });
         }
     }
