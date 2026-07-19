@@ -263,9 +263,11 @@ pub fn get_session(conn: &Connection, ident: &str) -> Result<ProcessSession> {
     }
 }
 
-/// Send SIGTERM to a recorded PID (best-effort, Unix only). Returns whether
-/// the signal was accepted. This is a LOCAL control: it cannot claw back
-/// values the process already received, and it never touches the provider.
+/// Terminate a recorded PID (best-effort): SIGTERM on Unix; on Windows a
+/// graceful taskkill first, then a forceful one (console processes cannot
+/// receive the graceful form). Returns whether termination was accepted.
+/// This is a LOCAL control: it cannot claw back values the process already
+/// received, and it never touches the provider.
 pub fn terminate_pid(pid: i64) -> bool {
     if cfg!(unix) {
         std::process::Command::new("kill")
@@ -274,10 +276,23 @@ pub fn terminate_pid(pid: i64) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     } else {
-        // Windows has no SIGTERM; taskkill without /F requests a graceful
-        // close, matching the Unix semantics as closely as the OS allows.
-        std::process::Command::new("taskkill")
+        // Windows has no SIGTERM. A graceful taskkill (no /F) only reaches
+        // processes with a message loop — console children (the normal
+        // `run` case) reject it outright, which the Windows CI run proved.
+        // Try graceful first for GUI children, then terminate forcefully:
+        // this command exists to be a working kill switch for an injected
+        // process, and a refusal would leave the credential-bearing child
+        // running.
+        let graceful = std::process::Command::new("taskkill")
             .args(["/PID", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if graceful {
+            return true;
+        }
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
