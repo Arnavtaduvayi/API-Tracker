@@ -82,19 +82,12 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
     let program = &args.command[0];
     let mut cmd = std::process::Command::new(program);
     cmd.args(&args.command[1..]);
-    // Do NOT leak API Tracker's own secret environment (the master password
-    // or session token) into the child. It inherits the rest of the parent
-    // environment plus only the credentials we inject.
-    for var in [
-        crate::ctx::ENV_PASSWORD,
-        crate::ctx::ENV_SESSION,
-        crate::ctx::ENV_PROJECT_PASSWORD,
-        crate::ctx::ENV_BACKUP_PASSWORD,
-        crate::ctx::ENV_PROVIDER_ADMIN_KEY,
-        crate::destination_cmd::ENV_DESTINATION_AUTH,
-    ] {
-        cmd.env_remove(var);
-    }
+    // Do NOT leak API Tracker's own secret environment (passwords, the
+    // session token, admin keys) into the child. Deny-by-default over the
+    // whole API_TRACKER_ prefix — an enumerated list here once missed
+    // API_TRACKER_NEW_PASSWORD (PI-01). The child inherits the rest of the
+    // parent environment plus only the credentials we inject.
+    api_tracker_core::inject::scrub_own_env(&mut cmd);
     for (name, value) in &env {
         // The secret is set on the child's environment only.
         cmd.env(name, value.expose());
