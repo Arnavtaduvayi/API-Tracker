@@ -110,15 +110,16 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 61 |
+| PASS | 69 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 64 |
+| NOT RUN (eligible, not yet reached) | 56 |
 | DEFERRED (out of session scope) | 4 (+7 live scripts) |
 | DEFECTS filed | 1 (MANUAL-001, low) |
 
 PASS to date: SETUP-01/02/03, VLT-01..06, PRJ-01..07, CRD-01..17, CRD-19,
-PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09. DEFERRED:
+PRV-01/02, DOC-01..04, USE-01..07, PRC-01..05, SCN-01..09, ALR-01/02/03,
+NTF-01..05. DEFERRED:
 CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled first_capture
 — low). Note: from CRD-06 onward, GUI driven by the conductor via a macOS
 accessibility harness + real key events, with CLI/DB cross-checks;
@@ -1243,6 +1244,110 @@ contains a secret value.
 - Expected: matched (plan SCN-09) — foreign hooks are never clobbered.
 - Evidence: CLI status/install/remove output; hook-file contents at each
   step; the CUSTOM-HOOK-RAN commit.
+- Suspected component: n/a.
+
+### ALR-01 — run checks; expected alert set — **PASS**
+
+- Screen/workflow: Alerts → Run checks now
+- Result: **PASS** (conductor-observed via AX UI + CLI)
+- Actual: notice "Checked 6 credential(s): 2 new, 0 resolved, 8 open.
+  Documentation checks: 0 · webhook deliveries: 0." The **8 open alerts**
+  cover every expected kind: expired (alpha-app/github-ci, high),
+  expiring_soon (alpha-app/stripe-webhook, medium), production_in_
+  development ×2 (payments-copy + shared-payments, high), over_budget
+  (alpha-app, high), documentation_changed (openai, info),
+  possible_exposure ×2 (scan finding + shared-payments marked exposed,
+  high/critical). Each card shows severity, title, "Evidence:",
+  "Recommended:". **No secret values** in any alert text (CLI grep clean).
+- Expected: matched (plan ALR-01) — at least expired / expiring_soon /
+  production_in_development / over_budget / documentation_changed all
+  present (plus the two possible_exposure from SCN-05).
+- Evidence: AX capture of cards; CLI `alerts list` (8 rows by kind);
+  negative secret-value scan.
+- Suspected component: n/a.
+
+### ALR-02 — acknowledge and resolve lifecycle — **PASS**
+
+- Screen/workflow: Alerts → acknowledge / resolve / "include acknowledged
+  & resolved"
+- Result: **PASS** — resolving an alert (f80910e7 possible_exposure) moved
+  it out of the default list; enabling "include acknowledged & resolved"
+  brought it back; CLI `alerts list --all` confirms state "resolved".
+- Evidence: UI list counts before/after; CLI state.
+- Suspected component: n/a.
+
+### ALR-03 — monitor status line + native notification — **PASS (status) / human-confirm (native banner)**
+
+- Screen/workflow: Alerts → Run checks now
+- Result: **PASS** for the monitor status surface. The UI muted line
+  "Checks last ran … · last success 7/19/2026, 1:30:20 PM" matches CLI
+  `monitor --status` (Last run / Last success 2026-07-19T17:30:20Z; Last
+  failure never; "2 new alert(s)"). The **native macOS notification**
+  (banner titled "API Tracker") and the OS notification-permission prompt
+  require human observation — flagged under "Items needing human
+  confirmation".
+- Evidence: UI status line; CLI `monitor --status`.
+- Suspected component: n/a.
+
+### NTF-01 — invalid webhook destination rejected — **PASS**
+
+- Screen/workflow: Notifications → Add webhook channel… → http URL
+- Result: **PASS** — entering `http://example.com/hook` (name bad-hook,
+  floor high) was rejected: "invalid input: plain http is only allowed to
+  localhost for testing (got host 'example.com'); use https"; **no channel
+  created** (CLI `notify list` empty). The URL field masks even on the
+  failed attempt.
+- Evidence: AX capture of error; CLI notify list.
+- Suspected component: n/a.
+
+### NTF-02 — add a working localhost channel and test it — **PASS (security-relevant)**
+
+- Screen/workflow: Notifications → Add webhook channel… (local-sink,
+  http://127.0.0.1:8085/hook, floor info) → test
+- Result: **PASS** — "Channel 'local-sink' added (http…ok; floor info)…";
+  URL column shows "URL (masked)"; test → "Test through 'local-sink':
+  delivered (status 200)". The sink received a **metadata-only** JSON
+  payload: `{source, kind:"test", severity:"info", title, detail,
+  recommended_action, observed_at}` — **no credential value, no full URL,
+  no secret**.
+- Evidence: AX capture; sink payload body captured (unbuffered sink).
+- Suspected component: n/a.
+
+### NTF-03 — delivery on monitor + duplicate-delivery prevention — **PASS**
+
+- Screen/workflow: Alerts → Run checks now (×2)
+- Result: **PASS** — 1st run delivered **6** payloads (UI "webhook
+  deliveries: 6"; sink received 6); 2nd run with no new alerts delivered
+  **0** ("webhook deliveries: 0"; sink silent). All 6 real-alert payloads
+  are metadata-only — e.g. the possible_exposure payload names the
+  credential and file but carries **no secret value**.
+- Evidence: sink payload count before/after; UI delivery counts; secret
+  scan across all payloads (clean).
+- Suspected component: n/a.
+
+### NTF-04 — webhook failure and retry — **PASS**
+
+- Screen/workflow: add dead-sink (http://127.0.0.1:8086/hook, nothing
+  listening) → test
+- Result: **PASS** — "Test through 'dead-sink' failed: provider request
+  failed: webhook delivery failed: network error"; CLI `notify list` shows
+  dead-sink LAST ERROR filled with that message. The failure is recorded
+  per-channel, **never reported as success**. (Retry-on-later-run is a
+  monitor-internal behavior; the per-channel failure recording — the
+  honesty-critical part — is verified.)
+- Evidence: AX notice; CLI notify list last_error.
+- Suspected component: n/a.
+
+### NTF-05 — disable / enable / remove — **PASS**
+
+- Screen/workflow: disable → enable → remove (both channels)
+- Result: **PASS** — disable local-sink → STATE "off"; enable → "on";
+  remove → confirm dialog "Remove channel 'dead-sink'?" → Remove channel →
+  row gone; both channels removed (CLI `notify list` empty).
+- Evidence: CLI state transitions; AX confirm-dialog capture.
+- Note: "disabled channel receives nothing" was inferred from STATE=off
+  (no new alerts existed to deliver during the disabled window, so an
+  explicit silent-delivery cycle was not separately forced).
 - Suspected component: n/a.
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
