@@ -1054,6 +1054,89 @@ fn budget_cost_source_get(state: State<'_, AppState>) -> CmdResult<String> {
 }
 
 #[tauri::command]
+fn pricing_records(
+    state: State<'_, AppState>,
+    all: bool,
+) -> CmdResult<Vec<api_tracker_core::pricing::PricingRecord>> {
+    with_vault(&state, |vault| {
+        if all {
+            vault.pricing_catalog()
+        } else {
+            vault.pricing_effective(&api_tracker_core::clock::now_rfc3339())
+        }
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn pricing_set_override(
+    state: State<'_, AppState>,
+    provider: String,
+    model: String,
+    input: Option<String>,
+    output: Option<String>,
+    cached_input: Option<String>,
+    per_request: Option<String>,
+    unit: Option<String>,
+    note: Option<String>,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        let parse =
+            |v: &Option<String>| -> Result<Option<i64>, api_tracker_core::error::CoreError> {
+                match v.as_deref().map(str::trim) {
+                    None | Some("") => Ok(None),
+                    Some(s) => Ok(Some(api_tracker_core::pricing::dollars_to_micros(s)?)),
+                }
+            };
+        let unit = match unit.as_deref() {
+            None | Some("") | Some("tokens") => api_tracker_core::pricing::Unit::Tokens,
+            Some("requests") => api_tracker_core::pricing::Unit::Requests,
+            Some(other) => {
+                return Err(api_tracker_core::error::CoreError::InvalidInput(format!(
+                    "unknown unit '{other}'"
+                )))
+            }
+        };
+        let spec = api_tracker_core::pricing::OverrideSpec {
+            unit: Some(unit),
+            input_price_per_m_micros: parse(&input)?,
+            cached_input_price_per_m_micros: parse(&cached_input)?,
+            output_price_per_m_micros: parse(&output)?,
+            batch_input_price_per_m_micros: None,
+            batch_output_price_per_m_micros: None,
+            per_request_micros: parse(&per_request)?,
+            effective_from: None,
+            note: note.unwrap_or_default(),
+        };
+        vault.set_pricing_override(&provider, &model, spec)
+    })
+}
+
+#[tauri::command]
+fn pricing_remove_override(
+    state: State<'_, AppState>,
+    provider: String,
+    model: String,
+) -> CmdResult<usize> {
+    with_vault(&state, |vault| {
+        vault.remove_pricing_override(&provider, &model)
+    })
+}
+
+#[tauri::command]
+fn pricing_import(
+    state: State<'_, AppState>,
+    json: String,
+) -> CmdResult<api_tracker_core::pricing::ImportOutcome> {
+    with_vault(&state, |vault| vault.pricing_import(&json))
+}
+
+#[tauri::command]
+fn pricing_export(state: State<'_, AppState>, provider: Option<String>) -> CmdResult<String> {
+    with_vault(&state, |vault| vault.pricing_export(provider.as_deref()))
+}
+
+#[tauri::command]
 fn budget_cost_source_set(state: State<'_, AppState>, value: String) -> CmdResult<()> {
     with_vault(&state, |vault| {
         let source: api_tracker_core::usage::CostSource = value.parse()?;
@@ -1895,6 +1978,11 @@ fn main() {
             usage_records,
             budget_cost_source_get,
             budget_cost_source_set,
+            pricing_records,
+            pricing_set_override,
+            pricing_remove_override,
+            pricing_import,
+            pricing_export,
             usage_report,
             usage_record_manual,
             budget_set,

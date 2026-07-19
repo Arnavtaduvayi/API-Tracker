@@ -36,6 +36,8 @@ import type {
   SessionKillResult,
   Suppression,
   PermissionsPreview,
+  PricingImportOutcome,
+  PricingRecord,
   Project,
   ProviderConnection,
   ProviderKeyListing,
@@ -274,6 +276,31 @@ export const api = {
     }),
   budgetCostSourceGet: () => call<string>("budget_cost_source_get"),
   budgetCostSourceSet: (value: string) => call<void>("budget_cost_source_set", { value }),
+  pricingRecords: (all: boolean) => call<PricingRecord[]>("pricing_records", { all }),
+  pricingSetOverride: (args: {
+    provider: string;
+    model: string;
+    unit: "tokens" | "requests";
+    input: string | null;
+    output: string | null;
+    cachedInput: string | null;
+    perRequest: string | null;
+    note: string | null;
+  }) =>
+    call<void>("pricing_set_override", {
+      provider: args.provider,
+      model: args.model,
+      unit: args.unit,
+      input: args.input,
+      output: args.output,
+      cachedInput: args.cachedInput,
+      perRequest: args.perRequest,
+      note: args.note,
+    }),
+  pricingRemoveOverride: (provider: string, model: string) =>
+    call<number>("pricing_remove_override", { provider, model }),
+  pricingImport: (json: string) => call<PricingImportOutcome>("pricing_import", { json }),
+  pricingExport: (provider: string | null) => call<string>("pricing_export", { provider }),
   usageRecordManual: (
     credential: string,
     model: string | null,

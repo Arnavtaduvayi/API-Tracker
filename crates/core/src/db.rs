@@ -558,6 +558,48 @@ CREATE TABLE notification_deliveries (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 8,
+        name: "versioned pricing records",
+        sql: r#"
+-- Effective-dated pricing records (imported files and manual overrides;
+-- the bundled table lives in code with the same shape). History is
+-- append-only by design: estimation resolves the record effective at the
+-- usage date, so new prices never silently reprice older usage.
+CREATE TABLE pricing_records (
+    id        TEXT PRIMARY KEY,
+    provider  TEXT NOT NULL,
+    model     TEXT NOT NULL,
+    unit      TEXT NOT NULL DEFAULT 'tokens',
+    input_price_per_m_micros        INTEGER,
+    cached_input_price_per_m_micros INTEGER,
+    output_price_per_m_micros       INTEGER,
+    batch_input_price_per_m_micros  INTEGER,
+    batch_output_price_per_m_micros INTEGER,
+    per_request_micros INTEGER,
+    currency  TEXT NOT NULL DEFAULT 'USD',
+    source    TEXT NOT NULL DEFAULT '',
+    effective_from TEXT NOT NULL,
+    last_verified  TEXT NOT NULL,
+    origin    TEXT NOT NULL,
+    version   INTEGER NOT NULL DEFAULT 1,
+    note      TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE(provider, model, origin, effective_from)
+) STRICT;
+
+-- Preserve legacy manual overrides. They predate effective dating, so they
+-- keep their historical semantics: applying to all usage dates.
+INSERT INTO pricing_records (id, provider, model, unit, input_price_per_m_micros,
+    output_price_per_m_micros, currency, source, effective_from, last_verified,
+    origin, version, note, created_at)
+SELECT id, provider, model, unit, input_price_per_m_micros, output_price_per_m_micros,
+    currency, 'manual override (' || note || ')', '1970-01-01', substr(created_at, 1, 10),
+    'override', 1, note, created_at
+FROM pricing_overrides;
+DROP TABLE pricing_overrides;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

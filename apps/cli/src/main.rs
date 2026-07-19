@@ -11,6 +11,7 @@ mod ctx;
 mod destination_cmd;
 mod env_cmd;
 mod key_cmd;
+mod pricing_cmd;
 mod project_cmd;
 mod provider_cmd;
 mod render;
@@ -93,6 +94,9 @@ enum Commands {
     /// Set and view budgets.
     #[command(subcommand)]
     Budget(usage_cmd::BudgetCmd),
+    /// Versioned pricing records for local cost estimates.
+    #[command(subcommand)]
+    Pricing(pricing_cmd::PricingCmd),
     /// View local activity events.
     #[command(subcommand)]
     Activity(usage_cmd::ActivityCmd),
@@ -150,6 +154,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Alerts(cmd) => alerts_cmd::alerts(&ctx, cmd),
         Commands::Usage(cmd) => usage_cmd::usage(&ctx, cmd),
         Commands::Budget(cmd) => usage_cmd::budget(&ctx, cmd),
+        Commands::Pricing(cmd) => pricing_cmd::run(&ctx, cmd),
         Commands::Activity(cmd) => usage_cmd::activity(&ctx, cmd),
         Commands::Mapping(cmd) => usage_cmd::mapping(&ctx, cmd),
         Commands::Run(args) => run_cmd::run(&ctx, args),

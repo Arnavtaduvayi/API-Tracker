@@ -45,6 +45,7 @@ pub enum AlertKind {
     UnusualTimePattern,
     DestinationDrift,
     AccessGrantExpired,
+    PricingStale,
 }
 
 impl AlertKind {
@@ -78,6 +79,7 @@ impl AlertKind {
             AlertKind::UnusualTimePattern => "unusual_time_pattern",
             AlertKind::DestinationDrift => "destination_drift",
             AlertKind::AccessGrantExpired => "access_grant_expired",
+            AlertKind::PricingStale => "pricing_stale",
         }
     }
 }

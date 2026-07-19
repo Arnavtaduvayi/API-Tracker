@@ -811,6 +811,31 @@ export interface TestKeyResult {
   notes: string[];
 }
 
+export interface PricingRecord {
+  provider: string;
+  model: string;
+  unit: "tokens" | "requests" | "credits";
+  input_price_per_m_micros: number | null;
+  cached_input_price_per_m_micros: number | null;
+  output_price_per_m_micros: number | null;
+  batch_input_price_per_m_micros: number | null;
+  batch_output_price_per_m_micros: number | null;
+  per_request_micros: number | null;
+  currency: string;
+  source: string;
+  effective_from: string;
+  last_verified: string;
+  origin: "bundled" | "imported" | "override";
+  version: number;
+  note: string;
+  stale: boolean;
+}
+
+export interface PricingImportOutcome {
+  added: number;
+  replaced: number;
+}
+
 export interface ApiError {
   code: string;
   message: string;

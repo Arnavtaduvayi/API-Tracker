@@ -2877,14 +2877,21 @@ impl UnlockedVault {
         }
 
         // Local estimates only where the model is known — never for cost
-        // rows, which carry the provider-reported amount instead.
+        // rows, which carry the provider-reported amount instead. Pricing
+        // resolves as of the usage window's date, so re-syncs re-derive the
+        // same estimate a window originally got even after prices change.
         for row in usage_rows.iter_mut() {
             if let (Some(model), Some(inp), Some(out)) =
                 (&row.model, row.input_tokens, row.output_tokens)
             {
-                if let Some(est) =
-                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
-                {
+                if let Some(est) = crate::pricing::estimate_token_cost_as_of(
+                    &self.conn,
+                    provider,
+                    model,
+                    &row.window_start,
+                    inp,
+                    out,
+                )? {
                     row.estimated_cost_micros = Some(est.micros);
                 }
             }
@@ -3053,9 +3060,14 @@ impl UnlockedVault {
             if let (Some(model), Some(inp), Some(out)) =
                 (&row.model, row.input_tokens, row.output_tokens)
             {
-                if let Some(est) =
-                    crate::pricing::estimate_token_cost(&self.conn, provider, model, inp, out)?
-                {
+                if let Some(est) = crate::pricing::estimate_token_cost_as_of(
+                    &self.conn,
+                    provider,
+                    model,
+                    &row.window_start,
+                    inp,
+                    out,
+                )? {
                     row.estimated_cost_micros = Some(est.micros);
                 }
             }
@@ -3190,9 +3202,14 @@ impl UnlockedVault {
             if let (Some(model), Some(inp), Some(out)) =
                 (&snap.model, snap.input_tokens, snap.output_tokens)
             {
-                if let Some(est) =
-                    crate::pricing::estimate_token_cost(&tx, provider, model, inp, out)?
-                {
+                if let Some(est) = crate::pricing::estimate_token_cost_as_of(
+                    &tx,
+                    provider,
+                    model,
+                    &snap.window_start,
+                    inp,
+                    out,
+                )? {
                     snap.estimated_cost_micros = Some(est.micros);
                 }
             }
@@ -3557,10 +3574,11 @@ impl UnlockedVault {
         snap.source = "manual".into();
         snap.attribution = usage::Attribution::ExactCredential;
         if let Some(m) = model {
-            if let Some(est) = crate::pricing::estimate_token_cost(
+            if let Some(est) = crate::pricing::estimate_token_cost_as_of(
                 &self.conn,
                 &cred.provider,
                 m,
+                window_start,
                 input_tokens,
                 output_tokens,
             )? {
@@ -3668,26 +3686,52 @@ impl UnlockedVault {
         crate::activity::list(&self.conn, limit, cred_id.as_deref())
     }
 
+    /// The full pricing history (bundled + imported + overrides).
     pub fn pricing_catalog(&self) -> Result<Vec<crate::pricing::PricingRecord>> {
         crate::pricing::catalog(&self.conn)
+    }
+
+    /// The record that would price each known model today.
+    pub fn pricing_effective(&self, as_of: &str) -> Result<Vec<crate::pricing::PricingRecord>> {
+        crate::pricing::effective_catalog(&self.conn, as_of)
+    }
+
+    /// The record that would price this provider/model at the given date.
+    pub fn pricing_lookup(
+        &self,
+        provider: &str,
+        model: &str,
+        as_of: &str,
+    ) -> Result<Option<crate::pricing::PricingRecord>> {
+        crate::pricing::lookup_as_of(&self.conn, provider, model, as_of)
     }
 
     pub fn set_pricing_override(
         &self,
         provider: &str,
         model: &str,
-        input_dollars_per_m: &str,
-        output_dollars_per_m: &str,
-        note: &str,
+        spec: crate::pricing::OverrideSpec,
     ) -> Result<()> {
-        crate::pricing::set_override(
-            &self.conn,
-            provider,
-            model,
-            crate::pricing::dollars_to_micros(input_dollars_per_m)?,
-            crate::pricing::dollars_to_micros(output_dollars_per_m)?,
-            note,
-        )
+        crate::pricing::set_override(&self.conn, provider, model, spec)
+    }
+
+    pub fn remove_pricing_override(&self, provider: &str, model: &str) -> Result<usize> {
+        crate::pricing::remove_override(&self.conn, provider, model)
+    }
+
+    /// Import reviewed pricing records from interchange JSON.
+    pub fn pricing_import(&self, json: &str) -> Result<crate::pricing::ImportOutcome> {
+        crate::pricing::import_records(&self.conn, json)
+    }
+
+    /// Export pricing records (bundled + local) as interchange JSON.
+    pub fn pricing_export(&self, provider: Option<&str>) -> Result<String> {
+        crate::pricing::export_records(&self.conn, provider)
+    }
+
+    /// A proposed-update template for one provider, for review and import.
+    pub fn pricing_propose(&self, provider: &str) -> Result<String> {
+        crate::pricing::proposal_template(&self.conn, provider)
     }
 
     // --- Process injection ---
