@@ -5,6 +5,22 @@ on:
     branches: [main]
   pull_request:
 
+# Every third-party action is pinned to an immutable full commit SHA with an
+# adjacent comment naming the human-readable release (M-6 supply-chain
+# hardening). A mutable tag (@v4, @main, @stable) could be re-pointed at
+# malicious code by a compromised action account; a commit SHA cannot.
+#
+# To update a pinned action deliberately:
+#   1. Find the new release's commit SHA:
+#        gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq '.object.sha'
+#      (dereference annotated tags via repos/<owner>/<repo>/git/tags/<sha>).
+#   2. Replace the SHA and update the trailing "# <version>" comment.
+#   3. Review the diff between the old and new SHA before merging.
+
+# Least privilege: CI only reads the repository. No job publishes anything.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -13,11 +29,15 @@ jobs:
     name: Rust (core + CLI)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
         with:
+          # The SHA pins the action code; `toolchain` selects the Rust
+          # release explicitly (a pinned SHA can no longer infer it from the
+          # branch name).
+          toolchain: stable
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -31,9 +51,11 @@ jobs:
     name: Rust core (Windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: Tests (compiles the Credential Manager adapter on real Windows)
         env:
           API_TRACKER_INSECURE_FAST_KDF: "1"
@@ -46,8 +68,8 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -63,12 +85,13 @@ jobs:
     name: Desktop backend (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
         with:
+          toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm

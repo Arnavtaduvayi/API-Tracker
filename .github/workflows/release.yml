@@ -4,6 +4,13 @@ name: Release
 # tag (v*) is pushed, generates SHA-256 checksums, and attaches everything to a
 # GitHub Release. Artifacts are UNSIGNED (public alpha) — see
 # docs/PACKAGING.md for signing/notarization requirements.
+#
+# Every third-party action is pinned to an immutable full commit SHA with an
+# adjacent version comment (M-6 supply-chain hardening); this workflow can
+# publish releases, so an unpinned action here is a direct supply-chain risk.
+# To update a pin deliberately, resolve the new release's SHA
+# (`gh api repos/<owner>/<repo>/git/refs/tags/<tag> --jq '.object.sha'`),
+# swap the SHA + version comment, and review the SHA-to-SHA diff first.
 
 on:
   push:
@@ -19,6 +26,7 @@ permissions:
 jobs:
   cli:
     name: CLI (${{ matrix.target }})
+    # Build + artifact upload only; inherits the workflow-level read scope.
     strategy:
       fail-fast: false
       matrix:
@@ -33,11 +41,12 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
       - name: Build CLI
         run: cargo build --release -p api-tracker-cli --target ${{ matrix.target }}
       - name: Package (unix)
@@ -57,7 +66,7 @@ jobs:
           cp "$bin" "api-tracker.exe"
           7z a "$out.zip" api-tracker.exe
           certutil -hashfile "$out.zip" SHA256 > "$out.zip.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cli-${{ matrix.target }}
           path: |
@@ -75,10 +84,12 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -93,7 +104,7 @@ jobs:
         run: npm ci
       # tauri-action builds the app and uploads the bundles to the release for
       # the tag that triggered this workflow. Artifacts are unsigned.
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -112,7 +123,7 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: cli-*
           merge-multiple: true
@@ -121,7 +132,7 @@ jobs:
       # publishing artifacts without an integrity manifest.
       - name: Combined checksums
         run: cd dist && sha256sum api-tracker-* > SHA256SUMS.txt
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
           prerelease: true
