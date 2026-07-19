@@ -7,11 +7,15 @@
 
 ## Overall verdict
 
-> **PASS — PR #10 fixes the reviewed Phase 2 set with no new merge-blocking finding.**
+> **PASS WITH REQUIRED CHANGES — the Phase 2 fixes are substantially correct, but one specified change is required before merge: de-flake the timing-dependent PI-02 test that fails the required CI check.**
 
-Every claimed Phase 2 fix is **FIXED** at `260e47e`, verified by attacking the code rather than trusting the Phase 2 report. No fix is ineffective; no Phase 2 change introduces a merge-blocking regression. The new/residual items (`RA2-1..5`, `RA-P2-1..3`, and the deferred audit backlog) are Low/Informational, pre-existing or honestly-documented, and none blocks PR #10.
+Every claimed Phase 2 *production* fix is **FIXED** at `260e47e`, verified by attacking the code rather than trusting the Phase 2 report — no fix is ineffective and no Phase 2 change introduces a production regression. **However, PR #10 must NOT be merged as-is:** the required "Rust (core + CLI)" GitHub CI check is **RED** on the PR head `260e47e`. A new Phase 2 test, `pid_reused_by_a_different_process_is_refused` (`crates/core/tests/pi02_process_identity.rs:183`), is **flaky/timing-dependent** — it passes 15/15 locally on macOS but failed on the Linux CI runner with *"a recycled PID must fail the identity match, got Signalled"* (finding **RA2-6**). This is a merge-blocker under the closeout gate ("every required CI check must be green"). The remaining new/residual items (`RA2-1..5`, `RA-P2-1..3`, the deferred backlog) are Low/Informational and non-blocking.
 
-**This PASS is scoped to PR #10's merge-readiness for its reviewed Phase 2 scope. It is NOT a statement that API Tracker is ready for GA.** Deferred blockers remain (PI-05, CONC-01/02, ROT-002..008/011, the manual Windows/live-provider/packaged-app verification) — see `CONTINUATION.md`.
+**Even once CI is green, this remains scoped to PR #10's Phase 2 merge-readiness — NOT a statement that API Tracker is GA-ready.** Deferred blockers remain (PI-05, CONC-01/02, ROT-002..008/011, the manual Windows/live-provider/packaged-app verification) — see `CONTINUATION.md`.
+
+### Required change before merge (single, specified)
+
+De-flake `pid_reused_by_a_different_process_is_refused`. The test constructs a "recycled PID with a different start time" and asserts termination is `Refused`, but its 1-second wall-clock wait cannot reliably produce distinct `ps lstart` values: `ps lstart` has 1-second resolution with jiffies→wall-clock rounding slop, so on the Linux runner the new decoy's displayed start-second collided with the recorded (dead) identity's — and the production code **correctly** matched two now-identical `lstart`+`comm` identities and signalled, hitting the *documented* same-second-same-executable recycle residual the PI-02 design explicitly cannot distinguish. The fix is a **test** fix (not production): either wait ≥2 s, or assert the recorded vs freshly-probed `lstart` strings actually differ before asserting `Refused`, or skip when they collide. Re-run the required CI checks and confirm green. Per audit scope I did not modify the test.
 
 ## How this was verified
 
@@ -39,7 +43,20 @@ Per-finding detail is in `FIX_VERIFICATION_MATRIX.md`; migration v11 in `MIGRATI
 | React security tests (+ IPC-05 `safeExternalUrl`) | FIXED (IPC-05 solid; RA2-5 coverage gaps) | No |
 | RA-4 — Windows env-casing scrub | FIXED | No |
 
+**Merge-blocking (required change):** **RA2-6** — the new PI-02 test `pid_reused_by_a_different_process_is_refused` is flaky/timing-dependent and **fails the required "Rust (core + CLI)" CI check** on the Linux runner (passes 15/15 locally on macOS). Production code is correct; the test over-asserts against the documented same-second-recycle residual. PR #10 must not merge until this is de-flaked and CI is green.
+
 New (non-blocking): **RA2-1** Vercel no pagination (Low, pre-existing); **RA2-2** `terminate_pid` dead code (Info); **RA2-3** unbounded `git --version` (Info); **RA2-4** tampered-identity threat boundary (Info); **RA2-5** React test count inflated + 3 coverage holes (Low). **RA-P2-1/2/3** confirmed valid and non-blocking. Deferred backlog (RA-2 broken-pipe reproduced, RA-3, PI-03/05, CONC-01/02, ROT-002..008/011) correctly out of scope.
+
+### CI status of PR #10 head `260e47e` (inspected via `gh`)
+
+| Check | Result |
+|---|---|
+| Rust (core + CLI) | **FAILURE** — `pid_reused_by_a_different_process_is_refused` (RA2-6) |
+| Rust core (Windows) | success |
+| Desktop frontend | success |
+| Desktop backend (macOS) | success |
+
+`gh pr view 10`: OPEN, **draft**, base `main`, head `fix/security-phase-2` @ `260e47e` (== audited), `mergeable: MERGEABLE` (no conflicts), `mergeStateStatus: UNSTABLE` (checks not all green). Evidence: `evidence/ci_pi02_flake_failure.log.txt`.
 
 ## What was checked most aggressively
 

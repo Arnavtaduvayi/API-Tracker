@@ -4,9 +4,11 @@ Per-finding disposition for every claimed Phase 2 fix, verified by attacking the
 
 **Legend:** FIXED · PARTIALLY FIXED · NOT FIXED · REGRESSION · INCONCLUSIVE. "Blocks PR #10" is the only merge-gate column.
 
+> **Merge gate:** all Phase 2 *production* fixes below are FIXED, but **PR #10 is blocked from merge** by **RA2-6** — the new PI-02 test `pid_reused_by_a_different_process_is_refused` is flaky/timing-dependent and fails the required "Rust (core + CLI)" CI check on Linux. Overall re-audit verdict: **PASS WITH REQUIRED CHANGES** (de-flake that test; get CI green). See `PHASE_2_REAUDIT.md` and NEW_FINDINGS `RA2-6`.
+
 | Finding(s) | Verdict | Blocks PR #10 |
 |---|---|---|
-| PI-02 / CONC-11 / CLI-03 / RA-1 — process identity before termination | **FIXED** | No |
+| PI-02 / CONC-11 / CLI-03 / RA-1 — process identity before termination | **FIXED** (production) — but its new suite carries the flaky test RA2-6 | **Yes, via RA2-6** (flaky test fails CI; production code is correct) |
 | Migration v11 — `proc_identity` column | **FIXED** (see MIGRATION_V11_REVIEW.md) | No |
 | GScan-01 / GScan-02 — git hook truthfulness & scan-first chaining | **FIXED** | No |
 | CONC-06 / GScan-03 / CONC-05 — bounded git execution & streaming history | **FIXED** | No |
@@ -26,7 +28,7 @@ Per-finding disposition for every claimed Phase 2 fix, verified by attacking the
 - **Changed files/symbols:** `inject.rs` (`probe_process_identity`, `IdentityProbe`, `TerminationOutcome`, `terminate_verified`, `set_session_pid` identity capture, `ProcessSession.proc_identity`); `vault.rs::terminate_process_session` (single routing + audit + row-close); `db.rs` migration v11; `access_cmd.rs` (`kill` + `end --kill` route through the vault); `main.rs::access_session_kill`; `types.ts`/`AccessView.tsx`.
 - **Intended invariant:** a recorded PID is signalled ONLY when the launch identity (start-time + executable, platform-prefixed) still matches immediately before signalling; a stale/recycled/tampered/identity-less record is refused; an exited process is reported truthfully; every request is audited.
 - **Baseline failure evidence:** `evidence/pi02_baseline_fail.log.txt` — the stale-PID test killed the decoy at `033f747`.
-- **Tests at 260e47e:** `pi02_process_identity` 10/10; `access_end_kill_guard` 1/1; `observability` termination test **strengthened** to assert `TerminationOutcome::Signalled`.
+- **Tests at 260e47e:** `pi02_process_identity` 10/10 locally (macOS) and 15/15 on a repeated local run of the recycled-PID case; `access_end_kill_guard` 1/1; `observability` termination test **strengthened** to assert `TerminationOutcome::Signalled`. **CI caveat (RA2-6):** on the Linux CI runner `pid_reused_by_a_different_process_is_refused` FAILED (`got Signalled`) — a flaky, `ps lstart`-granularity-dependent test, not a production defect. This is the sole merge-blocker.
 - **Independent proof:** I inventoried every termination entry point. `terminate_pid` (legacy, no identity check) has **zero production callers**. `terminate_verified` has exactly one production caller — `vault.terminate_process_session` — through which all three recorded-session paths route (`access kill`, `access end --kill`, desktop `access_session_kill`). The duration-limit auto-kill (`run_cmd.rs:122`) uses `Child::kill()`+`Child::wait()` on the live handle (a *stronger* primitive; no recycled-PID risk). `sweep_dead_sessions` only closes rows, never signals. The migration harness proved a NULL-identity (pre-v11) row is refused.
 - **Edge cases:** `pid<=0`, reused PID (real recycle simulated by capturing a dead process's identity then waiting for the wall-clock second to advance), fabricated identity, tampered record naming PID 1, cross-platform (`win:`) identity on Unix, already-exited (row closed), matching live process (signalled + audited), descendants (survive — PI-03 documented), concurrent exit during verify (kill fails → re-probe → AlreadyExited).
 - **Compatibility:** additive migration; pre-v11 rows refused (safe). FE `TerminationOutcome` tagged-enum matches the Rust serde tags.

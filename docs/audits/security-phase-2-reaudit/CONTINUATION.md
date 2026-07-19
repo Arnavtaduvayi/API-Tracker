@@ -1,6 +1,10 @@
 # Continuation — Everything Still Open After the Phase 2 Re-Audit
 
-**Audit branch:** `audit/security-phase-2-reaudit`. **Reviewed:** `033f747..260e47e` (PR #10). **Verdict:** PASS (merge-safe for the reviewed scope; **not** GA).
+**Audit branch:** `audit/security-phase-2-reaudit`. **Reviewed:** `033f747..260e47e` (PR #10). **Verdict:** **PASS WITH REQUIRED CHANGES** — production fixes are correct, but a flaky PI-02 test fails the required CI check (RA2-6). **PR #10 was NOT merged.**
+
+## Required before PR #10 can merge (blocking)
+
+1. **De-flake `pid_reused_by_a_different_process_is_refused`** (`crates/core/tests/pi02_process_identity.rs`) so the required "Rust (core + CLI)" CI check is green on Linux. The 1-second wall-clock wait cannot reliably produce a distinct `ps lstart` second (1-second resolution + rounding slop); wait ≥2 s, or assert the freshly-probed `lstart` actually differs from the recorded one before asserting `Refused` (treat a collision as the documented same-second-recycle residual, not a test failure). Test-only change; the production PI-02 code is correct. Re-run CI, confirm green, then merge with a merge commit (no squash).
 
 ## Verified fixed by Phase 2 (this re-audit)
 

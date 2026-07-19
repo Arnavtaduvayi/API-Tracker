@@ -1,0 +1,7 @@
+Rust (core + CLI)	Tests	2026-07-19T18:39:58.0322147Z test pid_reused_by_a_different_process_is_refused ... FAILED
+Rust (core + CLI)	Tests	2026-07-19T18:39:59.2915728Z ---- pid_reused_by_a_different_process_is_refused stdout ----
+Rust (core + CLI)	Tests	2026-07-19T18:39:59.2917346Z thread 'pid_reused_by_a_different_process_is_refused' (8339) panicked at crates/core/tests/pi02_process_identity.rs:183:5:
+Rust (core + CLI)	Tests	2026-07-19T18:39:59.2918469Z a recycled PID must fail the identity match, got Signalled
+Rust (core + CLI)	Tests	2026-07-19T18:39:59.2956498Z     pid_reused_by_a_different_process_is_refused
+Rust (core + CLI)	Tests	2026-07-19T18:39:59.2957479Z test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.27s
+Rust (core + CLI)	Tests	2026-07-19T18:39:59.2971715Z ##[error]Process completed with exit code 101.

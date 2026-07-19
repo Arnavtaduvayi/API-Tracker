@@ -22,6 +22,19 @@ All runs used synthetic credentials and disposable temp directories only. No pro
 
 `smoke.sh` builds and exercises the **release** binary (production Argon2id KDF). The RA-2 broken-pipe panic fired on piped stdout during the run (as it did in the PR #9 re-audit) but did not fail any assertion (126/0) — see NEW_FINDINGS RA-2.
 
+## PR #10 GitHub CI status (inspected via `gh`, head `260e47e`) — RED
+
+**A required check fails on the PR head — this is the merge blocker (RA2-6).** My local workspace run passed 505/0, but the Linux CI runner did not:
+
+| CI check | Result |
+|---|---|
+| **Rust (core + CLI)** | **FAILURE** — `pid_reused_by_a_different_process_is_refused` (`got Signalled`) |
+| Rust core (Windows) | success |
+| Desktop frontend | success |
+| Desktop backend (macOS) | success |
+
+**Local vs CI discrepancy explained:** the failing test is flaky/timing-dependent (relies on `ps lstart` 1-second granularity to separate a recycled PID's start-time). It passed **15/15** on a repeated local macOS run but failed on the Linux runner, where `ps lstart` rounding let the new decoy's start-second collide with the recorded identity — hitting the documented same-second-recycle residual. Production PI-02 code is correct; the test over-asserts. See NEW_FINDINGS `RA2-6`; evidence `evidence/ci_pi02_flake_failure.log.txt`. **PR #10 was NOT merged.**
+
 ## Each Phase 2 regression suite, run individually
 
 | Suite | Tests | Result |
