@@ -132,39 +132,97 @@ fn checked_ident(name: &str) -> Result<String> {
     Ok(format!("\"{name}\""))
 }
 
-fn collect_payload_v2(conn: &Connection) -> Result<BackupPayloadV2> {
-    let schema_version = db::user_version(conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT name FROM sqlite_master
-         WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    )?;
-    let names: Vec<String> = stmt
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
+/// Collect every user table inside ONE read transaction, so all tables come
+/// from the same WAL snapshot: a writer committing between two tables' reads
+/// (e.g. a project-key rotation between `credentials` and `projects`) can no
+/// longer produce a cross-table-inconsistent — and therefore unrestorable —
+/// backup. A read transaction blocks no one; concurrent writers proceed and
+/// simply do not appear in this snapshot.
+///
+/// `after_table` runs after each table's rows are read, still inside the
+/// snapshot — a deterministic seam for the concurrency regression test.
+fn collect_payload_v2_with(
+    conn: &Connection,
+    mut after_table: impl FnMut(&str),
+) -> Result<BackupPayloadV2> {
+    let tx = conn.unchecked_transaction()?;
+    let schema_version = db::user_version(&tx)?;
+    let names: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )?;
+        let names = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        names
+    };
 
     let mut tables = Vec::with_capacity(names.len());
     for name in names {
         let quoted = checked_ident(&name)?;
-        let mut stmt = conn.prepare(&format!("SELECT * FROM {quoted}"))?;
-        let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
-        let column_count = columns.len();
-        let rows: Vec<Vec<Cell>> = stmt
-            .query_and_then([], |row| {
-                (0..column_count)
-                    .map(|i| Cell::from_value_ref(row.get_ref(i)?))
-                    .collect::<Result<Vec<Cell>>>()
-            })?
-            .collect::<Result<_>>()?;
+        let (columns, rows) = {
+            let mut stmt = tx.prepare(&format!("SELECT * FROM {quoted}"))?;
+            let columns: Vec<String> = stmt.column_names().iter().map(|c| c.to_string()).collect();
+            let column_count = columns.len();
+            let rows: Vec<Vec<Cell>> = stmt
+                .query_and_then([], |row| {
+                    (0..column_count)
+                        .map(|i| Cell::from_value_ref(row.get_ref(i)?))
+                        .collect::<Result<Vec<Cell>>>()
+                })?
+                .collect::<Result<_>>()?;
+            (columns, rows)
+        };
+        after_table(&name);
         tables.push(TableExport {
             name,
             columns,
             rows,
         });
     }
-    Ok(BackupPayloadV2 {
+    tx.commit()?;
+    let payload = BackupPayloadV2 {
         schema_version,
         tables,
-    })
+    };
+    assert_payload_consistent(&payload)?;
+    Ok(payload)
+}
+
+/// Tripwire for the snapshot property above: under one snapshot (with
+/// foreign keys enforced) every credential's project row is necessarily in
+/// the same payload. If this ever fires, payload collection has regressed
+/// to reading tables from different points in time.
+fn assert_payload_consistent(payload: &BackupPayloadV2) -> Result<()> {
+    let table = |name: &str| payload.tables.iter().find(|t| t.name == name);
+    let (Some(projects), Some(credentials)) = (table("projects"), table("credentials")) else {
+        return Ok(());
+    };
+    let project_id_col = projects.columns.iter().position(|c| c == "id");
+    let cred_project_col = credentials.columns.iter().position(|c| c == "project_id");
+    let (Some(project_id_col), Some(cred_project_col)) = (project_id_col, cred_project_col) else {
+        return Ok(());
+    };
+    let project_ids: std::collections::HashSet<&str> = projects
+        .rows
+        .iter()
+        .filter_map(|r| match r.get(project_id_col) {
+            Some(Cell::Text(t)) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect();
+    for row in &credentials.rows {
+        if let Some(Cell::Text(project_id)) = row.get(cred_project_col) {
+            if !project_ids.contains(project_id.as_str()) {
+                return Err(CoreError::VaultCorrupted(
+                    "backup snapshot is internally inconsistent (a credential's project is \
+                     missing from the same snapshot)",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +340,18 @@ pub fn create_backup(
     backup_password: &SecretString,
     overwrite: bool,
 ) -> Result<BackupInfo> {
+    create_backup_with(vault, path, backup_password, overwrite, |_| {})
+}
+
+/// [`create_backup`] with the payload-collection seam exposed; see
+/// [`collect_payload_v2_with`].
+fn create_backup_with(
+    vault: &UnlockedVault,
+    path: &Path,
+    backup_password: &SecretString,
+    overwrite: bool,
+    after_table: impl FnMut(&str),
+) -> Result<BackupInfo> {
     if backup_password.expose().len() < crate::vault::MIN_PASSWORD_LEN {
         return Err(CoreError::InvalidInput(format!(
             "the backup password must be at least {} characters",
@@ -294,7 +364,7 @@ pub fn create_backup(
             ident: path.display().to_string(),
         });
     }
-    let payload = collect_payload_v2(vault.connection())?;
+    let payload = collect_payload_v2_with(vault.connection(), after_table)?;
     let payload_json = serde_json::to_vec(&payload)?;
     let kdf = KdfParams::recommended();
     let salt = crypto::new_salt();
@@ -843,6 +913,77 @@ mod tests {
         );
         let revealed = restored.reveal_credential("app/main", &master).unwrap();
         assert_eq!(revealed.expose(), "sk-proj-FAKE-legacy-backup-test-0001");
+    }
+
+    /// CONC-04 regression: a project-key rotation committing between two
+    /// tables' reads must not produce a cross-table-inconsistent backup.
+    /// Deterministic: the payload-collection seam commits the rotation from
+    /// a second session immediately after the `credentials` table is read
+    /// (tables are read in name order, so `projects` — holding the key wrap
+    /// — is read later). At baseline `7d81090` the resulting backup pairs
+    /// pre-rotation ciphertext with the post-rotation wrap and the restored
+    /// credential is undecryptable; with snapshot collection the backup is
+    /// internally consistent and restores.
+    #[test]
+    fn backup_snapshot_is_consistent_under_concurrent_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = VaultPaths::new(dir.path().join("orig"));
+        let master = SecretString::from("conc04-master-password-01");
+        let project_pw = SecretString::from("conc04-project-password-1");
+        let fake = "FAKE-TEST-NOT-A-REAL-KEY-CONC04A";
+        let mut a = crate::vault::create_vault(&paths, &master).unwrap();
+        a.create_project(crate::vault::NewProject {
+            name: "p".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        a.set_project_password("p", &project_pw, &master).unwrap();
+        a.add_credential(crate::vault::AddCredential {
+            project: "p".into(),
+            provider: "openai".into(),
+            name: "c0".into(),
+            environment: crate::model::Environment::Development,
+            value: SecretString::from(fake),
+            credential_type: None,
+            key_created_at: None,
+            expires_at: None,
+            docs_url: String::new(),
+            notes: String::new(),
+        })
+        .unwrap();
+
+        // The concurrent writer: a second session on the same vault.
+        let mut b = crate::vault::unlock_vault(&paths, &master).unwrap();
+        b.unlock_project("p", &project_pw).unwrap();
+
+        let backup_password = SecretString::from("conc04-backup-password-01");
+        let file_path = dir.path().join("raced.backup");
+        let mut rotated = false;
+        create_backup_with(&a, &file_path, &backup_password, false, |table| {
+            if table == "credentials" && !rotated {
+                rotated = true;
+                b.set_project_password("p", &project_pw, &master)
+                    .expect("the concurrent rotation itself must succeed");
+            }
+        })
+        .unwrap();
+        assert!(rotated, "the rotation must have committed mid-collection");
+
+        // The backup must restore to a vault whose credential decrypts.
+        let restored_paths = VaultPaths::new(dir.path().join("restored"));
+        restore_backup(&file_path, &backup_password, &restored_paths, false).unwrap();
+        let mut restored = crate::vault::unlock_vault(&restored_paths, &master).unwrap();
+        restored.unlock_project("p", &project_pw).unwrap();
+        let revealed = restored.reveal_credential("p/c0", &master).expect(
+            "CONC-04 regression: a backup taken during a concurrent project-key rotation \
+                 restored to a credential that does not decrypt (cross-table-inconsistent \
+                 snapshot)",
+        );
+        assert_eq!(revealed.expose(), fake);
+        // And the restored vault's rotation path must work (nothing orphaned).
+        restored
+            .set_project_password("p", &project_pw, &master)
+            .expect("the restored vault must be able to rotate its project key");
     }
 
     #[cfg(unix)]
