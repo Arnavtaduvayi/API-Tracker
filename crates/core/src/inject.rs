@@ -43,18 +43,58 @@ pub const ENV_PREFIX: &str = "API_TRACKER_";
 /// (authentication material).
 pub const CHILD_SAFE_ENV: &[&str] = &["API_TRACKER_DIR", "API_TRACKER_INSECURE_FAST_KDF"];
 
+/// ASCII case-insensitive byte-slice equality (non-ASCII bytes compared
+/// verbatim). Used for the Windows scrub, where env names are matched
+/// case-insensitively by the OS.
+fn ascii_ci_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.eq_ignore_ascii_case(y))
+}
+
+fn ascii_ci_starts_with(bytes: &[u8], prefix: &[u8]) -> bool {
+    bytes.len() >= prefix.len() && ascii_ci_eq(&bytes[..prefix.len()], prefix)
+}
+
+/// Whether an environment variable name must be scrubbed from an injected
+/// child. `case_insensitive` selects the platform's env-name semantics:
+/// Windows env lookups are case-insensitive, so ANY casing of the
+/// `API_TRACKER_` prefix (e.g. `Api_Tracker_Password`) is an alias the app
+/// could still read and must be scrubbed (RA-4); Unix env names are
+/// case-sensitive, so only the exact-case prefix is API Tracker's and a
+/// differently-cased name is an unrelated variable left untouched. The
+/// child-safe allowlist is matched with the same case sensitivity.
+pub fn env_name_is_scrubbed(name: &[u8], case_insensitive: bool) -> bool {
+    let prefix = ENV_PREFIX.as_bytes();
+    let prefix_match = if case_insensitive {
+        ascii_ci_starts_with(name, prefix)
+    } else {
+        name.starts_with(prefix)
+    };
+    if !prefix_match {
+        return false;
+    }
+    let child_safe = CHILD_SAFE_ENV.iter().any(|safe| {
+        let safe = safe.as_bytes();
+        if case_insensitive {
+            ascii_ci_eq(safe, name)
+        } else {
+            safe == name
+        }
+    });
+    !child_safe
+}
+
 /// Remove every API Tracker environment variable that is not explicitly
 /// child-safe from a command about to be spawned. An injected child must
 /// receive only the credentials mapped for it — never the master password,
 /// session token, or other API Tracker authentication material that may sit
 /// in the parent's environment for scripting (PI-01). Byte-level prefix
-/// matching so a non-UTF-8 name cannot dodge the scrub.
+/// matching so a non-UTF-8 name cannot dodge the scrub. On Windows the match
+/// is case-insensitive so an unusual-casing alias cannot leak (RA-4); on
+/// Unix it stays case-sensitive, preserving normal env semantics.
 pub fn scrub_own_env(cmd: &mut std::process::Command) {
+    let case_insensitive = cfg!(windows);
     for (name, _) in std::env::vars_os() {
-        let bytes = name.as_encoded_bytes();
-        if bytes.starts_with(ENV_PREFIX.as_bytes())
-            && !CHILD_SAFE_ENV.iter().any(|safe| safe.as_bytes() == bytes)
-        {
+        if env_name_is_scrubbed(name.as_encoded_bytes(), case_insensitive) {
             cmd.env_remove(&name);
         }
     }
@@ -571,6 +611,57 @@ mod tests {
         assert!(!valid_env_name("1BAD"));
         assert!(!valid_env_name("has-dash"));
         assert!(!valid_env_name(""));
+    }
+
+    #[test]
+    fn windows_scrub_is_case_insensitive_for_the_api_tracker_prefix() {
+        // RA-4: on Windows env lookups are case-insensitive, so ANY casing of
+        // the API_TRACKER_ prefix is an alias the app could still read and
+        // must be scrubbed — the exact three casings the brief requires.
+        let ci = true;
+        for name in [
+            "API_TRACKER_SESSION",
+            "api_tracker_session",
+            "Api_Tracker_New_Password",
+            "API_TRACKER_PASSWORD",
+            "api_tracker_new_password",
+            "aPi_TrAcKeR_backup_password",
+        ] {
+            assert!(
+                env_name_is_scrubbed(name.as_bytes(), ci),
+                "Windows scrub must remove {name}"
+            );
+        }
+        // The child-safe allowlist is honoured case-insensitively too.
+        for safe in [
+            "API_TRACKER_DIR",
+            "api_tracker_dir",
+            "Api_Tracker_Insecure_Fast_Kdf",
+        ] {
+            assert!(
+                !env_name_is_scrubbed(safe.as_bytes(), ci),
+                "child-safe var {safe} must survive on Windows"
+            );
+        }
+        // Unrelated variables are never scrubbed.
+        assert!(!env_name_is_scrubbed(b"PATH", ci));
+        assert!(!env_name_is_scrubbed(b"APITRACKER_X", ci));
+    }
+
+    #[test]
+    fn unix_scrub_preserves_case_sensitive_semantics() {
+        // On Unix, env names are case-sensitive and the app reads exact-case
+        // names, so only the exact-case prefix is API Tracker's. A
+        // differently-cased name is an unrelated variable, left untouched.
+        let ci = false;
+        assert!(env_name_is_scrubbed(b"API_TRACKER_SESSION", ci));
+        assert!(env_name_is_scrubbed(b"API_TRACKER_NEW_PASSWORD", ci));
+        // Lowercase / mixed case are DIFFERENT variables on Unix — not ours.
+        assert!(!env_name_is_scrubbed(b"api_tracker_session", ci));
+        assert!(!env_name_is_scrubbed(b"Api_Tracker_New_Password", ci));
+        // Exact-case child-safe survives; a differently-cased "dir" is
+        // unrelated and simply not prefixed-matched anyway.
+        assert!(!env_name_is_scrubbed(b"API_TRACKER_DIR", ci));
     }
 
     #[test]
