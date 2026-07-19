@@ -5472,6 +5472,33 @@ impl UnlockedVault {
                     account: cfg("account").unwrap_or_else(|| "api-tracker".to_string()),
                 }))
             }
+            "linux_secret_service" => {
+                if !cfg!(target_os = "linux") {
+                    return Err(CoreError::Unsupported {
+                        provider: dest.kind.clone(),
+                        capability: "destination",
+                        hint: "the Secret Service is only available on Linux".into(),
+                    });
+                }
+                Ok(Box::new(d::SecretServiceDestination {
+                    runner,
+                    service: cfg("service").unwrap_or_else(|| "api-tracker".to_string()),
+                }))
+            }
+            "windows_credential_manager" => {
+                #[cfg(windows)]
+                {
+                    return Ok(Box::new(d::WindowsCredentialDestination));
+                }
+                #[cfg(not(windows))]
+                {
+                    Err(CoreError::Unsupported {
+                        provider: dest.kind.clone(),
+                        capability: "destination",
+                        hint: "the Credential Manager is only available on Windows".into(),
+                    })
+                }
+            }
             "aws_secrets_manager" => {
                 let region = cfg("region").ok_or_else(|| {
                     CoreError::InvalidInput("AWS destination config needs a region".into())
@@ -5547,6 +5574,39 @@ impl UnlockedVault {
                 Err(e)
             }
         }
+    }
+
+    /// Delete a secret at a destination. Destructive and reauthentication-
+    /// gated; the returned message states the destination's real deletion
+    /// semantics (AWS schedules a 30-day recovery window; GitHub/Vercel and
+    /// the OS stores delete immediately).
+    pub fn destination_delete_secret(
+        &self,
+        ident: &str,
+        secret_name: &str,
+        master_password: &SecretString,
+        http: &dyn crate::http::HttpClient,
+        runner: &dyn crate::destinations::CommandRunner,
+    ) -> Result<String> {
+        self.verify_master_password(master_password)?;
+        let dest = crate::destinations::get(&self.conn, ident)?;
+        let adapter = self.destination_adapter(&dest, http, runner)?;
+        adapter.delete(secret_name)?;
+        crate::audit::record(
+            &self.conn,
+            "destination_secret_deleted",
+            None,
+            None,
+            &format!("destination {} secret {secret_name}", dest.name),
+        )?;
+        Ok(if dest.kind == "aws_secrets_manager" {
+            format!(
+                "scheduled deletion of '{secret_name}' with the 30-day recovery window \
+                 (RestoreSecret in AWS can cancel until the deletion date)"
+            )
+        } else {
+            format!("deleted '{secret_name}' at destination '{}'", dest.name)
+        })
     }
 
     /// Attach a credential to a destination under a secret name.

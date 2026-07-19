@@ -34,6 +34,19 @@ pub enum DestinationCmd {
     Attachments(AttachmentsArgs),
     /// Check every attachment for drift against the destination.
     Drift(AttachmentsArgs),
+    /// Delete a secret AT the destination (destructive; reauthenticated).
+    DeleteSecret(DeleteSecretArgs),
+}
+
+#[derive(Args)]
+pub struct DeleteSecretArgs {
+    /// The configured destination (name or id).
+    pub destination: String,
+    /// The secret name at the destination.
+    pub secret_name: String,
+    /// Skip the interactive confirmation.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 #[derive(Args)]
@@ -154,7 +167,43 @@ pub fn run(ctx: &Ctx, cmd: DestinationCmd) -> Result<()> {
         DestinationCmd::Detach(args) => detach(ctx, args),
         DestinationCmd::Attachments(args) => attachments(ctx, args, false),
         DestinationCmd::Drift(args) => attachments(ctx, args, true),
+        DestinationCmd::DeleteSecret(args) => delete_secret(ctx, args),
     }
+}
+
+fn delete_secret(ctx: &Ctx, args: DeleteSecretArgs) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    let dest = vault.destination_get(&args.destination)?;
+    println!(
+        "This deletes secret '{}' AT destination '{}' ({}).",
+        args.secret_name, dest.name, dest.kind
+    );
+    if dest.kind == "aws_secrets_manager" {
+        println!(
+            "AWS schedules deletion with a 30-day recovery window; RestoreSecret can cancel \
+             it until the deletion date."
+        );
+    } else {
+        println!("Deletion at this destination is immediate.");
+    }
+    println!("The value in the local vault is NOT touched.");
+    if !ctx::confirm("Delete the secret at the destination?", args.yes)? {
+        println!("cancelled");
+        return Ok(());
+    }
+    eprintln!("Reauthentication required to delete at a destination.");
+    let password = ctx::master_password()?;
+    let http = api_tracker_core::http::UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    let detail = vault.destination_delete_secret(
+        &args.destination,
+        &args.secret_name,
+        &password,
+        &http,
+        &runner,
+    )?;
+    println!("{detail}");
+    Ok(())
 }
 
 fn support_label(s: destinations::DestSupport) -> &'static str {
@@ -201,9 +250,13 @@ fn kinds(ctx: &Ctx) -> Result<()> {
         for k in catalog {
             println!("{} — {}", k.kind, k.name);
             println!("  {}", k.description);
-            println!("  Auth:   {}", k.auth);
-            println!("  Status: {}", k.status);
-            println!("  Config: {}", k.config_help);
+            println!("  Auth:     {}", k.auth);
+            println!("  Status:   {}", k.status);
+            println!("  Verify:   {}", k.verify_method);
+            println!("  Plan:     {}", k.required_plan);
+            println!("  Charges:  {}", k.charges);
+            println!("  Testing:  {}", k.testing);
+            println!("  Config:   {}", k.config_help);
         }
     });
     Ok(())

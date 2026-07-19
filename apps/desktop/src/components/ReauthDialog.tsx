@@ -8,6 +8,8 @@ import { isApiError } from "../api";
 export function ReauthDialog(props: {
   title: string;
   actionLabel: string;
+  /** Extra explanatory text shown above the password field. */
+  body?: string;
   onConfirm: (password: string) => Promise<void>;
   onClose: () => void;
 }) {
@@ -33,6 +35,7 @@ export function ReauthDialog(props: {
   return (
     <dialog open>
       <h2>{props.title}</h2>
+      {props.body && <p>{props.body}</p>}
       <p className="muted">Confirm your master password to continue.</p>
       <form className="stack" onSubmit={(e) => void submit(e)}>
         <label className="field">

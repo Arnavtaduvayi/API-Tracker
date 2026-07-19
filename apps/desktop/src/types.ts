@@ -630,6 +630,14 @@ export interface DestinationKindInfo {
   platforms: string;
   status: string;
   capabilities: DestCapabilities;
+  /** How a write is verified: value read-back or existence only. */
+  verify_method: string;
+  /** Plan/tier the destination requires, if any. */
+  required_plan: string;
+  /** Possible charges from using this destination. */
+  charges: string;
+  /** Automated-test coverage status (fixtures vs live). */
+  testing: string;
   config_help: string;
 }
 

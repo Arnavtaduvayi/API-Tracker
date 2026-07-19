@@ -82,6 +82,7 @@ export function DestinationsView() {
   // Dialogs.
   const [removing, setRemoving] = useState<Destination | null>(null);
   const [detaching, setDetaching] = useState<Attachment | null>(null);
+  const [deletingSecret, setDeletingSecret] = useState<Attachment | null>(null);
 
   const configurableKinds = catalog.filter(
     (k) => !["vault", "env_mapping", "env_export"].includes(k.kind),
@@ -245,6 +246,10 @@ export function DestinationsView() {
                   {capabilityChip("rollback", k.capabilities.rollback)}
                   {capabilityChip("validation", k.capabilities.validation)}
                 </div>
+                <div className="muted">
+                  verify: {k.verify_method} · plan: {k.required_plan} · charges: {k.charges}
+                </div>
+                <div className="muted">testing: {k.testing}</div>
               </td>
             </tr>
           ))}
@@ -459,6 +464,9 @@ export function DestinationsView() {
                 <td>
                   <button className="link danger" onClick={() => setDetaching(a)}>
                     detach
+                  </button>{" "}
+                  <button className="link danger" onClick={() => setDeletingSecret(a)}>
+                    delete at destination
                   </button>
                 </td>
               </tr>
@@ -544,6 +552,28 @@ export function DestinationsView() {
             await reload();
           }}
           onClose={() => setRemoving(null)}
+        />
+      )}
+      {deletingSecret && (
+        <ReauthDialog
+          title={`Delete '${deletingSecret.secret_name}' AT '${deletingSecret.destination_name}'`}
+          actionLabel="Delete secret at destination"
+          body={
+            "This deletes the secret at the destination itself (AWS schedules a 30-day " +
+            "recovery window; other destinations delete immediately). The value in the " +
+            "local vault is NOT touched."
+          }
+          onConfirm={async (password) => {
+            const a = deletingSecret;
+            const detail = await api.destinationDeleteSecret(
+              a.destination_id,
+              a.secret_name,
+              password,
+            );
+            setNotice(detail);
+            await reload();
+          }}
+          onClose={() => setDeletingSecret(null)}
         />
       )}
       {detaching && (

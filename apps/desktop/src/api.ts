@@ -387,6 +387,8 @@ export const api = {
     secretName: string,
     environment: string,
   ) => call<void>("destination_attach", { credential, destination, secretName, environment }),
+  destinationDeleteSecret: (ident: string, secretName: string, password: string) =>
+    call<string>("destination_delete_secret", { ident, secretName, password }),
   destinationDetach: (credential: string, destination: string, secretName: string | null) =>
     call<number>("destination_detach", { credential, destination, secretName }),
   destinationAttachments: (credential: string | null) =>

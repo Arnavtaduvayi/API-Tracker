@@ -62,6 +62,14 @@ pub struct DestinationKindInfo {
     /// Current implementation status, in plain words.
     pub status: &'static str,
     pub capabilities: DestCapabilities,
+    /// How a write is verified: value read-back or existence only.
+    pub verify_method: &'static str,
+    /// Plan/tier the destination requires, if any.
+    pub required_plan: &'static str,
+    /// Possible charges from using this destination.
+    pub charges: &'static str,
+    /// Automated-test coverage status (fixtures vs live).
+    pub testing: &'static str,
     /// Required configuration fields for `destination add`.
     pub config_help: &'static str,
 }
@@ -86,6 +94,10 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
                 rollback: IMPL,
                 validation: IMPL,
             },
+            verify_method: "value read-back (it is the source of truth)",
+            required_plan: "none",
+            charges: "none",
+            testing: "covered by the full core test suite",
             config_help: "none — the vault is implicit",
         },
         DestinationKindInfo {
@@ -103,6 +115,10 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
                 rollback: UNSUP,
                 validation: IMPL,
             },
+            verify_method: "n/a — resolved from the vault at injection time",
+            required_plan: "none",
+            charges: "none",
+            testing: "covered by injection tests",
             config_help: "none — managed via `api-tracker mapping`",
         },
         DestinationKindInfo {
@@ -120,6 +136,10 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
                 rollback: IMPL,
                 validation: IMPL,
             },
+            verify_method: "value read-back (file re-read + fingerprint compare)",
+            required_plan: "none",
+            charges: "none",
+            testing: "covered by env-governance tests",
             config_help: "none — created by `api-tracker env export`",
         },
         DestinationKindInfo {
@@ -157,7 +177,93 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
                     DestSupport::PlatformUnavailable
                 },
             },
+            verify_method: "value read-back via the security tool",
+            required_plan: "none",
+            charges: "none",
+            testing: "fixture-tested through a scripted runner; exercised on macOS",
             config_help: "optional: account (default 'api-tracker')",
+        },
+        DestinationKindInfo {
+            kind: "linux_secret_service",
+            name: "Linux Secret Service",
+            description: "Items in the session Secret Service (GNOME Keyring / KWallet) via libsecret's secret-tool; the value is passed on stdin, never as an argument.",
+            auth: "none beyond the OS session (the keyring may prompt to unlock)",
+            platforms: "Linux only (needs secret-tool and a session Secret Service)",
+            status: if cfg!(target_os = "linux") {
+                "implemented on this platform (needs the libsecret-tools package)"
+            } else {
+                "implemented, but unavailable on this platform"
+            },
+            capabilities: DestCapabilities {
+                read: if cfg!(target_os = "linux") {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+                write: if cfg!(target_os = "linux") {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+                delete: if cfg!(target_os = "linux") {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+                versioning: UNSUP,
+                rollback: IMPL,
+                validation: if cfg!(target_os = "linux") {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+            },
+            verify_method: "value read-back via secret-tool lookup",
+            required_plan: "none",
+            charges: "none",
+            testing: "fixture-tested through a scripted runner; not yet exercised against a live Secret Service",
+            config_help: "optional: service (default 'api-tracker')",
+        },
+        DestinationKindInfo {
+            kind: "windows_credential_manager",
+            name: "Windows Credential Manager",
+            description: "Generic credentials for the current user via the Win32 credential API (CredWrite/CredRead/CredDelete).",
+            auth: "none beyond the Windows session (current-user store)",
+            platforms: "Windows only",
+            status: if cfg!(windows) {
+                "implemented on this platform (compile-verified; not yet exercised by CI on Windows)"
+            } else {
+                "implemented, but unavailable on this platform"
+            },
+            capabilities: DestCapabilities {
+                read: if cfg!(windows) {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+                write: if cfg!(windows) {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+                delete: if cfg!(windows) {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+                versioning: UNSUP,
+                rollback: IMPL,
+                validation: if cfg!(windows) {
+                    DestSupport::Implemented
+                } else {
+                    DestSupport::PlatformUnavailable
+                },
+            },
+            verify_method: "value read-back via CredRead",
+            required_plan: "none",
+            charges: "none",
+            testing: "portable naming/limit logic unit-tested; Win32 calls compile-checked for the Windows target, not yet exercised by CI",
+            config_help: "none",
         },
         DestinationKindInfo {
             kind: "aws_secrets_manager",
@@ -165,15 +271,19 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
             description: "Secrets in AWS Secrets Manager via the official API (SigV4-signed, direct from this machine).",
             auth: "IAM access key id + secret access key (stored encrypted in the vault); needs secretsmanager:GetSecretValue/PutSecretValue/CreateSecret/DescribeSecret",
             platforms: "all",
-            status: "implemented; verified against recorded API fixtures, not yet against a live AWS account",
+            status: "implemented (delete schedules the 30-day recovery window; RestoreSecret can cancel); verified against recorded API fixtures, not yet against a live AWS account",
             capabilities: DestCapabilities {
                 read: IMPL,
                 write: IMPL,
-                delete: DestSupport::SupportedNotImplemented,
+                delete: IMPL, // DeleteSecret with the 30-day recovery window
                 versioning: IMPL,
                 rollback: IMPL,
                 validation: IMPL,
             },
+            verify_method: "value read-back (GetSecretValue + fingerprint compare)",
+            required_plan: "any AWS account",
+            charges: "AWS Secrets Manager bills ~$0.40/secret/month (prorated) + $0.05 per 10k API calls",
+            testing: "fixture-tested incl. the official SigV4 vector; live verification via scripts/live_verify_aws.sh (opt-in)",
             config_help: "region (e.g. us-east-1)",
         },
         DestinationKindInfo {
@@ -191,6 +301,10 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
                 rollback: IMPL,
                 validation: IMPL,
             },
+            verify_method: "existence only (GitHub never returns secret values)",
+            required_plan: "any plan (private repos need admin access to the repo)",
+            charges: "none",
+            testing: "fixture-tested; live verification via scripts/live_verify_github_actions.sh (opt-in)",
             config_help: "owner, repo",
         },
         DestinationKindInfo {
@@ -208,6 +322,10 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
                 rollback: IMPL,
                 validation: IMPL,
             },
+            verify_method: "existence only (encrypted variables are write-only at Vercel)",
+            required_plan: "any plan",
+            charges: "none",
+            testing: "fixture-tested; live verification via scripts/live_verify_vercel.sh (opt-in)",
             config_help: "project_id; optional: team_id, targets (default production,preview,development)",
         },
     ];
@@ -742,6 +860,246 @@ impl DestinationAdapter for MacKeychainDestination<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// Linux Secret Service (freedesktop.org) via the `secret-tool` CLI
+// ---------------------------------------------------------------------------
+
+/// Secrets in the session's Secret Service (GNOME Keyring / KWallet with
+/// the freedesktop bridge) through `secret-tool` from libsecret. The value
+/// is passed on **stdin** (secret-tool's documented store mode), never as
+/// an argument. Items are keyed by `service`/`secret` attributes.
+pub struct SecretServiceDestination<'a> {
+    pub runner: &'a dyn CommandRunner,
+    /// The `service` attribute grouping this app's items.
+    pub service: String,
+}
+
+impl SecretServiceDestination<'_> {
+    fn attrs<'x>(&'x self, secret_name: &'x str) -> [&'x str; 4] {
+        ["service", &self.service, "secret", secret_name]
+    }
+}
+
+impl DestinationAdapter for SecretServiceDestination<'_> {
+    fn kind(&self) -> &'static str {
+        "linux_secret_service"
+    }
+
+    fn write(&self, secret_name: &str, value: &SecretString) -> Result<String> {
+        check_name(secret_name)?;
+        check_name(&self.service)?;
+        let label = format!("--label={}/{}", self.service, secret_name);
+        let a = self.attrs(secret_name);
+        let args = ["store", &label, a[0], a[1], a[2], a[3]];
+        // The value goes to secret-tool on stdin (its documented
+        // non-interactive mode) so it never appears in an argument list.
+        let (code, _out, err) =
+            self.runner
+                .run("secret-tool", &args, Some(value.expose().as_bytes()))?;
+        if code != 0 {
+            return Err(CoreError::Provider(format!(
+                "secret-tool store failed (exit {code}): {}",
+                String::from_utf8_lossy(&err).trim()
+            )));
+        }
+        Ok(format!(
+            "stored Secret Service item {}/{secret_name}",
+            self.service
+        ))
+    }
+
+    fn read(&self, secret_name: &str) -> Result<Option<SecretString>> {
+        check_name(secret_name)?;
+        check_name(&self.service)?;
+        let a = self.attrs(secret_name);
+        let (code, out, err) =
+            self.runner
+                .run("secret-tool", &["lookup", a[0], a[1], a[2], a[3]], None)?;
+        if code == 0 {
+            let value = String::from_utf8_lossy(&out)
+                .trim_end_matches('\n')
+                .to_string();
+            return Ok(Some(SecretString::new(value)));
+        }
+        // secret-tool exits nonzero both for "not found" (silently) and for
+        // real failures (locked collection, no session bus — with stderr).
+        // Distinguish on stderr so a locked keyring is never misreported as
+        // an absent secret.
+        let err_text = String::from_utf8_lossy(&err).trim().to_string();
+        if err_text.is_empty() {
+            return Ok(Some(SecretString::new(String::new()))); // absent
+        }
+        Err(CoreError::Provider(format!(
+            "secret-tool lookup failed (exit {code}): {err_text}"
+        )))
+    }
+
+    fn exists(&self, secret_name: &str) -> Result<Option<bool>> {
+        let value = self.read(secret_name)?;
+        Ok(value.map(|v| !v.expose().is_empty()))
+    }
+
+    fn delete(&self, secret_name: &str) -> Result<()> {
+        check_name(secret_name)?;
+        check_name(&self.service)?;
+        let a = self.attrs(secret_name);
+        let (code, _out, err) =
+            self.runner
+                .run("secret-tool", &["clear", a[0], a[1], a[2], a[3]], None)?;
+        let err_text = String::from_utf8_lossy(&err).trim().to_string();
+        // Clearing an absent item is success (idempotent); real failures
+        // carry stderr.
+        if code != 0 && !err_text.is_empty() {
+            return Err(CoreError::Provider(format!(
+                "secret-tool clear failed (exit {code}): {err_text}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn test(&self) -> Result<String> {
+        check_name(&self.service)?;
+        let (code, _out, err) =
+            self.runner
+                .run("secret-tool", &["search", "service", &self.service], None)?;
+        let err_text = String::from_utf8_lossy(&err).trim().to_string();
+        if code != 0 && !err_text.is_empty() {
+            return Err(CoreError::Provider(format!(
+                "the Secret Service is not reachable (exit {code}): {err_text}"
+            )));
+        }
+        Ok("secret-tool reachable; the session Secret Service will prompt as needed".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows Credential Manager (generic credentials via the Win32 API)
+// ---------------------------------------------------------------------------
+
+/// Build (and validate) the Credential Manager target name for a secret.
+/// Portable so the naming contract is unit-tested on every platform.
+pub fn wincred_target(secret_name: &str) -> Result<String> {
+    check_name(secret_name)?;
+    Ok(format!("api-tracker/{secret_name}"))
+}
+
+/// Generic credentials in the current user's Windows Credential Manager via
+/// `CredWriteW`/`CredReadW`/`CredDeleteW`. Compiled only on Windows; the
+/// catalog reports the kind as platform-unavailable elsewhere. The blob is
+/// the UTF-8 secret value; persistence is `LOCAL_MACHINE` (this user, this
+/// machine, surviving reboots — the standard choice for stored secrets).
+#[cfg(windows)]
+pub struct WindowsCredentialDestination;
+
+#[cfg(windows)]
+impl WindowsCredentialDestination {
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+}
+
+#[cfg(windows)]
+impl DestinationAdapter for WindowsCredentialDestination {
+    fn kind(&self) -> &'static str {
+        "windows_credential_manager"
+    }
+
+    fn write(&self, secret_name: &str, value: &SecretString) -> Result<String> {
+        use windows_sys::Win32::Security::Credentials::{
+            CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+        };
+        let target = wincred_target(secret_name)?;
+        let mut target_w = Self::to_wide(&target);
+        let mut user_w = Self::to_wide("api-tracker");
+        let blob = value.expose().as_bytes();
+        if blob.len() > 2560 {
+            // CRED_MAX_CREDENTIAL_BLOB_SIZE is 5*512 bytes.
+            return Err(CoreError::InvalidInput(
+                "the value exceeds the Credential Manager blob limit (2560 bytes)".into(),
+            ));
+        }
+        let mut blob_copy = blob.to_vec();
+        let cred = CREDENTIALW {
+            Flags: 0,
+            Type: CRED_TYPE_GENERIC,
+            TargetName: target_w.as_mut_ptr(),
+            Comment: std::ptr::null_mut(),
+            LastWritten: unsafe { std::mem::zeroed() },
+            CredentialBlobSize: blob_copy.len() as u32,
+            CredentialBlob: blob_copy.as_mut_ptr(),
+            Persist: CRED_PERSIST_LOCAL_MACHINE,
+            AttributeCount: 0,
+            Attributes: std::ptr::null_mut(),
+            TargetAlias: std::ptr::null_mut(),
+            UserName: user_w.as_mut_ptr(),
+        };
+        let ok = unsafe { CredWriteW(&cred, 0) };
+        // Best-effort: clear the plaintext copy we handed to the API.
+        blob_copy.iter_mut().for_each(|b| *b = 0);
+        if ok == 0 {
+            return Err(CoreError::Provider(format!(
+                "CredWriteW failed (error {})",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(format!("stored Credential Manager entry {target}"))
+    }
+
+    fn read(&self, secret_name: &str) -> Result<Option<SecretString>> {
+        use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+        use windows_sys::Win32::Security::Credentials::{
+            CredFree, CredReadW, CREDENTIALW, CRED_TYPE_GENERIC,
+        };
+        let target = wincred_target(secret_name)?;
+        let target_w = Self::to_wide(&target);
+        let mut pcred: *mut CREDENTIALW = std::ptr::null_mut();
+        let ok = unsafe { CredReadW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0, &mut pcred) };
+        if ok == 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+                return Ok(Some(SecretString::new(String::new()))); // absent
+            }
+            return Err(CoreError::Provider(format!("CredReadW failed ({err})")));
+        }
+        let value = unsafe {
+            let c = &*pcred;
+            let bytes = std::slice::from_raw_parts(c.CredentialBlob, c.CredentialBlobSize as usize);
+            let s = String::from_utf8_lossy(bytes).to_string();
+            CredFree(pcred as *mut _);
+            s
+        };
+        Ok(Some(SecretString::new(value)))
+    }
+
+    fn exists(&self, secret_name: &str) -> Result<Option<bool>> {
+        let value = self.read(secret_name)?;
+        Ok(value.map(|v| !v.expose().is_empty()))
+    }
+
+    fn delete(&self, secret_name: &str) -> Result<()> {
+        use windows_sys::Win32::Foundation::ERROR_NOT_FOUND;
+        use windows_sys::Win32::Security::Credentials::{CredDeleteW, CRED_TYPE_GENERIC};
+        let target = wincred_target(secret_name)?;
+        let target_w = Self::to_wide(&target);
+        let ok = unsafe { CredDeleteW(target_w.as_ptr(), CRED_TYPE_GENERIC, 0) };
+        if ok == 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(ERROR_NOT_FOUND as i32) {
+                return Ok(()); // idempotent
+            }
+            return Err(CoreError::Provider(format!("CredDeleteW failed ({err})")));
+        }
+        Ok(())
+    }
+
+    fn test(&self) -> Result<String> {
+        // Reading a definitely-absent probe entry proves the API is
+        // reachable without creating anything.
+        self.read("api-tracker-availability-probe")?;
+        Ok("Windows Credential Manager reachable for this user".into())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AWS Secrets Manager (SigV4-signed official API)
 // ---------------------------------------------------------------------------
 
@@ -1114,12 +1472,34 @@ impl DestinationAdapter for AwsSecretsManagerDestination<'_> {
         Ok(Some((200..300).contains(&resp.status)))
     }
 
-    fn delete(&self, _secret_name: &str) -> Result<()> {
-        Err(CoreError::Unsupported {
-            provider: "aws_secrets_manager".into(),
-            capability: "delete",
-            hint: "deletion (with its recovery window) is not implemented yet; delete in the AWS console".into(),
-        })
+    /// Schedule deletion with the default 30-day recovery window (the AWS
+    /// default). The secret is recoverable via RestoreSecret until the
+    /// DeletionDate; `ForceDeleteWithoutRecovery` is deliberately never
+    /// sent — an irreversible immediate delete has no place in an
+    /// automated path. Deleting an already-absent secret succeeds
+    /// (idempotent), matching the other adapters.
+    fn delete(&self, secret_name: &str) -> Result<()> {
+        let resp = self.call(
+            "DeleteSecret",
+            serde_json::json!({ "SecretId": secret_name, "RecoveryWindowInDays": 30 }),
+        )?;
+        if resp.status == 400 && resp.error_type().contains("ResourceNotFoundException") {
+            return Ok(());
+        }
+        if resp.status == 403 {
+            return Err(CoreError::ProviderAuth {
+                provider: "aws_secrets_manager".into(),
+                detail: resp.error_type().to_string(),
+            });
+        }
+        if !(200..300).contains(&resp.status) {
+            return Err(CoreError::Provider(format!(
+                "DeleteSecret failed ({}): {}",
+                resp.status,
+                resp.error_type()
+            )));
+        }
+        Ok(())
     }
 
     fn test(&self) -> Result<String> {
@@ -1480,6 +1860,8 @@ mod tests {
                 "env_mapping",
                 "env_export",
                 "macos_keychain",
+                "linux_secret_service",
+                "windows_credential_manager",
                 "aws_secrets_manager",
                 "github_actions",
                 "vercel"
@@ -1490,12 +1872,11 @@ mod tests {
         assert_eq!(gh.capabilities.read, DestSupport::Unsupported);
         let vercel = kind_info("vercel").unwrap();
         assert_eq!(vercel.capabilities.read, DestSupport::Unsupported);
-        // AWS delete is declared not-implemented, matching the adapter.
+        // AWS delete is implemented with recovery-window semantics, and the
+        // status says so.
         let aws = kind_info("aws_secrets_manager").unwrap();
-        assert_eq!(
-            aws.capabilities.delete,
-            DestSupport::SupportedNotImplemented
-        );
+        assert_eq!(aws.capabilities.delete, DestSupport::Implemented);
+        assert!(aws.status.contains("recovery window"));
     }
 
     #[test]
@@ -1692,6 +2073,133 @@ mod tests {
                 .unwrap();
             assert!(auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIAFAKEFAKEFAKEFAKE/"));
             assert!(!auth.contains("FAKE-secret-access-key"));
+        }
+    }
+
+    fn aws_dest(mock: &MockHttpClient) -> AwsSecretsManagerDestination<'_> {
+        AwsSecretsManagerDestination {
+            http: mock,
+            creds: AwsCredentials {
+                access_key_id: "AKIAFAKEFAKEFAKEFAKE".into(),
+                secret_access_key: SecretString::new("FAKE-secret-access-key".into()),
+                session_token: None,
+            },
+            region: "us-east-1".into(),
+        }
+    }
+
+    #[test]
+    fn aws_delete_uses_the_recovery_window_and_never_forces() {
+        let mock = MockHttpClient::new(vec![MockHttpClient::json_response(
+            r#"{"ARN":"arn:aws:...","Name":"MY_SECRET","DeletionDate":1.75e9}"#,
+        )]);
+        aws_dest(&mock).delete("MY_SECRET").unwrap();
+        let requests = mock.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        let target = requests[0]
+            .headers
+            .iter()
+            .find(|(k, _)| k == "x-amz-target")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        assert!(target.ends_with("DeleteSecret"));
+        let body = String::from_utf8(requests[0].body.clone().unwrap_or_default()).unwrap();
+        assert!(body.contains("\"RecoveryWindowInDays\":30"));
+        // The irreversible force-delete flag is never sent.
+        assert!(!body.contains("ForceDeleteWithoutRecovery"));
+    }
+
+    #[test]
+    fn aws_delete_is_idempotent_for_missing_secrets() {
+        let mock = MockHttpClient::new(vec![crate::http::HttpResponse {
+            status: 400,
+            headers: vec![],
+            body: br#"{"__type":"ResourceNotFoundException"}"#.to_vec(),
+        }]);
+        aws_dest(&mock).delete("GONE").unwrap();
+    }
+
+    #[test]
+    fn secret_service_round_trips_via_stdin_and_attributes() {
+        let runner = ScriptedRunner {
+            calls: RefCell::new(Vec::new()),
+            results: RefCell::new(vec![
+                (0, Vec::new(), Vec::new()),              // store
+                (0, b"the-value\n".to_vec(), Vec::new()), // lookup
+                (0, Vec::new(), Vec::new()),              // clear
+            ]),
+        };
+        let dest = SecretServiceDestination {
+            runner: &runner,
+            service: "api-tracker".into(),
+        };
+        dest.write("MY_SECRET", &SecretString::new("the-value".into()))
+            .unwrap();
+        assert_eq!(
+            dest.read("MY_SECRET").unwrap().unwrap().expose(),
+            "the-value"
+        );
+        dest.delete("MY_SECRET").unwrap();
+        let calls = runner.calls.borrow();
+        // The value travels on stdin, never in the argument list.
+        let (prog, args, stdin) = &calls[0];
+        assert_eq!(prog, "secret-tool");
+        assert_eq!(args[0], "store");
+        assert!(args.iter().all(|a| !a.contains("the-value")));
+        assert_eq!(stdin.as_deref(), Some(b"the-value".as_slice()));
+        // Attribute pairs identify the item.
+        assert!(args.contains(&"service".to_string()));
+        assert!(args.contains(&"MY_SECRET".to_string()));
+    }
+
+    #[test]
+    fn secret_service_distinguishes_absent_from_errors() {
+        // Nonzero exit with EMPTY stderr = absent (secret-tool's silent
+        // not-found); nonzero WITH stderr = a real failure (locked keyring).
+        let runner = ScriptedRunner {
+            calls: RefCell::new(Vec::new()),
+            results: RefCell::new(vec![
+                (1, Vec::new(), Vec::new()),
+                (1, Vec::new(), b"error: cannot unlock collection".to_vec()),
+            ]),
+        };
+        let dest = SecretServiceDestination {
+            runner: &runner,
+            service: "api-tracker".into(),
+        };
+        let absent = dest.read("MISSING").unwrap().unwrap();
+        assert!(absent.expose().is_empty());
+        assert!(dest.read("LOCKED").is_err());
+    }
+
+    #[test]
+    fn wincred_target_names_are_validated() {
+        assert_eq!(
+            wincred_target("MY_SECRET").unwrap(),
+            "api-tracker/MY_SECRET"
+        );
+        assert!(wincred_target("bad name with spaces").is_err());
+        assert!(wincred_target("").is_err());
+        assert!(wincred_target("evil;rm -rf").is_err());
+    }
+
+    #[test]
+    fn platform_gated_kinds_report_honestly() {
+        let by_kind = |k: &str| kind_info(k).unwrap();
+        let lss = by_kind("linux_secret_service");
+        let win = by_kind("windows_credential_manager");
+        if !cfg!(target_os = "linux") {
+            assert_eq!(lss.capabilities.write, DestSupport::PlatformUnavailable);
+        }
+        if !cfg!(windows) {
+            assert_eq!(win.capabilities.write, DestSupport::PlatformUnavailable);
+        }
+        // Every kind now declares the extended honesty fields.
+        for k in catalog() {
+            assert!(!k.verify_method.is_empty(), "{} verify", k.kind);
+            assert!(!k.required_plan.is_empty(), "{} plan", k.kind);
+            assert!(!k.charges.is_empty(), "{} charges", k.kind);
+            assert!(!k.testing.is_empty(), "{} testing", k.kind);
         }
     }
 }

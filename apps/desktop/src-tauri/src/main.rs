@@ -1497,6 +1497,26 @@ fn destination_test(state: State<'_, AppState>, ident: String) -> CmdResult<Stri
 }
 
 #[tauri::command]
+fn destination_delete_secret(
+    state: State<'_, AppState>,
+    ident: String,
+    secret_name: String,
+    password: String,
+) -> CmdResult<String> {
+    let http = UreqClient::new();
+    let runner = api_tracker_core::destinations::SystemRunner;
+    with_vault(&state, |vault| {
+        vault.destination_delete_secret(
+            &ident,
+            &secret_name,
+            &SecretString::new(password.clone()),
+            &http,
+            &runner,
+        )
+    })
+}
+
+#[tauri::command]
 fn destination_attach(
     state: State<'_, AppState>,
     credential: String,
@@ -2086,6 +2106,7 @@ fn main() {
             destination_remove,
             destination_list,
             destination_test,
+            destination_delete_secret,
             destination_attach,
             destination_detach,
             destination_attachments,
