@@ -4386,35 +4386,81 @@ impl UnlockedVault {
         crate::inject::list_sessions(&self.conn, limit, active_only)
     }
 
-    /// Terminate a recorded injection session's process (best-effort local
-    /// SIGTERM to the PID recorded at spawn). This is a LOCAL control: it
-    /// cannot claw back values the process already received and never
-    /// touches the provider credential. Refuses sessions that already ended
-    /// or that recorded no PID. The session row itself is closed by the
-    /// launching `run` process when the child exits.
-    pub fn terminate_process_session(&self, ident: &str) -> Result<(String, i64, bool)> {
+    /// Terminate a recorded injection session's process. This is the ONLY
+    /// path by which a recorded PID may be signalled — CLI `access kill`,
+    /// CLI `access end --kill`, and the desktop terminate command all route
+    /// here — and it verifies the identity recorded at launch immediately
+    /// before signalling (see [`crate::inject::terminate_verified`]): a PID
+    /// recycled to an unrelated process, a tampered record, or a session
+    /// with no recorded identity is refused, never signalled. Only the
+    /// recorded process itself is signalled — descendants it spawned are
+    /// not (documented limitation). This is a LOCAL control: it cannot claw
+    /// back values the process already received and never touches the
+    /// provider credential. Refuses sessions that already ended or that
+    /// recorded no PID; a session whose process provably exited is closed
+    /// truthfully. Every request is audited with its outcome.
+    pub fn terminate_process_session(
+        &self,
+        ident: &str,
+    ) -> Result<(String, i64, crate::inject::TerminationOutcome)> {
+        use crate::inject::TerminationOutcome;
         let session = crate::inject::get_session(&self.conn, ident)?;
         if session.ended_at.is_some() {
+            audit::record(
+                &self.conn,
+                "process_session_termination_refused",
+                None,
+                None,
+                &format!("session={} reason=already-ended", session.id),
+            )?;
             return Err(CoreError::InvalidInput(format!(
                 "session {} already ended",
                 session.id
             )));
         }
         let Some(pid) = session.pid else {
+            audit::record(
+                &self.conn,
+                "process_session_termination_refused",
+                None,
+                None,
+                &format!("session={} reason=no-recorded-pid", session.id),
+            )?;
             return Err(CoreError::InvalidInput(format!(
                 "session {} recorded no PID (started by an older build?)",
                 session.id
             )));
         };
-        let signalled = crate::inject::terminate_pid(pid);
-        audit::record(
-            &self.conn,
-            "process_session_terminated",
-            None,
-            None,
-            &format!("session={} pid={pid} signalled={signalled}", session.id),
-        )?;
-        Ok((session.id, pid, signalled))
+        let outcome = crate::inject::terminate_verified(pid, session.proc_identity.as_deref());
+        let (kind, detail) = match &outcome {
+            TerminationOutcome::Signalled => (
+                "process_session_terminated",
+                format!("session={} pid={pid} outcome=signalled", session.id),
+            ),
+            TerminationOutcome::Refused { reason } => (
+                "process_session_termination_refused",
+                format!("session={} pid={pid} reason={reason}", session.id),
+            ),
+            TerminationOutcome::AlreadyExited => (
+                "process_session_termination_noop",
+                format!("session={} pid={pid} outcome=already-exited", session.id),
+            ),
+            TerminationOutcome::SignalFailed => (
+                "process_session_termination_failed",
+                format!("session={} pid={pid} outcome=signal-failed", session.id),
+            ),
+        };
+        audit::record(&self.conn, kind, None, None, &detail)?;
+        if outcome == TerminationOutcome::AlreadyExited {
+            // The platform definitively reported the process gone; close the
+            // row the same way sweep_dead_sessions would so the listing
+            // stops claiming it is running.
+            self.conn.execute(
+                "UPDATE process_sessions SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",
+                rusqlite::params![crate::clock::now_rfc3339(), session.id],
+            )?;
+        }
+        Ok((session.id, pid, outcome))
     }
 
     // ------------------------------------------------------------------

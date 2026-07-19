@@ -294,12 +294,28 @@ export interface ProcessSession {
   exit_code: number | null;
   pid: number | null;
   grant_id: string | null;
+  /** Launch-time process identity; null means termination will be refused. */
+  proc_identity: string | null;
 }
+
+/**
+ * Truthful result of a termination request. The backend re-verifies the
+ * launch identity before signalling and refuses when the PID can no longer
+ * be confirmed as the launched process.
+ */
+export type TerminationOutcome =
+  | { kind: "refused"; reason: string }
+  | { kind: "already_exited" }
+  | { kind: "signalled" }
+  | { kind: "signal_failed" };
 
 export interface SessionKillResult {
   session_id: string;
   pid: number;
+  /** True only when the identity matched and the signal was accepted. */
   signalled: boolean;
+  outcome: TerminationOutcome;
+  outcome_text: string;
 }
 
 /**

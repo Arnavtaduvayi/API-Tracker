@@ -473,11 +473,16 @@ fn process_sessions_list_with_pids_and_termination_is_guarded() {
     assert!(v.terminate_process_session(&s2).is_err());
     assert!(v.terminate_process_session("no-such-session").is_err());
 
-    // Terminating the live session signals the recorded PID.
-    let (id, pid, signalled) = v.terminate_process_session(&s1).unwrap();
+    // Terminating the live session verifies the identity captured at
+    // set_session_pid time and signals the recorded PID.
+    let (id, pid, outcome) = v.terminate_process_session(&s1).unwrap();
     assert_eq!(id, s1);
     assert_eq!(pid, i64::from(child.id()));
-    assert!(signalled, "SIGTERM to a live child must be accepted");
+    assert_eq!(
+        outcome,
+        api_tracker_core::inject::TerminationOutcome::Signalled,
+        "SIGTERM to a live, identity-verified child must be accepted"
+    );
     // The child actually dies (SIGTERM), proving the signal was real.
     let mut child = child;
     let status = child.wait().unwrap();

@@ -1927,19 +1927,29 @@ fn access_sessions(
 struct SessionKillDto {
     session_id: String,
     pid: i64,
+    /// True only when the launch identity matched and the signal was
+    /// accepted. `outcome` carries the truthful detail (refused / already
+    /// exited / signal failed) for display.
     signalled: bool,
+    outcome: api_tracker_core::inject::TerminationOutcome,
+    outcome_text: String,
 }
 
-/// Best-effort local SIGTERM to a recorded session PID. The frontend must
-/// confirm first; this is a local control and never touches the provider.
+/// Best-effort local SIGTERM to a recorded session PID. The recorded launch
+/// identity is re-verified in core immediately before signalling; a PID that
+/// can no longer be confirmed (reuse, tampering, no recorded identity) is
+/// refused. The frontend must confirm first; this is a local control and
+/// never touches the provider.
 #[tauri::command]
 fn access_session_kill(state: State<'_, AppState>, id: String) -> CmdResult<SessionKillDto> {
     with_vault(&state, |vault| {
-        let (session_id, pid, signalled) = vault.terminate_process_session(&id)?;
+        let (session_id, pid, outcome) = vault.terminate_process_session(&id)?;
         Ok(SessionKillDto {
             session_id,
             pid,
-            signalled,
+            signalled: outcome == api_tracker_core::inject::TerminationOutcome::Signalled,
+            outcome_text: outcome.describe(),
+            outcome,
         })
     })
 }

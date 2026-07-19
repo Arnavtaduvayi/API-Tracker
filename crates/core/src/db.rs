@@ -642,6 +642,18 @@ ALTER TABLE provider_connections ADD COLUMN account_source TEXT;
 ALTER TABLE provider_connections ADD COLUMN account_synced_at TEXT;
 "#,
     },
+    Migration {
+        version: 11,
+        name: "process start identity for safe termination",
+        sql: r#"
+-- Platform-reported identity of the spawned process (start time + executable
+-- name), captured at launch while the child handle is still held. Termination
+-- re-probes this identity and refuses to signal when it does not match, so a
+-- PID recycled to an unrelated process is never killed (PI-02). NULL means
+-- identity could not be captured; such sessions are refused termination.
+ALTER TABLE process_sessions ADD COLUMN proc_identity TEXT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

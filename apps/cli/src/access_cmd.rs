@@ -138,21 +138,16 @@ fn sessions(ctx: &Ctx, all: bool, limit: u32) -> Result<()> {
 fn kill(ctx: &Ctx, session: &str, yes: bool) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
     if !ctx::confirm(
-        "Send SIGTERM to this session's recorded process? Values already in its \
-         environment cannot be clawed back, and the provider credential stays valid.",
+        "Send SIGTERM to this session's recorded process? The process identity \
+         recorded at launch is re-verified first; termination is refused if the \
+         PID can no longer be confirmed. Values already in its environment \
+         cannot be clawed back, and the provider credential stays valid.",
         yes,
     )? {
         bail!("kept");
     }
-    let (id, pid, signalled) = vault.terminate_process_session(session)?;
-    println!(
-        "session {id}: pid {pid} — {}",
-        if signalled {
-            "SIGTERM sent"
-        } else {
-            "kill failed (already gone?)"
-        }
-    );
+    let (id, pid, outcome) = vault.terminate_process_session(session)?;
+    println!("session {id}: pid {pid} — {}", outcome.describe());
     println!("Reminder: this is a local control; it does not revoke the provider credential.");
     Ok(())
 }
@@ -256,19 +251,16 @@ fn end(ctx: &Ctx, args: EndArgs) -> Result<()> {
     } else {
         for (session, pid) in &running {
             if args.kill {
-                let killed = std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                println!(
-                    "  session {session}: pid {pid} — {}",
-                    if killed {
-                        "SIGTERM sent"
-                    } else {
-                        "kill failed (already gone?)"
+                // Route through the vault's verified termination — the same
+                // guarded implementation as `access kill` — so a stale or
+                // reused PID is refused instead of signalled (an inline
+                // `kill` here once bypassed every guard; RA-1/PI-02).
+                match vault.terminate_process_session(session) {
+                    Ok((_, pid, outcome)) => {
+                        println!("  session {session}: pid {pid} — {}", outcome.describe());
                     }
-                );
+                    Err(e) => println!("  session {session}: pid {pid} — not terminated: {e}"),
+                }
             } else {
                 println!("  session {session}: pid {pid} still running");
             }
