@@ -7489,14 +7489,44 @@ impl UnlockedVault {
         Ok(true)
     }
 
-    /// Revoke the old key. Returns Ok(true) when revoked, Ok(false) when the
-    /// workflow must wait for manual action.
+    /// The marker recorded immediately before a revoke HTTP call for a given
+    /// old key. Named by the exact key id so a recovered marker only ever
+    /// makes a later 404 for THAT key a completed retry.
+    fn revoke_attempt_marker(old_key: &str) -> String {
+        format!("attempting revocation of old key {old_key}")
+    }
+
+    /// Whether a revoke of `old_key` was ever attempted for this rotation.
+    /// Scans the WHOLE event log — not just the last event — because a
+    /// lost/failed response records an outcome event AFTER the marker,
+    /// burying it (ROT-001).
+    fn revoke_was_attempted(&self, id: &str, old_key: &str) -> Result<bool> {
+        let marker = Self::revoke_attempt_marker(old_key);
+        Ok(crate::rotation::events(&self.conn, id)?
+            .iter()
+            .any(|e| e.detail == marker))
+    }
+
+    /// Revoke the old key. Returns Ok(true) when revoked (or already gone),
+    /// Ok(false) when the workflow must wait for manual action.
     fn rotation_revoke_old(
         &mut self,
         rot: &crate::rotation::Rotation,
         id: &str,
         http: &dyn crate::http::HttpClient,
     ) -> Result<bool> {
+        // Idempotent completion: if a prior advance recorded a successful
+        // revoke (old_revoked_at set) but the process died before the CAS to
+        // COMPLETED, do NOT call revoke again (a permanent-delete provider
+        // would then answer 404 and wedge the rotation). Just complete.
+        if rot.old_revoked_at.is_some() {
+            crate::rotation::record_event_note(
+                &self.conn,
+                id,
+                "old key already revoked (recovered); completing rotation",
+            )?;
+            return Ok(true);
+        }
         let can_revoke = crate::providers::find(&rot.provider)
             .map(|m| {
                 matches!(
@@ -7509,21 +7539,19 @@ impl UnlockedVault {
             (Some(old_key), true) => {
                 let admin = self.provider_admin_secret(&rot.provider)?;
                 let connector = self.connector_for(&rot.provider)?;
-                // A durable marker BEFORE the call: if the process dies after
-                // the provider deleted the key but before we recorded it, the
-                // retry can distinguish "already deleted by us" from "wrong
-                // key id" when the provider answers 404. Only an attempt with
-                // NO recorded outcome counts (the crash window) — an attempt
-                // that concluded in a not-found error must not convert a
-                // later 404 into success.
-                let attempted_before = crate::rotation::events(&self.conn, id)?
-                    .last()
-                    .map(|e| e.detail.starts_with("attempting revocation of old key"))
-                    .unwrap_or(false);
+                // A durable marker BEFORE the call: if the response is lost or
+                // the process dies after the provider deleted the key, a retry
+                // that gets a 404 can tell "already gone (our attempt landed,
+                // or the key was already gone — either way it is no longer
+                // usable)" from "wrong key id, never attempted". The marker is
+                // key-specific and matched across the FULL event log, so a
+                // buried marker is still found and an unrelated 404 is never
+                // converted into success (ROT-010).
+                let attempted_before = self.revoke_was_attempted(id, old_key)?;
                 crate::rotation::record_event_note(
                     &self.conn,
                     id,
-                    &format!("attempting revocation of old key {old_key}"),
+                    &Self::revoke_attempt_marker(old_key),
                 )?;
                 let detail = match connector.revoke_credential(
                     http,
@@ -7535,18 +7563,31 @@ impl UnlockedVault {
                     Err(CoreError::NotFound { .. }) if attempted_before => {
                         format!(
                             "the provider no longer knows key {old_key}; a prior recorded \
-                             attempt makes this a completed retry"
+                             attempt on this exact key makes this a completed retry (the old \
+                             key is gone either way)"
                         )
                     }
                     Err(CoreError::NotFound { .. }) => {
-                        crate::rotation::record_error(
+                        // First 404 with no prior attempt: genuinely ambiguous
+                        // (a wrong key id or project looks identical). Do NOT
+                        // loop in OLD_DISABLED forever — surface the manual
+                        // verify-and-complete path so the rotation can converge
+                        // to a truthful terminal state (ROT-001).
+                        let manage = crate::providers::find(&rot.provider)
+                            .map(|m| m.manage_url.clone())
+                            .unwrap_or_default();
+                        crate::rotation::set_state(
                             &self.conn,
                             id,
+                            crate::rotation::OLD_DISABLED,
+                            crate::rotation::MANUAL_REQUIRED,
                             &format!(
                                 "the provider says key {old_key} does not exist — a wrong key \
-                                 id or project would look exactly like this. Verify with \
-                                 `provider list-keys` before retrying; nothing was marked \
-                                 revoked"
+                                 id or project would look exactly like this, so nothing was \
+                                 marked revoked. Verify at {manage} or with `provider \
+                                 list-keys`: if the old key is truly gone, run `rotation \
+                                 complete-manual {id}`; if this is NOT this rotation's key, \
+                                 `rotation rollback`"
                             ),
                         )?;
                         return Ok(false);
@@ -7586,6 +7627,18 @@ impl UnlockedVault {
         }
     }
 
+    /// Whether a provider's "revoke" is a REVERSIBLE soft state a rollback
+    /// can bring back, rather than a permanent delete. Only providers whose
+    /// old key `rotation_rollback` can actually re-enable qualify — today
+    /// that is Anthropic (revoke = status archived, re-enabled via
+    /// `set_key_status(active)`). OpenAI and Supabase permanently DELETE on
+    /// revoke, so once a revoke has been ATTEMPTED the old key may be gone and
+    /// a rollback that restores it could redeploy a dead credential (ROT-001).
+    /// Keep this in lockstep with the re-enable branch in `rotation_rollback`.
+    fn revoke_is_reversible(provider: &str) -> bool {
+        provider == crate::anthropic::PROVIDER
+    }
+
     fn rotation_complete(&self, rot: &crate::rotation::Rotation, id: &str) -> Result<()> {
         crate::rotation::set_state(
             &self.conn,
@@ -7616,13 +7669,19 @@ impl UnlockedVault {
     ) -> Result<RotationView> {
         self.verify_master_password(master_password)?;
         let rot = crate::rotation::load(&self.conn, id)?;
+        // OLD_DISABLED is included so a rotation that reached the revoke step
+        // but got an ambiguous/lost provider response has an explicit, honest
+        // exit: the user verifies out-of-band that the old key is gone and
+        // completes (ROT-001). GRACE_PERIOD/MANUAL_REQUIRED remain valid.
         if !matches!(
             rot.state.as_str(),
-            crate::rotation::MANUAL_REQUIRED | crate::rotation::GRACE_PERIOD
+            crate::rotation::MANUAL_REQUIRED
+                | crate::rotation::GRACE_PERIOD
+                | crate::rotation::OLD_DISABLED
         ) {
             return Err(CoreError::InvalidInput(format!(
-                "rotation {id} is '{}'; only manual-required (or grace) rotations can be \
-                 completed manually",
+                "rotation {id} is '{}'; only manual-required, grace, or old-disabled rotations \
+                 can be completed manually",
                 rot.state
             )));
         }
@@ -7700,6 +7759,29 @@ impl UnlockedVault {
                     .into(),
             ));
         }
+        // Even without a recorded successful revoke, a revoke ATTEMPT against a
+        // permanent-delete provider may have deleted the old key with the
+        // response lost (ROT-001). Restoring the old key would then redeploy a
+        // dead credential and misreport a clean rollback, so refuse: the safe
+        // path is to complete forward on the validated new key (or, if the old
+        // key is confirmed alive, revoke the new key and re-plan). Reversible
+        // providers (Anthropic soft-archive) are re-enabled below, so they are
+        // exempt.
+        if let Some(old_key) = &rot.old_provider_key_id {
+            if !Self::revoke_is_reversible(&rot.provider)
+                && self.revoke_was_attempted(id, old_key)?
+            {
+                return Err(CoreError::InvalidInput(format!(
+                    "a revocation of the old key was attempted at {}, whose revoke \
+                     permanently DELETES keys (no soft/disable state). The old key may already \
+                     be gone, so a rollback that restored it could redeploy a dead credential. \
+                     Refusing to roll back: verify with `provider list-keys` — if the old key \
+                     is gone, forward-fix on the validated new key (`rotation complete-manual \
+                     {id}`); if it is confirmed alive, re-plan a fresh rotation",
+                    rot.provider
+                )));
+            }
+        }
         // A COMPLETED rotation cannot be rolled back: on the manual path the
         // old key was revoked in the dashboard (we cannot know it is alive),
         // and "un-completing" a rotation would misrepresent history either
@@ -7742,7 +7824,7 @@ impl UnlockedVault {
         if rot.old_disabled_at.is_some() {
             if let Some(old_key) = &rot.old_provider_key_id {
                 let admin = self.provider_admin_secret(&rot.provider)?;
-                if rot.provider == "anthropic" {
+                if Self::revoke_is_reversible(&rot.provider) {
                     match crate::connectors::Anthropic::set_key_status(
                         http, &admin, old_key, "active",
                     ) {
