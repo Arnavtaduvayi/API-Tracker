@@ -1,0 +1,698 @@
+   Compiling libc v0.2.186
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.46
+   Compiling unicode-ident v1.0.24
+   Compiling cfg-if v1.0.4
+   Compiling typenum v1.20.1
+   Compiling version_check v0.9.5
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling subtle v2.6.1
+   Compiling getrandom v0.4.3
+   Compiling rand_core v0.10.1
+   Compiling serde_core v1.0.228
+   Compiling memchr v2.8.3
+   Compiling semver v1.0.28
+   Compiling regex-syntax v0.8.11
+   Compiling cc v1.2.67
+   Compiling httparse v1.10.1
+   Compiling untrusted v0.9.0
+   Compiling itoa v1.0.18
+   Compiling rustc_version v0.4.1
+   Compiling pkg-config v0.3.33
+   Compiling vcpkg v0.2.15
+   Compiling generic-array v0.14.7
+   Compiling crc32fast v1.5.0
+   Compiling aho-corasick v1.1.4
+   Compiling cmov v0.5.4
+   Compiling curve25519-dalek v4.1.3
+   Compiling ctutils v0.4.2
+   Compiling hybrid-array v0.4.13
+   Compiling log v0.4.33
+   Compiling simd-adler32 v0.3.10
+   Compiling bitflags v2.13.1
+   Compiling zmij v1.0.23
+   Compiling opaque-debug v0.3.1
+   Compiling once_cell v1.21.4
+   Compiling rustls v0.23.42
+   Compiling foldhash v0.2.0
+   Compiling adler2 v2.0.1
+   Compiling bytes v1.12.1
+   Compiling hashbrown v0.17.1
+   Compiling miniz_oxide v0.8.9
+   Compiling inout v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling serde_json v1.0.150
+   Compiling ring v0.17.14
+   Compiling regex-automata v0.4.16
+   Compiling libsqlite3-sys v0.38.1
+   Compiling http v1.4.2
+   Compiling blake3 v1.8.5
+   Compiling num-conv v0.2.2
+   Compiling serde v1.0.228
+   Compiling syn v2.0.119
+   Compiling getrandom v0.2.17
+   Compiling winnow v1.0.4
+   Compiling rand_core v0.6.4
+   Compiling crypto-common v0.2.2
+   Compiling option-ext v0.2.0
+   Compiling base64 v0.22.1
+   Compiling time-core v0.1.9
+   Compiling thiserror v2.0.18
+   Compiling base64ct v1.8.3
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling time-macros v0.2.31
+   Compiling flate2 v1.1.9
+   Compiling deranged v0.5.8
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling ureq-proto v0.6.0
+   Compiling serde_spanned v1.1.1
+   Compiling universal-hash v0.6.1
+   Compiling cipher v0.5.2
+   Compiling poly1305 v0.9.1
+   Compiling aead v0.6.1
+   Compiling password-hash v0.5.0
+   Compiling chacha20 v0.10.1
+   Compiling dirs-sys v0.5.0
+   Compiling cpufeatures v0.2.17
+   Compiling hashlink v0.12.1
+   Compiling rustix v1.1.4
+   Compiling constant_time_eq v0.4.2
+   Compiling regex v1.13.1
+   Compiling powerfmt v0.2.0
+   Compiling percent-encoding v2.3.2
+   Compiling same-file v1.0.6
+   Compiling smallvec v1.15.2
+   Compiling fallible-iterator v0.3.0
+   Compiling arrayref v0.3.9
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling utf8-zero v0.8.1
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling walkdir v2.5.0
+   Compiling toml v1.1.3+spec-1.1.0
+   Compiling chacha20poly1305 v0.11.0
+   Compiling directories v6.0.0
+   Compiling uuid v1.24.0
+   Compiling errno v0.3.14
+   Compiling hex v0.4.3
+   Compiling time v0.3.53
+   Compiling fastrand v2.4.1
+   Compiling anstyle v1.0.14
+   Compiling autocfg v1.5.1
+   Compiling utf8parse v0.2.2
+   Compiling colorchoice v1.0.5
+   Compiling anstyle-query v1.1.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstyle-parse v1.0.0
+   Compiling clap_lex v1.1.0
+   Compiling anyhow v1.0.103
+   Compiling predicates-core v1.0.10
+   Compiling anstream v1.0.0
+   Compiling strsim v0.11.1
+   Compiling heck v0.5.0
+   Compiling rtoolbox v0.0.5
+   Compiling num-traits v0.2.19
+   Compiling clap_builder v4.6.2
+   Compiling assert_cmd v2.2.2
+   Compiling termtree v0.5.1
+   Compiling normalize-line-endings v0.3.0
+   Compiling difflib v0.4.0
+   Compiling predicates-tree v1.0.13
+   Compiling rpassword v7.5.4
+   Compiling bstr v1.13.0
+   Compiling wait-timeout v0.2.1
+   Compiling zeroize_derive v1.5.0
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+   Compiling clap_derive v4.6.1
+   Compiling zeroize v1.9.0
+   Compiling tempfile v3.27.0
+   Compiling rustls-pki-types v1.15.0
+   Compiling arrayvec v0.7.8
+   Compiling float-cmp v0.10.0
+   Compiling predicates v3.1.4
+   Compiling clap v4.6.2
+   Compiling webpki-roots v1.0.9
+   Compiling rusqlite v0.40.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling inout v0.1.4
+   Compiling universal-hash v0.5.1
+   Compiling digest v0.10.7
+   Compiling cipher v0.4.4
+   Compiling aead v0.5.2
+   Compiling poly1305 v0.8.0
+   Compiling salsa20 v0.10.2
+   Compiling blake2 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling sha2 v0.10.9
+   Compiling crypto_secretbox v0.1.1
+   Compiling rustls-webpki v0.103.13
+   Compiling crypto_box v0.9.1
+   Compiling argon2 v0.5.3
+   Compiling ureq v3.3.0
+   Compiling api-tracker-core v0.1.0 (/Users/arnavtaduvayi/Documents/GitHub/API-Tracker-deep-audit/crates/core)
+   Compiling api-tracker-cli v0.1.0 (/Users/arnavtaduvayi/Documents/GitHub/API-Tracker-deep-audit/apps/cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.42s
+     Running unittests src/main.rs (target/debug/deps/api_tracker-1dbb1c0c76bff521)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-a21a39d95b119bdd)
+
+running 15 tests
+test provider_catalog_is_honest_about_capabilities ... ok
+test cli_reads_a_vault_created_through_the_core_library ... ok
+test init_creates_vault_and_refuses_second_init ... ok
+test locked_vault_requires_unlock_or_password ... ok
+test doctor_reports_vault_health ... ok
+test wrong_master_password_is_rejected ... ok
+test settings_show_and_set ... ok
+test session_unlock_use_lock_cycle ... ok
+test link_to_rejects_flags_that_would_be_ignored ... ok
+test project_unlock_without_a_session_is_rejected_not_silently_dropped ... ok
+test archive_hides_project_from_default_listing ... ok
+test project_password_lock_via_session ... ok
+test duplicate_detection_warns_and_supports_references ... ok
+test backup_create_verify_restore ... ok
+test project_and_credential_workflow_with_redaction ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s
+
+     Running tests/env_destinations_cli.rs (target/debug/deps/env_destinations_cli-7e809f693687094d)
+
+running 7 tests
+test destination_kinds_shows_honest_matrix_without_a_vault ... ok
+test env_example_never_contains_values ... ok
+test version_history_is_masked_and_reauth_gated ... ok
+test env_import_maps_and_never_prints_the_value ... ok
+test env_export_is_gated_confirmed_and_cleaned_up ... ok
+test destination_add_attach_plan_flow_stays_dry_without_execution ... ok
+test env_migrate_removes_plaintext_after_import_and_run_still_works ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/integrations_cli.rs (target/debug/deps/integrations_cli-387346a12c48d060)
+
+running 12 tests
+test provider_keys_listing_guides_before_first_sync ... ok
+test provider_capabilities_are_honestly_labeled ... ok
+test budget_cost_source_is_configurable ... ok
+test run_refuses_credential_from_another_project ... ok
+test openai_admin_connect_status_disconnect_never_reveal_the_key ... ok
+test usage_report_filters_by_source_and_provider ... ok
+test usage_record_report_and_budget_alert ... ok
+test run_propagates_child_exit_code ... ok
+test run_does_not_leak_vault_password_to_child ... ok
+test run_injects_exactly_one_credential_and_never_writes_it ... ok
+test activity_records_injection_sessions ... ok
+test mapping_config_drives_run_without_explicit_flags ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/observability_cli.rs (target/debug/deps/observability_cli-5e6a1798f1ec8111)
+
+running 3 tests
+test docs_history_starts_empty_and_watches_are_intact ... ok
+test monitor_offline_skips_network_phases ... ok
+test notify_channels_are_masked_https_only_and_listable ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/rotation_access_cli.rs (target/debug/deps/rotation_access_cli-eaab09b995572b9f)
+
+running 6 tests
+test key_history_shows_the_lifecycle_without_values ... ok
+test rotation_plan_is_a_dry_run_with_honest_manual_steps ... ok
+test revoked_grant_refuses_new_launches ... ok
+test rotation_approve_cancel_and_schedule_guard ... ok
+test one_time_grant_drives_run_and_ends_cleanly ... ok
+test grant_time_limit_terminates_the_child ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.16s
+
+     Running tests/scanning_cli.rs (target/debug/deps/scanning_cli-bbeaa08388e0396b)
+
+running 6 tests
+test scan_reports_nothing_on_a_clean_tree ... ok
+test doc_watch_register_and_status ... ok
+test provider_catalog_commands ... ok
+test monitor_and_alerts_lifecycle ... ok
+test scan_fixture_repo_and_suppress ... ok
+test acceptance_scan_match_expose_hook_flow ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running unittests src/lib.rs (target/debug/deps/api_tracker_core-c15c77e745f31184)
+
+running 205 tests
+test anthropic::tests::cents_conversion_matches_the_documented_semantics ... ok
+test anthropic::tests::auth_errors_demand_an_admin_key_and_never_leak_it ... ok
+test anthropic::tests::costs_are_cents_and_never_per_key ... ok
+test anthropic::tests::key_listing_captures_provider_reported_expiry ... ok
+test anthropic::tests::usage_pagination_and_per_key_grouping_are_honored ... ok
+test budget::tests::explicit_cost_source_is_respected ... ok
+test budget::tests::over_budget_detected_and_projected ... ok
+test budget::tests::period_start_is_first_of_month ... ok
+test budget::tests::under_budget_has_no_alert ... ok
+test budget::tests::uses_reported_cost_when_present_else_estimated ... ok
+test clock::tests::parses_rfc3339_roundtrip ... ok
+test clock::tests::parses_plain_date_as_utc_midnight ... ok
+test clock::tests::rejects_garbage ... ok
+test connectors::tests::github_billing_403_explains_fine_grained_requirement ... ok
+test connectors::tests::anthropic_usage_sends_rfc3339_starting_at ... ok
+test connectors::tests::github_fine_grained_has_no_readable_scopes ... ok
+test connectors::tests::github_billing_usage_preserves_units_and_account_attribution ... ok
+test connectors::tests::github_permissions_from_scope_header ... ok
+test connectors::tests::github_validate_parses_login ... ok
+test connectors::tests::github_validate_rejects_401 ... ok
+test connectors::tests::openai_usage_requires_admin_on_401 ... ok
+test connectors::tests::openai_usage_parses_org_level_and_is_not_exact ... ok
+test connectors::tests::registry_resolves_known_providers ... ok
+test connectors::tests::openai_validate_counts_models ... ok
+test connectors::tests::stripe_validate_reports_livemode ... ok
+test connectors::tests::stripe_events_aggregate_daily_families_with_pagination ... ok
+test connectors::tests::supabase_does_not_reject_project_keys_as_invalid ... ok
+test crypto::tests::corrupted_ciphertext_fails ... ok
+test crypto::tests::derive_key_is_deterministic_per_salt ... ok
+test crypto::tests::encrypt_decrypt_roundtrip ... ok
+test crypto::tests::modified_aad_fails ... ok
+test crypto::tests::nonces_are_unique_per_envelope ... ok
+test crypto::tests::truncated_envelope_fails ... ok
+test crypto::tests::unknown_version_fails ... ok
+test crypto::tests::unsupported_kdf_algorithm_rejected ... ok
+test crypto::tests::wrong_key_fails ... ok
+test connectors::tests::unsupported_capabilities_point_to_official_page ... ok
+test db::tests::failed_migration_rolls_back ... ok
+test db::tests::migrations_apply_incrementally ... ok
+test alerts::tests::alerts_never_serialize_secret_material ... ok
+test destinations::sigv4::tests::matches_the_official_iam_example_vector ... ok
+test destinations::sigv4::tests::signature_never_contains_the_secret_key ... ok
+test destinations::tests::attach_rejects_unsafe_secret_names ... ok
+test destinations::tests::aws_call_refuses_a_malicious_region_before_any_request ... ok
+test destinations::tests::aws_delete_is_idempotent_for_missing_secrets ... ok
+test destinations::tests::aws_delete_uses_the_recovery_window_and_never_forces ... ok
+test destinations::tests::aws_region_rejects_url_delimiters ... ok
+test destinations::tests::aws_write_creates_when_missing ... ok
+test destinations::tests::catalog_reports_every_kind_with_capabilities ... ok
+test destinations::tests::github_write_seals_and_puts_with_key_id ... ok
+test destinations::tests::keychain_distinguishes_not_found_from_errors ... ok
+test destinations::tests::keychain_quoting_escapes_and_rejects_control_chars ... ok
+test destinations::tests::keychain_write_goes_through_stdin_never_argv ... ok
+test access::tests::revoked_and_expired_grants_refuse_launches ... ok
+test destinations::tests::platform_gated_kinds_report_honestly ... ok
+test destinations::tests::secret_service_distinguishes_absent_from_errors ... ok
+test destinations::tests::secret_service_round_trips_via_stdin_and_attributes ... ok
+test destinations::tests::vercel_write_upserts_and_delete_looks_up_id ... ok
+test destinations::tests::wincred_target_names_are_validated ... ok
+test activity::tests::usage_after_disabled_flags_only_when_disabled_and_present ... ok
+test alerts::tests::upsert_dedups_open_alerts ... ok
+test activity::tests::cost_spike_requires_double_and_absolute_growth ... ok
+test activity::tests::records_and_lists_events ... ok
+test access::tests::one_time_grants_cannot_be_consumed_twice ... ok
+test alerts::tests::auto_resolve_clears_conditions_that_no_longer_hold ... ok
+test envfile::tests::bare_value_hash_needs_preceding_whitespace ... ok
+test envfile::tests::empty_document_round_trips ... ok
+test envfile::tests::entry_debug_never_shows_value ... ok
+test envfile::tests::malformed_lines_round_trip_verbatim ... ok
+test envfile::tests::parses_values_quoting_and_comments ... ok
+test envfile::tests::parsing_never_executes_or_interpolates ... ok
+test envfile::tests::reports_malformed_and_duplicates ... ok
+test envfile::tests::round_trips_crlf_and_no_trailing_newline ... ok
+test envfile::tests::round_trips_unmodified_content ... ok
+test envfile::tests::set_appends_missing_key_and_remove_deletes ... ok
+test envfile::tests::set_preserves_quoting_and_comment ... ok
+test envfile::tests::set_updates_every_duplicate_occurrence ... ok
+test envfile::tests::set_value_round_trips_hostile_values_regardless_of_prior_quoting ... ok
+test envfile::tests::values_needing_quotes_are_double_quoted_on_render ... ok
+test db::tests::migrations_are_idempotent ... ok
+test envgov::tests::atomic_write_sets_restrictive_permissions_and_replaces ... ok
+test envgov::tests::classifies_env_file_names ... ok
+test envgov::tests::diff_masks_bare_lines_without_assignments ... ok
+test envgov::tests::diff_masks_secret_values ... ok
+test envgov::tests::example_generation_never_includes_values_and_preserves_existing ... ok
+test db::tests::migrations_apply_and_record_version ... ok
+test envgov::tests::infers_environments_from_names ... ok
+test access::tests::grant_lifetime_and_duration_are_validated ... ok
+test gitrepo::tests::huge_line_number_does_not_allocate_a_giant_vector ... ok
+test gitrepo::tests::keeps_added_content_lines_starting_with_plus_plus ... ok
+test gitrepo::tests::parses_added_lines_with_line_numbers ... ok
+test gitrepo::tests::range_endpoints_must_be_hex ... ok
+test envgov::tests::write_new_refuses_existing_files ... ok
+test alerts::tests::lifecycle_acknowledge_then_resolve ... ok
+test envgov::tests::discovers_env_files_and_skips_build_dirs ... ok
+test hooks::tests::remove_does_not_panic_on_truncated_block ... ok
+test hooks::tests::refuses_to_clobber_foreign_hook_then_chains_with_force ... ok
+test http::tests::mock_pops_responses_and_records_requests ... ok
+test http::tests::response_header_lookup_is_case_insensitive ... ok
+test inject::tests::validates_env_names ... ok
+test model::tests::environment_parses_aliases ... ok
+test model::tests::mask_hides_most_of_the_value ... ok
+test monitor::tests::expired_credential_yields_high_alert ... ok
+test monitor::tests::exposed_credential_is_critical ... ok
+test monitor::tests::healthy_credential_yields_no_alerts ... ok
+test notify::tests::severity_ranks_order ... ok
+test notify::tests::webhook_payload_is_metadata_only_and_https_enforced ... ok
+test notify::tests::webhook_url_validation_blocks_bypasses ... ok
+test hooks::tests::remove_refuses_unmanaged_hook ... ok
+test openai::tests::costs_preserve_amount_currency_and_line_item ... ok
+test openai::tests::costs_reject_negative_and_non_finite_amounts ... ok
+test openai::tests::costs_without_key_or_project_are_account_level ... ok
+test openai::tests::projects_and_keys_follow_list_pagination ... ok
+test openai::tests::redacted_match_requires_prefix_and_suffix ... ok
+test openai::tests::usage_401_maps_to_provider_auth ... ok
+test openai::tests::usage_403_maps_to_provider_auth ... ok
+test openai::tests::usage_429_retries_then_reports_rate_limit ... ok
+test openai::tests::usage_empty_window_is_ok ... ok
+test openai::tests::usage_malformed_response_is_a_clear_error ... ok
+test destinations::tests::local_kinds_cannot_be_added_manually ... ok
+test openai::tests::usage_two_pages_are_followed_and_grouped_dimensions_kept ... ok
+test openai::tests::validate_admin_key_accepts_and_rejects ... ok
+test permissions::tests::classifies_github_scopes ... ok
+test permissions::tests::empty_scopes_summary_is_honest ... ok
+test pricing::tests::dollar_parsing ... ok
+test hooks::tests::install_status_remove_cycle ... ok
+test docwatch::tests::failed_check_preserves_prior_state ... ok
+test docwatch::tests::add_and_list_watch ... ok
+test docwatch::tests::changed_body_without_validators_clears_stale_validator ... ok
+test hooks::tests::rejects_worktree_whose_git_is_a_file ... ok
+test docwatch::tests::rejects_non_http_urls ... ok
+test docwatch::tests::first_capture_then_unchanged_then_changed ... ok
+test docwatch::tests::not_modified_is_unchanged_and_sends_validators ... ok
+test envgov::tests::git_status_reports_tracked_ignored_untracked_and_history ... ok
+test pricing::tests::effective_dating_switches_price_on_the_documented_date ... ok
+test pricing::tests::import_rejects_bad_records ... ok
+test pricing::tests::estimates_token_cost_from_bundled ... ok
+test pricing::tests::staleness_uses_last_verified ... ok
+test pricing::tests::import_validates_and_preserves_history ... ok
+test pricing::tests::legacy_overrides_migrate_into_pricing_records ... ok
+test providers::tests::all_embedded_manifests_parse_and_validate ... ok
+test providers::tests::every_detection_regex_compiles ... ok
+test providers::tests::known_providers_resolve_and_customs_preserved ... ok
+test providers::tests::parse_rejects_uppercase_id ... ok
+test reuse::tests::classifies_cross_project_and_reference ... ok
+test reuse::tests::classifies_duplicate_in_project ... ok
+test reuse::tests::classifies_prod_dev_sharing_both_directions ... ok
+test reuse::tests::fingerprint_is_keyed_and_deterministic ... ok
+test reuse::tests::fingerprint_is_not_a_plain_hash ... ok
+test reuse::tests::fingerprint_normalizes_whitespace ... ok
+test scanner::tests::code_expressions_are_not_flagged_as_entropy_secrets ... ok
+test scanner::tests::detects_known_env_var_assignments ... ok
+test scanner::tests::detects_provider_key_patterns ... ok
+test scanner::tests::entropy_can_be_disabled ... ok
+test scanner::tests::entropy_detection_needs_a_secret_like_name ... ok
+test scanner::tests::entropy_helpers ... ok
+test scanner::tests::findings_never_serialize_the_secret ... ok
+test scanner::tests::ignores_placeholders ... ok
+test scanner::tests::line_numbers_are_reported ... ok
+test scanner::tests::low_entropy_values_are_not_flagged ... ok
+test scanner::tests::non_secret_env_vars_are_not_flagged ... ok
+test scanner::tests::suppression_key_has_no_secret ... ok
+test scanner::tests::two_distinct_same_provider_secrets_are_both_reported ... ok
+test secret::tests::constant_time_eq_works ... ok
+test secret::tests::secret_bytes_redacts_debug_serde ... ok
+test secret::tests::secret_string_redacts_debug_display_serde ... ok
+test settings::tests::auto_lock_disabled_with_zero ... ok
+test settings::tests::auto_lock_threshold ... ok
+test stackdetect::tests::detects_npm_dependencies_with_evidence ... ok
+test pricing::tests::override_wins_and_is_labeled ... ok
+test stackdetect::tests::detects_python_requirements ... ok
+test stackdetect::tests::env_names_signal_without_reading_values ... ok
+test stackdetect::tests::fullstack_combination_composes ... ok
+test stackdetect::tests::oversized_files_are_skipped ... ok
+test status::tests::every_finding_has_reason_source_confidence_action ... ok
+test status::tests::expired_takes_precedence_over_stale ... ok
+test status::tests::expiring_soon_within_threshold ... ok
+test stackdetect::tests::preferences_mark_and_boost ... ok
+test status::tests::fresh_credential_is_unknown_with_explanation ... ok
+test status::tests::future_expiry_beyond_threshold_is_not_flagged ... ok
+test status::tests::never_used_old_credential_is_unused ... ok
+test status::tests::old_activity_is_stale ... ok
+test status::tests::recent_validation_is_active ... ok
+test status::tests::revoked_beats_everything ... ok
+test status::tests::shared_across_projects_reported_with_project_names ... ok
+test templates::tests::all_embedded_templates_parse_and_validate ... ok
+test templates::tests::env_example_contains_names_and_no_values ... ok
+test templates::tests::next_steps_cover_secret_vars_only ... ok
+test usage::tests::attribution_labels_are_honest ... ok
+test usage::tests::micros_format ... ok
+test pricing::tests::override_rejects_negative_and_empty ... ok
+test pricing::tests::prefix_matches_dated_model_ids ... ok
+test templates::tests::templates_never_contain_values_matching_detection_patterns ... ok
+test openai::tests::usage_recovers_after_transient_500 ... ok
+test pricing::tests::proposal_template_lists_current_effective_records ... ok
+test pricing::tests::request_unit_estimation_via_override ... ok
+test pricing::tests::specific_model_beats_family_fallback ... ok
+test pricing::tests::unknown_model_yields_no_estimate ... ok
+test pricing::tests::usage_before_any_effective_record_extrapolates_and_says_so ... ok
+test pricing::tests::export_import_round_trip ... ok
+test usage::tests::record_and_aggregate ... ok
+test openai::tests::admin_key_never_appears_in_error_text ... ok
+test backup::tests::backup_files_are_owner_only ... ok
+test backup::tests::legacy_v1_format_backup_restores_and_upgrades ... ok
+test backup::tests::future_format_and_future_schema_are_rejected ... ok
+
+test result: ok. 205 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.56s
+
+     Running tests/account_metadata.rs (target/debug/deps/account_metadata-534f4232ec005752)
+
+running 6 tests
+test account_sync_without_connection_is_rejected ... ok
+test github_account_sync_stores_provider_reported_identity ... ok
+test anthropic_account_sync_uses_organizations_me ... ok
+test openai_account_sync_is_honestly_unsupported ... ok
+test stripe_account_sync_reads_v1_account ... ok
+test supabase_multiple_orgs_never_guesses_one ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/anthropic_sync.rs (target/debug/deps/anthropic_sync-fb9d2bd15cfd6145)
+
+running 4 tests
+test full_sync_records_per_key_usage_cents_costs_and_metadata ... ok
+test manual_rows_survive_resync_and_offline_sync_fails_safely ... ok
+test linking_upgrades_attribution_and_flows_provider_expiry ... ok
+test admin_connect_validates_via_organizations_me_and_key_stays_encrypted ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/backup_session.rs (target/debug/deps/backup_session-a22f3a67d20cdee9)
+
+running 11 tests
+test wrong_backup_password_fails ... ok
+test short_backup_password_rejected ... ok
+test expired_session_is_rejected_and_deleted ... ok
+test session_file_does_not_contain_key_material_in_plaintext ... ok
+test tampered_backup_fails_verification ... ok
+test session_roundtrip_and_wrong_token ... ok
+test force_restore_preserves_a_still_open_vault_including_uncheckpointed_wal ... ok
+test backup_restore_invalidates_prior_session ... ok
+test restore_refuses_to_overwrite_without_force_and_preserves_old_vault_with_force ... ok
+test backup_create_verify_restore_roundtrip ... ok
+test repeated_force_restores_never_clobber_a_previous_aside ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+
+     Running tests/credentials.rs (target/debug/deps/credentials-ce1d42c07bb68153)
+
+running 13 tests
+test short_project_password_is_rejected ... ok
+test expired_and_expiring_statuses_flow_through ... ok
+test reference_reveal_requires_source_project_unlocked ... ok
+test replacing_a_source_value_keeps_references_consistent ... ok
+test secrets_never_appear_in_listings_errors_or_serialized_output ... ok
+test project_crud_lifecycle ... ok
+test failed_validation_does_not_produce_a_contradictory_active_finding ... ok
+test intentional_references_share_one_encrypted_value ... ok
+test reuse_detection_and_classification ... ok
+test duplicate_names_within_project_rejected_and_selectors_disambiguate ... ok
+test credentials_are_encrypted_at_rest ... ok
+test credential_lifecycle_with_metadata ... ok
+test project_password_lock_flow ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+     Running tests/env_destinations.rs (target/debug/deps/env_destinations-9bad7577e61c6757)
+
+running 20 tests
+test example_generation_and_diff_stay_secret_free ... ok
+test import_refuses_templates_and_skips_placeholders ... ok
+test preview_classifies_variables_without_exposing_values ... ok
+test export_paths_are_absolute_and_ttl_is_capped ... ok
+test destination_catalog_is_honest_and_local_kinds_are_not_addable ... ok
+test replacing_a_value_retains_versions_and_history_is_reauth_gated ... ok
+test keychain_destination_round_trips_through_a_scripted_runner ... ok
+test import_is_selective_creates_mappings_and_never_duplicates ... ok
+test deleting_a_credential_purges_its_version_history ... ok
+test drift_detects_diverged_unmapped_production_and_copied_values ... ok
+test cleanup_refuses_modified_files_without_force ... ok
+test destination_add_encrypts_auth_and_removal_requires_reauth ... ok
+test reexport_refuses_files_modified_since_export ... ok
+test discovery_reports_class_environment_and_git_status ... ok
+test export_requires_reauth_writes_atomically_and_cleans_up ... ok
+test stale_plans_are_refused_and_rollback_restores_the_old_version ... ok
+test rollback_matches_destination_names_and_refuses_when_nothing_rolled_back ... ok
+test sync_plan_writes_verifies_and_handles_partial_failure_with_retry ... ok
+test export_refuses_git_tracked_targets ... ok
+test sync_plan_includes_reexport_steps_and_rewrites_export_files ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.56s
+
+     Running tests/integrations.rs (target/debug/deps/integrations-4588ac2d6a5fb1f7)
+
+running 7 tests
+test unsupported_capability_reports_official_link ... ok
+test metadata_fetch_never_serializes_the_secret ... ok
+test permission_sync_normalizes_github_scopes ... ok
+test injection_builds_env_for_only_requested_project_credentials ... ok
+test manual_usage_estimates_cost_and_budget_triggers_over_budget_alert ... ok
+test usage_sync_records_account_level_snapshots ... ok
+test validate_credential_records_result ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running tests/migration_safety.rs (target/debug/deps/migration_safety-dc29967dc05fb54d)
+
+running 8 tests
+test corrupted_inputs_fail_loudly_and_roll_back ... ok
+test interrupted_migration_resumes_where_it_stopped ... ok
+test v7_backfills_first_seen_for_preexisting_provider_entities ... ok
+test populated_v5_and_v6_tables_survive_the_upgrade ... ok
+test populated_v1_database_upgrades_directly_to_current ... ok
+test populated_v1_database_upgrades_sequentially_one_version_at_a_time ... ok
+test future_schema_databases_are_refused_including_via_unlock ... ok
+test backup_captures_every_table_and_restore_preserves_all_rows ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+     Running tests/observability.rs (target/debug/deps/observability-6d43cb9c1aec8d24)
+
+running 8 tests
+test suppressions_can_be_listed_and_removed ... ok
+test doc_watch_scheduling_and_history ... ok
+test monitor_cycle_records_status_and_offline_skips_network ... ok
+test process_sessions_list_with_pids_and_termination_is_guarded ... ok
+test rotation_attention_and_grant_expiry_alerts ... ok
+test notification_channels_deliver_metadata_only_and_record_failures ... ok
+test observe_rules_fire_with_evidence_and_auto_resolve ... ok
+test incremental_repo_scan_baselines_then_flags_only_new_commits ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+     Running tests/openai_sync.rs (target/debug/deps/openai_sync-e83e386f673c423b)
+
+running 13 tests
+test migration_v4_upgrades_a_v3_database ... ok
+test full_sync_records_usage_costs_metadata_and_checkpoints ... ok
+test non_usd_costs_are_kept_but_never_mixed_into_usd_totals ... ok
+test admin_connection_is_encrypted_masked_and_removable ... ok
+test manual_usage_is_never_touched_by_sync ... ok
+test linking_a_provider_key_upgrades_attribution_and_unlinking_downgrades ... ok
+test connect_rejects_an_invalid_admin_key_without_storing_it ... ok
+test budgets_choose_reported_or_estimated_without_double_counting ... ok
+test auth_failure_marks_connection_invalid_and_raises_an_alert ... ok
+test linking_requires_a_same_provider_credential ... ok
+test monitor_flags_stale_data_unmatched_keys_and_unmapped_projects ... ok
+test repeated_and_overlapping_syncs_do_not_double_count ... ok
+test offline_sync_fails_safely_and_previous_data_stays_viewable ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.80s
+
+     Running tests/rotation_access.rs (target/debug/deps/rotation_access-a15e29799665a662)
+
+running 23 tests
+test github_validation_records_provider_reported_expiration ... ok
+test config_errors_do_not_burn_one_time_grants ... ok
+test orphaned_provider_key_blocks_a_second_creation ... ok
+test manual_required_completion_needs_validation_and_reauth ... ok
+test completed_rotations_cannot_be_rolled_back ... ok
+test access_grants_bound_injection_locally_and_are_terminable ... ok
+test replacing_a_value_clears_provider_reported_expiry ... ok
+test manual_mode_walks_disable_then_archive_for_anthropic ... ok
+test concurrent_advance_into_creation_serializes_via_cas ... ok
+test active_rotation_versions_survive_the_prune_and_deletion_is_blocked ... ok
+test cancel_is_only_allowed_before_any_change ... ok
+test api_rotation_completes_end_to_end_with_verified_steps ... ok
+test grace_period_waits_and_continued_use_blocks_until_acknowledged ... ok
+test external_replacement_mid_rotation_blocks_destructive_arming ... ok
+test revoke_404_is_an_error_not_success_on_first_attempt ... ok
+test test_key_creation_labels_enforcement_honestly_and_provider_revoke_works ... ok
+test second_concurrent_rotation_approval_is_refused ... ok
+test rollback_is_refused_once_the_old_key_was_revoked ... ok
+test rotation_survives_restart_and_does_not_double_create ... ok
+test timeline_merges_lifecycle_sources_chronologically ... ok
+test scheduling_requires_a_completed_rotation_and_monitor_raises_due_alerts ... ok
+test validation_failure_blocks_destruction_and_rollback_restores_everything ... ok
+test provider_create_failure_is_retryable_and_old_key_untouched ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.91s
+
+     Running tests/scanning.rs (target/debug/deps/scanning-663bb722d7e0c4e5)
+
+running 9 tests
+test documentation_change_raises_an_alert ... ok
+test working_tree_scan_finds_secrets_and_skips_binaries ... ok
+test monitor_flags_reuse_and_alert_lifecycle ... ok
+test monitor_generates_and_resolves_alerts ... ok
+test reuse_alerts_survive_a_password_locked_project_across_monitor_runs ... ok
+test history_scan_detects_committed_secret ... ok
+test staged_scan_matches_vault_and_marks_exposed ... ok
+test suppression_hides_a_finding ... ok
+test hook_blocks_and_unblocks_via_scanner ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+
+     Running tests/security_residuals.rs (target/debug/deps/security_residuals-e28c8e6b64d42460)
+
+running 6 tests
+test env_export_refuses_symlink_targets ... ok
+test dead_injection_sessions_are_swept_by_monitor ... ok
+test master_password_change_rewraps_and_old_password_stops_working ... ok
+test stale_cached_project_key_is_rejected_after_rotation ... ok
+test project_password_changes_rotate_the_project_key ... ok
+test cleanup_sweeps_orphaned_atomic_write_temp_files ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+
+     Running tests/shared_vault_smoke.rs (target/debug/deps/shared_vault_smoke-3a167b9a7d109eeb)
+
+running 1 test
+test desktop_core_opens_a_cli_created_vault ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/templates_stack.rs (target/debug/deps/templates_stack-943baba7a499e023)
+
+running 4 tests
+test stack_detection_over_project_repositories ... ok
+test template_apply_creates_project_and_records_application ... ok
+test stack_detection_learns_and_forgets_locally ... ok
+test template_apply_writes_example_but_never_overwrites ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/vault_lifecycle.rs (target/debug/deps/vault_lifecycle-6a43e69485ea5fc6)
+
+running 11 tests
+test unlock_missing_vault_reports_not_found ... ok
+test short_master_password_is_rejected ... ok
+test creating_over_an_existing_vault_is_rejected ... ok
+test master_password_minimum_is_exactly_twelve_characters ... ok
+test reauthentication_verifies_master_password ... ok
+test wrong_master_password_is_rejected ... ok
+test settings_persist ... ok
+test create_then_unlock_roundtrip ... ok
+test corrupted_wrapped_vault_key_fails_to_unlock ... ok
+test tampered_credential_ciphertext_is_detected ... ok
+test swapping_ciphertext_between_credentials_is_detected ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+
+   Doc-tests api_tracker_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
