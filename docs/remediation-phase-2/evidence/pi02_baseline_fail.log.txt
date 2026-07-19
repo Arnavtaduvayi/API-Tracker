@@ -1,7 +1,7 @@
    Compiling argon2 v0.5.3
    Compiling crypto_box v0.9.1
    Compiling ureq v3.3.0
-   Compiling api-tracker-core v0.1.0 (/Users/arnavtaduvayi/Documents/GitHub/API-Tracker-security-phase-2/crates/core)
+   Compiling api-tracker-core v0.1.0 (<worktree>/crates/core)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 12.05s
      Running tests/pi02_process_identity.rs (target/debug/deps/pi02_process_identity-6c09c7d538772f34)
 
