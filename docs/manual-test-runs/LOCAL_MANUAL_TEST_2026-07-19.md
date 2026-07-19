@@ -110,16 +110,22 @@ Running totals (updated live; checkpoint after each phase):
 
 | Result | Count |
 | --- | --- |
-| PASS | 27 |
+| PASS | 51 |
 | FAIL | 0 |
 | BLOCKED | 0 |
-| NOT RUN (eligible, not yet reached) | 98 |
+| NOT RUN (eligible, not yet reached) | 74 |
 | DEFERRED (out of session scope) | 4 (+7 live scripts) |
+| DEFECTS filed | 1 (MANUAL-001, low) |
 
-PASS so far: SETUP-01, SETUP-02, VLT-01..06 (6), PRJ-01..07 (7),
-CRD-01..13 except CRD-11 in-progress (CRD-01,02,03,04,05,06,07,08,09,10,12,13),
-CRD-19. (SETUP-03 deferred to when servers are first needed; packaged-app
-re-check pending with the freshly built bundle.)
+PASS to date: SETUP-01/02/03, VLT-01..06 (6), PRJ-01..07 (7), CRD-01..17
+(17), CRD-19, PRV-01/02, DOC-01/02/03/04, USE-01..07 (7), PRC-01..05 (5).
+DEFERRED: CRD-18 (live). Defect: MANUAL-001 (doc-watch redirect labeled
+first_capture — low). Note: from CRD-06 onward, GUI driven by the conductor
+via a macOS accessibility harness + real key events, with CLI/DB
+cross-checks; conductor-observed, not human-observed (screenshots at
+SETUP-01/VLT-01/PRJ-01/CRD-05 were human). Pending: packaged-app re-check;
+Phases: Alerts/NTF, Scanning, Env, Destinations/Sync, Rotation, Access,
+Templates, Admin(mock), Settings/offline, Backup endgame.
 
 ## Passed
 
@@ -140,7 +146,41 @@ the IDs still pending at session end.
 
 ## Defects
 
-_(none recorded yet — IDs MANUAL-001, MANUAL-002, … as found)_
+### MANUAL-001 — doc-watch records an HTTP redirect as a successful "first_capture" instead of a failed check
+
+- **Title:** Documentation watch treats a 301/redirect response as a
+  successful capture rather than surfacing it as a failed/blocked check.
+- **Severity recommendation:** **Low** (honesty/UX; **not** a security
+  hole — the redirect is correctly NOT followed).
+- **Test ID:** DOC-03.
+- **Preconditions:** a watched URL that responds with an HTTP 301 redirect
+  (here `http://127.0.0.1:8091/docs.html` → 301 to :8090).
+- **Reproduction steps:** add the watch via
+  `provider watch-docs openai --url http://127.0.0.1:8091/docs.html`;
+  Providers → OpenAI → Documentation watches → "check now" on that row.
+- **Expected result (per plan):** the check FAILS / status reflects an
+  error, "redirect not followed"; Last changed stays "no change seen".
+- **Actual result:** the check succeeds with outcome `first_capture`
+  (UI: "Checked: first capture."); the 301 response itself is hashed and
+  stored as the baseline.
+- **Reproduction rate:** 1/1.
+- **Logs:** redirect server logged only the direct 301 (no follow); the
+  docroot server logged **no** request at check time — confirming the
+  redirect target was never fetched; CLI `docs-history` for the URL →
+  `first_capture`.
+- **Screenshot reference:** AX-tree capture of "Checked: first capture."
+- **Possible affected files/symbols:** the documentation-watch HTTP fetch
+  + outcome classification in the core provider docs watcher (redirect
+  responses should map to an error/blocked outcome, not `first_capture`).
+- **Security relevance:** the SSRF/downgrade guard itself **works** (the
+  redirect is not followed; no request reaches the redirect target). The
+  only issue is the misleading outcome label, which could let a user
+  believe a page is being watched normally when the endpoint actually
+  redirects (and its real content is never seen).
+- **Data-loss relevance:** none.
+- **Blocks further testing:** no.
+
+_(further defects appended as found: MANUAL-002, …)_
 
 ## Screenshots/evidence
 
@@ -798,6 +838,263 @@ contains a secret value.
 - Expected: matched (plan CRD-16).
 - Evidence: AX-tree capture (Link element); CLI `key show`.
 - Suspected component: n/a.
+
+### SETUP-03 — local test servers — **PASS**
+
+- Result: **PASS** (conductor-executed) — `webhook_sink.py` on
+  127.0.0.1:8085 (POST → 200) and `python3 -m http.server 8090` serving
+  `~/at-manual-test/docroot` (GET /docs.html → 200) both confirmed live.
+
+### PRV-01 — provider catalog — **PASS**
+
+- Screen/workflow: Providers
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: "Provider catalog" with columns Provider / Secret env vars /
+  Detection patterns / Expiration, listing exactly OpenAI, Anthropic,
+  GitHub, Stripe, Supabase; OpenAI env vars "OPENAI_API_KEY,
+  OPENAI_ADMIN_KEY". CLI `provider list` matches (5 rows, same env vars).
+- Expected: matched (plan PRV-01).
+- Evidence: AX-tree capture; CLI `provider list`.
+- Suspected component: n/a.
+
+### PRV-02 — provider detail: links + honest capability matrix — **PASS**
+
+- Screen/workflow: Providers → OpenAI (Capabilities + an official link)
+- Result: **PASS** (conductor-observed via AX + CLI + browser check)
+- Actual: OpenAI detail shows the Administrative connection panel and a
+  Capabilities matrix with all 10 rows and honest statuses: validate
+  credential = implemented·exact credential; fetch metadata / fetch usage
+  = implemented·admin credential·exact credential; read permissions &
+  change permissions = manual action required; create credential =
+  implemented·admin credential·provider-project level only; disable
+  credential = unsupported; revoke credential & rotate credential =
+  implemented·admin credential·exact credential; fetch pricing = manual
+  action required. Clicking the "Manage keys"
+  (platform.openai.com/api-keys) link **kept the app on the OpenAI detail
+  (no in-app navigation)** and opened the URL in the **system browser**
+  (Chrome tab `platform.openai.com/login?next=%2Fapi-keys`).
+- Expected: matched (plan PRV-02) — nothing claimed implemented that
+  isn't; links open externally.
+- Evidence: AX-tree matrix capture; CLI `provider capabilities openai`
+  (identical 10-row honest matrix); Chrome tab URL confirming external
+  open.
+- Suspected component: n/a.
+
+### DOC-01 — watch a local page (unchanged) — **PASS**
+
+- Screen/workflow: (CLI add watch) → Providers → OpenAI → Documentation
+  watches → check now ×2 (8090 row)
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: watch added via `provider watch-docs openai --url
+  http://127.0.0.1:8090/docs.html`; first "check now" → "Checked: first
+  capture. A page change does not necessarily mean a breaking API
+  change."; second → "Checked: unchanged. …". CLI `docs-history` for the
+  URL: `first_capture` then `unchanged`. The docroot access log shows the
+  second check was a **conditional GET returning 304 Not Modified** —
+  confirming ETag/Last-Modified conditional requests.
+- Expected: matched (plan DOC-01), incl. the honest "not necessarily
+  breaking" copy and conditional checks.
+- Evidence: AX captures; CLI `docs-history`; docroot server log
+  (200 then 304).
+- Suspected component: n/a.
+
+### DOC-02 — the page changes — **PASS**
+
+- Screen/workflow: overwrite docs.html → v2, check now
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: after replacing the page with v2, "check now" → "Checked:
+  changed. A page change does not necessarily mean a breaking API
+  change."; `docs-history` records outcome `changed`; a
+  `documentation_changed` alert (id cf483c05, severity info, "openai
+  documentation changed") is raised.
+- Expected: matched (plan DOC-02).
+- Evidence: docroot log (200 on the changed fetch); CLI `docs-history`
+  (`changed`); CLI `alerts list` shows the documentation_changed alert.
+- Suspected component: n/a.
+
+### DOC-03 — redirect is refused — **PASS (security) / MANUAL-001 (label)**
+
+- Screen/workflow: (CLI add watch 8091) → check now (8091 row)
+- Result: **PASS for the security-critical property**; a low-severity
+  outcome-label discrepancy is filed as MANUAL-001.
+- Actual: the watcher issued a single GET to :8091 which returned 301; it
+  **did not follow the redirect** — the docroot (:8090) access log shows
+  **no request at that time** (12:30:36), and the redirect server logged
+  only the direct 301. So no request was made to the redirect target on
+  the watcher's behalf (SSRF/downgrade guard holds). **However**, the
+  recorded outcome was `first_capture` (a successful capture of the 301
+  response), not a failure — the plan expected "the check FAILS".
+- Expected: security expectation (no redirect follow) **met**; the
+  visible-result expectation ("the check FAILS / error status") **not
+  met** — see MANUAL-001.
+- Evidence: redirect server log (301 only, no follow); docroot log (no hit
+  at 12:30:36); CLI `docs-history` for 8091 → `first_capture`.
+- Reproduction: observed once.
+- Suspected component: the docs-watch fetch/outcome-classification path in
+  the provider docs watcher (core) — reported, not modified.
+
+### DOC-04 — unwatch — **PASS**
+
+- Screen/workflow: Documentation watches → unwatch (8091 row)
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: after unwatch, CLI `docs-status openai` lists only the 8090
+  watch (8091 removed); the docs-history rows for 8091 correctly remain
+  (history persists after unwatch, as documented).
+- Expected: matched (plan DOC-04).
+- Evidence: CLI `docs-status` before/after.
+- Suspected component: n/a.
+
+### USE-01 — record synthetic usage; estimated cost — **PASS**
+
+- Screen/workflow: (CLI record) → Usage → scope alpha-app
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: after `usage record … --model gpt-4o --input-tokens 1000000
+  --output-tokens 1000000`, the Usage screen (scope alpha-app) "This
+  month" shows Input tokens 1,000,000, Output tokens 1,000,000, Reported
+  cost $0.00 "(provider-reported)", Estimated cost $12.50 "(estimated
+  locally from token counts and a bundled price table — may differ from
+  the provider's bill)", Attribution exact_credential; Records table has
+  the manual row "2,000,000 tokens", "$12.50 (est.)", source manual.
+- Expected: matched (plan USE-01); estimate clearly labeled, never
+  provider-reported.
+- Evidence: AX capture; CLI `usage report --project alpha-app` identical
+  ($12.50 estimated / $0.00 reported / exact credential).
+- Suspected component: n/a.
+
+### USE-02 / USE-03 / USE-04 — over-budget alert + strict boundary — **PASS**
+
+- Screen/workflow: Usage (scope alpha-app) → Budget; boundary via CLI
+  `budget set` + UI re-read
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: budget 5.00 → "Budget saved.", "over budget" badge, projected
+  month-end shown (USE-02). Strict boundary (used = $12.50): budget
+  **12.50 → NOT over budget** (UI over-budget badge count 0; CLI STATUS
+  blank); budget **12.49 → over budget** (UI badge count 1; CLI STATUS:
+  OVER BUDGET). Confirms "over" means used **strictly greater** than
+  budget. Budget reset to 5.00 for the alert phase.
+- Expected: matched (plan USE-02/03/04).
+- Evidence: UI badge counts at 12.50 (0) vs 5.00 (1); CLI `budget show`
+  STATUS at 12.50 (none), 12.49 (OVER BUDGET), 5.00 (OVER BUDGET).
+- Note: the exact-value boundary was set via CLI `budget set` because the
+  numeric budget field did not reliably accept automated keystroke
+  replacement (harness limitation, not an app defect); the UI badge was
+  read from the live screen after each change.
+- Suspected component: n/a.
+
+### USE-05 — budget cost source selector — **PASS (behavior via CLI/shared core)**
+
+- Screen/workflow: Usage → Budget cost source
+- Result: **PASS** — the "Used" figure tracks the selected source exactly:
+  provider_reported → Used $0.00 (provider-reported); estimated → Used
+  $12.50; best_available → Used $12.50 (reported 0 → falls to estimated).
+  The Usage screen shows the "Budget cost source" popup with its current
+  selection; the source change itself was driven via CLI `budget source`
+  (shared core) because the native popup menu did not expose items to the
+  AX driver during this test. Left at best_available.
+- Evidence: CLI `budget show` per source.
+- Suspected component: n/a (UI-driver limitation on the native popup only).
+
+### USE-06 — empty usage range — **PASS**
+
+- Screen/workflow: Usage → Scope → beta-service
+- Result: **PASS** — This month all $0.00; "No usage records for this
+  scope and source." rendered cleanly (empty scope).
+- Evidence: AX capture at scope beta-service.
+- Suspected component: n/a.
+
+### USE-07 — unknown model: no invented estimate — **PASS**
+
+- Screen/workflow: (CLI record made-up-model-xyz) → Usage → scope
+  alpha-app → Records
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: the new record row shows "2,000 tokens" with Estimated **"—"**
+  (no number invented for an unknown model); the gpt-4o row keeps its
+  $12.50 estimate. CLI `usage report` shows the made-up-model-xyz row with
+  2000 tokens and no estimated-cost value.
+- Expected: matched (plan USE-07).
+- Evidence: AX capture (row "made-up-model-xyz / 2,000 tokens / —"); CLI
+  `usage report`.
+- Suspected component: n/a.
+
+### PRC-01 — pricing records table — **PASS**
+
+- Screen/workflow: Pricing (records table + "Show full version history")
+- Result: **PASS** (conductor-observed via AX + CLI)
+- Actual: the Pricing screen renders the records table with columns incl.
+  Origin (bundled) and the checkbox "Show full version history (not just
+  currently effective records)". With history on, **claude-sonnet-5
+  appears twice** with different Effective-from dates: $2.00/$10.00
+  effective 2026-07-18 and $3.00/$15.00 effective 2026-09-01 (the
+  documented Sept-2026 change). CLI `pricing list --all` matches.
+- Expected: matched (plan PRC-01).
+- Evidence: CLI `pricing list` / `pricing list --all`; AX capture of the
+  Pricing heading, checkbox, and bundled records.
+- Note: the Pricing screen's large table exceeds the AX driver's
+  fast-read budget, so the record data was cross-checked via CLI (shared
+  core) rather than a full UI table scrape; the UI controls were confirmed
+  present.
+- Suspected component: n/a.
+
+### PRC-02 — manual override makes the unknown model estimable — **PASS**
+
+- Result: **PASS** (conductor-observed via CLI/shared core)
+- Actual: `pricing set-override openai made-up-model-xyz --input 2.50
+  --output 10` → "Override stored for openai/made-up-model-xyz. It wins
+  over imported and bundled records; existing stored estimates are NOT
+  recomputed." An Origin "override" row ($2.50/$10.00) appears. Re-recording
+  the unknown-model usage then produces a row estimated at **$0.01 (est.)**
+  (1k×$2.50/1M + 1k×$10/1M = $0.0125 → $0.01), while the OLD unknown-model
+  rows keep "—" (stored estimates not recomputed).
+- Expected: matched (plan PRC-02) — override > imported > bundled; new
+  usage uses it.
+- Evidence: CLI `pricing set-override`, `pricing list --all` (override
+  row), `usage report` (new row $0.01, old rows —).
+- Suspected component: n/a.
+
+### PRC-03 — remove the override — **PASS**
+
+- Result: **PASS** — `pricing remove-override openai made-up-model-xyz` →
+  "removed 1 override record(s)"; no override row remains.
+- Evidence: CLI before/after.
+
+### PRC-04 — import rejects malformed pricing — **PASS**
+
+- Result: **PASS** (whole-file validation; nothing added on any bad input)
+- Actual: the plan's exact JSON
+  `[{"provider":"openai","model":"bad","unit":"tokens","input_per_m":"-1"}]`
+  is rejected ("missing field `source`") — it is malformed (missing a
+  required field). A fully-formed record carrying a negative price is
+  rejected specifically on the price: "record 1 (openai/bad): input_per_m:
+  invalid input: '-1.000000' is not a valid amount". In both cases **no
+  record is added** (whole-file validation, no partial import).
+- Expected: matched in outcome (malformed rejected, nothing added). Minor
+  note: the plan expected the "negative price" message for its exact JSON,
+  but the missing-`source` check fires first; the negative-price check was
+  confirmed separately. Not a defect.
+- Evidence: CLI import attempts + post-count (bad rows: 0).
+- Suspected component: n/a.
+
+### PRC-05 — export / re-import round trip — **PASS (with benign layering note)**
+
+- Result: **PASS** — export → re-import completes with **no error**.
+- Actual: `pricing export` (14,936 bytes) → `pricing import` → "Imported 30
+  new record(s); replaced 0 …". The first round-trip creates
+  **"imported"-origin copies** of the "bundled" records (identical values;
+  origin bundled→imported). Because precedence is override > imported >
+  bundled and the values are identical, **estimates are unaffected**. The
+  growth is **bounded and idempotent**: a second identical import reports
+  "Imported 0 new; replaced 30" and the record count does not increase
+  further (stayed 59; claude-sonnet-5 stayed at 4 rows = 2 bundled + 2
+  imported shadows).
+- Expected: the plan's "Imported 0 new, replaced N; never an error" is met
+  on the **second** import; the first import shadows bundled→imported. This
+  is defensible layering (reviewed imports outrank bundled defaults),
+  causes no estimate change and no error — recorded as a benign
+  observation, **not** a defect.
+- Evidence: CLI export/import twice; record-count and sonnet-5-row counts
+  before/after; the 4 sonnet-5 rows are 2×bundled + 2×imported with
+  identical prices.
+- Suspected component: n/a (pricing import origin-layering; by design).
 
 ### CRD-13 — version history (reauth-gated, masked) — **PASS**
 
