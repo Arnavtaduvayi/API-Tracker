@@ -183,11 +183,14 @@ pub fn discover(root: &Path) -> Result<Vec<EnvFileInfo>> {
             let Some(class) = classify_file_name(&name) else {
                 continue;
             };
+            // Relative paths are displayed, compared against git output, and
+            // stored — normalize to forward slashes so behavior is identical
+            // across platforms (git itself always reports forward slashes).
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(&path)
                 .to_string_lossy()
-                .into_owned();
+                .replace('\\', "/");
             let content = std::fs::read_to_string(&path).unwrap_or_default();
             let doc = EnvDocument::parse(&content);
             let (git_status, in_history) = git_status_of(&root, &rel);
