@@ -310,7 +310,22 @@ pub fn create_backup(
         salt_hex: hex::encode(&salt),
         payload_b64: base64::engine::general_purpose::STANDARD.encode(&envelope),
     };
-    std::fs::write(path, serde_json::to_string_pretty(&file)?)?;
+    // Owner-only permissions from the first byte: the payload is encrypted,
+    // but a world-readable file would still hand other local users material
+    // for offline password guessing. Matches the `.env`-export policy.
+    {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut out = options.open(path)?;
+        out.write_all(serde_json::to_string_pretty(&file)?.as_bytes())?;
+        out.sync_all()?;
+    }
     crate::audit::record(
         vault.connection(),
         "backup_created",
@@ -440,11 +455,40 @@ pub fn restore_backup(
         if !force {
             return Err(CoreError::VaultExists(db_path));
         }
+        // Pick an aside name that does not already exist. A whole-second
+        // timestamp is not unique enough (two `restore --force` within the
+        // same second — a plausible retry — would rename the second vault
+        // OVER the first aside, silently destroying it, since `rename`
+        // replaces the destination). A frozen/mock clock makes the collision
+        // certain. Probe a suffix counter until the base and its sidecars are
+        // all free.
         let timestamp = clock::now().unix_timestamp().to_string();
-        let aside = target
-            .data_dir
-            .join(format!("vault.db.replaced-{timestamp}"));
-        std::fs::rename(&db_path, &aside)?;
+        let stem = |n: u32| {
+            if n == 0 {
+                format!("vault.db.replaced-{timestamp}")
+            } else {
+                format!("vault.db.replaced-{timestamp}-{n}")
+            }
+        };
+        let mut n = 0u32;
+        let base = loop {
+            let candidate = stem(n);
+            let taken = target.data_dir.join(&candidate).exists()
+                || ["-wal", "-shm"]
+                    .iter()
+                    .any(|s| target.data_dir.join(format!("{candidate}{s}")).exists());
+            if !taken {
+                break candidate;
+            }
+            n += 1;
+            if n > 10_000 {
+                return Err(CoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "could not find a free name to set the existing vault aside",
+                )));
+            }
+        };
+        std::fs::rename(&db_path, target.data_dir.join(&base))?;
         // Move the WAL/SHM sidecars alongside the renamed database instead of
         // deleting them: a live connection may hold committed-but-uncheckpointed
         // transactions in the WAL, and SQLite associates `<db>-wal`/`<db>-shm`
@@ -453,9 +497,7 @@ pub fn restore_backup(
         for suffix in ["-wal", "-shm"] {
             let side = target.data_dir.join(format!("vault.db{suffix}"));
             if side.exists() {
-                let aside_side = target
-                    .data_dir
-                    .join(format!("vault.db.replaced-{timestamp}{suffix}"));
+                let aside_side = target.data_dir.join(format!("{base}{suffix}"));
                 std::fs::rename(&side, &aside_side)?;
             }
         }
@@ -801,6 +843,26 @@ mod tests {
         );
         let revealed = restored.reveal_credential("app/main", &master).unwrap();
         assert_eq!(revealed.expose(), "sk-proj-FAKE-legacy-backup-test-0001");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = VaultPaths::new(dir.path().join("v"));
+        let master = SecretString::from("perm-test-master-pass-01");
+        let vault = crate::vault::create_vault(&paths, &master).unwrap();
+        let file_path = dir.path().join("perm.backup");
+        create_backup(
+            &vault,
+            &file_path,
+            &SecretString::from("perm-test-backup-pass-01"),
+            false,
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&file_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "backup files must be owner-only");
     }
 
     #[test]

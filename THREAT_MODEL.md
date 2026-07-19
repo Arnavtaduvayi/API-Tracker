@@ -176,6 +176,28 @@ integrations land.
   password as sufficient to learn value-equality across all projects.
 - Audit events are plaintext rows in the same database and are not
   tamper-evident.
+- **Adding a project password does not rotate the project key.** A project is
+  created with its key wrapped under the vault key; setting a project password
+  adds an *outer* wrap but keeps the same underlying key. The vault-only wrap
+  that existed before the password was set may therefore survive in
+  uncheckpointed WAL frames or in any backup taken while the project was
+  unprotected — so a holder of the *master* password could, in principle,
+  recover a later-locked project's key from those historical artifacts. The
+  live in-memory protection is intact (a locked project's values need its own
+  password to reveal), and this is consistent with the stated model that the
+  master password already learns value-equality across all projects
+  (ADR 0005). Treat a project password as protection against an attacker who
+  has *some* session but not the master password, not against the
+  master-password holder examining old on-disk remnants.
+- **Backup files and `vault.db` are written owner-only (0600) on Unix**; the
+  data directory is 0700. On Windows/non-Unix these permission tightenings are
+  no-ops (no ACL is set), so the OS-inherited ACLs govern — treat the data
+  directory as sensitive there. Backup contents are AEAD-encrypted regardless.
+- **The session file's TTL/expiry is plaintext** (only the session id is in
+  the AEAD associated data); an attacker with write access to the session file
+  could extend the auto-lock window, but still cannot decrypt anything without
+  the environment-held token. Auto-lock is a convenience bound, not a
+  cryptographic control.
 - The session file's expiry timestamp is plaintext; an attacker with write
   access could extend it but still needs the environment token.
 - No OS-level "lock on session lock" hook yet (listed in the spec; needs

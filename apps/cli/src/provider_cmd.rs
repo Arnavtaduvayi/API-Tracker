@@ -373,7 +373,11 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 );
                 for k in &keys {
                     if !k.note.is_empty() {
-                        println!("  {}: {}", k.api_key_id, k.note);
+                        println!(
+                            "  {}: {}",
+                            render::sanitize(&k.api_key_id),
+                            render::sanitize(&k.note)
+                        );
                     }
                 }
                 println!();

@@ -170,6 +170,44 @@ fn restore_refuses_to_overwrite_without_force_and_preserves_old_vault_with_force
 }
 
 #[test]
+fn repeated_force_restores_never_clobber_a_previous_aside() {
+    // Two `restore --force` runs (a plausible retry) must each set the
+    // existing vault aside under a DISTINCT name, even if they land in the
+    // same wall-clock second — otherwise the second restore would rename its
+    // vault over the first aside and silently destroy it.
+    let (dir, paths, mut vault) = new_vault();
+    add_project(&mut vault, "generation-one");
+    let backup_path = dir.path().join("b.json");
+    backup::create_backup(&vault, &backup_path, &backup_pw(), false).unwrap();
+    vault.lock();
+
+    // First force restore: sets generation-one aside.
+    backup::restore_backup(&backup_path, &backup_pw(), &paths, true).unwrap();
+    // Mutate the freshly restored vault so the next aside differs in content.
+    {
+        let mut v = vault::unlock_vault(&paths, &master_pw()).unwrap();
+        add_project(&mut v, "generation-two");
+    }
+    // Second force restore: must set generation-two aside under a new name,
+    // leaving generation-one's aside intact.
+    backup::restore_backup(&backup_path, &backup_pw(), &paths, true).unwrap();
+
+    let asides: Vec<_> = std::fs::read_dir(&paths.data_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("vault.db.replaced-") && !n.ends_with("-wal") && !n.ends_with("-shm")
+        })
+        .collect();
+    assert_eq!(
+        asides.len(),
+        2,
+        "both replaced vaults must be preserved under distinct names"
+    );
+}
+
+#[test]
 fn force_restore_preserves_a_still_open_vault_including_uncheckpointed_wal() {
     // Reproduces the data-loss case: a concurrent connection (e.g. the
     // desktop app) holds committed-but-uncheckpointed transactions in the

@@ -22,6 +22,8 @@ type ActionKind = "approve" | "advance" | "rollback" | "complete_manual" | "canc
 /** States in which Advance can still make progress (mirrors core is_active). */
 const ADVANCEABLE = [
   "approved",
+  "creating_replacement",
+  "creating_in_progress",
   "awaiting_manual_key",
   "replacement_stored",
   "updating_destinations",

@@ -246,16 +246,29 @@ fn hook_status(path: String) -> CmdResult<api_tracker_core::hooks::HookStatus> {
     api_tracker_core::hooks::status(std::path::Path::new(&path)).map_err(Into::into)
 }
 
+// hook_install/hook_remove write to a repo's `.git/hooks`, so they are gated
+// behind an unlocked vault: a locked session must not mutate the filesystem.
 #[tauri::command]
-fn hook_install(path: String, force: bool) -> CmdResult<api_tracker_core::hooks::HookStatus> {
-    api_tracker_core::hooks::install(std::path::Path::new(&path), force)?;
-    api_tracker_core::hooks::status(std::path::Path::new(&path)).map_err(Into::into)
+fn hook_install(
+    state: State<'_, AppState>,
+    path: String,
+    force: bool,
+) -> CmdResult<api_tracker_core::hooks::HookStatus> {
+    with_vault(&state, |_vault| {
+        api_tracker_core::hooks::install(std::path::Path::new(&path), force)?;
+        api_tracker_core::hooks::status(std::path::Path::new(&path))
+    })
 }
 
 #[tauri::command]
-fn hook_remove(path: String) -> CmdResult<api_tracker_core::hooks::HookStatus> {
-    api_tracker_core::hooks::remove(std::path::Path::new(&path))?;
-    api_tracker_core::hooks::status(std::path::Path::new(&path)).map_err(Into::into)
+fn hook_remove(
+    state: State<'_, AppState>,
+    path: String,
+) -> CmdResult<api_tracker_core::hooks::HookStatus> {
+    with_vault(&state, |_vault| {
+        api_tracker_core::hooks::remove(std::path::Path::new(&path))?;
+        api_tracker_core::hooks::status(std::path::Path::new(&path))
+    })
 }
 
 // --- Monitoring + alerts ---
@@ -1180,11 +1193,16 @@ struct EnvExampleProposal {
 /// Compute (without writing) the `.env.example` sibling for a values file.
 /// Purely local file work; no vault access and no secret values involved —
 /// the proposal carries variable names only and the diff is masked.
+///
+/// Gated behind an unlocked vault (`with_vault`): these commands read and
+/// write arbitrary host paths, so — even though they touch no vault data —
+/// they must not be callable while the vault is locked. That bounds the
+/// filesystem-write primitive to a trusted, unlocked session.
 #[tauri::command]
-fn env_example_preview(file: String) -> CmdResult<EnvExampleProposal> {
+fn env_example_preview(state: State<'_, AppState>, file: String) -> CmdResult<EnvExampleProposal> {
     use api_tracker_core::{envfile::EnvDocument, envgov};
     let file = PathBuf::from(&file);
-    let inner = || -> Result<EnvExampleProposal, CoreError> {
+    with_vault(&state, |_vault| {
         let content = std::fs::read_to_string(&file)?;
         let values = EnvDocument::parse(&content);
         let example_path = file
@@ -1204,15 +1222,20 @@ fn env_example_preview(file: String) -> CmdResult<EnvExampleProposal> {
             example_path: example_path.display().to_string(),
             changed,
         })
-    };
-    inner().map_err(Into::into)
+    })
 }
 
-/// Write a previously previewed `.env.example` (atomic, owner-only).
+/// Write a previously previewed `.env.example` (atomic, owner-only). Gated
+/// behind an unlocked vault so a locked session cannot write host files.
 #[tauri::command]
-fn env_example_write(example_path: String, content: String) -> CmdResult<()> {
-    api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
-        .map_err(Into::into)
+fn env_example_write(
+    state: State<'_, AppState>,
+    example_path: String,
+    content: String,
+) -> CmdResult<()> {
+    with_vault(&state, |_vault| {
+        api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
+    })
 }
 
 #[tauri::command]

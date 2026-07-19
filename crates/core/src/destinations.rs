@@ -976,8 +976,27 @@ pub struct AwsSecretsManagerDestination<'a> {
     pub region: String,
 }
 
+/// An AWS region is `[a-z0-9-]+` (e.g. `us-east-1`). The region is
+/// interpolated into the request AUTHORITY, so a value carrying a URL
+/// delimiter (`/`, `?`, `#`, `@`, `:`) could otherwise steer the connection
+/// — and the plaintext secret and session token it carries — to another
+/// host. Reject anything that is not a plain region label.
+fn valid_aws_region(region: &str) -> bool {
+    !region.is_empty()
+        && region.len() <= 64
+        && region
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 impl AwsSecretsManagerDestination<'_> {
     fn call(&self, target: &str, body: serde_json::Value) -> Result<HttpResponse2> {
+        if !valid_aws_region(&self.region) {
+            return Err(CoreError::InvalidInput(format!(
+                "invalid AWS region {:?}: expected a plain region label like us-east-1",
+                self.region
+            )));
+        }
         let url = format!("https://secretsmanager.{}.amazonaws.com/", self.region);
         let mut req = HttpRequest::with_method(Method::Post, url)
             .header("content-type", "application/x-amz-json-1.1")
@@ -1408,6 +1427,48 @@ mod tests {
     use super::*;
     use crate::http::MockHttpClient;
     use std::cell::RefCell;
+
+    #[test]
+    fn aws_region_rejects_url_delimiters() {
+        // Legitimate regions pass.
+        for ok in ["us-east-1", "eu-west-2", "ap-southeast-1"] {
+            assert!(valid_aws_region(ok), "{ok} should be valid");
+        }
+        // Anything that could steer the request authority off-host is refused.
+        for bad in [
+            "",
+            "evil.com?",
+            "evil.com#",
+            "foo/bar",
+            "us-east-1@evil.com",
+            "us-east-1:443",
+            "US-EAST-1",
+            "us_east_1",
+            "region with space",
+        ] {
+            assert!(!valid_aws_region(bad), "{bad:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn aws_call_refuses_a_malicious_region_before_any_request() {
+        let http = MockHttpClient::json("{}");
+        let dest = AwsSecretsManagerDestination {
+            http: &http,
+            creds: AwsCredentials {
+                access_key_id: "AKIAFAKE".into(),
+                secret_access_key: SecretString::from("FAKE-secret"),
+                session_token: None,
+            },
+            region: "evil.com?".into(),
+        };
+        let err = dest
+            .write("name", &SecretString::from("sk-FAKE"))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)), "{err}");
+        // The guard fires before any network request is attempted.
+        assert!(http.last_request().is_none());
+    }
 
     #[test]
     fn catalog_reports_every_kind_with_capabilities() {

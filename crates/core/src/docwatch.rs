@@ -374,6 +374,14 @@ impl HttpFetcher {
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(20)))
+            // Do NOT follow redirects. A watched documentation page that
+            // 30x-redirects could otherwise be pointed at an internal host
+            // (e.g. a cloud metadata endpoint) or downgraded https→http; the
+            // user chose the URL, so a redirect to a different origin is not
+            // something we should silently follow. A redirect surfaces as a
+            // non-success status (handled as a failed check), never as a
+            // fetch of the redirect target.
+            .max_redirects(0)
             .user_agent("api-tracker-docwatch/0.1 (+local, respects conditional requests)")
             .build();
         Self {

@@ -6276,11 +6276,41 @@ impl UnlockedVault {
                         )?;
                         return self.rotation_get(id);
                     }
+                    // Claim the creation via CAS BEFORE the provider HTTP call.
+                    // Only the process that wins this transition performs the
+                    // (non-idempotent) create; a concurrent advance sees the
+                    // row already moved and stops with "changed concurrently"
+                    // rather than creating a second live key.
+                    crate::rotation::set_state(
+                        &self.conn,
+                        id,
+                        crate::rotation::CREATING_REPLACEMENT,
+                        crate::rotation::CREATING_IN_PROGRESS,
+                        "claimed the provider-side key creation",
+                    )?;
+                }
+                crate::rotation::CREATING_IN_PROGRESS => {
+                    // Same orphan guard for the crash-after-create-before-store
+                    // window while holding the transient state.
+                    if rot.new_provider_key_id.is_some() && rot.new_version.is_none() {
+                        crate::rotation::record_error(
+                            &self.conn,
+                            id,
+                            &format!(
+                                "a provider key ({}) was created but its value was never \
+                                 stored (it is shown only once, at creation). Revoke that \
+                                 key at the provider, clear it with `rotation cancel`, and \
+                                 plan again",
+                                rot.new_provider_key_id.as_deref().unwrap_or("?")
+                            ),
+                        )?;
+                        return self.rotation_get(id);
+                    }
                     match self.rotation_create_replacement(&rot, master_password, http) {
                         Ok(detail) => crate::rotation::set_state(
                             &self.conn,
                             id,
-                            crate::rotation::CREATING_REPLACEMENT,
+                            crate::rotation::CREATING_IN_PROGRESS,
                             crate::rotation::REPLACEMENT_STORED,
                             &detail,
                         )?,
