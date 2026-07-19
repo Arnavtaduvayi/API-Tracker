@@ -355,8 +355,8 @@ export const api = {
   envDrift: (project: string) => call<DriftFinding[]>("env_drift", { project }),
   envExamplePreview: (file: string) =>
     call<EnvExampleProposal>("env_example_preview", { file }),
-  envExampleWrite: (examplePath: string, content: string) =>
-    call<void>("env_example_write", { examplePath, content }),
+  envExampleWrite: (project: string, examplePath: string, content: string, password: string) =>
+    call<string>("env_example_write", { project, examplePath, content, password }),
   envExport: (args: {
     project: string;
     path: string;

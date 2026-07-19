@@ -1404,16 +1404,30 @@ fn env_example_preview(state: State<'_, AppState>, file: String) -> CmdResult<En
     })
 }
 
-/// Write a previously previewed `.env.example` (atomic, owner-only). Gated
-/// behind an unlocked vault so a locked session cannot write host files.
+/// Write a previously previewed `.env.example` (names only, never values).
+/// Authorized and confined in core: reauthentication, plus containment of
+/// the target to a `.env.example` inside one of the project's registered
+/// repositories (IPC-01/FS-09). The React confirmation dialog is UX only —
+/// it is NOT the authorization; the master password re-verification in core
+/// is. Returns the canonical path written.
 #[tauri::command]
 fn env_example_write(
     state: State<'_, AppState>,
+    project: String,
     example_path: String,
     content: String,
-) -> CmdResult<()> {
-    with_vault(&state, |_vault| {
-        api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
+    password: String,
+) -> CmdResult<String> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault
+            .env_example_write(
+                &project,
+                std::path::Path::new(&example_path),
+                &content,
+                &password,
+            )
+            .map(|p| p.display().to_string())
     })
 }
 

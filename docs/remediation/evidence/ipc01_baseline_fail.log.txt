@@ -1,0 +1,25 @@
+
+---- symlinked_parent_directory_escaping_the_repo_is_refused stdout ----
+
+thread 'symlinked_parent_directory_escaping_the_repo_is_refused' (20314376) panicked at crates/core/tests/ipc01_env_example_confinement.rs:148:82:
+called `Result::unwrap_err()` on an `Ok` value: "<tmp>"
+
+---- incorrect_or_missing_reauth_is_refused stdout ----
+
+thread 'incorrect_or_missing_reauth_is_refused' (20314370) panicked at crates/core/tests/ipc01_env_example_confinement.rs:179:87:
+called `Result::unwrap_err()` on an `Ok` value: "<tmp>"
+
+
+failures:
+    incorrect_or_missing_reauth_is_refused
+    non_example_file_name_is_refused
+    parent_traversal_out_of_tree_is_refused
+    path_switched_after_preview_to_out_of_tree_is_refused
+    project_without_registered_repo_cannot_be_a_write_target
+    symlink_destination_is_refused
+    symlinked_parent_directory_escaping_the_repo_is_refused
+    write_to_unrelated_absolute_path_is_refused
+
+test result: FAILED. 1 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+error: test failed, to rerun pass `-p api-tracker-core --test ipc01_env_example_confinement`

@@ -63,6 +63,9 @@ export function EnvView() {
   const [exportOverwrite, setExportOverwrite] = useState(false);
   const [exportTtl, setExportTtl] = useState("");
   const [exportReauth, setExportReauth] = useState(false);
+  // `.env.example` write is reauthenticated and confined to a registered
+  // repository in core (the dialog below is UX, not the authorization).
+  const [exampleReauth, setExampleReauth] = useState(false);
 
   const run = async (action: () => Promise<void>) => {
     setError(null);
@@ -146,13 +149,15 @@ export function EnvView() {
       setPreview(await api.envPreview(project, selected.path));
     });
 
-  const writeExample = () =>
-    run(async () => {
-      if (!selected || !example) return;
-      await api.envExampleWrite(example.example_path, example.proposed);
-      setNotice(`Wrote ${example.example_path} (names only, never values).`);
-      setExample(await api.envExamplePreview(selected.path));
-    });
+  const writeExample = () => {
+    if (!selected || !example) return;
+    if (!project) {
+      setError("Select the project that owns this repository to write its .env.example.");
+      return;
+    }
+    // Authorization is the core reauthentication below, not this dialog.
+    setExampleReauth(true);
+  };
 
   const checkDrift = () =>
     run(async () => {
@@ -636,6 +641,25 @@ export function EnvView() {
             </button>
           </div>
         </form>
+      )}
+
+      {exampleReauth && example && (
+        <ReauthDialog
+          title={`Write ${example.example_path} (variable names only, never values)`}
+          actionLabel="Write .env.example"
+          onConfirm={async (password) => {
+            const written = await api.envExampleWrite(
+              project,
+              example.example_path,
+              example.proposed,
+              password,
+            );
+            setExampleReauth(false);
+            setNotice(`Wrote ${written} (names only, never values).`);
+            if (selected) setExample(await api.envExamplePreview(selected.path));
+          }}
+          onClose={() => setExampleReauth(false)}
+        />
       )}
 
       {exportReauth && (

@@ -4791,6 +4791,105 @@ impl UnlockedVault {
         Ok(outcomes)
     }
 
+    /// Write a project's `.env.example` template (variable NAMES and
+    /// comments only — never secret values), reauthenticated and confined.
+    ///
+    /// This is the authorization boundary for the desktop `env_example_write`
+    /// IPC command, which previously forwarded a frontend-controlled path and
+    /// content straight to an atomic file write with no reauth and no path
+    /// constraint — an arbitrary-file-overwrite primitive reachable from a
+    /// compromised or misbehaving webview (IPC-01/FS-09). The guarantees
+    /// enforced here, in core:
+    ///
+    /// - **Reauthentication:** the master password is re-verified (full
+    ///   Argon2id), so an unlocked session is not sufficient.
+    /// - **Confinement:** the target must be a `.env.example` file whose
+    ///   canonical parent directory lies inside one of the project's
+    ///   registered repositories. A project with no registered repository
+    ///   cannot be a write target.
+    /// - **Canonical validation / no traversal / no out-of-tree write:** the
+    ///   parent is canonicalized (symlinks and `..` resolved) before the
+    ///   containment check, so `/tmp/x`, `<repo>/../../etc/x`, and similar
+    ///   escape the repo root and are refused.
+    /// - **Symlink rejection:** a symlinked target is refused outright.
+    /// - **Fixed file name:** the final path component must be
+    ///   `.env.example`, so the primitive can only ever write that one
+    ///   template, never an arbitrary file, and a path switched after the
+    ///   preview cannot redirect the write outside these rules.
+    ///
+    /// Returns the canonical path written.
+    pub fn env_example_write(
+        &self,
+        project: &str,
+        example_path: &std::path::Path,
+        content: &str,
+        master_password: &SecretString,
+    ) -> Result<PathBuf> {
+        // Reauthentication in core: never trust a UI confirmation as
+        // authorization for a filesystem write.
+        self.verify_master_password(master_password)?;
+        let project_row = self.project_row_by_ident(project)?;
+        let model = self.project_model(&project_row)?;
+
+        // The target is always the `.env.example` template, never an
+        // arbitrary file name.
+        if example_path.file_name().and_then(|n| n.to_str()) != Some(".env.example") {
+            return Err(CoreError::InvalidInput(
+                "the target must be a file named '.env.example'".into(),
+            ));
+        }
+        let parent = example_path.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent = parent.ok_or_else(|| {
+            CoreError::InvalidInput("the .env.example path has no parent directory".into())
+        })?;
+        // Canonicalize the parent (resolves `..` and symlinked directories)
+        // so the containment check below cannot be fooled by traversal.
+        let canon_parent = parent.canonicalize().map_err(|e| {
+            CoreError::InvalidInput(format!("cannot access {}: {e}", parent.display()))
+        })?;
+
+        // The canonical parent must sit inside a registered repository. A
+        // registered repo path that does not resolve is skipped (not an
+        // implicit allow).
+        let within_repo = model.repo_paths.iter().any(|repo| {
+            std::path::Path::new(repo)
+                .canonicalize()
+                .map(|root| canon_parent == root || canon_parent.starts_with(&root))
+                .unwrap_or(false)
+        });
+        if !within_repo {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is not inside a repository registered on project '{}'; \
+                 register the repository first, or write the file manually",
+                example_path.display(),
+                project_row.name
+            )));
+        }
+
+        let target = canon_parent.join(".env.example");
+        // Refuse a symlinked target: the atomic rename would replace the link
+        // node, but writing "through" a link here is almost certainly an
+        // attempt to redirect the write and gets a clear refusal.
+        if let Ok(meta) = std::fs::symlink_metadata(&target) {
+            if meta.file_type().is_symlink() {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is a symbolic link; refusing to write through it",
+                    target.display()
+                )));
+            }
+        }
+
+        crate::envgov::atomic_write(&target, content)?;
+        audit::record(
+            &self.conn,
+            "env_example_written",
+            Some(&project_row.id),
+            None,
+            &format!("path={}", target.display()),
+        )?;
+        Ok(target)
+    }
+
     /// Detect drift between a project's `.env` files, its vault credentials,
     /// and its injection mappings.
     pub fn env_drift(&self, project: &str) -> Result<Vec<crate::envgov::DriftFinding>> {
