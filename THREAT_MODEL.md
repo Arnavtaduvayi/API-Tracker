@@ -130,7 +130,7 @@ integrations land.
 | Someone who copies `vault.db` (cloud sync, backup leak) | Same as above. Keyed fingerprints prevent offline guess-confirmation of values. |
 | Someone who obtains a backup file | Needs the backup password (Argon2id-stretched). Contents beyond that are the same ciphertext as at rest. |
 | Attacker who can *modify* the database | AEAD + per-record associated data detect value tampering, truncation, and ciphertext swapping between records. Metadata edits (e.g., renaming, changing an expiration date) are NOT cryptographically detected. |
-| Snooper at an unattended, *locked* machine | Needs the master password; reauthentication also gates reveal/copy/export inside live sessions. Auto-lock (default 15 min) bounds exposure of an unlocked app. |
+| Snooper at an unattended, *locked* machine | Needs the master password; reauthentication also gates reveal/copy/export **and credential deletion** inside live sessions (enforced in core, not by the UI). Auto-lock (default 15 min) bounds exposure of an unlocked app. |
 | Malware running as the user | **Not defended.** It can keylog the master password, read process memory, read the session file plus environment, or capture the clipboard. Local encryption cannot beat an attacker inside your account. |
 | Compromised OS, debugger, cold-boot/memory dump | **Not defended.** Zeroization is best-effort; plaintext exists in memory during use. |
 | Malicious dependency in the user's own projects | Out of scope — once you paste a key into your app's environment, its safety is that app's problem. (Future scanning features reduce *accidental* exposure, not malicious exfiltration.) |
