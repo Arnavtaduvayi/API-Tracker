@@ -772,15 +772,23 @@ fn revoke_404_is_an_error_not_success_on_first_attempt() {
             false,
         )
         .unwrap();
-    // NOT completed: a first-attempt 404 is ambiguous (wrong id?) and must
-    // never be reported as a successful revocation.
-    assert_ne!(stuck.rotation.state, "completed");
+    // A first-attempt 404 is ambiguous (wrong id?) and must never be reported
+    // as a successful revocation. It is now routed to manual_required — an
+    // explicit verify-and-complete exit — instead of being wedged in
+    // old_disabled forever (ROT-001). No false revocation is recorded.
+    assert_eq!(stuck.rotation.state, "manual_required");
     assert!(stuck.rotation.old_revoked_at.is_none());
+    let events = v.rotation_events(&plan.rotation.id).unwrap();
     assert!(
-        stuck.rotation.last_error.contains("does not exist"),
-        "{}",
-        stuck.rotation.last_error
+        events.iter().any(|e| e.detail.contains("does not exist")),
+        "the ambiguity must be recorded: {events:?}"
     );
+    // The honest exit works: once the user verifies the old key is gone, a
+    // reauthenticated manual completion converges to a truthful terminal state.
+    let done = v
+        .rotation_complete_manual(&plan.rotation.id, &master_pw(), "verified gone via console")
+        .unwrap();
+    assert_eq!(done.rotation.state, "completed");
 }
 
 #[test]
@@ -1090,7 +1098,7 @@ fn active_rotation_versions_survive_the_prune_and_deletion_is_blocked() {
         "the rotation's rollback material must survive pruning"
     );
     // And the credential cannot be deleted mid-rotation.
-    let err = v.delete_credential(&cred_id).unwrap_err();
+    let err = v.delete_credential(&cred_id, &master_pw()).unwrap_err();
     assert!(err.to_string().contains("in flight"), "{err}");
 }
 

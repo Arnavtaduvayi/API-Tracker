@@ -156,7 +156,16 @@ alerts (provider_data_stale, unmatched_provider_key,
 unmapped_provider_project, provider_connection_invalid,
 provider_sync_failed, documentation_changed, rotation_due, rotation_stuck).
 Alert lifecycle with dedup and auto-resolve. Incremental repo monitoring
-scans only new commits (`scan_repos_incremental`).
+scans only new commits (`scan_repos_incremental`). **Repository-scan
+exposure alerts (`repo_secret_exposure`) and coverage-gap alerts
+(`repo_scan_coverage_gap`) are deliberately excluded from auto-resolve**: a
+possible-secret-exposure signal never clears just because a later
+incremental scan stopped re-emitting it (unchanged / unavailable / failed /
+skipped repo, or the secret left the working tree but remains in history).
+It stays open until an explicit resolution or a qualifying clean full
+re-scan — `api-tracker scan <repo> --reverify` (or the desktop
+`scan_reverify` command), which resolves the alerts only when a full
+history + working-tree scan finds nothing.
 
 **The honest ceiling.** No per-request log exists in any official API; no
 local gateway/SDK shim is built (deliberate — ADR 0014).

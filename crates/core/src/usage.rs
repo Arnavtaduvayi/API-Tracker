@@ -171,6 +171,27 @@ impl NewUsageSnapshot {
     }
 }
 
+/// Drop provider-fetched snapshots whose time window is unusable, returning
+/// how many were dropped. Sync engines derive their replace-range DELETE
+/// bounds from these provider-controlled strings, and the comparison is
+/// lexicographic: a missing or blank `window_start` sorts below every real
+/// timestamp, so one malformed bucket would otherwise delete the provider's
+/// entire stored history (OBS-003). A window is usable only when both
+/// bounds parse as RFC3339 and the range is not inverted.
+pub fn retain_valid_windows(rows: &mut Vec<NewUsageSnapshot>) -> usize {
+    let before = rows.len();
+    rows.retain(|s| {
+        matches!(
+            (
+                crate::clock::parse_rfc3339(&s.window_start),
+                crate::clock::parse_rfc3339(&s.window_end),
+            ),
+            (Ok(start), Ok(end)) if start <= end
+        )
+    });
+    before - rows.len()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageSnapshot {
     pub id: String,

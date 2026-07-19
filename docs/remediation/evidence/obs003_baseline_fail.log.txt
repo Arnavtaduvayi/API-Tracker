@@ -1,0 +1,95 @@
+ right: 0
+
+---- invalid_cost_bucket_does_not_wipe_cost_history stdout ----
+
+thread 'invalid_cost_bucket_does_not_wipe_cost_history' (20267340) panicked at crates/core/tests/obs003_sync_range_guard.rs:273:5:
+assertion `left == right` failed: the invalid cost bucket is not recorded
+  left: 1
+ right: 0
+
+---- inverted_range_is_skipped stdout ----
+
+thread 'inverted_range_is_skipped' (20267341) panicked at crates/core/tests/obs003_sync_range_guard.rs:130:5:
+assertion `left == right` failed: end before start: only valid buckets are recorded
+  left: 1
+ right: 0
+
+---- missing_starting_at_does_not_wipe_history stdout ----
+
+thread 'missing_starting_at_does_not_wipe_history' (20267343) panicked at crates/core/tests/obs003_sync_range_guard.rs:130:5:
+assertion `left == right` failed: missing starting_at: only valid buckets are recorded
+  left: 1
+ right: 0
+
+---- empty_starting_at_does_not_wipe_history stdout ----
+
+thread 'empty_starting_at_does_not_wipe_history' (20267339) panicked at crates/core/tests/obs003_sync_range_guard.rs:130:5:
+assertion `left == right` failed: empty starting_at: only valid buckets are recorded
+  left: 1
+ right: 0
+
+---- malformed_timestamps_are_skipped stdout ----
+
+thread 'malformed_timestamps_are_skipped' (20267342) panicked at crates/core/tests/obs003_sync_range_guard.rs:130:5:
+assertion `left == right` failed: malformed starting_at: only valid buckets are recorded
+  left: 1
+ right: 0
+
+
+failures:
+    empty_or_missing_ending_at_is_skipped
+    empty_starting_at_does_not_wipe_history
+    invalid_cost_bucket_does_not_wipe_cost_history
+    inverted_range_is_skipped
+    malformed_timestamps_are_skipped
+    missing_starting_at_does_not_wipe_history
+    mixed_valid_and_invalid_buckets_record_only_the_valid_one
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `-p api-tracker-core --test obs003_sync_range_guard`
+test inverted_range_is_skipped ... ok
+test empty_or_missing_ending_at_is_skipped ... ok
+test malformed_timestamps_are_skipped ... ok
+
+failures:
+
+---- missing_starting_at_does_not_wipe_history stdout ----
+
+thread 'missing_starting_at_does_not_wipe_history' (20268354) panicked at crates/core/tests/obs003_sync_range_guard.rs:134:5:
+assertion `left == right` failed: OBS-003 regression (missing starting_at): previously stored usage history was deleted by a sync carrying an invalid provider time range
+  left: (0, 1)
+ right: (1, 1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- invalid_cost_bucket_does_not_wipe_cost_history stdout ----
+
+thread 'invalid_cost_bucket_does_not_wipe_cost_history' (20268351) panicked at crates/core/tests/obs003_sync_range_guard.rs:265:5:
+assertion `left == right` failed: the invalid cost bucket is not recorded
+  left: 1
+ right: 0
+
+---- mixed_valid_and_invalid_buckets_record_only_the_valid_one stdout ----
+
+thread 'mixed_valid_and_invalid_buckets_record_only_the_valid_one' (20268355) panicked at crates/core/tests/obs003_sync_range_guard.rs:220:5:
+assertion `left == right` failed: the valid bucket is recorded
+  left: 2
+ right: 1
+
+---- empty_starting_at_does_not_wipe_history stdout ----
+
+thread 'empty_starting_at_does_not_wipe_history' (20268350) panicked at crates/core/tests/obs003_sync_range_guard.rs:134:5:
+assertion `left == right` failed: OBS-003 regression (empty starting_at): previously stored usage history was deleted by a sync carrying an invalid provider time range
+  left: (0, 1)
+ right: (1, 1)
+
+
+failures:
+    empty_starting_at_does_not_wipe_history
+    invalid_cost_bucket_does_not_wipe_cost_history
+    missing_starting_at_does_not_wipe_history
+    mixed_valid_and_invalid_buckets_record_only_the_valid_one
+
+test result: FAILED. 3 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p api-tracker-core --test obs003_sync_range_guard`

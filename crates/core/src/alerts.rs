@@ -24,6 +24,17 @@ pub enum AlertKind {
     ReusedAcrossProjects,
     ProductionInDevelopment,
     PossibleExposure,
+    /// A likely secret found by a repository scan. Deliberately NOT in any
+    /// auto-resolve managed set: an exposure signal must not clear just
+    /// because a later incremental scan stopped re-emitting it (unchanged /
+    /// unavailable / failed / skipped repo, or the secret left the working
+    /// tree but remains in history). It clears only on explicit user
+    /// resolution or a qualifying clean full re-scan (OBS-001).
+    RepoSecretExposure,
+    /// A repository range the incremental scanner could not read (history
+    /// rewritten, git failed). A coverage gap, not a clean result; it
+    /// persists until an explicit full re-scan covers the range (OBS-001).
+    RepoScanCoverageGap,
     ProviderSyncFailed,
     ProviderConnectionInvalid,
     ProviderDataStale,
@@ -58,6 +69,8 @@ impl AlertKind {
             AlertKind::ReusedAcrossProjects => "reused_across_projects",
             AlertKind::ProductionInDevelopment => "production_in_development",
             AlertKind::PossibleExposure => "possible_exposure",
+            AlertKind::RepoSecretExposure => "repo_secret_exposure",
+            AlertKind::RepoScanCoverageGap => "repo_scan_coverage_gap",
             AlertKind::ProviderSyncFailed => "provider_sync_failed",
             AlertKind::ProviderConnectionInvalid => "provider_connection_invalid",
             AlertKind::ProviderDataStale => "provider_data_stale",
@@ -268,6 +281,19 @@ pub fn auto_resolve_stale(
         }
     }
     Ok(resolved)
+}
+
+/// Resolve every open alert with the given `dedup_key`. Used for evidence-
+/// based resolution of exposure alerts (which are excluded from the
+/// re-emission-driven `auto_resolve_stale`): they clear only when an
+/// explicit action or a qualifying clean re-verification proves the
+/// condition gone. Returns how many were resolved.
+pub fn resolve_by_dedup(conn: &Connection, dedup_key: &str) -> Result<usize> {
+    let n = conn.execute(
+        "UPDATE alerts SET resolved_at = ?1 WHERE dedup_key = ?2 AND resolved_at IS NULL",
+        params![clock::now_rfc3339(), dedup_key],
+    )?;
+    Ok(n)
 }
 
 /// List alerts. When `include_resolved` is false, only open alerts are shown.

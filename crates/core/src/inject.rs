@@ -21,6 +21,45 @@ pub struct EnvMapping {
     pub env_var: String,
 }
 
+/// The environment-variable prefix owned by API Tracker.
+pub const ENV_PREFIX: &str = "API_TRACKER_";
+
+/// The only `API_TRACKER_*` variables a spawned child may inherit. Every
+/// other variable under the prefix is treated as authentication, password,
+/// session, or internal control material and scrubbed by default, so a
+/// variable added in the future is protected without anyone remembering to
+/// enumerate it here.
+///
+/// - `API_TRACKER_DIR` — data-directory override: a plain path, required so
+///   a child that itself invokes `api-tracker` talks to the same vault.
+/// - `API_TRACKER_INSECURE_FAST_KDF` — debug-build-only KDF weakening used
+///   by test harnesses; secretless, ignored by release builds.
+///
+/// Everything else currently in use is sensitive: `API_TRACKER_PASSWORD`,
+/// `API_TRACKER_NEW_PASSWORD`, `API_TRACKER_PROJECT_PASSWORD`,
+/// `API_TRACKER_BACKUP_PASSWORD` (password material),
+/// `API_TRACKER_SESSION` (session material), and
+/// `API_TRACKER_PROVIDER_ADMIN_KEY` / `API_TRACKER_DESTINATION_AUTH`
+/// (authentication material).
+pub const CHILD_SAFE_ENV: &[&str] = &["API_TRACKER_DIR", "API_TRACKER_INSECURE_FAST_KDF"];
+
+/// Remove every API Tracker environment variable that is not explicitly
+/// child-safe from a command about to be spawned. An injected child must
+/// receive only the credentials mapped for it — never the master password,
+/// session token, or other API Tracker authentication material that may sit
+/// in the parent's environment for scripting (PI-01). Byte-level prefix
+/// matching so a non-UTF-8 name cannot dodge the scrub.
+pub fn scrub_own_env(cmd: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        let bytes = name.as_encoded_bytes();
+        if bytes.starts_with(ENV_PREFIX.as_bytes())
+            && !CHILD_SAFE_ENV.iter().any(|safe| safe.as_bytes() == bytes)
+        {
+            cmd.env_remove(&name);
+        }
+    }
+}
+
 /// A POSIX-ish environment variable name: starts with a letter or `_`, then
 /// letters/digits/`_`. Rejects shell metacharacters.
 pub fn valid_env_name(name: &str) -> bool {
@@ -269,6 +308,14 @@ pub fn get_session(conn: &Connection, ident: &str) -> Result<ProcessSession> {
 /// This is a LOCAL control: it cannot claw back values the process already
 /// received, and it never touches the provider.
 pub fn terminate_pid(pid: i64) -> bool {
+    // Refuse non-positive PIDs before any signal is sent. On Unix `kill 0`
+    // signals the CALLER's entire process group and a negative PID signals a
+    // process group, so a corrupted/edited/zero recorded PID could terminate
+    // API Tracker itself or an unrelated group (PI-06). A real child PID is
+    // always > 0. `taskkill` on Windows likewise must never receive 0/negative.
+    if pid <= 0 {
+        return false;
+    }
     if cfg!(unix) {
         std::process::Command::new("kill")
             .arg(pid.to_string())
@@ -310,5 +357,17 @@ mod tests {
         assert!(!valid_env_name("1BAD"));
         assert!(!valid_env_name("has-dash"));
         assert!(!valid_env_name(""));
+    }
+
+    #[test]
+    fn terminate_pid_refuses_non_positive_pids() {
+        // PI-06: 0 and negative PIDs must be refused BEFORE any signal — on
+        // Unix `kill 0` would signal API Tracker's own process group. These
+        // return false without ever spawning `kill`/`taskkill`. (A positive
+        // PID is not exercised here: it would send a real signal.)
+        assert!(!terminate_pid(0));
+        assert!(!terminate_pid(-1));
+        assert!(!terminate_pid(-12345));
+        assert!(!terminate_pid(i64::MIN));
     }
 }

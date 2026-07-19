@@ -204,6 +204,13 @@ export interface Finding {
   vault_match: VaultMatch | null;
 }
 
+export interface RepoReverifyReport {
+  repo_path: string;
+  findings: number;
+  clean: boolean;
+  resolved_alerts: number;
+}
+
 export type HookState = "absent" | "installed" | "foreign" | "chained_into_foreign";
 
 export interface HookStatus {

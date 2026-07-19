@@ -1,0 +1,6 @@
+---- credential_lifecycle_with_metadata stdout ----
+
+thread 'credential_lifecycle_with_metadata' (20400255) panicked at crates/core/tests/credentials.rs:145:10:
+called `Result::unwrap_err()` on an `Ok` value: Credential { id: "<uuid>", project_id: "<uuid>", project_name: "app", provider: "anthropic", name: "claude-key", environment: Production, credential_type: "api_key", masked_value: "FAKE…02", is_reference: false, linked_credential_id: None, linked_target: None, created_at: "<ts>", updated_at: "<ts>", key_created_at: Some("<ts>"), expires_at: Some("2030-01-01T00:00:00Z"), provider_expires_at: None, last_validated_at: Some("<ts>"), last_used_at: Some("<ts>"), docs_url: "https://docs.anthropic.com", notes: "rotated soon", manually_disabled: false, revoked: false, marked_invalid: false, possibly_exposed: false, exposure_note: "", status: StatusReport { primary: Active, findings: [Finding { status: Active, reason: "use or validation was recorded on <ts>", source: "vault timestamps (manually recorded in this milestone)", observed_at: "<ts>", confidence: Medium, recommended_action: "no action needed" }] } }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+

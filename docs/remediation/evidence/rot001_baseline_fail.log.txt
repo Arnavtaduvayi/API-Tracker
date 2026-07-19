@@ -1,0 +1,23 @@
+---- crash_after_old_revoked_at_completes_on_restart_without_recalling_revoke stdout ----
+
+thread 'crash_after_old_revoked_at_completes_on_restart_without_recalling_revoke' (20391163) panicked at crates/core/tests/rot001_revoke_recovery.rs:209:5:
+assertion `left == right` failed: "invalid input: mock: no more responses queued"
+  left: "old_disabled"
+--
+---- first_404_without_attempt_routes_to_manual_required_and_completes stdout ----
+
+thread 'first_404_without_attempt_routes_to_manual_required_and_completes' (20391181) panicked at crates/core/tests/rot001_revoke_recovery.rs:224:5:
+assertion `left == right` failed
+  left: "old_disabled"
+--
+---- lost_revoke_response_then_404_converges_to_completed stdout ----
+
+thread 'lost_revoke_response_then_404_converges_to_completed' (20391182) panicked at crates/core/tests/rot001_revoke_recovery.rs:175:5:
+assertion `left == right` failed: "the provider says key key_old_1 does not exist"
+  left: "old_disabled"
+--
+---- rollback_after_revoke_attempt_on_permanent_delete_provider_is_refused stdout ----
+
+thread 'rollback_after_revoke_attempt_on_permanent_delete_provider_is_refused' (20391186) panicked at crates/core/tests/rot001_revoke_recovery.rs:252:10:
+called `Result::unwrap_err()` on an `Ok` value: RotationView { rotation: Rotation { id: "<uuid>", credential_id: "<uuid>", provider: "openai", state: "manual_required", mode: "api_create", note: "", created_at: "2026-07-19T15:37:42.475556Z", updated_at: "2026-07-19T15:37:43.000288Z", approved_at: Some("2026-07-19T15:37:42.476845Z"), old_version: Some(1), new_version: Some(2), sync_plan_id: Some("<uuid>"), grace_minutes: 0, grace_ends_at: Some("2026-07-19T15:37:42.48559Z"), old_provider_key_id: Some("key_old_1"), new_provider_key_id: Some("key_new_1"), provider_project_id: Some("proj_1"), new_value_validated: true, old_disabled_at: None, old_revoked_at: None, last_error: "rollback partially failed: vault value restored from v1; destination rollback FAILED: invalid input: mock: no more responses queued", manual_instructions: "" }, credential_name: "openai-main", project_name: "app", waiting_on: Some("manual provider-side action") }
+

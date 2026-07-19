@@ -841,8 +841,34 @@ impl UnlockedVault {
         self.get_project(&row.id)
     }
 
+    /// Begin a write (IMMEDIATE) transaction, taking SQLite's single write
+    /// lock up front. Every span that reads a project-key wrap, encrypts
+    /// under the unwrapped key, and persists the ciphertext must run inside
+    /// one of these, with the wrap read AFTER the transaction begins:
+    /// holding the write lock from before the wrap is read until commit
+    /// means a concurrent project-key rotation cannot destroy the wrap
+    /// mid-operation, so committed ciphertext is always decryptable under
+    /// the persisted key. Waiting out the busy timeout surfaces as the
+    /// typed [`CoreError::Busy`], never as a partial write.
+    fn write_txn(&self) -> Result<rusqlite::Transaction<'_>> {
+        rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| match e {
+                rusqlite::Error::SqliteFailure(f, _)
+                    if f.code == rusqlite::ErrorCode::DatabaseBusy
+                        || f.code == rusqlite::ErrorCode::DatabaseLocked =>
+                {
+                    CoreError::Busy
+                }
+                other => other.into(),
+            })
+    }
+
     /// The decrypted key for a project. Fails with [`CoreError::ProjectLocked`]
     /// for password-locked projects that have not been unlocked this session.
+    ///
+    /// Callers that persist ciphertext produced under the returned key must
+    /// read `row` inside a [`Self::write_txn`] so the wrap cannot be rotated
+    /// away between this check and their write.
     fn project_key_for_row(&self, row: &ProjectRow) -> Result<SecretBytes> {
         match row.key_wrap_mode.as_str() {
             "vault" => crypto::decrypt(
@@ -937,12 +963,18 @@ impl UnlockedVault {
         // other secret-changing operation.
         self.verify_master_password(master_password)?;
         validate_password(password, "the project password")?;
-        let row = self.project_row_by_ident(ident)?;
-        let old_key = self.project_key_for_row(&row)?;
+        // The memory-hard derivation depends only on the new password, so it
+        // runs before the write lock is taken.
         let kdf = KdfParams::recommended();
         let salt = crypto::new_salt();
         let kek = crypto::derive_key(password, &salt, &kdf)?;
-        let tx = self.conn.unchecked_transaction()?;
+        // Row read, old-key unwrap, re-encryption, and the wrap update share
+        // one write transaction: a concurrent add/replace either committed
+        // before it (and is re-encrypted below) or waits behind it and then
+        // sees the new wrap (see `write_txn`).
+        let tx = self.write_txn()?;
+        let row = self.project_row_by_ident(ident)?;
+        let old_key = self.project_key_for_row(&row)?;
         let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let inner = crypto::encrypt(
             &kek,
@@ -1047,15 +1079,28 @@ impl UnlockedVault {
     /// Remove a project's password lock (requires the current project
     /// password, proving authorization).
     pub fn remove_project_password(&mut self, ident: &str, password: &SecretString) -> Result<()> {
-        let row = self.project_row_by_ident(ident)?;
-        if row.key_wrap_mode != "vault+password" {
+        let pre = self.project_row_by_ident(ident)?;
+        if pre.key_wrap_mode != "vault+password" {
             return Err(CoreError::InvalidInput(format!(
                 "project '{}' has no password lock",
-                row.name
+                pre.name
             )));
         }
-        let old_key = self.unwrap_project_key_with_password(&row, password)?;
-        let tx = self.conn.unchecked_transaction()?;
+        // The memory-hard unwrap runs against a pre-read of the row so the
+        // write lock is not held for the KDF; the wrap it unlocked is then
+        // required to still be current inside the transaction below.
+        let old_key = self.unwrap_project_key_with_password(&pre, password)?;
+        let tx = self.write_txn()?;
+        let row = self.project_row_by_ident(&pre.id)?;
+        if row.key_wrap_mode != "vault+password"
+            || row.wrapped_project_key != pre.wrapped_project_key
+        {
+            // Another session rotated the project key after the unwrap above;
+            // `old_key` no longer matches what is on disk. Re-encrypting with
+            // it would corrupt the project, so refuse and let the caller
+            // retry against the current state.
+            return Err(CoreError::Busy);
+        }
         let new_key = Self::rotate_project_key(&tx, &self.vault_id, &row.id, &old_key)?;
         let wrapped = crypto::encrypt(
             &self.vault_key,
@@ -1205,13 +1250,6 @@ impl UnlockedVault {
         &mut self,
         add: AddCredential,
     ) -> Result<(Credential, Vec<ReuseWarning>)> {
-        let project = self.project_row_by_ident(&add.project)?;
-        if project.archived {
-            return Err(CoreError::InvalidInput(format!(
-                "project '{}' is archived; restore it before adding credentials",
-                project.name
-            )));
-        }
         let name = add.name.trim().to_owned();
         if name.is_empty() {
             return Err(CoreError::InvalidInput(
@@ -1222,6 +1260,19 @@ impl UnlockedVault {
             return Err(CoreError::InvalidInput(
                 "credential value must not be empty".into(),
             ));
+        }
+        // The project row (and with it the key wrap) is read under the write
+        // lock, so a concurrent project-key rotation either committed before
+        // this transaction (caught by the wrap-hash freshness check) or waits
+        // behind it and re-encrypts this row too. Ciphertext can never be
+        // committed under a destroyed key.
+        let tx = self.write_txn()?;
+        let project = self.project_row_by_ident(&add.project)?;
+        if project.archived {
+            return Err(CoreError::InvalidInput(format!(
+                "project '{}' is archived; restore it before adding credentials",
+                project.name
+            )));
         }
         self.ensure_credential_name_free(&project.id, &name, None)?;
 
@@ -1271,6 +1322,7 @@ impl UnlockedVault {
             Some(&id),
             &format!("name={name}"),
         )?;
+        tx.commit()?;
         Ok((self.get_credential(&id)?, warnings))
     }
 
@@ -1656,16 +1708,20 @@ impl UnlockedVault {
         new_value: SecretString,
     ) -> Result<(Credential, Vec<ReuseWarning>)> {
         self.verify_master_password(master_password)?;
+        if new_value.expose().trim().is_empty() {
+            return Err(CoreError::InvalidInput(
+                "credential value must not be empty".into(),
+            ));
+        }
+        // Row read, key derivation, version retention, and the ciphertext
+        // update share one write transaction so a concurrent project-key
+        // rotation cannot commit in between (see `write_txn`).
+        let tx = self.write_txn()?;
         let row = self.resolve_credential(selector)?;
         if row.linked_credential_id.is_some() {
             return Err(CoreError::InvalidInput(
                 "this record is a reference; replace the value on the credential it points to"
                     .into(),
-            ));
-        }
-        if new_value.expose().trim().is_empty() {
-            return Err(CoreError::InvalidInput(
-                "credential value must not be empty".into(),
             ));
         }
         let project = self.project_row_by_ident(&row.project_id)?;
@@ -1710,13 +1766,22 @@ impl UnlockedVault {
             Some(&row.id),
             "",
         )?;
+        tx.commit()?;
         Ok((self.get_credential(&row.id)?, warnings))
     }
 
-    /// Delete a credential. Refuses while other records reference it or a
-    /// rotation is in flight (deleting would cascade away the tracking of a
-    /// still-live provider-side key).
-    pub fn delete_credential(&mut self, selector: &str) -> Result<Credential> {
+    /// Delete a credential. Reauthenticated (IPC-02): deletion is a
+    /// destructive, hard-to-undo operation, so — like reveal, replace, and
+    /// destination removal — it re-verifies the master password in core
+    /// rather than trusting a UI confirmation. Refuses while other records
+    /// reference it or a rotation is in flight (deleting would cascade away
+    /// the tracking of a still-live provider-side key).
+    pub fn delete_credential(
+        &mut self,
+        selector: &str,
+        master_password: &SecretString,
+    ) -> Result<Credential> {
+        self.verify_master_password(master_password)?;
         let row = self.resolve_credential(selector)?;
         let active_rotations: i64 = self.conn.query_row(
             "SELECT count(*) FROM rotations WHERE credential_id = ?1
@@ -2046,19 +2111,22 @@ impl UnlockedVault {
                 repos_scanned += 1;
                 repo_findings += report.findings;
                 if report.findings > 0 {
+                    // Repo-scoped dedup key (NOT keyed by head commit): a
+                    // persistent secret keeps ONE stable alert as the head
+                    // advances, instead of a new key per commit that the old
+                    // alert can never match (OBS-001). The kind is excluded
+                    // from auto-resolve, so this never clears just because a
+                    // later run didn't re-emit it.
                     let alert = alerts::NewAlert {
-                        kind: alerts::AlertKind::PossibleExposure,
+                        kind: alerts::AlertKind::RepoSecretExposure,
                         severity: alerts::Severity::High,
-                        dedup_key: format!(
-                            "repo_scan_findings:{}:{}",
-                            report.repo_path, report.head_commit
-                        ),
+                        dedup_key: format!("repo_scan_exposure:{}", report.repo_path),
                         title: format!(
                             "likely secret(s) in new commits: {}",
                             report.repo_path
                         ),
                         detail: format!(
-                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect.",
+                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect. This alert stays open until an                              explicit remediation or a clean full re-scan.",
                             report.findings, report.head_commit, report.repo_path
                         ),
                         evidence: format!(
@@ -2067,13 +2135,15 @@ impl UnlockedVault {
                         ),
                         confidence: crate::providers::Confidence::Medium,
                         recommended_action:
-                            "inspect the findings; rotate anything real and scrub history"
+                            "inspect the findings; rotate anything real and scrub history, \
+                             then re-scan to confirm"
                                 .into(),
                         project_id: None,
                         credential_id: None,
                         observed_at: now.clone(),
                     };
-                    active_keys.push(alert.dedup_key.clone());
+                    // Not pushed to active_keys: its kind is excluded from
+                    // auto_resolve_stale, so membership would be inert anyway.
                     if alerts::upsert(&self.conn, &alert)? {
                         created += 1;
                     }
@@ -3058,6 +3128,19 @@ impl UnlockedVault {
                     (Vec::new(), false)
                 }
             };
+        // Invalid provider time ranges must never reach the replace-range
+        // deletion below — one blank window_start would widen the range over
+        // the whole stored history (OBS-003).
+        note_skipped_invalid_windows(
+            &mut notes,
+            "usage",
+            usage::retain_valid_windows(&mut usage_rows),
+        );
+        note_skipped_invalid_windows(
+            &mut notes,
+            "cost",
+            usage::retain_valid_windows(&mut cost_rows),
+        );
 
         // Provider-side metadata is best-effort: an admin key without the
         // api_keys read scope must not fail the usage sync.
@@ -3243,6 +3326,19 @@ impl UnlockedVault {
                 (Vec::new(), false)
             }
         };
+        // Invalid provider time ranges must never reach the replace-range
+        // deletion below — one blank window_start would widen the range over
+        // the whole stored history (OBS-003).
+        note_skipped_invalid_windows(
+            &mut notes,
+            "usage",
+            usage::retain_valid_windows(&mut usage_rows),
+        );
+        note_skipped_invalid_windows(
+            &mut notes,
+            "cost",
+            usage::retain_valid_windows(&mut cost_rows),
+        );
 
         // Provider-side metadata is best-effort.
         let mut side_projects = Vec::new();
@@ -3417,7 +3513,15 @@ impl UnlockedVault {
     ) -> Result<SyncReport> {
         let connector = self.connector_for(provider)?;
         let since_days = ((to - from).whole_days().max(1)) as u32;
-        let fetched = connector.fetch_usage(http, admin_secret, since_days)?;
+        let mut fetched = connector.fetch_usage(http, admin_secret, since_days)?;
+        let mut notes = Vec::new();
+        // Same guard as the detail engines: the deletion below ranges over a
+        // provider-controlled window_start (OBS-003).
+        note_skipped_invalid_windows(
+            &mut notes,
+            "usage",
+            usage::retain_valid_windows(&mut fetched.snapshots),
+        );
         let tx = self.conn.unchecked_transaction()?;
         if let Some(earliest) = fetched.snapshots.iter().map(|s| &s.window_start).min() {
             tx.execute(
@@ -3453,7 +3557,7 @@ impl UnlockedVault {
             cost_rows: 0,
             window_start: clock::to_rfc3339(from),
             window_end: clock::to_rfc3339(to),
-            notes: Vec::new(),
+            notes,
         })
     }
 
@@ -4700,6 +4804,105 @@ impl UnlockedVault {
         Ok(outcomes)
     }
 
+    /// Write a project's `.env.example` template (variable NAMES and
+    /// comments only — never secret values), reauthenticated and confined.
+    ///
+    /// This is the authorization boundary for the desktop `env_example_write`
+    /// IPC command, which previously forwarded a frontend-controlled path and
+    /// content straight to an atomic file write with no reauth and no path
+    /// constraint — an arbitrary-file-overwrite primitive reachable from a
+    /// compromised or misbehaving webview (IPC-01/FS-09). The guarantees
+    /// enforced here, in core:
+    ///
+    /// - **Reauthentication:** the master password is re-verified (full
+    ///   Argon2id), so an unlocked session is not sufficient.
+    /// - **Confinement:** the target must be a `.env.example` file whose
+    ///   canonical parent directory lies inside one of the project's
+    ///   registered repositories. A project with no registered repository
+    ///   cannot be a write target.
+    /// - **Canonical validation / no traversal / no out-of-tree write:** the
+    ///   parent is canonicalized (symlinks and `..` resolved) before the
+    ///   containment check, so `/tmp/x`, `<repo>/../../etc/x`, and similar
+    ///   escape the repo root and are refused.
+    /// - **Symlink rejection:** a symlinked target is refused outright.
+    /// - **Fixed file name:** the final path component must be
+    ///   `.env.example`, so the primitive can only ever write that one
+    ///   template, never an arbitrary file, and a path switched after the
+    ///   preview cannot redirect the write outside these rules.
+    ///
+    /// Returns the canonical path written.
+    pub fn env_example_write(
+        &self,
+        project: &str,
+        example_path: &std::path::Path,
+        content: &str,
+        master_password: &SecretString,
+    ) -> Result<PathBuf> {
+        // Reauthentication in core: never trust a UI confirmation as
+        // authorization for a filesystem write.
+        self.verify_master_password(master_password)?;
+        let project_row = self.project_row_by_ident(project)?;
+        let model = self.project_model(&project_row)?;
+
+        // The target is always the `.env.example` template, never an
+        // arbitrary file name.
+        if example_path.file_name().and_then(|n| n.to_str()) != Some(".env.example") {
+            return Err(CoreError::InvalidInput(
+                "the target must be a file named '.env.example'".into(),
+            ));
+        }
+        let parent = example_path.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent = parent.ok_or_else(|| {
+            CoreError::InvalidInput("the .env.example path has no parent directory".into())
+        })?;
+        // Canonicalize the parent (resolves `..` and symlinked directories)
+        // so the containment check below cannot be fooled by traversal.
+        let canon_parent = parent.canonicalize().map_err(|e| {
+            CoreError::InvalidInput(format!("cannot access {}: {e}", parent.display()))
+        })?;
+
+        // The canonical parent must sit inside a registered repository. A
+        // registered repo path that does not resolve is skipped (not an
+        // implicit allow).
+        let within_repo = model.repo_paths.iter().any(|repo| {
+            std::path::Path::new(repo)
+                .canonicalize()
+                .map(|root| canon_parent == root || canon_parent.starts_with(&root))
+                .unwrap_or(false)
+        });
+        if !within_repo {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is not inside a repository registered on project '{}'; \
+                 register the repository first, or write the file manually",
+                example_path.display(),
+                project_row.name
+            )));
+        }
+
+        let target = canon_parent.join(".env.example");
+        // Refuse a symlinked target: the atomic rename would replace the link
+        // node, but writing "through" a link here is almost certainly an
+        // attempt to redirect the write and gets a clear refusal.
+        if let Ok(meta) = std::fs::symlink_metadata(&target) {
+            if meta.file_type().is_symlink() {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is a symbolic link; refusing to write through it",
+                    target.display()
+                )));
+            }
+        }
+
+        crate::envgov::atomic_write(&target, content)?;
+        audit::record(
+            &self.conn,
+            "env_example_written",
+            Some(&project_row.id),
+            None,
+            &format!("path={}", target.display()),
+        )?;
+        Ok(target)
+    }
+
     /// Detect drift between a project's `.env` files, its vault credentials,
     /// and its injection mappings.
     pub fn env_drift(&self, project: &str) -> Result<Vec<crate::envgov::DriftFinding>> {
@@ -5132,20 +5335,26 @@ impl UnlockedVault {
                             Err(_) => (Vec::new(), false),
                         };
                     if !range_ok {
+                        // Repo-scoped, dedicated coverage-gap kind: this is a
+                        // "coverage unavailable" signal, not a clean result.
+                        // It is excluded from auto-resolve so it persists (the
+                        // old head-keyed PossibleExposure key was never added
+                        // to active_keys and so auto-resolved in the SAME run
+                        // — OBS-001).
                         let _ = alerts::upsert(
                             &self.conn,
                             &alerts::NewAlert {
-                                kind: alerts::AlertKind::PossibleExposure,
+                                kind: alerts::AlertKind::RepoScanCoverageGap,
                                 severity: alerts::Severity::Medium,
-                                dedup_key: format!("repo_rebaselined:{path}:{head}"),
+                                dedup_key: format!("repo_scan_coverage_gap:{path}"),
                                 title: format!("repository re-baselined: {path}"),
                                 detail: format!(
-                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --history` if secrets may have landed there."
+                                    "the commit range {last}..{head} could not be read                                      (history rewritten, or git failed). Commits in that                                      range were NOT scanned; run `api-tracker scan                                      --all-history` if secrets may have landed there."
                                 ),
                                 evidence: format!("last={last} head={head}"),
                                 confidence: crate::providers::Confidence::Medium,
                                 recommended_action:
-                                    "run an explicit history scan of this repository".into(),
+                                    "run an explicit full history scan of this repository".into(),
                                 project_id: None,
                                 credential_id: None,
                                 observed_at: clock::now_rfc3339(),
@@ -5201,6 +5410,80 @@ impl UnlockedVault {
             });
         }
         Ok(reports)
+    }
+
+    /// Re-verify a repository's outstanding exposure and coverage-gap alerts
+    /// with a FULL scan (entire git history + working tree), and resolve them
+    /// only if that scan is clean.
+    ///
+    /// This is the "sufficiently strong re-verification" that OBS-001
+    /// requires: repository-scan exposure alerts are excluded from the
+    /// incremental monitor's re-emission-driven auto-resolve, so they never
+    /// clear merely because a later run didn't re-report the finding
+    /// (unchanged / unavailable / failed / skipped repo, or the secret left
+    /// the working tree but remains in history). They clear only here — on an
+    /// explicit full re-scan that finds nothing (history included, so a secret
+    /// still in history keeps the alert open) — or on explicit user
+    /// resolution. An incremental or working-tree-only result is never
+    /// accepted as proof of remediation.
+    ///
+    /// The dedup keys use the repository path exactly as registered on a
+    /// project; `repo` is matched to that registered string by canonical
+    /// path so a differently-spelled argument still resolves the right alerts.
+    pub fn reverify_repo_exposure(&self, repo: &std::path::Path) -> Result<RepoReverifyReport> {
+        let canon = repo.canonicalize().map_err(|e| {
+            CoreError::InvalidInput(format!("cannot access {}: {e}", repo.display()))
+        })?;
+        // Resolve to the registered repo-path spelling used in dedup keys.
+        let registered: Vec<String> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT DISTINCT path FROM project_repos ORDER BY path")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?;
+            rows
+        };
+        let repo_path = registered
+            .into_iter()
+            .find(|p| {
+                std::path::Path::new(p)
+                    .canonicalize()
+                    .map(|c| c == canon)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| repo.to_string_lossy().into_owned());
+
+        // A FULL re-scan: entire history plus the working tree. A secret that
+        // remains anywhere in history keeps the exposure alert open.
+        let mut findings = self.scan_history(repo, None)?;
+        findings.extend(self.scan_working_tree(repo)?);
+        let count = findings.len();
+
+        let mut resolved = 0;
+        if count == 0 {
+            for key in [
+                format!("repo_scan_exposure:{repo_path}"),
+                format!("repo_scan_coverage_gap:{repo_path}"),
+            ] {
+                resolved += alerts::resolve_by_dedup(&self.conn, &key)?;
+            }
+            if resolved > 0 {
+                audit::record(
+                    &self.conn,
+                    "repo_exposure_reverified_clean",
+                    None,
+                    None,
+                    &format!("repo={repo_path} resolved={resolved}"),
+                )?;
+            }
+        }
+        Ok(RepoReverifyReport {
+            repo_path,
+            findings: count,
+            clean: count == 0,
+            resolved_alerts: resolved,
+        })
     }
 
     // ------------------------------------------------------------------
@@ -7214,14 +7497,44 @@ impl UnlockedVault {
         Ok(true)
     }
 
-    /// Revoke the old key. Returns Ok(true) when revoked, Ok(false) when the
-    /// workflow must wait for manual action.
+    /// The marker recorded immediately before a revoke HTTP call for a given
+    /// old key. Named by the exact key id so a recovered marker only ever
+    /// makes a later 404 for THAT key a completed retry.
+    fn revoke_attempt_marker(old_key: &str) -> String {
+        format!("attempting revocation of old key {old_key}")
+    }
+
+    /// Whether a revoke of `old_key` was ever attempted for this rotation.
+    /// Scans the WHOLE event log — not just the last event — because a
+    /// lost/failed response records an outcome event AFTER the marker,
+    /// burying it (ROT-001).
+    fn revoke_was_attempted(&self, id: &str, old_key: &str) -> Result<bool> {
+        let marker = Self::revoke_attempt_marker(old_key);
+        Ok(crate::rotation::events(&self.conn, id)?
+            .iter()
+            .any(|e| e.detail == marker))
+    }
+
+    /// Revoke the old key. Returns Ok(true) when revoked (or already gone),
+    /// Ok(false) when the workflow must wait for manual action.
     fn rotation_revoke_old(
         &mut self,
         rot: &crate::rotation::Rotation,
         id: &str,
         http: &dyn crate::http::HttpClient,
     ) -> Result<bool> {
+        // Idempotent completion: if a prior advance recorded a successful
+        // revoke (old_revoked_at set) but the process died before the CAS to
+        // COMPLETED, do NOT call revoke again (a permanent-delete provider
+        // would then answer 404 and wedge the rotation). Just complete.
+        if rot.old_revoked_at.is_some() {
+            crate::rotation::record_event_note(
+                &self.conn,
+                id,
+                "old key already revoked (recovered); completing rotation",
+            )?;
+            return Ok(true);
+        }
         let can_revoke = crate::providers::find(&rot.provider)
             .map(|m| {
                 matches!(
@@ -7234,21 +7547,19 @@ impl UnlockedVault {
             (Some(old_key), true) => {
                 let admin = self.provider_admin_secret(&rot.provider)?;
                 let connector = self.connector_for(&rot.provider)?;
-                // A durable marker BEFORE the call: if the process dies after
-                // the provider deleted the key but before we recorded it, the
-                // retry can distinguish "already deleted by us" from "wrong
-                // key id" when the provider answers 404. Only an attempt with
-                // NO recorded outcome counts (the crash window) — an attempt
-                // that concluded in a not-found error must not convert a
-                // later 404 into success.
-                let attempted_before = crate::rotation::events(&self.conn, id)?
-                    .last()
-                    .map(|e| e.detail.starts_with("attempting revocation of old key"))
-                    .unwrap_or(false);
+                // A durable marker BEFORE the call: if the response is lost or
+                // the process dies after the provider deleted the key, a retry
+                // that gets a 404 can tell "already gone (our attempt landed,
+                // or the key was already gone — either way it is no longer
+                // usable)" from "wrong key id, never attempted". The marker is
+                // key-specific and matched across the FULL event log, so a
+                // buried marker is still found and an unrelated 404 is never
+                // converted into success (ROT-010).
+                let attempted_before = self.revoke_was_attempted(id, old_key)?;
                 crate::rotation::record_event_note(
                     &self.conn,
                     id,
-                    &format!("attempting revocation of old key {old_key}"),
+                    &Self::revoke_attempt_marker(old_key),
                 )?;
                 let detail = match connector.revoke_credential(
                     http,
@@ -7260,18 +7571,31 @@ impl UnlockedVault {
                     Err(CoreError::NotFound { .. }) if attempted_before => {
                         format!(
                             "the provider no longer knows key {old_key}; a prior recorded \
-                             attempt makes this a completed retry"
+                             attempt on this exact key makes this a completed retry (the old \
+                             key is gone either way)"
                         )
                     }
                     Err(CoreError::NotFound { .. }) => {
-                        crate::rotation::record_error(
+                        // First 404 with no prior attempt: genuinely ambiguous
+                        // (a wrong key id or project looks identical). Do NOT
+                        // loop in OLD_DISABLED forever — surface the manual
+                        // verify-and-complete path so the rotation can converge
+                        // to a truthful terminal state (ROT-001).
+                        let manage = crate::providers::find(&rot.provider)
+                            .map(|m| m.manage_url.clone())
+                            .unwrap_or_default();
+                        crate::rotation::set_state(
                             &self.conn,
                             id,
+                            crate::rotation::OLD_DISABLED,
+                            crate::rotation::MANUAL_REQUIRED,
                             &format!(
                                 "the provider says key {old_key} does not exist — a wrong key \
-                                 id or project would look exactly like this. Verify with \
-                                 `provider list-keys` before retrying; nothing was marked \
-                                 revoked"
+                                 id or project would look exactly like this, so nothing was \
+                                 marked revoked. Verify at {manage} or with `provider \
+                                 list-keys`: if the old key is truly gone, run `rotation \
+                                 complete-manual {id}`; if this is NOT this rotation's key, \
+                                 `rotation rollback`"
                             ),
                         )?;
                         return Ok(false);
@@ -7311,6 +7635,18 @@ impl UnlockedVault {
         }
     }
 
+    /// Whether a provider's "revoke" is a REVERSIBLE soft state a rollback
+    /// can bring back, rather than a permanent delete. Only providers whose
+    /// old key `rotation_rollback` can actually re-enable qualify — today
+    /// that is Anthropic (revoke = status archived, re-enabled via
+    /// `set_key_status(active)`). OpenAI and Supabase permanently DELETE on
+    /// revoke, so once a revoke has been ATTEMPTED the old key may be gone and
+    /// a rollback that restores it could redeploy a dead credential (ROT-001).
+    /// Keep this in lockstep with the re-enable branch in `rotation_rollback`.
+    fn revoke_is_reversible(provider: &str) -> bool {
+        provider == crate::anthropic::PROVIDER
+    }
+
     fn rotation_complete(&self, rot: &crate::rotation::Rotation, id: &str) -> Result<()> {
         crate::rotation::set_state(
             &self.conn,
@@ -7341,13 +7677,19 @@ impl UnlockedVault {
     ) -> Result<RotationView> {
         self.verify_master_password(master_password)?;
         let rot = crate::rotation::load(&self.conn, id)?;
+        // OLD_DISABLED is included so a rotation that reached the revoke step
+        // but got an ambiguous/lost provider response has an explicit, honest
+        // exit: the user verifies out-of-band that the old key is gone and
+        // completes (ROT-001). GRACE_PERIOD/MANUAL_REQUIRED remain valid.
         if !matches!(
             rot.state.as_str(),
-            crate::rotation::MANUAL_REQUIRED | crate::rotation::GRACE_PERIOD
+            crate::rotation::MANUAL_REQUIRED
+                | crate::rotation::GRACE_PERIOD
+                | crate::rotation::OLD_DISABLED
         ) {
             return Err(CoreError::InvalidInput(format!(
-                "rotation {id} is '{}'; only manual-required (or grace) rotations can be \
-                 completed manually",
+                "rotation {id} is '{}'; only manual-required, grace, or old-disabled rotations \
+                 can be completed manually",
                 rot.state
             )));
         }
@@ -7425,6 +7767,29 @@ impl UnlockedVault {
                     .into(),
             ));
         }
+        // Even without a recorded successful revoke, a revoke ATTEMPT against a
+        // permanent-delete provider may have deleted the old key with the
+        // response lost (ROT-001). Restoring the old key would then redeploy a
+        // dead credential and misreport a clean rollback, so refuse: the safe
+        // path is to complete forward on the validated new key (or, if the old
+        // key is confirmed alive, revoke the new key and re-plan). Reversible
+        // providers (Anthropic soft-archive) are re-enabled below, so they are
+        // exempt.
+        if let Some(old_key) = &rot.old_provider_key_id {
+            if !Self::revoke_is_reversible(&rot.provider)
+                && self.revoke_was_attempted(id, old_key)?
+            {
+                return Err(CoreError::InvalidInput(format!(
+                    "a revocation of the old key was attempted at {}, whose revoke \
+                     permanently DELETES keys (no soft/disable state). The old key may already \
+                     be gone, so a rollback that restored it could redeploy a dead credential. \
+                     Refusing to roll back: verify with `provider list-keys` — if the old key \
+                     is gone, forward-fix on the validated new key (`rotation complete-manual \
+                     {id}`); if it is confirmed alive, re-plan a fresh rotation",
+                    rot.provider
+                )));
+            }
+        }
         // A COMPLETED rotation cannot be rolled back: on the manual path the
         // old key was revoked in the dashboard (we cannot know it is alive),
         // and "un-completing" a rotation would misrepresent history either
@@ -7467,7 +7832,7 @@ impl UnlockedVault {
         if rot.old_disabled_at.is_some() {
             if let Some(old_key) = &rot.old_provider_key_id {
                 let admin = self.provider_admin_secret(&rot.provider)?;
-                if rot.provider == "anthropic" {
+                if Self::revoke_is_reversible(&rot.provider) {
                     match crate::connectors::Anthropic::set_key_status(
                         http, &admin, old_key, "active",
                     ) {
@@ -8270,6 +8635,17 @@ pub struct RepoScanReport {
     pub baseline_only: bool,
 }
 
+/// Result of an explicit re-verification of a repository's exposure alerts.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoReverifyReport {
+    pub repo_path: String,
+    /// Unsuppressed likely-secret findings across full history + working tree.
+    pub findings: usize,
+    /// Whether the scan was clean and therefore resolved the exposure alerts.
+    pub clean: bool,
+    pub resolved_alerts: usize,
+}
+
 /// One event in a credential's merged lifecycle timeline (metadata only).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimelineEvent {
@@ -8342,6 +8718,18 @@ pub struct ProviderConnection {
     pub account_synced_at: Option<String>,
     /// True when synced data is older than the configured staleness window.
     pub stale: bool,
+}
+
+/// Record — honestly, in the sync report — that provider report buckets
+/// were dropped for carrying a missing, malformed, or inverted time range
+/// (see [`usage::retain_valid_windows`]).
+fn note_skipped_invalid_windows(notes: &mut Vec<String>, kind: &str, dropped: usize) {
+    if dropped > 0 {
+        notes.push(format!(
+            "skipped {dropped} {kind} bucket(s) with a missing or invalid time range (the \
+             provider response was malformed); previously stored history is preserved"
+        ));
+    }
 }
 
 /// The outcome of one provider synchronization.

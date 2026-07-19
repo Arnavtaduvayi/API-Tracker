@@ -223,8 +223,11 @@ pub fn fetch_usage(
     let buckets = fetch_report_buckets(http, admin, &url, "usage report")?;
     let mut out = Vec::new();
     for bucket in &buckets {
+        // Verbatim; a bucket missing either bound is visibly invalid and is
+        // dropped by the sync engine's window validation (OBS-003) rather
+        // than silently patched into a zero-width window here.
         let ws = opt_str(bucket, "starting_at").unwrap_or_default();
-        let we = opt_str(bucket, "ending_at").unwrap_or_else(|| ws.clone());
+        let we = opt_str(bucket, "ending_at").unwrap_or_default();
         let Some(results) = bucket.get("results").and_then(|r| r.as_array()) else {
             continue;
         };
@@ -275,8 +278,11 @@ pub fn fetch_costs(
     let buckets = fetch_report_buckets(http, admin, &url, "cost report")?;
     let mut out = Vec::new();
     for bucket in &buckets {
+        // Verbatim; a bucket missing either bound is visibly invalid and is
+        // dropped by the sync engine's window validation (OBS-003) rather
+        // than silently patched into a zero-width window here.
         let ws = opt_str(bucket, "starting_at").unwrap_or_default();
-        let we = opt_str(bucket, "ending_at").unwrap_or_else(|| ws.clone());
+        let we = opt_str(bucket, "ending_at").unwrap_or_default();
         let Some(results) = bucket.get("results").and_then(|r| r.as_array()) else {
             continue;
         };

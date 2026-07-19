@@ -37,3 +37,6 @@ keyring = { version = "3", default-features = false, features = ["windows-native
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Same pinned version/features as the main dependency: concurrency tests use
+# a raw connection to probe SQLite's write lock deterministically.
+rusqlite = { version = "0.40.1", features = ["bundled"] }

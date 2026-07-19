@@ -5,6 +5,40 @@ All notable changes to API Tracker are documented here. The project is in
 
 ## [Unreleased]
 
+### Security — release-blocker remediation
+Fixes for the confirmed release blockers from the deep technical audit
+(baseline `7d81090`). Each ships with a regression test that fails at
+baseline; details in `docs/remediation/RELEASE_BLOCKER_REMEDIATION.md`. No
+schema migration or data-format change.
+- **CRYPTO-01/CONC-03** — a concurrent project-key rotation during a
+  credential add/replace could persist ciphertext under a destroyed key
+  (silent permanent loss + wedged rotation). Both writers and the rotation
+  writers now share one `BEGIN IMMEDIATE` transaction; a losing operation
+  fails with a typed `ProjectLocked`/`vault_busy` error instead.
+- **CONC-04** — backup payload collection is now a single consistent
+  snapshot, so a concurrent writer cannot produce a cross-table-inconsistent
+  (unrestorable) backup.
+- **OBS-003** — malformed provider usage buckets (missing/blank/inverted
+  time ranges) are skipped before any replace-range deletion, so a
+  malformed provider response can no longer wipe stored usage history.
+- **PI-01/CLI-01** — `run` scrubs API Tracker authentication variables from
+  injected children by deny-by-default over the whole `API_TRACKER_` prefix
+  (previously an enumerated list that missed `API_TRACKER_NEW_PASSWORD`).
+- **IPC-01/FS-09** — `env_example_write` is reauthenticated in core and
+  confined to a `.env.example` inside a registered repository (canonical
+  path validation, symlink and out-of-tree rejection).
+- **OBS-001** — repository-scan exposure alerts no longer auto-resolve when
+  a finding stops being re-emitted; they persist until an explicit
+  resolution or a clean full re-scan (`scan <repo> --reverify`).
+- **ROT-001/ROT-010** — an ambiguous revoke outcome converges to a truthful
+  terminal or manual-recovery state: idempotent revoke recovery, a
+  full-log attempt marker, a manual-completion exit from `old_disabled`, and
+  a rollback that refuses to restore a likely-deleted key at permanent-delete
+  providers.
+- **PI-06** — `terminate_pid` refuses `pid <= 0` before signalling.
+- **IPC-02** — credential deletion now requires master-password
+  reauthentication enforced in core (CLI and desktop).
+
 ### Added — product gap closure (migrations v8–v10)
 - **Versioned pricing**: effective-dated records (bundled current
   OpenAI/Anthropic prices with per-entry source + verification date,

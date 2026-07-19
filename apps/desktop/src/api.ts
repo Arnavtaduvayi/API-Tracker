@@ -49,6 +49,7 @@ import type {
   ProviderKeyOverview,
   ProviderManifest,
   ProviderProjectOverview,
+  RepoReverifyReport,
   ReuseWarning,
   RotationEvent,
   RotationSchedule,
@@ -108,6 +109,7 @@ export const api = {
     markExposed: boolean,
     historyDepth: number | null,
   ) => call<Finding[]>("scan_path", { path, mode, markExposed, historyDepth }),
+  scanReverify: (path: string) => call<RepoReverifyReport>("scan_reverify", { path }),
   suppressionAdd: (suppressionKey: string, path: string, reason: string) =>
     call<void>("suppression_add", { suppressionKey, path, reason }),
   suppressionList: () => call<Suppression[]>("suppression_list"),
@@ -223,7 +225,8 @@ export const api = {
   ) => call<Credential>("credential_mark", { selector, ...args }),
   credentialReplaceValue: (selector: string, password: string, value: string) =>
     call<ReuseWarning[]>("credential_replace_value", { selector, password, value }),
-  credentialDelete: (selector: string) => call<void>("credential_delete", { selector }),
+  credentialDelete: (selector: string, password: string) =>
+    call<void>("credential_delete", { selector, password }),
   credentialReveal: (selector: string, password: string) =>
     call<string>("credential_reveal", { selector, password }),
   credentialCopy: (selector: string, password: string) =>
@@ -355,8 +358,8 @@ export const api = {
   envDrift: (project: string) => call<DriftFinding[]>("env_drift", { project }),
   envExamplePreview: (file: string) =>
     call<EnvExampleProposal>("env_example_preview", { file }),
-  envExampleWrite: (examplePath: string, content: string) =>
-    call<void>("env_example_write", { examplePath, content }),
+  envExampleWrite: (project: string, examplePath: string, content: string, password: string) =>
+    call<string>("env_example_write", { project, examplePath, content, password }),
   envExport: (args: {
     project: string;
     path: string;

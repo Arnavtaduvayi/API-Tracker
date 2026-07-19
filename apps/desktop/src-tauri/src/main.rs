@@ -238,6 +238,18 @@ fn scan_path(
     })
 }
 
+/// Re-verify a repository's outstanding exposure alerts with a full scan,
+/// resolving them only if it is clean (OBS-001). Exposure alerts never
+/// auto-resolve on their own; this is the qualifying clean re-scan.
+#[tauri::command]
+fn scan_reverify(
+    state: State<'_, AppState>,
+    path: String,
+) -> CmdResult<api_tracker_core::vault::RepoReverifyReport> {
+    let p = std::path::PathBuf::from(&path);
+    with_vault(&state, |vault| vault.reverify_repo_exposure(&p))
+}
+
 #[tauri::command]
 fn suppression_add(
     state: State<'_, AppState>,
@@ -739,10 +751,18 @@ fn credential_replace_value(
     })
 }
 
+/// Delete a credential. Reauthenticated in core (IPC-02): the React confirm
+/// dialog is UX only — the master-password re-verification below is the
+/// authorization, so a direct `invoke` cannot delete without it.
 #[tauri::command]
-fn credential_delete(state: State<'_, AppState>, selector: String) -> CmdResult<()> {
+fn credential_delete(
+    state: State<'_, AppState>,
+    selector: String,
+    password: String,
+) -> CmdResult<()> {
+    let password = SecretString::new(password);
     with_vault(&state, |vault| {
-        vault.delete_credential(&selector)?;
+        vault.delete_credential(&selector, &password)?;
         Ok(())
     })
 }
@@ -1404,16 +1424,30 @@ fn env_example_preview(state: State<'_, AppState>, file: String) -> CmdResult<En
     })
 }
 
-/// Write a previously previewed `.env.example` (atomic, owner-only). Gated
-/// behind an unlocked vault so a locked session cannot write host files.
+/// Write a previously previewed `.env.example` (names only, never values).
+/// Authorized and confined in core: reauthentication, plus containment of
+/// the target to a `.env.example` inside one of the project's registered
+/// repositories (IPC-01/FS-09). The React confirmation dialog is UX only —
+/// it is NOT the authorization; the master password re-verification in core
+/// is. Returns the canonical path written.
 #[tauri::command]
 fn env_example_write(
     state: State<'_, AppState>,
+    project: String,
     example_path: String,
     content: String,
-) -> CmdResult<()> {
-    with_vault(&state, |_vault| {
-        api_tracker_core::envgov::atomic_write(std::path::Path::new(&example_path), &content)
+    password: String,
+) -> CmdResult<String> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault
+            .env_example_write(
+                &project,
+                std::path::Path::new(&example_path),
+                &content,
+                &password,
+            )
+            .map(|p| p.display().to_string())
     })
 }
 
@@ -2057,6 +2091,7 @@ fn main() {
             credential_reveal,
             credential_copy,
             scan_path,
+            scan_reverify,
             suppression_add,
             suppression_list,
             suppression_remove,

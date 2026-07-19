@@ -1,0 +1,29 @@
+---- clean_full_rescan_resolves_the_exposure_alert stdout ----
+
+thread 'clean_full_rescan_resolves_the_exposure_alert' (20345484) panicked at crates/core/tests/obs001_exposure_alert_lifecycle.rs:229:5:
+assertion failed: report.resolved_alerts >= 1
+--
+---- exposure_survives_scan_failure_on_non_repo stdout ----
+
+thread 'exposure_survives_scan_failure_on_non_repo' (20345832) panicked at crates/core/tests/obs001_exposure_alert_lifecycle.rs:165:5:
+OBS-001: a scan failure auto-resolved the exposure alert
+--
+---- exposure_survives_secret_removed_from_working_tree_but_kept_in_history stdout ----
+
+thread 'exposure_survives_secret_removed_from_working_tree_but_kept_in_history' (20345973) panicked at crates/core/tests/obs001_exposure_alert_lifecycle.rs:181:5:
+OBS-001: exposure resolved when the secret left the working tree but remained in git history
+--
+---- exposure_survives_unchanged_second_monitor_run stdout ----
+
+thread 'exposure_survives_unchanged_second_monitor_run' (20346148) panicked at crates/core/tests/obs001_exposure_alert_lifecycle.rs:131:5:
+OBS-001: exposure alert was auto-resolved by an unchanged monitor run
+--
+---- exposure_survives_when_repository_is_unavailable stdout ----
+
+thread 'exposure_survives_when_repository_is_unavailable' (20346289) panicked at crates/core/tests/obs001_exposure_alert_lifecycle.rs:149:5:
+OBS-001: making the repo unavailable 'cleared' the exposure signal
+--
+---- rebaseline_coverage_gap_persists_across_runs stdout ----
+
+thread 'rebaseline_coverage_gap_persists_across_runs' (20346417) panicked at crates/core/tests/obs001_exposure_alert_lifecycle.rs:257:5:
+a re-baseline must raise a coverage-gap alert
