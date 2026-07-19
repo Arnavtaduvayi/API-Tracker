@@ -1137,6 +1137,17 @@ fn pricing_export(state: State<'_, AppState>, provider: Option<String>) -> CmdRe
 }
 
 #[tauri::command]
+fn provider_account_sync(
+    state: State<'_, AppState>,
+    provider: String,
+) -> CmdResult<api_tracker_core::connectors::AccountInfo> {
+    with_vault(&state, |vault| {
+        let http = api_tracker_core::http::UreqClient::new();
+        vault.provider_account_sync(&provider, &http)
+    })
+}
+
+#[tauri::command]
 fn template_list() -> Vec<api_tracker_core::templates::Template> {
     api_tracker_core::templates::catalog()
 }
@@ -2045,6 +2056,7 @@ fn main() {
             pricing_remove_override,
             pricing_import,
             pricing_export,
+            provider_account_sync,
             template_list,
             template_apply,
             stack_detect,

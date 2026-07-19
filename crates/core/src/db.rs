@@ -625,6 +625,23 @@ CREATE TABLE stack_preferences (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 10,
+        name: "provider-account metadata (official endpoints only)",
+        sql: r#"
+-- Account identity reported by official provider endpoints (GitHub /user,
+-- Stripe /v1/account, Supabase /v1/organizations, Anthropic
+-- /v1/organizations/me). Only provider-reported values are stored, with
+-- their source and sync time; nothing is derived from credential
+-- appearance, and no login/password material exists anywhere.
+ALTER TABLE provider_connections ADD COLUMN account_id TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_email TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_name TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_plan TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_source TEXT;
+ALTER TABLE provider_connections ADD COLUMN account_synced_at TEXT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

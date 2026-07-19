@@ -2554,7 +2554,9 @@ impl UnlockedVault {
             .query_row(
                 "SELECT admin_credential_id, last_synced_at, last_status, detail,
                         admin_key_ciphertext IS NOT NULL, admin_key_masked, org_label,
-                        connected_at, last_success_at, last_failure_at, last_error
+                        connected_at, last_success_at, last_failure_at, last_error,
+                        account_id, account_email, account_name, account_plan,
+                        account_source, account_synced_at
                  FROM provider_connections WHERE provider = ?1",
                 [&provider],
                 |r| {
@@ -2573,6 +2575,12 @@ impl UnlockedVault {
                         last_success_at: r.get(8)?,
                         last_failure_at: r.get(9)?,
                         last_error: r.get(10)?,
+                        account_id: r.get(11)?,
+                        account_email: r.get(12)?,
+                        account_name: r.get(13)?,
+                        account_plan: r.get(14)?,
+                        account_source: r.get(15)?,
+                        account_synced_at: r.get(16)?,
                         stale: false,
                     })
                 },
@@ -2591,6 +2599,12 @@ impl UnlockedVault {
             last_success_at: None,
             last_failure_at: None,
             last_error: String::new(),
+            account_id: None,
+            account_email: None,
+            account_name: None,
+            account_plan: None,
+            account_source: None,
+            account_synced_at: None,
             stale: false,
         });
         status.stale = self.connection_is_stale(&status);
@@ -2610,6 +2624,71 @@ impl UnlockedVault {
             (None, Some(connected)) => connected < &threshold,
             (None, None) => true,
         }
+    }
+
+    /// Synchronize provider-account identity from the provider's official
+    /// endpoint (GitHub `/user`, Stripe `/v1/account`, Supabase
+    /// `/v1/organizations`, Anthropic `/v1/organizations/me`). Stores only
+    /// what the provider reported, with source and time. OpenAI has no
+    /// documented account-identity endpoint — reported honestly as
+    /// unsupported (the user-entered organization label stands in, labeled
+    /// as user-entered).
+    pub fn provider_account_sync(
+        &self,
+        provider: &str,
+        http: &dyn crate::http::HttpClient,
+    ) -> Result<crate::connectors::AccountInfo> {
+        let provider = crate::providers::normalize(provider);
+        let secret = self.provider_admin_secret(&provider)?;
+        let info = match provider.as_str() {
+            "anthropic" => {
+                let (id, name) = crate::anthropic::fetch_organization(http, &secret)?;
+                crate::connectors::AccountInfo {
+                    account_id: id,
+                    email: None,
+                    name,
+                    plan: None,
+                    source: "Anthropic GET /v1/organizations/me".to_string(),
+                }
+            }
+            "openai" => {
+                return Err(CoreError::Unsupported {
+                    provider: "openai".into(),
+                    capability: "fetch_account",
+                    hint: "OpenAI's Admin API has no documented account-identity endpoint; \
+                           the organization label you entered at connect time is shown \
+                           instead (labeled user-entered)"
+                        .into(),
+                })
+            }
+            other => {
+                let connector = self.connector_for(other)?;
+                connector.fetch_account(http, &secret)?
+            }
+        };
+        self.conn.execute(
+            "UPDATE provider_connections SET
+               account_id = ?2, account_email = ?3, account_name = ?4,
+               account_plan = ?5, account_source = ?6, account_synced_at = ?7
+             WHERE provider = ?1",
+            params![
+                provider,
+                info.account_id,
+                info.email,
+                info.name,
+                info.plan,
+                info.source,
+                clock::now_rfc3339(),
+            ],
+        )?;
+        crate::audit::record(
+            &self.conn,
+            "provider_account_synced",
+            None,
+            None,
+            &format!("provider {provider} via {}", info.source),
+        )?;
+        Ok(info)
     }
 
     /// All provider connections (for monitoring and UI).
@@ -8027,6 +8106,16 @@ pub struct ProviderConnection {
     pub last_error: String,
     pub last_status: String,
     pub detail: String,
+    /// Provider-reported account identity (official endpoints only; never
+    /// derived from a credential's appearance). None = never synced or the
+    /// provider does not report it.
+    pub account_id: Option<String>,
+    pub account_email: Option<String>,
+    pub account_name: Option<String>,
+    pub account_plan: Option<String>,
+    /// The official endpoint the account fields came from.
+    pub account_source: Option<String>,
+    pub account_synced_at: Option<String>,
     /// True when synced data is older than the configured staleness window.
     pub stale: bool,
 }

@@ -148,7 +148,25 @@ export function ProviderConnectionPanel(props: { provider: string }) {
           {status.org_label && (
             <>
               <dt>Organization</dt>
-              <dd>{status.org_label}</dd>
+              <dd>
+                {status.org_label}{" "}
+                <span className="muted">(user-entered label, not provider-verified)</span>
+              </dd>
+            </>
+          )}
+          {status.account_synced_at && (
+            <>
+              <dt>Account (provider-reported)</dt>
+              <dd>
+                {status.account_name ?? "—"}
+                {status.account_email ? ` <${status.account_email}>` : ""}
+                {status.account_id ? ` · id ${status.account_id}` : ""}
+                {status.account_plan ? ` · plan ${status.account_plan}` : ""}
+                <br />
+                <span className="muted">
+                  via {status.account_source ?? "?"} at {status.account_synced_at}
+                </span>
+              </dd>
             </>
           )}
           <dt>Connected at</dt>
@@ -195,6 +213,24 @@ export function ProviderConnectionPanel(props: { provider: string }) {
             </label>
             <button onClick={() => void sync()} disabled={busy}>
               {busy ? "Working…" : "Sync now"}
+            </button>
+            <button
+              disabled={busy}
+              onClick={() =>
+                void (async () => {
+                  setError(null);
+                  setNotice(null);
+                  try {
+                    const info = await api.providerAccountSync(props.provider);
+                    setNotice(`Account identity synced from ${info.source}.`);
+                    await reload();
+                  } catch (err) {
+                    if (isApiError(err)) setError(err.message);
+                  }
+                })()
+              }
+            >
+              Sync account identity
             </button>
             <button onClick={() => setReauth("test")}>Test connection</button>
             <button className="danger" onClick={() => setReauth("disconnect")}>

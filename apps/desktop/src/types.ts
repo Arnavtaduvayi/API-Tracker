@@ -174,6 +174,10 @@ export interface ProviderManifest {
   pricing_url: string;
   /** Official permission/scope documentation ("" when none is declared). */
   permissions_docs_url: string;
+  /** Official console/login page ("" when none is declared). */
+  login_url: string;
+  /** Official billing portal page ("" when none is declared). */
+  billing_url: string;
   watch_docs: string[];
   detection: DetectionPattern[];
   capabilities: Capabilities;
@@ -372,7 +376,23 @@ export interface ProviderConnection {
   last_error: string;
   last_status: string;
   detail: string;
+  /** Provider-reported account identity (official endpoints only). */
+  account_id: string | null;
+  account_email: string | null;
+  account_name: string | null;
+  account_plan: string | null;
+  account_source: string | null;
+  account_synced_at: string | null;
   stale: boolean;
+}
+
+/** Provider-reported account identity (official endpoints only). */
+export interface AccountInfo {
+  account_id: string | null;
+  email: string | null;
+  name: string | null;
+  plan: string | null;
+  source: string;
 }
 
 export interface SyncReport {

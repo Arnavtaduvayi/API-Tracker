@@ -4,6 +4,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AccountInfo,
   AccessGrant,
   ActivityEvent,
   Alert,
@@ -253,6 +254,8 @@ export const api = {
     }),
   providerConnectionStatus: (provider: string) =>
     call<ProviderConnection>("provider_connection_status", { provider }),
+  providerAccountSync: (provider: string) =>
+    call<AccountInfo>("provider_account_sync", { provider }),
   providerKeys: (provider: string) =>
     call<ProviderKeyOverview[]>("provider_keys", { provider }),
   providerProjects: (provider: string) =>

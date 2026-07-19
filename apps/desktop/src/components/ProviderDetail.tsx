@@ -168,6 +168,26 @@ export function ProviderDetail(props: { id: string; onBack: () => void }) {
             </dd>
           </>
         )}
+        {m.login_url && (
+          <>
+            <dt>Console login</dt>
+            <dd>
+              <button className="link" onClick={() => open(m.login_url)}>
+                {m.login_url}
+              </button>
+            </dd>
+          </>
+        )}
+        {m.billing_url && (
+          <>
+            <dt>Billing portal</dt>
+            <dd>
+              <button className="link" onClick={() => open(m.billing_url)}>
+                {m.billing_url}
+              </button>
+            </dd>
+          </>
+        )}
         <dt>Secret env vars</dt>
         <dd className="mono">{m.env_vars.join(", ") || "—"}</dd>
         <dt>Key types</dt>
