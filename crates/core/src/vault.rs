@@ -3115,6 +3115,19 @@ impl UnlockedVault {
                     (Vec::new(), false)
                 }
             };
+        // Invalid provider time ranges must never reach the replace-range
+        // deletion below — one blank window_start would widen the range over
+        // the whole stored history (OBS-003).
+        note_skipped_invalid_windows(
+            &mut notes,
+            "usage",
+            usage::retain_valid_windows(&mut usage_rows),
+        );
+        note_skipped_invalid_windows(
+            &mut notes,
+            "cost",
+            usage::retain_valid_windows(&mut cost_rows),
+        );
 
         // Provider-side metadata is best-effort: an admin key without the
         // api_keys read scope must not fail the usage sync.
@@ -3300,6 +3313,19 @@ impl UnlockedVault {
                 (Vec::new(), false)
             }
         };
+        // Invalid provider time ranges must never reach the replace-range
+        // deletion below — one blank window_start would widen the range over
+        // the whole stored history (OBS-003).
+        note_skipped_invalid_windows(
+            &mut notes,
+            "usage",
+            usage::retain_valid_windows(&mut usage_rows),
+        );
+        note_skipped_invalid_windows(
+            &mut notes,
+            "cost",
+            usage::retain_valid_windows(&mut cost_rows),
+        );
 
         // Provider-side metadata is best-effort.
         let mut side_projects = Vec::new();
@@ -3474,7 +3500,15 @@ impl UnlockedVault {
     ) -> Result<SyncReport> {
         let connector = self.connector_for(provider)?;
         let since_days = ((to - from).whole_days().max(1)) as u32;
-        let fetched = connector.fetch_usage(http, admin_secret, since_days)?;
+        let mut fetched = connector.fetch_usage(http, admin_secret, since_days)?;
+        let mut notes = Vec::new();
+        // Same guard as the detail engines: the deletion below ranges over a
+        // provider-controlled window_start (OBS-003).
+        note_skipped_invalid_windows(
+            &mut notes,
+            "usage",
+            usage::retain_valid_windows(&mut fetched.snapshots),
+        );
         let tx = self.conn.unchecked_transaction()?;
         if let Some(earliest) = fetched.snapshots.iter().map(|s| &s.window_start).min() {
             tx.execute(
@@ -3510,7 +3544,7 @@ impl UnlockedVault {
             cost_rows: 0,
             window_start: clock::to_rfc3339(from),
             window_end: clock::to_rfc3339(to),
-            notes: Vec::new(),
+            notes,
         })
     }
 
@@ -8399,6 +8433,18 @@ pub struct ProviderConnection {
     pub account_synced_at: Option<String>,
     /// True when synced data is older than the configured staleness window.
     pub stale: bool,
+}
+
+/// Record — honestly, in the sync report — that provider report buckets
+/// were dropped for carrying a missing, malformed, or inverted time range
+/// (see [`usage::retain_valid_windows`]).
+fn note_skipped_invalid_windows(notes: &mut Vec<String>, kind: &str, dropped: usize) {
+    if dropped > 0 {
+        notes.push(format!(
+            "skipped {dropped} {kind} bucket(s) with a missing or invalid time range (the \
+             provider response was malformed); previously stored history is preserved"
+        ));
+    }
 }
 
 /// The outcome of one provider synchronization.
