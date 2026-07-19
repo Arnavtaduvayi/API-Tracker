@@ -12,6 +12,14 @@ Or use the desktop **Backup** screen. You choose a **backup password** (it can
 differ from the master password). The file is a single AEAD-encrypted document;
 credential values inside stay encrypted under their project keys.
 
+A backup captures the **entire vault** — every table in the database
+(projects, credentials and their retained versions, provider connections,
+usage and cost history, alerts, scan suppressions, `.env` mappings and
+exports, destinations, sync plans, rotations, access grants, documentation
+watches, and notification channels). Backups created by older builds
+(format v1) contained only projects, credentials, repositories, and the
+audit trail; they still restore, preserving what they contain.
+
 ## Verify a backup
 
 ```bash
@@ -28,6 +36,11 @@ api-tracker backup restore --force ~/api-tracker-backup.json  # replace an exist
 `--force` renames the current database aside (`vault.db.replaced-<ts>`) rather
 than deleting it. After restore, unlock with the **master password that was in
 effect when the backup was created**.
+
+A backup made by an **older** version of API Tracker restores fine: the data
+is imported at its original schema version and then upgraded to the current
+one automatically. A backup made by a **newer** version is refused with a
+clear error — restore it with that newer version instead.
 
 ## Recovery limits (by design)
 

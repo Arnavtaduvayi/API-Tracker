@@ -183,6 +183,11 @@ pub mod aad {
     pub fn backup(vault_id: &str) -> String {
         format!("api-tracker:v1:backup:{vault_id}")
     }
+    /// Format-v2 backups bind the (plaintext-header) format version into the
+    /// AAD so a tampered header cannot demote a payload to another parser.
+    pub fn backup_v2(vault_id: &str) -> String {
+        format!("api-tracker:v1:backup-format2:{vault_id}")
+    }
     /// A provider's administrative connection key (vault-level, encrypted
     /// under the vault key; not tied to any project).
     pub fn provider_admin(vault_id: &str, provider: &str) -> String {
