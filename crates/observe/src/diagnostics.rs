@@ -69,7 +69,7 @@ pub fn run(ca_present: bool) -> Vec<Check> {
             "existing_proxy",
             "warn",
             format!(
-                "{} proxy variable(s) are already set ({}). A monitored child overrides them for that child only; the proxy chains upstream where reachable.",
+                "{} proxy variable(s) are already set ({}). A monitored child's proxy variables are overridden to point at the local observation proxy for that child only. Upstream connections go DIRECT — they are NOT chained through your existing proxy — so a monitored run requires direct egress to the providers; if egress is only allowed via that proxy, monitored requests will fail.",
                 existing.len(),
                 existing.join(", ")
             ),
@@ -82,11 +82,15 @@ pub fn run(ca_present: bool) -> Vec<Check> {
         "upstream provider certificates are verified against the bundled Mozilla root store; verification is never disabled",
     ));
 
-    // Orphaned temp trust files from a crashed run (best-effort visibility).
+    // Describe the temp-trust-file policy honestly. This is a statement of
+    // design, not a scan of the data directory (this entry point has no path to
+    // scan): a crashed run may leave a temporary bundle behind, but it holds
+    // only public certificate material — never a private key or the session
+    // token.
     out.push(check(
         "cleanup",
         "ok",
-        "temporary trust files are written 0600 and deleted when a session ends",
+        "temporary trust files are written 0600 and removed when a session ends; a crashed run may leave one behind, but it contains only public certificate material (no keys, no tokens)",
     ));
 
     out

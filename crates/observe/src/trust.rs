@@ -52,13 +52,21 @@ pub fn detect_runtime(program: &str) -> RuntimeAssessment {
         .and_then(|s| s.to_str())
         .unwrap_or(program)
         .to_ascii_lowercase();
-    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    // Strip the Windows executable/shim extensions too: npm/npx/yarn/pnpm ship
+    // as `.cmd`/`.bat` batch shims, and the Python launcher is `py.exe`, so
+    // without this they detected as 'unknown' on Windows — wrong runtime/trust
+    // reporting for the most common Windows invocations.
+    let base = base
+        .strip_suffix(".exe")
+        .or_else(|| base.strip_suffix(".cmd"))
+        .or_else(|| base.strip_suffix(".bat"))
+        .unwrap_or(&base);
     let (runtime, trust_level) = match base {
         "node" | "npm" | "npx" | "yarn" | "pnpm" | "bun" | "deno" => {
             ("node", TrustLevel::FullySupported)
         }
         "curl" => ("curl", TrustLevel::FullySupported),
-        "python" | "python3" | "pip" | "pip3" | "uv" | "poetry" => {
+        "python" | "python3" | "py" | "pip" | "pip3" | "uv" | "poetry" => {
             ("python", TrustLevel::ProbablySupported)
         }
         "ruby" | "bundle" | "gem" => ("ruby", TrustLevel::ProbablySupported),
@@ -186,10 +194,38 @@ impl ScopedTrust {
 
     /// Apply the scoped environment to a command (child only).
     pub fn apply(&self, cmd: &mut std::process::Command) {
-        let existing = std::env::var("NO_PROXY").ok();
+        // Read BOTH casings and merge their entries: on Unix env names are
+        // case-sensitive and lowercase `no_proxy` is the historically dominant
+        // convention (curl honored only it for years; many CI/corp setups export
+        // lowercase). Reading only NO_PROXY silently dropped the parent's
+        // lowercase exclusions, so a private host in `no_proxy` was routed
+        // through the observation proxy and blocked by SSRF policy.
+        let existing = merge_no_proxy(
+            std::env::var("NO_PROXY").ok().as_deref(),
+            std::env::var("no_proxy").ok().as_deref(),
+        );
         for (k, v) in self.child_env(existing.as_deref()) {
             cmd.env(k, v);
         }
+    }
+}
+
+/// Union the comma-separated entries of two `no_proxy` values (either casing),
+/// de-duplicated and trimmed. Returns `None` if both are empty.
+fn merge_no_proxy(a: Option<&str>, b: Option<&str>) -> Option<String> {
+    let mut entries: Vec<String> = Vec::new();
+    for src in [a, b].into_iter().flatten() {
+        for e in src.split(',') {
+            let e = e.trim();
+            if !e.is_empty() && !entries.iter().any(|x| x == e) {
+                entries.push(e.to_string());
+            }
+        }
+    }
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(","))
     }
 }
 
@@ -225,6 +261,27 @@ mod tests {
             detect_runtime("go").trust_level,
             TrustLevel::ConnectionOnlyFallback
         );
+        // Windows .cmd/.bat shims and py.exe launcher classify correctly.
+        assert_eq!(detect_runtime("npm.cmd").runtime, "node");
+        assert_eq!(detect_runtime("yarn.bat").runtime, "node");
+        assert_eq!(detect_runtime("py.exe").runtime, "python");
+        assert_eq!(
+            detect_runtime("npm.cmd").trust_level,
+            TrustLevel::FullySupported
+        );
+    }
+
+    #[test]
+    fn merge_no_proxy_unions_both_casings() {
+        assert_eq!(
+            merge_no_proxy(Some("a.com,b.com"), Some("b.com,c.com")).as_deref(),
+            Some("a.com,b.com,c.com")
+        );
+        assert_eq!(
+            merge_no_proxy(None, Some("only.lower")).as_deref(),
+            Some("only.lower")
+        );
+        assert_eq!(merge_no_proxy(None, None), None);
     }
 
     #[test]

@@ -2055,6 +2055,9 @@ impl UnlockedVault {
         // Close injection-session rows whose recorded process died with its
         // launcher (best-effort liveness probe; Unix only).
         let _ = crate::inject::sweep_dead_sessions(&self.conn);
+        // Same for observation sessions: a crashed/killed launcher leaves a
+        // 'running' row that is otherwise never reconciled (RO-14).
+        let _ = crate::runtime::store::sweep_orphaned_sessions(&self.conn);
         let cost_source = self.budget_cost_source()?;
         let credentials = self.list_credentials(None)?;
         let mut active_keys: Vec<String> = Vec::new();

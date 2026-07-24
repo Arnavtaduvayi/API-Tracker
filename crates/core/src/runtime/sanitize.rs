@@ -387,6 +387,69 @@ fn has_unprintable(s: &str) -> bool {
     s.bytes().any(|b| b < 0x20 || b == 0x7f)
 }
 
+/// Redact credential-shaped and high-entropy tokens from a command's argv
+/// before it is persisted as a session's `command` label, so a secret passed as
+/// an argument (`curl -H "Authorization: Bearer sk-live-…"`, `psql --password
+/// …`, `…?api_key=sk-…`) is never stored in plaintext. Execution uses the raw
+/// argv directly; only the stored/displayed label is redacted, so
+/// over-redaction here is harmless.
+pub fn redact_command(args: &[String]) -> String {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut redact_next = false;
+    for arg in args {
+        if redact_next {
+            out.push(":redacted".into());
+            redact_next = false;
+            continue;
+        }
+        let lower = arg.to_ascii_lowercase();
+        // Flags whose FOLLOWING argument carries a secret value.
+        if matches!(
+            lower.as_str(),
+            "-h" | "--header"
+                | "-u"
+                | "--user"
+                | "--api-key"
+                | "--apikey"
+                | "--token"
+                | "--password"
+                | "--secret"
+                | "--auth"
+        ) {
+            out.push(arg.clone());
+            redact_next = true;
+            continue;
+        }
+        out.push(redact_arg_token(arg));
+    }
+    out.join(" ")
+}
+
+/// Redact one argv token if any of its separated parts looks like a secret.
+/// Splitting on URL/host separators (`/` and `.` included) breaks a normal URL
+/// into short dictionary parts so it is not mistaken for a high-entropy token,
+/// while a real embedded credential (`sk-…`, a JWT, an opaque blob) still stands
+/// out as its own part.
+fn redact_arg_token(arg: &str) -> String {
+    let embeds_secret = arg
+        .split(|c: char| {
+            matches!(
+                c,
+                ' ' | ':' | '=' | '"' | '\'' | '&' | '?' | '@' | '/' | '.' | ',' | ';'
+            )
+        })
+        .any(is_secretish);
+    if embeds_secret {
+        ":redacted".into()
+    } else {
+        arg.to_string()
+    }
+}
+
+fn is_secretish(s: &str) -> bool {
+    is_credential_shaped(s) || is_jwt(s) || (s.len() >= 20 && is_high_entropy(s))
+}
+
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -656,6 +719,52 @@ mod tests {
         let (out, conf) = sanitize_path(&long);
         assert!(out.contains(":truncated"));
         assert_eq!(conf, Confidence::Low);
+    }
+
+    #[test]
+    fn redact_command_strips_secrets_from_argv() {
+        let argv: Vec<String> = [
+            "curl",
+            "-H",
+            "Authorization: Bearer sk-live-REALKEY0000000000",
+            "https://api.stripe.com/v1/charges",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let label = redact_command(&argv);
+        assert!(
+            !label.contains("sk-live-REALKEY0000000000"),
+            "token leaked: {label}"
+        );
+        assert!(
+            !label.contains("Bearer"),
+            "header value not redacted: {label}"
+        );
+        assert!(label.starts_with("curl -H :redacted"));
+        // The non-secret URL is preserved.
+        assert!(label.contains("https://api.stripe.com/v1/charges"));
+
+        // Secret embedded in a URL query is redacted (whole token).
+        let argv2: Vec<String> = [
+            "wget",
+            "https://api.example.com/data?api_key=sk-proj-ABCDEFGH12345678",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let label2 = redact_command(&argv2);
+        assert!(
+            !label2.contains("sk-proj-ABCDEFGH12345678"),
+            "query secret leaked: {label2}"
+        );
+
+        // A plain, secret-free command is untouched.
+        let argv3: Vec<String> = ["node", "server.js", "--port", "3000"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(redact_command(&argv3), "node server.js --port 3000");
     }
 
     #[test]

@@ -41,6 +41,9 @@ const HEAD_DEADLINE: Duration = Duration::from_secs(15);
 /// Per-read timeout during the untrusted pre-auth head read; shorter than
 /// `HEAD_DEADLINE` so the read loop wakes to observe the absolute deadline.
 const PREAUTH_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-address upstream TCP connect timeout, so a dead/unreachable address (a
+/// stale IPv6 route) fails fast and the next validated address is tried.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Receives observed metadata from the proxy. Implementations must be
 /// non-blocking-friendly (the proxy calls them on worker threads) and must
@@ -288,25 +291,41 @@ fn handle_client(mut client: TcpStream, cfg: &ProxyConfig, shutdown: &AtomicBool
     }
 }
 
-/// Resolve `host:port` and return the first address that passes the policy.
+/// Resolve `host:port` ONCE and return EVERY address that passes the policy, in
+/// resolution order. Returning all validated addresses (not just the first)
+/// lets the caller fall back across a dual-stack host — e.g. try IPv4 when a
+/// stale/unreachable AAAA sorts first — without a second DNS lookup, so the
+/// anti-rebinding property is preserved (only validated addresses are ever
+/// connectable, denied addresses are filtered out).
 fn resolve_validated(
     host: &str,
     port: u16,
     allow: &policy::AllowList,
-) -> Result<SocketAddr, policy::DenyReason> {
+) -> Result<Vec<SocketAddr>, policy::DenyReason> {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     let allowlisted = allow.contains(host, port) || allow.contains(bare, port);
-    // Resolve ONCE; connect only to a validated resolved address (no second
-    // resolution → no DNS-rebinding window).
     let addrs = (bare, port)
         .to_socket_addrs()
         .map_err(|_| policy::DenyReason::BadHostname)?;
+    let validated: Vec<SocketAddr> = addrs
+        .filter(|addr| policy::check_resolved(addr.ip(), allowlisted).is_allowed())
+        .collect();
+    if validated.is_empty() {
+        Err(policy::DenyReason::Private)
+    } else {
+        Ok(validated)
+    }
+}
+
+/// Try each validated address in order (dual-stack fallback), returning the
+/// first that accepts a TCP connection within `CONNECT_TIMEOUT`.
+fn connect_any(addrs: &[SocketAddr]) -> Option<TcpStream> {
     for addr in addrs {
-        if policy::check_resolved(addr.ip(), allowlisted).is_allowed() {
-            return Ok(addr);
+        if let Ok(s) = TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
+            return Some(s);
         }
     }
-    Err(policy::DenyReason::Private)
+    None
 }
 
 fn handle_connect(
@@ -334,7 +353,7 @@ fn handle_connect(
         return;
     }
 
-    let addr = match resolve_validated(&host, port, &cfg.allowlist) {
+    let addrs = match resolve_validated(&host, port, &cfg.allowlist) {
         Ok(a) => a,
         Err(reason) => {
             cfg.sink
@@ -353,9 +372,9 @@ fn handle_connect(
     }
 
     let connect_started = Instant::now();
-    let upstream = match TcpStream::connect(addr) {
-        Ok(s) => s,
-        Err(_) => {
+    let upstream = match connect_any(&addrs) {
+        Some(s) => s,
+        None => {
             record_transport(
                 cfg,
                 &host,
@@ -889,7 +908,7 @@ fn handle_plain(
         );
         return;
     }
-    let addr = match resolve_validated(&host, port, &cfg.allowlist) {
+    let addrs = match resolve_validated(&host, port, &cfg.allowlist) {
         Ok(a) => a,
         Err(reason) => {
             cfg.sink
@@ -901,9 +920,9 @@ fn handle_plain(
             return;
         }
     };
-    let mut upstream = match TcpStream::connect(addr) {
-        Ok(s) => s,
-        Err(_) => {
+    let mut upstream = match connect_any(&addrs) {
+        Some(s) => s,
+        None => {
             record_transport(
                 cfg,
                 &host,

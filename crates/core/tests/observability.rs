@@ -490,6 +490,51 @@ fn process_sessions_list_with_pids_and_termination_is_guarded() {
 }
 
 #[test]
+#[cfg(unix)]
+fn run_monitor_sweeps_orphaned_observation_sessions() {
+    // Regression (PR #13): sweep_orphaned_sessions had no caller, so a crashed
+    // launcher left the session 'running' forever. It is now wired into
+    // run_monitor and must reconcile such a row to interrupted/launcher_gone.
+    let (_dir, _paths, mut v) = new_vault();
+    add_project(&mut v, "app");
+    let sid = v
+        .observe_open_session(
+            "app",
+            api_tracker_core::runtime::model::ObservationMode::Metadata,
+            "cli_run",
+            "node app.js",
+            &[],
+        )
+        .unwrap();
+    // A guaranteed-dead child pid: spawn a process, then reap it.
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .unwrap();
+    let dead_pid = child.id() as i64;
+    child.wait().unwrap();
+    v.connection()
+        .execute(
+            "UPDATE observation_sessions SET pid = ?1, status = 'running' WHERE id = ?2",
+            rusqlite::params![dead_pid, sid],
+        )
+        .unwrap();
+
+    v.run_monitor().unwrap();
+
+    let status: String = v
+        .connection()
+        .query_row(
+            "SELECT status FROM observation_sessions WHERE id = ?1",
+            [&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "interrupted", "an orphaned session must be swept");
+}
+
+#[test]
 fn observe_injected_resolves_reference_to_the_root_credentials_version() {
     // Regression (PR #13): observe_injected read value_version from the injected
     // row. For a reference credential that is always the schema default 1, even
@@ -524,7 +569,9 @@ fn observe_injected_resolves_reference_to_the_root_credentials_version() {
         )
         .unwrap();
 
-    let injected = v.observe_injected(&[reference.id.clone()]).unwrap();
+    let injected = v
+        .observe_injected(std::slice::from_ref(&reference.id))
+        .unwrap();
     assert_eq!(injected.len(), 1);
     // Resolved to the root credential and its live version, not the reference's.
     assert_eq!(injected[0].credential_id, root.id);

@@ -557,9 +557,18 @@ pub fn delete_session(conn: &Connection, session_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Close any `running` session whose recording process is definitively gone,
-/// marking it interrupted with `launcher_gone`. Reuses the POSIX `ps -p`
-/// liveness convention (exit code exactly 1 = no such process). Unix only.
+/// Close any `running` observation session whose recorded process is
+/// definitively gone, marking it interrupted with `launcher_gone`.
+///
+/// The stored pid is the monitored child's ([`set_session_runtime`], called
+/// from the run orchestrator). A normal child exit finalizes the session to
+/// `completed`, so a session still `running` whose child is gone was never
+/// finalized — the launcher (CLI/desktop) crashed, was SIGKILLed, or the host
+/// rebooted mid-run. Reuses the POSIX `ps -p` liveness convention (exit code
+/// exactly 1 = no such process); any other outcome proves nothing and never
+/// closes a live session (pid reuse therefore fails safe: it keeps the session
+/// open rather than closing a live one). Unix only. Must be CALLED periodically
+/// (wired into `run_monitor`) or orphans persist forever.
 pub fn sweep_orphaned_sessions(conn: &Connection) -> Result<usize> {
     #[cfg(unix)]
     {
@@ -573,12 +582,7 @@ pub fn sweep_orphaned_sessions(conn: &Connection) -> Result<usize> {
             if pid <= 0 {
                 continue;
             }
-            let probe = std::process::Command::new("ps")
-                .args(["-p", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if matches!(probe, Ok(s) if s.code() == Some(1)) {
+            if pid_is_definitely_gone(pid) {
                 interrupt_session(conn, &id, "launcher_gone")?;
                 closed += 1;
             }
@@ -590,6 +594,32 @@ pub fn sweep_orphaned_sessions(conn: &Connection) -> Result<usize> {
         let _ = conn;
         Ok(0)
     }
+}
+
+/// True only if `pid` is DEFINITIVELY not a live process. Fail-safe: anything
+/// uncertain returns false (keep the session open) so a live session is never
+/// wrongly closed.
+#[cfg(target_os = "linux")]
+fn pid_is_definitely_gone(pid: i64) -> bool {
+    // Absence of /proc/<pid> is authoritative and needs no `ps`, so this is
+    // robust on BusyBox/Alpine where `ps -p` is unsupported and exits 1 (which
+    // the ps-based convention would misread as "gone", closing live sessions).
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn pid_is_definitely_gone(pid: i64) -> bool {
+    // macOS/BSD have no /proc: use `ps -p`, where exit code EXACTLY 1 means "no
+    // such process". Any other outcome (including a `ps` that doesn't support
+    // the flag) proves nothing and must not close a live session.
+    matches!(
+        std::process::Command::new("ps")
+            .args(["-p", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+        Ok(s) if s.code() == Some(1)
+    )
 }
 
 // --- Attribution rollup ----------------------------------------------------

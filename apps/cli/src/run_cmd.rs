@@ -72,7 +72,7 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
     }
 
     let (vault, _token) = ctx.unlocked()?;
-    let command_label = args.command.join(" ");
+    let command_label = api_tracker_core::runtime::sanitize::redact_command(&args.command);
     let (env, session, grant_limits) = match &args.grant {
         Some(grant_id) => {
             if !args.credentials.is_empty() {
@@ -190,7 +190,7 @@ fn run_observed(
         .expect("clap enforces project|grant, and grant is barred above");
 
     let (vault, _token) = ctx.unlocked()?;
-    let command_label = args.command.join(" ");
+    let command_label = api_tracker_core::runtime::sanitize::redact_command(&args.command);
 
     // Build the credential injection through the vetted path (this decrypts
     // only the mapped/explicit credentials and creates a process-session row,
