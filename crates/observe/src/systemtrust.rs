@@ -30,6 +30,10 @@ pub enum SystemTrustState {
     Unsupported,
 }
 
+// Only the macOS install path writes a temp cert; gating this with the same
+// cfg as its caller keeps it from being dead code on Linux/Windows (a
+// `-D dead-code` clippy failure that a macOS-only local build never sees).
+#[cfg(target_os = "macos")]
 fn write_temp_cert(dir: &Path, pem: &str) -> Result<std::path::PathBuf> {
     use std::io::Write;
     let path = dir.join(".api-tracker-tmp-systemtrust-ca.pem");
