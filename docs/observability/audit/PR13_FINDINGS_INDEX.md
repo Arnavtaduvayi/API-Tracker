@@ -114,3 +114,21 @@ See `PR13_REMEDIATION_PLAN.md` for the commit-by-commit remediation,
 `PR13_SOURCE_REVIEW_LEDGER.md` for per-finding verification notes,
 `PR13_TEST_COVERAGE_GAPS.md` for remaining gaps, and
 `PR13_THREAT_MODEL_DELTA.md` for the security-posture change.
+
+---
+
+## Addendum — 2026-07-24: H12 vault-lock now code-fixed (supersedes its earlier "FIXED (docs) + RESIDUAL" disposition)
+
+H12 ("vault lock does not stop an active observation session") was originally
+dispositioned as a documented residual (docs corrected honestly; a lock hook
+tracked as follow-up). It is now **implemented** and regression-tested. See
+`PR13_VAULT_LOCK_COMPLETION.md` (design), `PR13_VAULT_LOCK_REAUDIT.md`
+(independent re-audit), and `PR13_VAULT_LOCK_FINAL_VERDICT.md` (verdict). In
+brief: `run_monitored` now watches the vault lock state on a bounded poll loop
+and, on a manual lock (session-file deleted → `vault_locked`) or auto-lock
+(session-file expiry / inline-password TTL → `auto_lock`), shuts the proxy down
+first (stopping all decryption + invalidating the token), terminates the child
+via the verified-identity path, drops the CA + temp trust files, and marks the
+session interrupted. Coverage: `crates/observe/tests/lock_lifecycle.rs`,
+`core::session::peek_state` and `LockPolicy` unit tests, and the observe test
+suite is now run in CI (Linux job).

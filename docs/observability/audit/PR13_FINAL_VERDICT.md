@@ -58,3 +58,17 @@ and in the docs, not obscured.
 PR #13 is marked **ready for review** (not merged). It must NOT be merged until
 the public-release follow-ups above are addressed or explicitly accepted by a
 maintainer.
+
+---
+
+## Addendum — 2026-07-24: vault-lock follow-up now implemented
+
+The first "Required before PUBLIC release" item above (vault-lock / auto-lock
+interruption of a live `run --observe`, RO-13) has since been **implemented and
+regression-tested**, not merely documented. See `PR13_VAULT_LOCK_COMPLETION.md`,
+`PR13_VAULT_LOCK_REAUDIT.md`, and `PR13_VAULT_LOCK_FINAL_VERDICT.md` for the
+design, independent re-audit, and verdict. The remaining public-release
+follow-ups (automated per-runtime interception integration tests; a negative
+upstream-TLS test; extending the canary to raw DB/stderr/temp-file bytes —
+partially addressed by the new `raw_database_and_wal_never_contain_*` core test;
+desktop end-to-end packaged runs) still stand.

@@ -113,10 +113,11 @@ Key facts about this CA:
   ciphertext encrypted under your vault key (the ciphertext is
   cryptographically bound to the CA certificate, so a tampered certificate
   fails to decrypt), is never written to disk in plaintext, and is dropped and
-  zeroized from memory when the monitored **session** ends. Note: while a
-  `run --observe` is active the reconstituted signing key stays in that run
-  process's memory for the child's lifetime; locking the vault does not end an
-  already-running session.
+  zeroized from memory when the monitored session ends — including when you
+  **lock the vault** or it auto-locks mid-run, which now tears the run down (the
+  proxy stops, the CA key and leaf cache are cleared, and the monitored process
+  is terminated). So the reconstituted signing key's in-memory window ends at
+  the earliest of: the child exiting, a manual lock, or the auto-lock timeout.
 - Upstream server certificates are **always fully verified** against the
   standard public root store, with hostname checking. A failed upstream
   verification is surfaced as an error to your application — never silently
@@ -383,20 +384,32 @@ tables directly.)
 **Session shows "interrupted"**
 
 - Interruption is a distinct, honestly reported state with a reason:
-  `trust_setup_failed` (scoped trust could not be prepared),
-  `child_spawn_failed` (the command could not be launched), or `launcher_gone`
-  (the launching process disappeared and the orphaned session was later swept
-  by the monitor). Interrupted sessions are never silently relabeled as
-  completed.
+  `vault_locked` (the vault was manually locked mid-run), `auto_lock` (the
+  vault's auto-lock timeout elapsed mid-run), `trust_setup_failed` (scoped trust
+  could not be prepared), `child_spawn_failed` (the command could not be
+  launched), or `launcher_gone` (the launching process disappeared and the
+  orphaned session was later swept by the monitor). Interrupted sessions are
+  never silently relabeled as completed.
 
 **Locking the vault during a run**
 
-- Important: locking the vault (or auto-lock) does **not** stop an already-
-  running `run --observe`. That run holds its own copy of the vault key and the
-  CA signing key in memory for the lifetime of the monitored child, and keeps
-  observing until the child exits. If you need the CA-key exposure window to
-  end, stop the monitored process. (Cross-process lock interruption of a live
-  run is not implemented in this version — see the threat model.)
+- Locking the vault (`api-tracker lock`) or an auto-lock timeout **stops** an
+  active `run --observe`: within a moment the observation proxy is shut down
+  (no further HTTPS is decrypted, the per-session token is invalidated, the
+  leaf-certificate cache and CA signing key are cleared), the monitored process
+  is terminated, the temporary trust files are removed, and the session is
+  recorded as **interrupted** (reason `vault_locked` for a manual lock,
+  `auto_lock` for a timeout) — never silently completed.
+- A run started under a session token (`API_TRACKER_SESSION`) follows exactly
+  the lock behavior of that session: `api-tracker lock` (which deletes the
+  session file) ends it, and the vault's auto-lock timeout ends it. A run
+  started with an inline password (no session) is bounded by the vault's
+  auto-lock interval from when the run started.
+- Unlocking afterwards does not resurrect the old run — start a new one. The
+  monitored program's direct child is terminated with a verified-identity check
+  (it never signals a reused PID); descendant *processes* it spawned are not
+  tree-killed (a documented limitation), but because the proxy is already down
+  they cannot have their traffic decrypted.
 
 ## Uninstalling: cleanup checklist
 

@@ -90,11 +90,13 @@ itself. A panic records a compatibility result, marks the session
 half-open connection that appears verified.
 
 `observe::session::run_monitored` orchestrates lifecycle: ensure CA → open
-session → start proxy + writer → launch child → `child.wait()` → teardown
-(stop listener, force-close client sockets, join the writer, drop + zeroize the
-CA, delete temp trust files) → attribute/aggregate/finish. There is NO
-`on_lock()` hook (locking the vault does not interrupt a running run — RO-13).
-A completed run finalizes `completed`; a pre-launch failure or a crashed
+session → start proxy + writer → launch child → **interruptible wait loop**
+(poll `child.try_wait()` + `LockPolicy::lock_signal` each ~250 ms) → teardown
+(proxy shutdown FIRST → verified child termination on a lock → join the writer,
+drop + zeroize the CA, delete temp trust files) → attribute/aggregate/finalize.
+The vault-lock interrupt is the poll loop, not an `on_lock()` callback (RO-13).
+A completed run finalizes `completed`; a lock finalizes `interrupted`
+(`vault_locked` / `auto_lock`); a pre-launch failure or a crashed
 launcher yields `interrupted` with a machine-readable reason
 (`trust_setup_failed` / `child_spawn_failed` / `launcher_gone`), never a silent
 `completed`.
@@ -167,13 +169,18 @@ private key.
 Cached in a bounded LRU of 256 entries; leaf keys are zeroized on eviction and
 on lock/shutdown.
 
-**Vault lock (RO-13).** NOT implemented in this version: there is no
-`session::on_lock()` and no `vault_locked` interrupt. A `run --observe` process
-holds the vault key and the reconstituted CA signing key in memory and keeps
-decrypting until the child exits; locking the vault from another process does
-not interrupt it. `tests/vault_lock.rs` does not exist. Implementing a
-lock/auto-lock hook (shut the proxy, drop the CA, interrupt with
-`reason = vault_locked`) is required follow-up before public release.
+**Vault lock (RO-13).** Implemented via an in-process lock watch rather than a
+cross-process hook (the CLI `run` process owns the live proxy + CA, so it
+enforces the lock itself). `run_monitored` polls `LockPolicy::lock_signal` while
+waiting on the child: a deleted session file → `vault_locked`; an expired
+session file or the inline-password auto-lock TTL → `auto_lock`. On a signal it
+shuts the proxy FIRST (stops decryption, invalidates the token), terminates the
+child via `inject::terminate_verified`, drops the CA + temp files, and marks the
+session interrupted. Portable state check lives in `core::session::peek_state`
+(unit-tested on Linux+Windows CI); the end-to-end lifecycle is
+`crates/observe/tests/lock_lifecycle.rs` (Unix; wired into the Linux CI job).
+There is no `session::on_lock()` symbol — the mechanism is the poll loop, not a
+callback.
 
 **Rotation, removal, orphans.** `observe cert status` reports
 present/absent, fingerprint, dates, and the system-trust state THIS VAULT
@@ -526,11 +533,12 @@ Run down this list for any change touching `crates/observe` or
 - [ ] **No verification-disabling env vars** set on the child, ever, enforced
   by `no_insecure_verifier.rs`, and the absence test covers any new variable
   the change introduces. (§10 of the architecture)
-- [ ] **Vault-lock teardown (NOT yet implemented).** Target: after lock, the
-  listener refuses new connections, CA key and leaf cache are zeroized, session
-  is `interrupted / vault_locked`, no events timestamped after the lock. Today
-  a running `run --observe` is NOT interrupted by a lock; there is no
-  `vault_lock.rs`. (RO-13 — required follow-up before release)
+- [ ] **Vault-lock teardown (implemented).** On a manual lock / auto-lock the
+  proxy is shut down (listener stops, token invalidated, connections closed, CA
+  key + leaf cache cleared), the monitored child is terminated (verified), and
+  the session is `interrupted / vault_locked` (or `auto_lock`). Covered by
+  `crates/observe/tests/lock_lifecycle.rs` and the `core::session::peek_state` /
+  `LockPolicy` unit tests. (RO-13)
 - [ ] **CA key containment.** Key exists only as vault-key AEAD ciphertext
   (AAD `api-tracker:v1:observe-ca-key:{vault_id}`) at rest and `SecretBytes`
   in memory; not in any DTO, IPC payload, CLI output, or backup plaintext.

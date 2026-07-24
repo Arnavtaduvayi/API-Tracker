@@ -254,14 +254,20 @@ See `RUNTIME_OBSERVABILITY_THREAT_MODEL.md` §T1 for the threat analysis.
 - Leaf keys are generated per hostname, live only in the bounded cache, and
   are zeroized when evicted or on lock/shutdown.
 
-Vault lock during an active run: **not implemented in this version.** There is
-no `session::on_lock()` hook. A `run --observe` process holds its own copy of
-the vault key and the reconstituted CA signing key in memory and keeps
-minting leaves / decrypting the child's TLS until the child exits; only then
-are the CA dropped, the leaf cache cleared, and keys zeroized. Locking the vault
-from another process does not interrupt that run. A lock/auto-lock hook that
-shuts the proxy down and interrupts the session (`reason = vault_locked`) is
-required follow-up before public release (see THREAT_MODEL RO-13).
+Vault lock during an active run: **implemented.** The CLI `run` process — the
+sole owner of the live proxy + CA key — enforces the lock itself, so no
+cross-process signalling is needed. `run_monitored` replaces its blocking
+`child.wait()` with a bounded poll loop driven by a `LockPolicy`: each ~250 ms
+tick it checks `child.try_wait()` and whether the vault should be considered
+locked (session file deleted → `vault_locked`; session file expired or the
+inline-password auto-lock TTL elapsed → `auto_lock`). On a lock signal it runs
+one teardown, `proxy.shutdown()` FIRST (force-closes connections, invalidates
+the token, stops decryption), then verified child termination
+(`inject::terminate_verified`), then drops the CA (leaf cache cleared, key
+zeroized), deletes temp trust files, and marks the session `interrupted`
+(compare-and-set, idempotent). See THREAT_MODEL RO-13 and
+`crates/observe/tests/lock_lifecycle.rs`. Descendant process trees are not
+killed (PI-03), which is safe because decryption already stopped.
 
 ## 10. Scoped trust (Mode B) — no system changes
 

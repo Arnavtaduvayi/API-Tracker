@@ -617,45 +617,45 @@ Pass/fail: ☐
 
 ### Lifecycle and teardown
 
-#### OBS-16 — locking the vault does NOT stop an already-running observed run
+#### OBS-16 — locking the vault STOPS an already-running observed run
 
-> NOTE (current behaviour): a lock/auto-lock does **not** interrupt an active
-> `run --observe`. That run holds its own copy of the vault key and the
-> reconstituted CA signing key in memory and keeps observing until the child
-> exits. There is no `on_lock` hook and no `vault_locked` interrupt reason in
-> the shipped code (see THREAT_MODEL RO-13 — a lock-teardown hook is required
-> follow-up before public release). This test verifies that HONEST behaviour,
-> not a teardown that does not exist.
+> NOTE: observed runs are CLI-only (the desktop app does not launch them), so a
+> manual lock is exercised with `api-tracker lock` in a second terminal. The
+> run must inherit the lock behavior of the session it was started under, so
+> start it under a session token (`api-tracker unlock` → export
+> `API_TRACKER_SESSION`). `api-tracker lock` deletes the session file, which the
+> run detects and tears itself down.
 
 ```text
-Mode: Manual UI + CLI
-Requirement: a lock during an active observed run does NOT tear down
-  interception; the run continues until the child exits and finalizes normally.
-  (A lock-teardown control is not implemented in this version.)
-Starting state: app unlocked; servers running
-Prerequisites: two terminals
-Exact navigation: top bar → Lock vault (while the run is active); then unlock
-  and open API activity → Sessions
-Exact buttons to click: Lock vault; Unlock
-Exact fields to fill: Master password (on unlock)
+Mode: Manual CLI
+Requirement: a manual lock during an active observed run tears interception
+  down (proxy stops, token invalidated, CA/leaf cache cleared, child
+  terminated) and marks the session interrupted with reason vault_locked;
+  decryption does not continue past the lock.
+Starting state: vault unlocked via `api-tracker unlock`, API_TRACKER_SESSION
+  exported; a local synthetic HTTPS server running
+Prerequisites: two terminals sharing API_TRACKER_SESSION
 Exact test values: in terminal 1 start a long observed loop:
   api-tracker run --project obs-app --observe=metadata -- sh -c \
-    'while true; do curl -s --max-time 5 http://127.0.0.1:8484/v1/tick \
+    'while true; do curl -s --max-time 5 https://127.0.0.1:8443/v1/tick \
        >/dev/null; sleep 1; done'
-  then lock the vault from the desktop app while it loops
-Expected visible result: the loop keeps making SUCCESSFUL observed requests
-  after the lock (interception continues); locking the vault does not interrupt
-  it. When you Ctrl-C the loop (or the child exits), the session finalizes as
-  "completed", not "interrupted/vault_locked".
-Expected persisted result: events recorded during the run remain; the session
-  is "completed" after the child exits.
+  confirm metadata appears (`api-tracker observe sessions`), then in terminal 2:
+  api-tracker lock
+Expected visible result: within ~1 second of `api-tracker lock`, terminal 1
+  prints "Monitored session <id> INTERRUPTED — the vault was locked: the
+  observation proxy was shut down and the monitored process was terminated" and
+  exits non-zero (125). The curl loop stops (its proxy is gone / it was killed).
+Expected persisted result: `api-tracker observe show <id>` shows status
+  "interrupted", reason "vault_locked"; events recorded before the lock remain;
+  the session is NOT relabeled "completed".
 Expected audit/alert result: —
-Expected security behavior: the CA signing key remains in the run process's
-  memory for the child's lifetime regardless of the lock — to end that exposure
-  window, stop the monitored process. Confirm a fresh observed run still works
-  after unlocking.
-Cleanup: Ctrl-C the loop; unlock the vault
-Screenshot checkpoint: the completed session after the child exits
+Expected security behavior: after the lock, no new request is decrypted or
+  recorded (compare `observe show` request count before vs after). Unlock and
+  confirm the OLD run does not resume and a fresh `run --observe` works
+  normally. (Auto-lock variant: instead of `api-tracker lock`, wait out the
+  vault's auto-lock interval; the run interrupts with reason "auto_lock".)
+Cleanup: unset API_TRACKER_SESSION; unlock as needed
+Screenshot checkpoint: the interrupted session with reason vault_locked
 Pass/fail: ☐
 ```
 

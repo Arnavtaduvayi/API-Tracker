@@ -231,21 +231,42 @@ closed on unwind.
 
 ## RO-13 — Vault lock during an active session
 
-**Current behaviour (honest).** Locking or auto-locking the vault does **not**
-interrupt an already-running `run --observe`. That run process holds its own
-copy of the vault key and the reconstituted CA signing key in memory and keeps
-terminating/observing the child's TLS until the child exits; only then are the
-CA dropped and the key zeroized. `api-tracker lock` in another shell merely
-deletes the session file and cannot reach the separate run process. There is no
-`session::on_lock()` hook and no `vault_locked` interrupt reason in production
-(cross-process interruption of a live run is not implemented in this version).
+**Mitigated (implemented).** Locking or auto-locking the vault now **interrupts**
+an active `run --observe`. Because the process that owns the live proxy + CA key
+is the CLI `run` process itself, that process watches the lock state and tears
+itself down — no cross-process signalling is needed (fully portable: no signals,
+no `/proc`, no pidfd). Concretely, `run_monitored` replaces its blocking
+`child.wait()` with a bounded poll loop (`LockPolicy`) that, on each tick,
+checks whether the child exited **and** whether the vault should be considered
+locked:
 
-Residual exposure: the CA-key-in-memory window equals the monitored child's
-lifetime regardless of lock. To end it, stop the monitored process. Implementing
-a lock/auto-lock hook that shuts the proxy down, drops the CA, and interrupts
-the session (`reason = vault_locked`) is tracked as required follow-up before
-public release. The CA private key is a per-vault local-observation CA (not a
-credential value), and Mode C system trust is off by default.
+- under a session token, it watches the session file — deleted (`api-tracker
+  lock`) → `vault_locked`; past its recorded expiry → `auto_lock`;
+- with an inline password, it enforces the vault's auto-lock TTL as a hard
+  wall-clock cap from run start → `auto_lock`.
+
+On a lock signal it runs one teardown, security-critical step FIRST:
+`proxy.shutdown()` force-closes in-flight client sockets, stops the listener,
+releases the ephemeral port, and invalidates the per-session token — **no
+further traffic is decrypted after it returns**. It then terminates the
+monitored child via the verified-identity path (`inject::terminate_verified` —
+refuses on PID reuse), drops the `CertAuthority` (clears the leaf cache,
+releases/zeroizes the CA signing key), deletes the temp trust files, and records
+the session `interrupted` with `vault_locked` / `auto_lock` (compare-and-set on
+`status='running'`, so idempotent and never overwriting a terminal state).
+Unlocking does not resurrect the run.
+
+Residual exposure now bounded: the CA-key-in-memory window ends at the earliest
+of child exit, manual lock, or the auto-lock timeout (± one ~250 ms poll tick).
+Two documented limitations remain: (1) descendant processes the child spawned
+are not tree-killed (pre-existing PI-03), which is safe because decryption
+already stopped when the proxy shut down; (2) if the `run` launcher process is
+itself SIGKILLed before teardown, its threads die with it (proxy gone, port
+released) and the orphan-session sweep reconciles the DB row to `launcher_gone`.
+Covered by `crates/observe/tests/lock_lifecycle.rs` and the `LockPolicy` /
+`session::peek_state` unit tests. The CA private key is a per-vault
+local-observation CA (not a credential value); Mode C system trust is off by
+default.
 
 ## RO-14 — Stale sessions, port reuse, PID reuse
 
