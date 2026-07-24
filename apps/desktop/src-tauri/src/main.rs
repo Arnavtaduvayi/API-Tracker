@@ -2128,74 +2128,130 @@ fn observe_services(state: State<'_, AppState>) -> CmdResult<Vec<obs_model::Obse
 }
 
 #[tauri::command]
-fn observe_service(state: State<'_, AppState>, id: String) -> CmdResult<obs_model::ObservedServiceRow> {
+fn observe_service(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<obs_model::ObservedServiceRow> {
     with_vault(&state, |vault| vault.observe_service(&id))
 }
 
 #[tauri::command]
-fn observe_service_metrics(state: State<'_, AppState>, id: String) -> CmdResult<aggregate::Metrics> {
-    with_vault(&state, |vault| aggregate::service_metrics(vault.connection(), &id, None))
+fn observe_service_metrics(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<aggregate::Metrics> {
+    with_vault(&state, |vault| {
+        aggregate::service_metrics(vault.connection(), &id, None)
+    })
 }
 
 #[tauri::command]
-fn observe_service_endpoints(state: State<'_, AppState>, id: String) -> CmdResult<Vec<obs_model::ObservedEndpointRow>> {
+fn observe_service_endpoints(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<obs_model::ObservedEndpointRow>> {
     with_vault(&state, |vault| vault.observe_service_endpoints(&id))
 }
 
 #[tauri::command]
-fn observe_service_events(state: State<'_, AppState>, id: String, limit: u32) -> CmdResult<Vec<obs_model::RuntimeEventRow>> {
+fn observe_service_events(
+    state: State<'_, AppState>,
+    id: String,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::RuntimeEventRow>> {
     with_vault(&state, |vault| vault.observe_service_events(&id, limit))
 }
 
 #[tauri::command]
-fn observe_sessions(state: State<'_, AppState>, project: Option<String>, limit: u32) -> CmdResult<Vec<obs_model::ObservationSessionRow>> {
-    with_vault(&state, |vault| vault.observe_sessions(project.as_deref(), limit))
+fn observe_sessions(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::ObservationSessionRow>> {
+    with_vault(&state, |vault| {
+        vault.observe_sessions(project.as_deref(), limit)
+    })
 }
 
 #[tauri::command]
-fn observe_session(state: State<'_, AppState>, id: String) -> CmdResult<obs_model::ObservationSessionRow> {
+fn observe_session(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<obs_model::ObservationSessionRow> {
     with_vault(&state, |vault| vault.observe_session(&id))
 }
 
 #[tauri::command]
-fn observe_session_metrics(state: State<'_, AppState>, id: String) -> CmdResult<aggregate::Metrics> {
-    with_vault(&state, |vault| aggregate::session_metrics(vault.connection(), &vault.observe_session(&id)?.id))
+fn observe_session_metrics(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<aggregate::Metrics> {
+    with_vault(&state, |vault| {
+        aggregate::session_metrics(vault.connection(), &vault.observe_session(&id)?.id)
+    })
 }
 
 #[tauri::command]
-fn observe_session_events(state: State<'_, AppState>, id: String, limit: u32) -> CmdResult<Vec<obs_model::RuntimeEventRow>> {
+fn observe_session_events(
+    state: State<'_, AppState>,
+    id: String,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::RuntimeEventRow>> {
     with_vault(&state, |vault| vault.observe_session_events(&id, limit))
 }
 
 #[tauri::command]
-fn observe_session_attributions(state: State<'_, AppState>, id: String) -> CmdResult<Vec<obs_model::CredentialAttributionRow>> {
+fn observe_session_attributions(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<obs_model::CredentialAttributionRow>> {
     with_vault(&state, |vault| vault.observe_session_attributions(&id))
 }
 
 #[tauri::command]
-fn observe_session_compat(state: State<'_, AppState>, id: String) -> CmdResult<Vec<obs_model::CompatibilityResultRow>> {
+fn observe_session_compat(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<obs_model::CompatibilityResultRow>> {
     with_vault(&state, |vault| vault.observe_session_compat(&id))
 }
 
 #[tauri::command]
-fn observe_credential_activity(state: State<'_, AppState>, selector: String, limit: u32) -> CmdResult<Vec<obs_model::CredentialAttributionRow>> {
-    with_vault(&state, |vault| vault.observe_credential_activity(&selector, limit))
+fn observe_credential_activity(
+    state: State<'_, AppState>,
+    selector: String,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::CredentialAttributionRow>> {
+    with_vault(&state, |vault| {
+        vault.observe_credential_activity(&selector, limit)
+    })
 }
 
 #[tauri::command]
-fn observe_cert_status(state: State<'_, AppState>) -> CmdResult<api_tracker_core::runtime::store::CertStatus> {
+fn observe_cert_status(
+    state: State<'_, AppState>,
+) -> CmdResult<api_tracker_core::runtime::store::CertStatus> {
     with_vault(&state, |vault| vault.observe_ca_status())
 }
 
 /// Rotate the local CA. Reauthenticated in core (the CA removal verifies the
 /// master password); generation happens in the observe crate.
 #[tauri::command]
-fn observe_cert_rotate(state: State<'_, AppState>, password: String) -> CmdResult<api_tracker_core::runtime::store::CertStatus> {
+fn observe_cert_rotate(
+    state: State<'_, AppState>,
+    password: String,
+) -> CmdResult<api_tracker_core::runtime::store::CertStatus> {
     let password = SecretString::new(password);
     with_vault(&state, |vault| {
         vault.observe_ca_remove(&password)?;
         let g = api_tracker_observe::ca::generate_ca(vault.vault_id())?;
-        vault.observe_ca_store(&g.cert_pem, &g.key_der, &g.fingerprint_sha256, &g.serial_hex, &g.not_after)?;
+        vault.observe_ca_store(
+            &g.cert_pem,
+            &g.key_der,
+            &g.fingerprint_sha256,
+            &g.serial_hex,
+            &g.not_after,
+        )?;
         vault.observe_ca_status()
     })
 }
@@ -2218,7 +2274,8 @@ fn observe_cert_install_system(state: State<'_, AppState>, password: String) -> 
             .ok_or_else(|| CoreError::InvalidInput("no local CA yet".into()))?;
         let dir = vault.paths().data_dir.clone();
         api_tracker_observe::systemtrust::install(&dir, &pem)?;
-        vault.observe_ca_set_system_trust("installed", Some(&api_tracker_core::clock::now_rfc3339()))
+        vault
+            .observe_ca_set_system_trust("installed", Some(&api_tracker_core::clock::now_rfc3339()))
     })
 }
 
@@ -2231,7 +2288,9 @@ fn observe_cert_uninstall_system(state: State<'_, AppState>) -> CmdResult<()> {
 }
 
 #[tauri::command]
-fn observe_settings_get(state: State<'_, AppState>) -> CmdResult<api_tracker_core::runtime::settings::ObservabilitySettings> {
+fn observe_settings_get(
+    state: State<'_, AppState>,
+) -> CmdResult<api_tracker_core::runtime::settings::ObservabilitySettings> {
     with_vault(&state, |vault| vault.observe_settings())
 }
 
@@ -2259,7 +2318,9 @@ fn observe_settings_set(
 }
 
 #[tauri::command]
-fn observe_diagnostics(state: State<'_, AppState>) -> CmdResult<Vec<api_tracker_observe::diagnostics::Check>> {
+fn observe_diagnostics(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_observe::diagnostics::Check>> {
     with_vault(&state, |vault| {
         let present = vault.observe_ca_status()?.present;
         Ok(api_tracker_observe::diagnostics::run(present))
@@ -2279,18 +2340,36 @@ fn observe_delete_all(state: State<'_, AppState>, password: String) -> CmdResult
 }
 
 #[tauri::command]
-fn observe_allowlist(state: State<'_, AppState>, project: String) -> CmdResult<Vec<(String, u16, String)>> {
+fn observe_allowlist(
+    state: State<'_, AppState>,
+    project: String,
+) -> CmdResult<Vec<(String, u16, String)>> {
     with_vault(&state, |vault| vault.observe_allowlist(&project))
 }
 
 #[tauri::command]
-fn observe_allowlist_add(state: State<'_, AppState>, project: String, host: String, port: u16, note: String) -> CmdResult<()> {
-    with_vault(&state, |vault| vault.observe_allowlist_add(&project, &host, port, &note))
+fn observe_allowlist_add(
+    state: State<'_, AppState>,
+    project: String,
+    host: String,
+    port: u16,
+    note: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.observe_allowlist_add(&project, &host, port, &note)
+    })
 }
 
 #[tauri::command]
-fn observe_allowlist_remove(state: State<'_, AppState>, project: String, host: String, port: u16) -> CmdResult<bool> {
-    with_vault(&state, |vault| vault.observe_allowlist_remove(&project, &host, port))
+fn observe_allowlist_remove(
+    state: State<'_, AppState>,
+    project: String,
+    host: String,
+    port: u16,
+) -> CmdResult<bool> {
+    with_vault(&state, |vault| {
+        vault.observe_allowlist_remove(&project, &host, port)
+    })
 }
 
 fn main() {
