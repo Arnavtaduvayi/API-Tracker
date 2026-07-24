@@ -4,6 +4,7 @@ use crate::ctx::{self, Ctx};
 use crate::render;
 use anyhow::{bail, Result};
 use api_tracker_core::db;
+use api_tracker_core::envcompat;
 use api_tracker_core::session::{self, SessionToken};
 use api_tracker_core::settings::VaultSettings;
 use api_tracker_core::vault::{self};
@@ -33,14 +34,17 @@ pub fn init(ctx: &Ctx) -> Result<()> {
     println!("Important recovery information:");
     println!("  - The master password is NOT stored anywhere and cannot be recovered.");
     println!("  - If you lose it, the vault contents are unrecoverable by design.");
-    println!("  - Create encrypted backups regularly: `api-tracker backup create <path>`.");
+    println!("  - Create encrypted backups regularly: `tethra backup create <path>`.");
     drop(vault);
     Ok(())
 }
 
 #[derive(Args)]
 pub struct UnlockArgs {
-    /// Print only the `export API_TRACKER_SESSION=...` line (for eval).
+    /// Print only the session export lines (for eval). Both the preferred
+    /// `TETHRA_SESSION` and the legacy `API_TRACKER_SESSION` line are
+    /// printed — legacy first, so scripts that parse the legacy line keep
+    /// working — and `eval` leaves both variables set to the same token.
     #[arg(long)]
     pub print_export: bool,
 }
@@ -52,7 +56,7 @@ pub fn unlock(ctx: &Ctx, args: UnlockArgs) -> Result<()> {
     vault.save_session(&token)?;
     let auto_lock = vault.settings().auto_lock_minutes;
     if args.print_export {
-        println!("export {}=\"{}\"", ctx::ENV_SESSION, token.encode());
+        print_session_exports(&token);
     } else {
         eprintln!("Vault unlocked.");
         if auto_lock > 0 {
@@ -62,9 +66,25 @@ pub fn unlock(ctx: &Ctx, args: UnlockArgs) -> Result<()> {
         }
         eprintln!();
         eprintln!("Run this in your shell to use the session:");
-        println!("export {}=\"{}\"", ctx::ENV_SESSION, token.encode());
+        print_session_exports(&token);
     }
     Ok(())
+}
+
+/// The legacy line prints first so old scripts that parse
+/// `export API_TRACKER_SESSION="..."` still find it; both variables carry
+/// the same token, so precedence never matters after an `eval`.
+fn print_session_exports(token: &SessionToken) {
+    println!(
+        "export {}=\"{}\"",
+        envcompat::legacy_name(ctx::ENV_SESSION),
+        token.encode()
+    );
+    println!(
+        "export {}=\"{}\"",
+        envcompat::preferred_name(ctx::ENV_SESSION),
+        token.encode()
+    );
 }
 
 pub fn lock(ctx: &Ctx) -> Result<()> {
@@ -75,9 +95,9 @@ pub fn lock(ctx: &Ctx) -> Result<()> {
         println!("No active session; the vault was already locked.");
     }
     println!(
-        "(If you exported {}, unset it: `unset {}`.)",
-        ctx::ENV_SESSION,
-        ctx::ENV_SESSION
+        "(If you exported {new} or {old}, unset them: `unset {new} {old}`.)",
+        new = envcompat::preferred_name(ctx::ENV_SESSION),
+        old = envcompat::legacy_name(ctx::ENV_SESSION)
     );
     Ok(())
 }
@@ -106,12 +126,12 @@ pub fn change_password(ctx: &Ctx) -> Result<()> {
         "Choose a new master password of at least {} characters.",
         vault::MIN_PASSWORD_LEN
     );
-    let new = ctx::new_password("new master password", "API_TRACKER_NEW_PASSWORD")?;
+    let new = ctx::new_password("new master password", "NEW_PASSWORD")?;
     vault.change_master_password(&current, &new)?;
     println!("Master password changed.");
     println!("  - Existing CLI sessions keep working until they expire.");
     println!("  - Backups made before this change still need the OLD password to restore.");
-    println!("  - Consider creating a fresh backup now: `api-tracker backup create <path>`.");
+    println!("  - Consider creating a fresh backup now: `tethra backup create <path>`.");
     Ok(())
 }
 
@@ -161,7 +181,7 @@ pub fn doctor(ctx: &Ctx) -> Result<()> {
     } else {
         report
             .warnings
-            .push("no vault found; run `api-tracker init`".to_owned());
+            .push("no vault found; run `tethra init`".to_owned());
     }
     if !cfg!(unix) {
         report.warnings.push(

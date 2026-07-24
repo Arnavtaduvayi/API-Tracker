@@ -20,6 +20,14 @@ predicates = "3.1.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 tempfile = "3.27.0"
 
+# Preferred command after the Tethra rename.
+[[bin]]
+name = "tethra"
+path = "src/main.rs"
+
+# Legacy compatibility entry point: byte-for-byte the same program, kept so
+# existing scripts, git hooks, and automation keep working. See
+# docs/rebrand/TETHRA_MIGRATION_GUIDE.md.
 [[bin]]
 name = "api-tracker"
 path = "src/main.rs"

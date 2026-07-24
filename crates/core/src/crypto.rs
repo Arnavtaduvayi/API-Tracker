@@ -43,12 +43,13 @@ impl KdfParams {
     /// Current recommended parameters: Argon2id, 64 MiB, 3 iterations,
     /// 1 lane (OWASP-recommended range for interactive logins).
     ///
-    /// Debug builds only: setting `API_TRACKER_INSECURE_FAST_KDF=1` switches
-    /// to deliberately weak parameters so the automated test suite stays
-    /// fast. Release builds ignore the variable entirely. Vaults always store
-    /// the parameters they were created with and unlock with those.
+    /// Debug builds only: setting `TETHRA_INSECURE_FAST_KDF=1` (or the
+    /// legacy `API_TRACKER_INSECURE_FAST_KDF=1`) switches to deliberately
+    /// weak parameters so the automated test suite stays fast. Release
+    /// builds ignore the variable entirely. Vaults always store the
+    /// parameters they were created with and unlock with those.
     pub fn recommended() -> Self {
-        if cfg!(debug_assertions) && std::env::var_os("API_TRACKER_INSECURE_FAST_KDF").is_some() {
+        if cfg!(debug_assertions) && crate::envcompat::is_set("INSECURE_FAST_KDF") {
             return Self {
                 algorithm: "argon2id".to_owned(),
                 m_cost_kib: 8,

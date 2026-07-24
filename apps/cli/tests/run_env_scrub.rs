@@ -77,8 +77,8 @@ fn injected_child_sees_mapped_credentials_but_no_api_tracker_auth_vars() {
     assert!(unlock.status.success());
     let export = String::from_utf8(unlock.stdout).unwrap();
     let session_token = export
-        .trim()
-        .strip_prefix("export API_TRACKER_SESSION=\"")
+        .lines()
+        .find_map(|l| l.strip_prefix("export API_TRACKER_SESSION=\""))
         .and_then(|s| s.strip_suffix('"'))
         .expect("unlock --print-export output shape")
         .to_owned();

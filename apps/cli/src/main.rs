@@ -1,4 +1,5 @@
-//! api-tracker: local-first encrypted API credential manager (CLI).
+//! tethra: local-first encrypted API credential manager (CLI).
+//! (Also installed as the legacy `api-tracker` compatibility binary.)
 //!
 //! Uses the same vault, database, and business rules as the desktop app via
 //! `api-tracker-core`. All output redacts credential values; the single
@@ -28,14 +29,15 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
-    name = "api-tracker",
+    name = "tethra",
     version,
     about = "Local-first encrypted vault for organizing API credentials across projects",
     propagate_version = true
 )]
 struct Cli {
     /// Vault data directory (defaults to the platform data dir; the
-    /// API_TRACKER_DIR environment variable also overrides it).
+    /// TETHRA_DIR environment variable — or the legacy API_TRACKER_DIR —
+    /// also overrides it).
     #[arg(long, global = true, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 

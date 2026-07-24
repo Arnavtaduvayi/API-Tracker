@@ -20,6 +20,7 @@ use crate::audit;
 use crate::clock;
 use crate::crypto::{self, aad, KdfParams};
 use crate::db;
+use crate::envcompat;
 use crate::error::{CoreError, Result};
 use crate::model::{mask_value, Credential, Environment, Project};
 use crate::reuse::{self, ReuseMatch, ReuseWarning};
@@ -75,16 +76,36 @@ impl VaultPaths {
 }
 
 /// Default shared data directory for the desktop app and CLI.
-/// `API_TRACKER_DIR` overrides it (used by tests and power users).
+/// `TETHRA_DIR` overrides it (legacy `API_TRACKER_DIR` still honored; used
+/// by tests and power users). The directory name stays `api-tracker` so
+/// vaults created before the Tethra rename are found unchanged.
 pub fn default_data_dir() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("API_TRACKER_DIR") {
+    if let (Some(new), Some(old)) = (
+        std::env::var_os("TETHRA_DIR"),
+        std::env::var_os("API_TRACKER_DIR"),
+    ) {
+        if new != old {
+            // Never silently combine conflicting locations: say which one
+            // wins, once per process. Paths only — no secret material.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "warning: TETHRA_DIR and API_TRACKER_DIR are both set and differ; \
+                     using TETHRA_DIR ({}) and ignoring API_TRACKER_DIR ({})",
+                    PathBuf::from(&new).display(),
+                    PathBuf::from(&old).display()
+                );
+            });
+        }
+    }
+    if let Some(dir) = envcompat::var_os("DIR") {
         return Ok(PathBuf::from(dir));
     }
     directories::ProjectDirs::from("", "", "api-tracker")
         .map(|dirs| dirs.data_dir().to_path_buf())
         .ok_or_else(|| {
             CoreError::InvalidInput(
-                "could not determine a data directory; set API_TRACKER_DIR".to_owned(),
+                "could not determine a data directory; set TETHRA_DIR".to_owned(),
             )
         })
 }
@@ -2155,7 +2176,7 @@ impl UnlockedVault {
                             report.repo_path
                         ),
                         detail: format!(
-                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `api-tracker scan {}` for details; detection is                              best-effort, never perfect. This alert stays open until an                              explicit remediation or a clean full re-scan.",
+                            "{} finding(s) in commits up to {} (background incremental                              scan). Run `tethra scan {}` for details; detection is                              best-effort, never perfect. This alert stays open until an                              explicit remediation or a clean full re-scan.",
                             report.findings, report.head_commit, report.repo_path
                         ),
                         evidence: format!(
@@ -5068,7 +5089,7 @@ impl UnlockedVault {
                                         info.rel_path
                                     ),
                                     recommendation:
-                                        "import it (`api-tracker env import`) and remove the \
+                                        "import it (`tethra env import`) and remove the \
                                          plaintext copy"
                                             .into(),
                                 });
@@ -5124,7 +5145,7 @@ impl UnlockedVault {
                                     mapping.credential_name, info.rel_path
                                 ),
                                 recommendation: "keep production values out of development \
-                                                 files; use `api-tracker run` instead"
+                                                 files; use `tethra run` instead"
                                     .into(),
                             });
                         }
@@ -5183,7 +5204,7 @@ impl UnlockedVault {
                         "mapping '{}' is not written in any .env file",
                         mapping.env_var
                     ),
-                    recommendation: "expected when the project runs via `api-tracker run` — \
+                    recommendation: "expected when the project runs via `tethra run` — \
                                      no action needed; otherwise export explicitly"
                         .into(),
                 });
@@ -5286,8 +5307,8 @@ impl UnlockedVault {
             )));
         }
         let mut doc = crate::envfile::EnvDocument::parse(
-            "# Written by `api-tracker env export`. This file contains PLAINTEXT secrets.\n\
-             # Prefer `api-tracker run`, which injects credentials without a file.\n",
+            "# Written by `tethra env export`. This file contains PLAINTEXT secrets.\n\
+             # Prefer `tethra run`, which injects credentials without a file.\n",
         );
         let mut var_names = Vec::new();
         for mapping in &selected {
@@ -5454,7 +5475,7 @@ impl UnlockedVault {
                                 dedup_key: format!("repo_scan_coverage_gap:{path}"),
                                 title: format!("repository scan coverage gap: {path}"),
                                 detail: format!(
-                                    "{detail} Run `api-tracker scan --reverify` for a full \
+                                    "{detail} Run `tethra scan --reverify` for a full \
                                      history re-scan."
                                 ),
                                 evidence: format!("last={last} head={head}"),
@@ -5786,7 +5807,7 @@ impl UnlockedVault {
             source: "api-tracker",
             kind: "test",
             severity: "info",
-            title: "API Tracker test notification",
+            title: "Tethra test notification",
             detail: "channel connectivity test — no alert condition exists",
             recommended_action: "none",
             observed_at: &now,
@@ -6332,7 +6353,7 @@ impl UnlockedVault {
                 environment: String::new(),
                 action: crate::syncplan::ACTION_NONE.into(),
                 status: crate::syncplan::STEP_PLANNED.into(),
-                detail: "`api-tracker run` always injects the current vault value".into(),
+                detail: "`tethra run` always injects the current vault value".into(),
                 validation: "not needed (resolved at injection time)".into(),
                 rollback_available: false,
                 executed_at: None,
@@ -8566,7 +8587,7 @@ impl UnlockedVault {
             expires_at: Some(expires.clone()),
             docs_url: String::new(),
             notes: format!(
-                "Test key created by API Tracker ({created_detail}). The expiration is a \
+                "Test key created by Tethra ({created_detail}). The expiration is a \
                  LOCAL reminder — this provider's keys stay valid until revoked."
             ),
         })?;

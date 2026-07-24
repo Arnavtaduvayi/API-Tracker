@@ -82,8 +82,9 @@ fn require_session(token: &Option<api_tracker_core::session::SessionToken>) -> R
     if token.is_none() {
         bail!(
             "this changes per-session project state, which requires an active session. \
-             Run `api-tracker unlock`, export API_TRACKER_SESSION, then retry \
-             (it does not work with API_TRACKER_PASSWORD alone)."
+             Run `tethra unlock`, export TETHRA_SESSION (legacy \
+             API_TRACKER_SESSION also works), then retry (it does not work \
+             with TETHRA_PASSWORD/API_TRACKER_PASSWORD alone)."
         );
     }
     Ok(())
@@ -114,9 +115,7 @@ pub fn run(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
             let projects = vault.list_projects(archived)?;
             render::emit(ctx.json, &projects, || {
                 if projects.is_empty() {
-                    println!(
-                        "No projects yet. Create one with `api-tracker project create <name>`."
-                    );
+                    println!("No projects yet. Create one with `tethra project create <name>`.");
                 } else {
                     render::table(
                         &["NAME", "ENVIRONMENTS", "KEYS", "STATE", "DESCRIPTION"],
