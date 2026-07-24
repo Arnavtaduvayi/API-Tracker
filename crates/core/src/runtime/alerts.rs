@@ -207,11 +207,17 @@ fn credential_rules(
     label_of: &dyn Fn(&str) -> String,
     out: &mut Vec<NewAlert>,
 ) -> Result<()> {
-    // Old credential version still in use after rotation.
+    // Old credential version still in use after rotation. Compared LIVE against
+    // the credential's current value_version, so it fires when a rotation
+    // (days later) advances the version past a still-running session's
+    // launch-time version.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.credential_id, s.host, a.credential_version
-         FROM credential_traffic_attributions a JOIN observed_api_services s ON s.id = a.service_id
-         WHERE a.used_current_version = 0 AND a.confidence IN ('confirmed','high','possible')",
+         FROM credential_traffic_attributions a
+         JOIN credentials c ON c.id = a.credential_id
+         JOIN observed_api_services s ON s.id = a.service_id
+         WHERE a.credential_version IS NOT NULL AND a.credential_version < c.value_version
+           AND a.confidence IN ('confirmed','high','possible')",
     )?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?)))? {
         let (cred, host, ver) = row?;
@@ -338,7 +344,9 @@ mod tests {
         let sid = store::insert_session(&conn, &store::NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
         let now_ts = crate::clock::now_rfc3339();
         let (svc, _) = store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now_ts).unwrap();
-        store::upsert_attribution(&conn, &sid, "c1", &svc, 5, AttributionConfidence::Confirmed, "e", Some(1), Some(false)).unwrap();
+        // launched at v1; the credential has since rotated to v3.
+        store::upsert_attribution(&conn, &sid, "c1", &svc, 5, AttributionConfidence::Confirmed, "e", Some(1), Some(true)).unwrap();
+        conn.execute("UPDATE credentials SET value_version = 3 WHERE id = 'c1'", []).unwrap();
         let alerts = alerts(&conn, crate::clock::now(), &|_| "web/openai-main".to_string()).unwrap();
         assert!(alerts.iter().any(|a| a.kind == AlertKind::RuntimeOldCredentialVersion));
     }

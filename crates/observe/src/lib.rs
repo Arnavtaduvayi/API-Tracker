@@ -29,7 +29,9 @@ pub mod clienthello;
 pub mod policy;
 pub mod proxy;
 pub mod relay;
+pub mod session;
 pub mod tls;
+pub mod trust;
 pub mod wire;
 
 /// Product-neutral user-agent-style identity for any diagnostic self-probe this
