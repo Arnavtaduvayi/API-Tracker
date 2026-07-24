@@ -14,7 +14,7 @@ use crate::policy::AllowList;
 use crate::proxy::{ObservationSink, ProxyConfig, RunningProxy};
 use crate::trust::{detect_runtime, RuntimeAssessment, ScopedTrust};
 use api_tracker_core::error::{CoreError, Result};
-use api_tracker_core::runtime::model::{HttpMethod, ObservationMode, ObservedRequest};
+use api_tracker_core::runtime::model::{HttpMethod, ObservationMode, ObservedRequest, TrustLevel};
 use api_tracker_core::runtime::{aggregate, attribution, inventory, retention, store};
 use api_tracker_core::vault::UnlockedVault;
 use api_tracker_core::{clock, inject};
@@ -130,23 +130,38 @@ pub fn run_monitored(
     let data_dir = vault.paths().data_dir.clone();
     let db_path = vault.paths().db_path();
 
-    // 1. Certificate authority (metadata mode); connection mode needs none.
-    let ca = if params.mode == ObservationMode::Metadata {
+    // 0. Detect the runtime FIRST so the effective mode can account for it.
+    let assessment = detect_runtime(program);
+    // A runtime that honors env proxying but cannot verify our minted leaf (Go
+    // on macOS/Windows, which ignores SSL_CERT_FILE) would FAIL every HTTPS
+    // request under metadata interception. Downgrade it to connection-only
+    // observation (opaque tunnels) so it keeps working and is recorded honestly
+    // at the connection level — instead of the false "falls back automatically"
+    // the docs promised while the code left the mode unchanged.
+    let effective_mode = if params.mode == ObservationMode::Metadata
+        && assessment.trust_level == TrustLevel::ConnectionOnlyFallback
+    {
+        ObservationMode::Connection
+    } else {
+        params.mode
+    };
+
+    // 1. Certificate authority (metadata mode only).
+    let ca = if effective_mode == ObservationMode::Metadata {
         Some(ensure_ca(vault)?)
     } else {
         None
     };
     let ca_pem = ca.as_ref().map(|(_, pem)| pem.clone()).unwrap_or_default();
 
-    // 2. Session row + runtime detection.
+    // 2. Session row (records the mode that ACTUALLY runs).
     let session_id = vault.observe_open_session(
         &params.project_id,
-        params.mode,
+        effective_mode,
         &params.source,
         &params.command_label,
         &params.credential_names,
     )?;
-    let assessment = detect_runtime(program);
 
     // 3. Proxy + channel sink + writer thread.
     let token = random_token();
@@ -157,7 +172,7 @@ pub fn run_monitored(
         allow.insert(h, *p);
     }
     let proxy = RunningProxy::start(ProxyConfig {
-        mode: params.mode,
+        mode: effective_mode,
         ca: ca.as_ref().map(|(a, _)| a.clone()),
         token: token.clone(),
         allowlist: allow,
@@ -171,11 +186,40 @@ pub fn run_monitored(
     let writer_session = session_id.clone();
     let writer = std::thread::spawn(move || run_writer(&writer_db, &writer_session, rx));
 
+    // Honesty: never show a green "full coverage" dashboard for a run whose
+    // requests bypassed interception. If we downgraded, or the runtime does not
+    // honor scoped CA trust at all (Java/.NET) while metadata was requested,
+    // flag partial coverage with a machine-readable reason.
+    if effective_mode != params.mode {
+        sink.note_compat(
+            "runtime_trust",
+            "downgraded",
+            &format!(
+                "{} cannot verify the local CA leaf; downgraded to connection-only observation",
+                assessment.runtime
+            ),
+        );
+        sink.mark_partial("runtime_connection_only");
+    } else if effective_mode == ObservationMode::Metadata
+        && assessment.trust_level == TrustLevel::Unsupported
+    {
+        sink.note_compat(
+            "runtime_trust",
+            "unsupported",
+            &format!(
+                "{} does not honor scoped CA trust; its HTTPS requests may fail or bypass interception",
+                assessment.runtime
+            ),
+        );
+        sink.mark_partial("runtime_unsupported");
+    }
+
     // 4. Scoped trust (child-only env) + record port/runtime. The proxy token
     //    is embedded in the proxy URL so the child sends Proxy-Authorization
     //    automatically; it never leaves this function or reaches any DTO.
     let infix = &session_id[..8.min(session_id.len())];
-    let trust = match ScopedTrust::prepare(&data_dir, port, &token, &ca_pem, params.mode, infix) {
+    let trust = match ScopedTrust::prepare(&data_dir, port, &token, &ca_pem, effective_mode, infix)
+    {
         Ok(t) => t,
         Err(e) => {
             proxy.shutdown();

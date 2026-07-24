@@ -9,7 +9,7 @@ v1–v12; v12 adds the observation tables — `observation_sessions`,
 `observed_api_services`, `observed_endpoints`, `runtime_request_events`,
 `runtime_metric_buckets`, `credential_traffic_attributions`,
 `observation_compatibility_results`, `observe_certificate_state`,
-`observe_internal_allowlist`, `runtime_alert_baselines`).
+`observe_internal_allowlist`).
 
 Classifications:
 

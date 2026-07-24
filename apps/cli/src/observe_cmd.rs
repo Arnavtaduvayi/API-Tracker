@@ -37,6 +37,12 @@ pub enum ObserveCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Delete all observability data for one project.
+    DeleteProject {
+        project: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// Delete ALL observability data (reauthentication required).
     DeleteAll {
         #[arg(long)]
@@ -126,6 +132,17 @@ pub fn run(ctx: &Ctx, cmd: ObserveCmd) -> Result<()> {
             }
             vault.observe_delete_session(&session)?;
             println!("Deleted session '{session}'.");
+            Ok(())
+        }
+        ObserveCmd::DeleteProject { project, yes } => {
+            if !crate::ctx::confirm(
+                &format!("Delete ALL observability data for project '{project}'?"),
+                yes,
+            )? {
+                bail!("aborted");
+            }
+            vault.observe_delete_project(&project)?;
+            println!("Deleted observability data for project '{project}'.");
             Ok(())
         }
         ObserveCmd::DeleteAll { yes } => {

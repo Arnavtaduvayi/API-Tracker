@@ -147,8 +147,9 @@ Send each of these through an observed run (the §8 client recipes bundle them
 all). Every value is unmistakably fake and high-entropy enough to grep for.
 **Expected** for every row: byte-for-byte **absent** from
 `~/at-obs-test/vault/vault.db`, `vault.db-wal`, `vault.db-shm`, every screen
-of the desktop app, `observe export` output, CLI output, and any temp file —
-present only in the synthetic server's own terminal.
+of the desktop app, CLI output (`observe show --json`, `observe apis`), and any
+temp file — present only in the synthetic server's own terminal. (There is no
+`observe export` command in this version.)
 
 | Purpose | Value | Expected |
 | --- | --- | --- |

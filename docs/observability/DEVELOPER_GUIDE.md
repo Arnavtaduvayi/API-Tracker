@@ -162,21 +162,22 @@ private key.
 Cached in a bounded LRU of 256 entries; leaf keys are zeroized on eviction and
 on lock/shutdown.
 
-**Vault lock (RO-13).** Lock → `session::on_lock()` → stop accepting new
-connections, close active ones, zeroize the CA key and the leaf cache, mark
-the session `interrupted` with reason `vault_locked`. Decryption cannot
-continue past a lock because the signing key needed to mint further leaves is
-gone. `tests/vault_lock.rs` asserts all four invariants, including that no
-event rows carry `at` after the lock time.
+**Vault lock (RO-13).** NOT implemented in this version: there is no
+`session::on_lock()` and no `vault_locked` interrupt. A `run --observe` process
+holds the vault key and the reconstituted CA signing key in memory and keeps
+decrypting until the child exits; locking the vault from another process does
+not interrupt it. `tests/vault_lock.rs` does not exist. Implementing a
+lock/auto-lock hook (shut the proxy, drop the CA, interrupt with
+`reason = vault_locked`) is required follow-up before public release.
 
 **Rotation, removal, orphans.** `observe cert status` reports
-present/absent, fingerprint, dates, and system-trust state
-(`absent`/`installed`/`orphaned`). `observe cert rotate` mints a new CA
-(required after any suspected exposure, RO-1). `observe cert remove` removes
-a Mode C entry from the OS store; `observe cert repair` re-installs when the
-vault has a CA the OS store lacks. Orphan detection scans the OS store for
-certificates with our CN prefix (e.g. after a vault was deleted and
-recreated) and offers removal — app uninstall does **not** remove a
+present/absent, fingerprint, dates, and the system-trust state THIS VAULT
+recorded (`absent`/`installed`). `observe cert rotate` mints a new CA
+(required after any suspected exposure, RO-1). `observe cert uninstall` removes
+a Mode C entry from the OS store. There is no `observe cert repair`, and status
+does not scan the OS store, so it cannot report `orphaned`; a stale OS-store
+entry (e.g. after a vault was deleted and recreated) must be removed manually
+with `observe cert uninstall` — app uninstall does **not** remove a
 system-trust entry, so this path matters.
 
 **Mode C constraints (RO-20).** Installation targets the **user** trust store
@@ -203,7 +204,6 @@ All tables are `STRICT`. Grains and retention:
 | `observation_compatibility_results` | (session, check) | with session |
 | `observe_certificate_state` | singleton | until rotated/removed |
 | `observe_internal_allowlist` | (project, host, port) | user-managed |
-| `runtime_alert_baselines` | (rule key, metric) | rolling |
 
 Key rules:
 
@@ -359,15 +359,15 @@ namespace.
 The full rule table — thresholds, minimum sample sizes, warm-up, severity —
 is normative in `IMPLEMENTATION_PLAN.md` §5. Highlights for implementers:
 
-- Volume/latency rules (`RuntimeLatencyRegression`, `RuntimeVolumeSpike`,
-  `RuntimeApiInactive`) require baselines stored in
-  `runtime_alert_baselines` and respect warm-up windows (e.g. p95 regression
-  needs a ≥ 3-day baseline and ≥ 50 requests, and both a 2× relative and a
-  250 ms absolute delta). Do not fire from thin data.
+- Rolling-baseline volume/latency rules (`RuntimeLatencyRegression`,
+  `RuntimeVolumeSpike`) and the `runtime_alert_baselines` table are **NOT
+  implemented** in this version and the table was dropped from migration 12.
+  The shipped spike rules use fixed thresholds with sample floors, not stored
+  baselines. Adding warm-up baselines is future work.
 - Credential rules (`RuntimeOldCredentialVersion`,
-  `RuntimeRevokedCredentialInUse`, `RuntimeProdCredInDev`,
-  `RuntimeSharedCredential`) require attribution confidence ≥ High (version
-  rules require a rotation to exist).
+  `RuntimeRevokedCredentialInUse`, `RuntimeSharedCredential`) require
+  attribution confidence ∈ {confirmed, high} and bind old-version/revoked
+  detection to still-running sessions (so they auto-resolve).
 - "Credential unused" reuses the existing `Unused` kind: observed traffic
   updates `credentials.last_used_at`, so the existing rule improves with no
   new kind.
@@ -376,27 +376,32 @@ is normative in `IMPLEMENTATION_PLAN.md` §5. Highlights for implementers:
 
 ## Test fixtures and the privacy proof
 
-- **Local rustls "provider" server.** Proxy integration tests
-  (`crates/observe/tests/proxy_*.rs`) run against a local TLS server acting
-  as the upstream provider — no real provider, no real credentials, no
-  network. TLS tests live in `tls_*.rs`; SSRF in `ssrf.rs`; proxy auth in
-  `proxy_auth.rs`; process scoping in `scope_*.rs`.
+- **Local rustls "provider" server.** The proxy integration test
+  (`crates/observe/tests/proxy_integration.rs`) runs against a local TLS server
+  acting as the upstream provider — no real provider, no real credentials, no
+  network. It covers TLS intercept, plain-HTTP round-trip, SSRF blocking, and
+  proxy-auth 407. The upstream-verification guard is
+  `crates/observe/tests/no_insecure_verifier.rs`. (There are no separate
+  `tls_*.rs`/`ssrf.rs`/`proxy_auth.rs`/`scope_*.rs` files; those cases live in
+  `proxy_integration.rs` and the in-module unit tests.)
 - **Canary markers.** Test traffic stuffs every dangerous location — URL path,
   query string, `Authorization: Bearer <marker>`, `Cookie`, request body,
   response body — with distinct high-entropy markers (fake keys like
   `sk-proj-LEAKCANARY…`, `canary@leak.test`, a JWT, a UUID,
   `AI-PROMPT-CANARY`, source code, multipart forms). All test credentials are
   unmistakably fake.
-- **`privacy_no_leak.rs` — the end-to-end proof.** Drives a real monitored
-  HTTPS request through the proxy, ends the session, then asserts every
-  marker is byte-for-byte absent from: the SQLite file and its `-wal`/`-shm`
-  sidecars, stdout, stderr, the `Debug`/`Display` of every public type, every
-  serialized DTO and export, `audit_events` and `activity_events`, every temp
-  file the session created, and the diagnostics report. The only legitimate
-  marker sighting is inside the live relayed bytes, which are never captured
-  — the test confirms the provider *received* the body while nothing was
-  *stored*. If your change makes this test fail, the change is leaking; fix
-  the change, never the test.
+- **The end-to-end canary
+  (`proxy_integration.rs::intercept_captures_sanitized_metadata_and_leaks_no_payload`).**
+  Drives a real monitored HTTPS request through the proxy and asserts every
+  marker is absent from the metadata the proxy emits — the in-memory
+  `ObservedRequest` values (and their `Debug`/serde forms) collected by a test
+  sink, which are the ONLY thing that reaches the store — while confirming the
+  provider *received* the streamed body and the client got the response. The
+  guarantee is structural (`ObservedRequest` cannot hold payload). Scope note:
+  the canary asserts over the emitted metadata, not the raw SQLite file/WAL,
+  captured stderr, or temp files; extending it to scan those byte streams is
+  tracked follow-up. If your change makes this test fail, the change is leaking;
+  fix the change, never the test.
 - **Source-grep guards.** `no_insecure_verifier.rs` (TLS, above) and the
   privacy model §2 grep (`record.?body|capture.?body|full.?payload|
   store.?body` must match nothing outside absence-asserting tests).
@@ -479,8 +484,9 @@ integration test, update the compatibility matrix row from ⛔/🟡 with the
 test name, and never claim coverage the code cannot prove.
 
 **Explicitly out of reach without a redesign:** HTTP/3/QUIC (UDP — bypasses
-an HTTP proxy entirely; detected and reported as `possible_quic_or_bypass`,
-never blocked or hidden), browser traffic, and machine-wide capture. These
+an HTTP proxy entirely; documented as a known bypass but NOT auto-detected in
+this version — there is no `possible_quic_or_bypass` diagnostic yet — never
+blocked or hidden), browser traffic, and machine-wide capture. These
 are product non-goals, not backlog items.
 
 ## Security invariants — reviewer checklist
@@ -499,23 +505,27 @@ Run down this list for any change touching `crates/observe` or
   Loopback/private/link-local/CGN/metadata/multicast/reserved denied;
   IPv4-mapped IPv6 unwrapped before checking; only ports 80/443 unless
   explicitly allowlisted per `(project, host, port)` with a persistent UI
-  warning and a compatibility-result record. (`ssrf.rs`; RO-4/RO-5)
+  warning and a compatibility-result record.
+  (`proxy_integration.rs::ssrf_targets_are_blocked`, `policy.rs` unit tests;
+  RO-4/RO-5)
 - [ ] **Upstream verification intact.** One `ClientConfig` from
   `webpki-roots`, full verification, no `dangerous()`, source-grep guard
   passing; upstream cert failure surfaces as a TLS alert to the child and
   `upstream_certificate_invalid` in the record, never as success.
-  (`no_insecure_verifier.rs`, `tls_*.rs`; RO-6)
+  (`no_insecure_verifier.rs`, `tls.rs` unit tests; RO-6)
 - [ ] **Metadata-only type boundary.** Every stored wire-derived string
   passes through `runtime::sanitize`; `ObservedRequest` still has no field
   able to hold a query string, header value, cookie, or body; no new
-  `store::` function accepts raw wire data; P1–P9 pass;
-  `privacy_no_leak.rs` passes. (privacy model §§3–6)
-- [ ] **No verification-disabling env vars** set on the child, ever, and the
-  absence test covers any new variable the change introduces. (§10 of the
-  architecture)
-- [ ] **Vault-lock teardown.** After lock: listener refuses new connections,
-  CA key and leaf cache zeroized, session `interrupted / vault_locked`, no
-  events timestamped after the lock. (`vault_lock.rs`; RO-13)
+  `store::` function accepts raw wire data; P1–P9 pass; the
+  `proxy_integration.rs` canary passes. (privacy model §§3–6)
+- [ ] **No verification-disabling env vars** set on the child, ever, enforced
+  by `no_insecure_verifier.rs`, and the absence test covers any new variable
+  the change introduces. (§10 of the architecture)
+- [ ] **Vault-lock teardown (NOT yet implemented).** Target: after lock, the
+  listener refuses new connections, CA key and leaf cache are zeroized, session
+  is `interrupted / vault_locked`, no events timestamped after the lock. Today
+  a running `run --observe` is NOT interrupted by a lock; there is no
+  `vault_lock.rs`. (RO-13 — required follow-up before release)
 - [ ] **CA key containment.** Key exists only as vault-key AEAD ciphertext
   (AAD `api-tracker:v1:observe-ca-key:{vault_id}`) at rest and `SecretBytes`
   in memory; not in any DTO, IPC payload, CLI output, or backup plaintext.

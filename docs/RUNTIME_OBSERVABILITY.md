@@ -29,12 +29,14 @@ api-tracker run --observe=metadata -- npm run dev
   your system is left changed.
 
 In the desktop app, open the **API activity** screen in the navigation to see
-live and historical observation: services, endpoints, error rates, latency,
-credential attribution, and per-session coverage status.
+recorded observation: services, endpoints, error rates, latency, credential
+attribution, and per-session coverage status. (The view fetches on open/tab
+switch; it does not auto-refresh live during a run — reopen it to see new data.)
 
 Certificate and session management is under the `observe` CLI verb (for
 example `observe cert status`, `observe cert rotate`, `observe cert remove`,
-`observe cert repair`, `observe export`).
+`observe cert install`, `observe cert uninstall`). Data deletion is
+`observe delete-session`, `observe delete-project`, and `observe delete-all`.
 
 ---
 
@@ -82,9 +84,17 @@ a query string, or a full URL. Query strings are severed before any value is
 even constructed. Path identifiers (UUIDs, numeric IDs, emails, tokens, hex
 blobs, high-entropy strings) are replaced with placeholders like `:id`,
 `:uuid`, `:email`, `:token` before persistence. Property tests and an
-end-to-end "canary" test — which stuffs a real monitored request with fake
-secrets and asserts every one is byte-for-byte absent from the database,
-logs, exports, and temp files — enforce this on every build.
+end-to-end "canary" test enforce this on every build: the canary drives a
+real monitored HTTPS request whose path/query/headers/body carry distinctive
+fake secrets and asserts every one is absent from the observed metadata the
+proxy emits (the in-memory `ObservedRequest` values collected by a test sink,
+which are the *only* thing that reaches the database) while proving the
+provider still received the streamed body and the client got the response. The
+guarantee is structural — `ObservedRequest` cannot hold a body, header value,
+cookie, query string, or raw URL — so no reconstruction from stored rows is
+possible. (The canary asserts over the emitted metadata, not the raw SQLite
+file bytes; extending it to scan the DB file and captured stderr is tracked as
+follow-up.)
 
 There is **no** hidden or experimental full-payload option. It does not exist
 in the settings, the CLI, or the code.
@@ -100,14 +110,20 @@ opens its own fully verified TLS connection to the real server.
 Key facts about this CA:
 
 - It is generated locally, per vault. The private key is stored only as
-  ciphertext encrypted under your vault key, is never written to disk in
-  plaintext, and is zeroized from memory when the vault locks or the session
-  ends.
+  ciphertext encrypted under your vault key (the ciphertext is
+  cryptographically bound to the CA certificate, so a tampered certificate
+  fails to decrypt), is never written to disk in plaintext, and is dropped and
+  zeroized from memory when the monitored **session** ends. Note: while a
+  `run --observe` is active the reconstituted signing key stays in that run
+  process's memory for the child's lifetime; locking the vault does not end an
+  already-running session.
 - Upstream server certificates are **always fully verified** against the
   standard public root store, with hostname checking. A failed upstream
   verification is surfaced as an error to your application — never silently
-  accepted. The code base contains a test that fails the build if anyone adds
-  a verification bypass.
+  accepted. A source-level guard test
+  (`crates/observe/tests/no_insecure_verifier.rs`) fails the build if anyone
+  adds a verification bypass (`.dangerous(`, a custom `ServerCertVerifier`,
+  `danger_accept_invalid`, …) to the crate.
 - TLS verification in your application is **never disabled**. The observer
   never sets variables like `NODE_TLS_REJECT_UNAUTHORIZED` and you should
   never set them yourself — not for this tool, not for anything.
@@ -192,8 +208,10 @@ summary for Mode B (scoped trust):
 
 **Not covered by scoped trust (reported honestly, never silently):**
 
-- Go (`net/http`) on macOS and Windows — Go ignores `SSL_CERT_FILE` there;
-  these sessions automatically fall back to connection-only observation.
+- Go (`net/http`) on macOS and Windows — Go ignores `SSL_CERT_FILE` there. A
+  detected Go runtime in metadata mode is automatically downgraded to
+  connection-only observation (opaque tunnels) so it keeps working, and the
+  session is flagged partial coverage (`runtime_connection_only`).
 - Java / JVM — uses its own `cacerts` keystore (and needs
   `-Dhttps.proxyHost`-style flags rather than the proxy env var). Mode C or
   Mode A.
@@ -202,10 +220,17 @@ summary for Mode B (scoped trust):
 - Browsers — out of scope entirely. This feature does not observe browser
   traffic.
 
-The rule throughout: when a runtime cannot be given scoped trust, the session
-is recorded as **partial coverage** with a machine-readable reason, and the
-UI shows a partial-coverage badge. A green, complete-looking dashboard is
-never shown for a run whose requests bypassed observation.
+The rule for DETECTED runtimes: when the detected runtime cannot be given
+scoped trust — Go (`ConnectionOnlyFallback`) or Java/.NET (`Unsupported`) — a
+metadata-mode run is recorded as **partial coverage** with a machine-readable
+reason (`runtime_connection_only` / `runtime_unsupported`), and the UI shows a
+partial-coverage badge. Go runs are additionally downgraded to connection-only
+observation automatically so they keep working.
+
+Limitation: a client that fails the TLS handshake *inside* the tunnel for
+another reason (certificate pinning) is not yet auto-detected — its requests
+simply do not appear. Do not read an empty "full" dashboard as proof of no
+traffic; see the pinning and QUIC notes below.
 
 ## Certificate pinning
 
@@ -213,10 +238,12 @@ Some applications pin their expected server certificate and will refuse any
 locally signed certificate. That is the pinning working as designed — it is a
 compatibility limit, not a bug in either tool.
 
-What happens: the pinned client's TLS handshake to the observer fails
-repeatedly while the observer can reach the same host upstream successfully.
-This pattern is detected and reported as *pinning suspected*, and the UI
-recommends **Mode A (connection-level observation)** for that host.
+What happens: the pinned client's TLS handshake to the observer fails and its
+HTTPS calls error, while the observer can reach the same host upstream. This
+version does **not** yet auto-detect this as "pinning suspected" — the session
+simply shows no successful requests for that host. If a client's calls fail
+only under observation, suspect pinning and use **Mode A (`--observe=connection`,
+connection-level observation)** for that host.
 
 **Never disable pinning, and never disable TLS verification, to make
 observation work.** Connection-level metadata is the honest maximum for a
@@ -225,13 +252,14 @@ pinned client.
 ## Corporate and managed machines
 
 **Existing proxy:** if your environment already sets `HTTP_PROXY` /
-`HTTPS_PROXY` (a corporate proxy), the observer detects it before launch and
-**chains** through it — its upstream connections issue a `CONNECT` to your
-corporate proxy, which therefore sees exactly what it saw before. If the
-upstream proxy is unreachable or refuses `CONNECT`, the run fails with an
-explicit error naming the conflict; you can override for the monitored child
-only (`--proxy-conflict=override`), which is recorded in the session. Your
-parent shell's environment is never modified.
+`HTTPS_PROXY` (a corporate proxy), the observer **overrides** those variables
+for the monitored child so its traffic goes to the local observation proxy.
+Upstream connections then go **directly** to the providers — they are **not
+chained** through your corporate proxy. A monitored run therefore requires
+direct egress; if egress is only permitted via the corporate proxy, monitored
+requests will fail. `observe doctor` warns when a proxy variable is present.
+Your parent shell's environment is never modified. (Upstream CONNECT chaining
+is not implemented in this version.)
 
 **TLS-intercepting corporate proxy:** if your corporate proxy itself
 intercepts TLS, the observer's upstream verification against the public root
@@ -280,14 +308,16 @@ at-rest protections as the rest of your data. Nothing is uploaded anywhere.
 Deletion is available at three scopes, none of which touch credentials or any
 other vault data:
 
-- delete observation data **by project**,
-- delete **by session**,
-- **delete all observability data** (reauthentication required).
+- delete observation data **by project** (`observe delete-project <project>`),
+- delete **by session** (`observe delete-session <session>`),
+- **delete all observability data** (`observe delete-all`, reauthentication
+  required).
 
 Exports and backups of the vault include these tables, and they are safe to
 include for the same reason the feature is safe at all: they contain no
-secrets and no payloads by construction. A dedicated `observe export`
-produces sanitized JSON of the aggregates for sharing with a teammate.
+secrets and no payloads by construction. (There is no dedicated `observe
+export` command in this version; share the vault backup or query the aggregate
+tables directly.)
 
 ## Removing the certificate
 
@@ -295,14 +325,16 @@ produces sanitized JSON of the aggregates for sharing with a teammate.
   trust is a temporary file deleted when the session ends. There is nothing
   to remove.
 - **Mode C (system trust)** installed one entry in your user trust store. To
-  remove it, use `observe cert remove`, which deletes the entry through the
-  platform's own tooling. `observe cert status` shows whether system trust is
-  currently installed, absent, or **orphaned** (present in the OS store but
-  no longer matching a vault — for example after deleting and recreating a
-  vault); orphan detection offers removal. `observe cert repair` re-installs
-  when the vault has a CA the OS store lacks.
+  remove it, use `observe cert uninstall`, which deletes the entry through the
+  platform's own tooling. `observe cert status` shows the system-trust state
+  this vault recorded (installed / absent). Note: `status` reflects installs
+  performed *by this vault*; it does not currently scan the OS store, so after
+  deleting and recreating a vault an old entry may remain and should be removed
+  with `observe cert uninstall`.
 - **Rotation:** `observe cert rotate` generates a fresh CA. Rotate after any
-  suspected exposure of your machine.
+  suspected exposure of your machine. If the previous CA was installed via
+  Mode C, uninstall it from the OS store separately — rotation does not remove
+  the old system-trust entry.
 
 ## Troubleshooting
 
@@ -311,11 +343,11 @@ produces sanitized JSON of the aggregates for sharing with a teammate.
 - Confirm you launched through `run --observe=…` — only the launched process
   and its descendants are observed. Nothing machine-wide is ever captured.
 - Check whether your client uses **HTTP/3 (QUIC)**. QUIC is UDP and bypasses
-  an HTTP proxy entirely; a session that shows connections but no requests
-  for a meaningful duration is flagged *possible QUIC or bypass* in
-  diagnostics. Most clients have a flag to disable HTTP/3 for a run; the
-  observer never sets such flags silently, and it cannot and does not block
-  UDP.
+  an HTTP proxy entirely. This version does **not** auto-detect this — a
+  session that shows connections but no requests may indicate QUIC or another
+  bypass (this is a documented limitation, not a diagnostic flag). Most
+  clients have a flag to disable HTTP/3 for a run; the observer never sets
+  such flags silently, and it cannot and does not block UDP.
 - Some programs ignore proxy environment variables by design, and a child
   process that explicitly clears its environment escapes observation. This
   is a stated limit — enforcing it would require machine-wide capture, which
@@ -332,8 +364,10 @@ produces sanitized JSON of the aggregates for sharing with a teammate.
 
 **Repeated TLS failures from one host**
 
-- Likely certificate pinning; the UI will say *pinning suspected*. Use
-  Mode A for that host. Do not disable pinning or TLS verification.
+- Likely certificate pinning (the client rejects the locally minted leaf).
+  This is not auto-flagged in this version — the host simply shows no
+  successful requests. Use Mode A (`--observe=connection`) for that host. Do
+  not disable pinning or TLS verification.
 - If the failure is on the **upstream** side
   (`upstream_certificate_invalid`), the real server's certificate failed
   verification — possibly a corporate TLS-intercepting proxy (add its root
@@ -348,16 +382,27 @@ produces sanitized JSON of the aggregates for sharing with a teammate.
 
 **Session shows "interrupted"**
 
-- Interruption is a distinct, honestly reported state with a reason: the
-  vault locked mid-session (observation cannot continue past a lock, by
-  design), the app quit, or the launching process disappeared. Interrupted
-  sessions are never silently relabeled as completed.
+- Interruption is a distinct, honestly reported state with a reason:
+  `trust_setup_failed` (scoped trust could not be prepared),
+  `child_spawn_failed` (the command could not be launched), or `launcher_gone`
+  (the launching process disappeared and the orphaned session was later swept
+  by the monitor). Interrupted sessions are never silently relabeled as
+  completed.
+
+**Locking the vault during a run**
+
+- Important: locking the vault (or auto-lock) does **not** stop an already-
+  running `run --observe`. That run holds its own copy of the vault key and the
+  CA signing key in memory for the lifetime of the monitored child, and keeps
+  observing until the child exits. If you need the CA-key exposure window to
+  end, stop the monitored process. (Cross-process lock interruption of a live
+  run is not implemented in this version — see the threat model.)
 
 ## Uninstalling: cleanup checklist
 
 Deleting the application does **not** remove a Mode C system-trust
 certificate — OS trust stores are not cleaned up by file deletion. If you
-ever enabled Mode C, run `observe cert remove` (or remove the entry named
+ever enabled Mode C, run `observe cert uninstall` (or remove the entry named
 with the `Tethra Local Observation CA` prefix through your OS's certificate
 manager) **before** uninstalling. Mode B users have nothing to do: scoped
 trust never touched the system and its temp files are already gone.

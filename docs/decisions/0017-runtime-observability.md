@@ -64,8 +64,12 @@ feature, and adds no mandatory moving part to the product.
    hex, high-entropy strings, digit runs) are replaced with placeholders,
    property-tested. There is no full-payload flag, hidden or otherwise, and
    an end-to-end canary test proves distinctive markers placed in URLs,
-   headers, and bodies are byte-for-byte absent from the database, logs,
-   DTOs, exports, and temp files after a real monitored request.
+   headers, and bodies are absent from the metadata the proxy emits (the
+   `ObservedRequest` values that are the only thing reaching the store) after a
+   real monitored request. The guarantee is structural — `ObservedRequest` has
+   no field able to hold payload. (The canary asserts over emitted metadata, not
+   the raw DB-file bytes / stderr / temp files; extending it to those streams is
+   tracked follow-up.)
 
 3. **A separate crate (`api-tracker-observe`).** `api-tracker-core`
    promises no network I/O beyond outbound provider clients. A listening
@@ -109,13 +113,17 @@ feature, and adds no mandatory moving part to the product.
 6. **The CA private key is a high-value asset and is treated like one.**
    One CA per vault, ECDSA P-256. The private key exists at rest only as
    XChaCha20-Poly1305 ciphertext under the vault key with AAD
-   `api-tracker:v1:observe-ca-key:{vault_id}`; in memory only as
+   `api-tracker:v1:observe-ca-key:{vault_id}:{cert-hash}` (the AAD binds the
+   certificate PEM, so a tampered cert fails to decrypt); in memory only as
    `SecretBytes` inside the proxy thread pool. It is never written to a
    plaintext file, never printed, never crosses the Tauri IPC boundary,
    and is absent from every DTO (only the fingerprint and dates are
-   exposed). Vault lock zeroizes the key and the leaf cache and tears down
-   active sessions — decryption cannot continue past a lock. Rotation and
-   removal commands exist (`observe cert rotate` / `remove` / `repair`),
+   exposed). The key and leaf cache are zeroized and the session is torn down
+   when the monitored **session** ends. NOTE (limitation): locking the vault
+   does NOT interrupt an already-running `run --observe` — that run holds the
+   key for the child's lifetime; a lock/auto-lock interruption hook is required
+   follow-up (see THREAT_MODEL RO-13). Rotation and removal commands exist
+   (`observe cert rotate` / `remove` / `uninstall`),
    and destructive observability operations (delete-all, Mode C install)
    are reauthentication-gated, consistent with the vault's existing
    reauth-before-sensitive-action rule.
@@ -205,8 +213,10 @@ feature, and adds no mandatory moving part to the product.
   protections as the rest of the operational schema (see ADR 0018).
 - Failure semantics fail closed: if the listener dies the child loses
   connectivity through the proxy and errors honestly rather than silently
-  bypassing; sessions interrupted by lock, crash, or quit are marked
-  `interrupted` with a reason, never silently `completed`.
+  bypassing; sessions interrupted by a pre-launch failure or a crashed/killed
+  launcher are marked `interrupted` with a reason (`trust_setup_failed`,
+  `child_spawn_failed`, `launcher_gone`), never silently `completed`. (A
+  mid-run vault lock does not currently interrupt the session — see RO-13.)
 
 ## Future limitations
 
@@ -215,9 +225,17 @@ feature, and adds no mandatory moving part to the product.
   connection-only metadata. True h2 decoding is the top item in the
   protocol-support roadmap.
 - **HTTP/3 / QUIC bypasses the proxy entirely** (UDP; proxy variables do
-  not apply). It is detected heuristically and reported as a possible
-  bypass; it cannot be observed or blocked without a network extension,
-  which is out of scope.
+  not apply). It is documented as a known bypass but NOT auto-detected in this
+  version (no connections-without-requests heuristic yet); it cannot be
+  observed or blocked without a network extension, which is out of scope.
+- **Attribution is injection-based and cannot see ambient credentials.** If a
+  credential is already present in the child's environment (exported in the
+  user's shell, or supplied by an OS credential helper) it, not Tethra's
+  injected credential, may be what authenticated the traffic. Attribution never
+  reads header values, so it cannot detect this; a single-injected-credential
+  provider match is labelled `Confirmed` only when an auth header was observed,
+  but the "no ambient credential of the same provider existed" assumption is
+  inherent to injection-based attribution and is not verified.
 - **Runtimes that ignore trust environment variables** (Java, .NET, Go on
   macOS/Windows, native-tls Rust clients) get connection-only fallback or
   require the Mode C opt-in; sessions record `partial_coverage` with a

@@ -235,6 +235,7 @@ the body (proving streaming worked) while Tethra *stored* none of it.
 
 The existing backup/export path carries these tables because they live in the
 vault DB. They contain **no secrets and no payloads by construction**, so a
-backup is safe by the same argument as the rest of the schema. A dedicated
-`observe export` produces sanitized JSON of the aggregates for sharing (e.g.
-with a teammate) and is proven secret-free by the same canary test set.
+backup is safe by the same argument as the rest of the schema. (There is no
+dedicated `observe export` command in this version; the safety argument is
+structural — the schema has no column that can hold payload — not a claim about
+a specific export tool.)

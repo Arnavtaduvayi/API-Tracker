@@ -507,7 +507,7 @@ function Settings({
     <div className="stack">
       <h2>Settings</h2>
       <label className="field">
-        Default observation mode for Tethra-launched runs
+        Default observation mode (stored preference)
         <select
           value={s.default_mode}
           onChange={(e) => setS({ ...s, default_mode: e.target.value })}
@@ -516,6 +516,12 @@ function Settings({
           <option value="connection">connection (no HTTPS decryption)</option>
           <option value="metadata">metadata (decrypts HTTPS for that process)</option>
         </select>
+        <small>
+          Note: this preference is stored but not yet consumed automatically. The desktop app
+          does not launch monitored runs, and <code>api-tracker run</code> observes only when{" "}
+          <code>--observe</code> is passed explicitly. Pass{" "}
+          <code>--observe=connection|metadata</code> per run.
+        </small>
       </label>
       <label className="field">
         Event retention (days)
@@ -616,7 +622,9 @@ function Privacy() {
         <li>Everything stays on your device — nothing is uploaded to Tethra.</li>
         <li>
           Some programs may bypass monitoring (HTTP/3/QUIC, certificate pinning, or runtimes
-          that ignore trust configuration) — those are reported, never hidden.
+          that ignore trust configuration). Detected unsupported runtimes (Go, Java, .NET) are
+          flagged with a partial-coverage badge; QUIC and pinning are documented limitations
+          that are not yet auto-detected, so an empty result is not proof of no traffic.
         </li>
         <li>The certificate can be removed at any time from the Certificate tab.</li>
       </ul>

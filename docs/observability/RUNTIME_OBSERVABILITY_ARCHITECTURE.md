@@ -254,11 +254,14 @@ See `RUNTIME_OBSERVABILITY_THREAT_MODEL.md` §T1 for the threat analysis.
 - Leaf keys are generated per hostname, live only in the bounded cache, and
   are zeroized when evicted or on lock/shutdown.
 
-Vault lock → `session::on_lock()` → stop accepting new connections, close
-active ones, zeroize the CA key and the leaf cache, mark the session
-`interrupted` with reason `vault_locked`. Traffic decryption cannot continue
-past a lock because the signing key required to mint further leaves is gone
-and existing sessions are torn down.
+Vault lock during an active run: **not implemented in this version.** There is
+no `session::on_lock()` hook. A `run --observe` process holds its own copy of
+the vault key and the reconstituted CA signing key in memory and keeps
+minting leaves / decrypting the child's TLS until the child exits; only then
+are the CA dropped, the leaf cache cleared, and keys zeroized. Locking the vault
+from another process does not interrupt that run. A lock/auto-lock hook that
+shuts the proxy down and interrupts the session (`reason = vault_locked`) is
+required follow-up before public release (see THREAT_MODEL RO-13).
 
 ## 10. Scoped trust (Mode B) — no system changes
 
@@ -290,12 +293,12 @@ variables at that.
 `trust::inspect_existing_proxy()` reads the parent env before launch:
 
 - No existing proxy → proceed.
-- Existing `HTTP(S)_PROXY` → **chaining** is attempted: Tethra forwards
-  upstream through the corporate proxy by issuing its own `CONNECT` to it.
-  Chaining is used when the upstream proxy is reachable and answers `CONNECT`;
-  otherwise the run is refused with an explicit error naming the conflict.
-- The user can override for the monitored child only (`--proxy-conflict=
-  override`), which is logged into the session record.
+- Existing `HTTP(S)_PROXY` → the child's proxy variables are **overridden** to
+  point at the local observation proxy; upstream connections go **direct** to
+  the providers. Upstream CONNECT chaining is **not implemented** in this
+  version, and there is no `--proxy-conflict` flag. A monitored run therefore
+  requires direct egress; `observe doctor` warns when a proxy variable is
+  present.
 - The parent shell's environment is never modified, so there is nothing to
   restore.
 
@@ -314,7 +317,6 @@ Migration **12**, `runtime api observability`. Full DDL in `crates/core/src/db.r
 | `observation_compatibility_results` | (session, check) | with session |
 | `observe_certificate_state` | singleton | until rotated/removed |
 | `observe_internal_allowlist` | (project, host, port) | user-managed |
-| `runtime_alert_baselines` | (rule key, metric) | rolling |
 
 Retention defaults are justified in `IMPLEMENTATION_PLAN.md` §7 and are
 configurable in Settings.

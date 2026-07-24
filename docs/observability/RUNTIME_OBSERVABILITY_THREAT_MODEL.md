@@ -68,11 +68,14 @@ not to *any local process*.
 
 **Threat.** The `Proxy-Authorization` value ends up in an event, log or error.
 
-**Mitigations.** `wire.rs` strips `Proxy-Authorization` and `Proxy-Connection`
-before forwarding, and `ObservedRequest` has no header field at all — there is
-no container for it. `tests/privacy_no_leak.rs` asserts the token string is
-absent from the DB file bytes, every log line, every error string, every DTO,
-and every export.
+**Mitigations.** The plain-HTTP path strips `Proxy-Authorization` and
+`Proxy-Connection` before forwarding (verified by
+`proxy.rs::rewrite_uses_origin_form_drops_proxy_headers_and_preserves_the_rest`),
+and `ObservedRequest` has no header field at all — there is no container for it.
+The proxy-integration tests assert the session token never appears in the
+forwarded upstream request or the recorded metadata. `SecretString`'s
+`Debug`/`Display`/`Serialize` all redact, and `RequestHead`'s manual `Debug`
+redacts the token and raw query.
 
 ## RO-4 — Malicious CONNECT destinations / SSRF (RO-4, RO-5, RO-6, RO-7)
 
@@ -144,10 +147,13 @@ developer's own client — which now trusts our CA — sees a green padlock.
 **Threat.** A pinned client fails to connect and the developer blames Tethra,
 or worse, disables pinning.
 
-**Mitigation.** Not a vulnerability — a compatibility limit. Detected
-heuristically: repeated TLS handshake failures from the client to us on a host
-that we can reach successfully upstream ⇒ `pinning_suspected`. The UI says so
-explicitly and recommends Mode A for that host, **never** disabling pinning.
+**Mitigation.** Not a vulnerability — a compatibility limit. In this version it
+is **not** auto-detected (there is no `pinning_suspected` signal): a pinned
+client's requests fail and simply do not appear for that host. The docs and
+troubleshooting guide instruct the user to suspect pinning when calls fail only
+under observation and to use Mode A for that host, **never** disabling pinning.
+Emitting a `pinning_suspected` compat note from repeated client-handshake
+failures is tracked as follow-up.
 
 ## RO-8 — Unsupported trust stores / silent bypass
 
@@ -174,10 +180,11 @@ client with HTTP/3 enabled bypasses Tethra entirely and the developer sees
 **Mitigations.**
 - Documented as a **known bypass** in the compatibility matrix, the UI setup
   screen, and the user documentation.
-- Detection: if a session records TCP connections to a host but the process
-  ran for a meaningful duration with no requests, `diagnostics` reports
-  `possible_quic_or_bypass`. We do not block UDP (we cannot, without a network
-  extension) and we do not claim we do.
+- No auto-detection in this version: there is no `possible_quic_or_bypass`
+  diagnostic. A session that shows connections but no requests may indicate
+  QUIC or a bypass; this is stated as a documented limitation. We do not block
+  UDP (we cannot, without a network extension) and we do not claim we do. A
+  connections-without-requests heuristic is tracked as follow-up.
 - Mitigation available to the user: most clients honour
   `--disable-http3`-style flags; the docs list the common ones. We never set
   them silently.
@@ -224,11 +231,21 @@ closed on unwind.
 
 ## RO-13 — Vault lock during an active session
 
-Covered in the architecture §9. The invariant asserted by
-`tests/vault_lock.rs`: after a lock, (a) the listener refuses new connections,
-(b) the CA key material is zeroized, (c) the session row's `status` is
-`interrupted` with `reason = vault_locked`, (d) no event rows are written with
-`at` after the lock time.
+**Current behaviour (honest).** Locking or auto-locking the vault does **not**
+interrupt an already-running `run --observe`. That run process holds its own
+copy of the vault key and the reconstituted CA signing key in memory and keeps
+terminating/observing the child's TLS until the child exits; only then are the
+CA dropped and the key zeroized. `api-tracker lock` in another shell merely
+deletes the session file and cannot reach the separate run process. There is no
+`session::on_lock()` hook and no `vault_locked` interrupt reason in production
+(cross-process interruption of a live run is not implemented in this version).
+
+Residual exposure: the CA-key-in-memory window equals the monitored child's
+lifetime regardless of lock. To end it, stop the monitored process. Implementing
+a lock/auto-lock hook that shuts the proxy down, drops the CA, and interrupts
+the session (`reason = vault_locked`) is tracked as required follow-up before
+public release. The CA private key is a per-vault local-observation CA (not a
+credential value), and Mode C system trust is off by default.
 
 ## RO-14 — Stale sessions, port reuse, PID reuse
 
@@ -237,21 +254,27 @@ Covered in the architecture §9. The invariant asserted by
 - A session row is only attached to by the launching process, in memory. There
   is no "attach to session by port" API, so a recycled port cannot be attached
   to.
-- On startup, `store::sweep_orphaned_sessions` marks any `running` session
-  whose recording process is gone as `interrupted / launcher_gone`, reusing the
-  existing `sweep_dead_sessions` liveness convention (`ps -p`, exit code
-  exactly 1 = definitively gone).
+- The periodic monitor cycle (`run_monitor`) calls
+  `store::sweep_orphaned_sessions`, which marks any `running` session whose
+  recorded child process is gone as `interrupted / launcher_gone`. Liveness uses
+  `/proc/<pid>` on Linux (robust on BusyBox/Alpine) and `ps -p` (exit code
+  exactly 1 = definitively gone) on macOS/BSD; uncertainty keeps the session
+  open (fail-safe). This runs each monitor cycle, not only at startup.
 
 ## RO-15 — CA removal, interrupted creation, orphaned certificates
 
 - Generation writes the row in one transaction; a crash mid-generation leaves
   no row and the next start regenerates.
-- `observe cert status` reports: present/absent, fingerprint, dates,
-  system-trust installed/absent/**orphaned** (present in the OS store but not
-  in the vault — e.g. the vault was deleted and recreated).
-- `observe cert repair` re-installs when the vault has a CA the OS store lacks;
-  `observe cert remove` removes from the OS store; orphan detection scans the
-  OS store for certificates with our CN prefix and offers removal.
+- The CA private-key ciphertext's AAD binds the certificate PEM, so a DB
+  attacker who swaps `ca_cert_pem` (to launder a foreign CA into the OS store
+  via a consented Mode C install) makes the key fail to decrypt — the swapped
+  cert can never be materialized or installed.
+- `observe cert status` reports present/absent, fingerprint, dates, and the
+  system-trust state **this vault recorded** (installed/absent). It does not
+  currently scan the OS store, so it cannot report `orphaned`; after a vault
+  is deleted and recreated a stale OS-store entry may remain and must be removed
+  with `observe cert uninstall`. There is no `observe cert repair` command.
+  `observe cert uninstall` removes the entry through the platform's own tooling.
 - Uninstall guidance is in the user docs, because deleting the app does **not**
   remove a system-trust entry.
 
@@ -264,11 +287,17 @@ The most likely way a metadata-only design leaks payloads is a debug log.
   wire-derived data. Diagnostics emit fixed enum variants plus numbers.
 - `CoreError` and the crate's own error type carry `&'static str` context, not
   formatted wire data — the same discipline already used across this codebase.
-- `tests/privacy_no_leak.rs` drives a full monitored request whose URL, headers
-  and bodies are stuffed with distinctive markers, then asserts every marker is
-  absent from: the DB file bytes, WAL, stdout, stderr, every `Debug`/`Display`
-  of every public type, every serialized DTO, every export, every temp file
-  left behind, and the audit + activity tables.
+- The canary test lives in `crates/observe/tests/proxy_integration.rs`
+  (`intercept_captures_sanitized_metadata_and_leaks_no_payload`): it drives a
+  full monitored HTTPS request whose URL, headers, and body are stuffed with
+  distinctive markers, then asserts every marker is absent from the metadata the
+  proxy emits — the in-memory `ObservedRequest` values (and their
+  `Debug`/serde forms) collected by a test sink, which are the ONLY thing that
+  reaches the store — while confirming the provider received the streamed body
+  and the client got the response. The guarantee is structural
+  (`ObservedRequest` cannot hold payload). The canary asserts over the emitted
+  metadata, not the raw SQLite file / WAL / captured stderr / temp files;
+  extending it to scan those byte streams end-to-end is tracked as follow-up.
 
 ## RO-17 — Path and query leakage
 
