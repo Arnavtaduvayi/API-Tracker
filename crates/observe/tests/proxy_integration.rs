@@ -638,3 +638,164 @@ fn bench_proxy_overhead() {
     proxy.shutdown();
     provider.stop.store(true, Ordering::Relaxed);
 }
+
+// --- plain-HTTP (non-TLS) path ----------------------------------------------
+
+/// A plain-HTTP (non-TLS) "provider" for exercising the `handle_plain` path.
+/// Reads the request head + Content-Length body, records the raw bytes, and
+/// replies with `body`.
+fn start_plain_provider(status_line: &'static str, body: &'static str) -> Provider {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let received2 = received.clone();
+    let stop2 = stop.clone();
+    std::thread::spawn(move || {
+        while !stop2.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut tcp, _)) => {
+                    tcp.set_nonblocking(false).ok();
+                    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                    let recv = received2.clone();
+                    std::thread::spawn(move || {
+                        let mut buf = Vec::new();
+                        let mut tmp = [0u8; 4096];
+                        loop {
+                            if let Some(pos) = find_double_crlf(&buf) {
+                                let head = String::from_utf8_lossy(&buf[..pos]).to_string();
+                                let content_len: usize = head
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.to_lowercase()
+                                            .strip_prefix("content-length:")
+                                            .and_then(|v| v.trim().parse::<usize>().ok())
+                                    })
+                                    .unwrap_or(0);
+                                if buf.len() - pos >= content_len {
+                                    break;
+                                }
+                            }
+                            match tcp.read(&mut tmp) {
+                                Ok(0) => break,
+                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                                Err(_) => break,
+                            }
+                        }
+                        recv.lock().unwrap().extend_from_slice(&buf);
+                        let resp = format!(
+                            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = tcp.write_all(resp.as_bytes());
+                        let _ = tcp.flush();
+                    });
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    Provider {
+        addr,
+        received,
+        stop,
+    }
+}
+
+#[test]
+fn plain_http_round_trips_body_and_records_origin_path() {
+    // Regression for three plain-path bugs found in the PR-13 audit:
+    //  (1) the response relay had src/dst reversed, so the response body was
+    //      written back to the upstream and the client starved (~90s hang);
+    //  (2) the recorded path collapsed to "/:redacted" (absolute-form was
+    //      sanitized instead of the origin-form path);
+    //  (3) every request header except Host/Content-* was dropped, silently
+    //      breaking authenticated plain-HTTP calls.
+    let resp_body = "{\"reply\":\"PLAINBODY-OK-42\"}";
+    let provider = start_plain_provider("HTTP/1.1 200 OK", resp_body);
+    let port = provider.addr.port();
+
+    let sink = Arc::new(CollectSink::default());
+    let mut allow = AllowList::new();
+    allow.insert(HOST, port);
+    let token = "PLAIN-TEST-TOKEN".to_string();
+    let proxy = RunningProxy::start(ProxyConfig {
+        mode: api_tracker_core::runtime::model::ObservationMode::Metadata,
+        ca: None, // the plain path never terminates TLS, so no CA is needed
+        token: token.clone(),
+        allowlist: allow,
+        max_connections: 16,
+        sink: sink.clone(),
+        upstream_config: None,
+    })
+    .unwrap();
+
+    let auth = RunningProxy::expected_auth(&token);
+    let req_body = "{\"q\":\"hello\"}";
+    let request = format!(
+        "POST http://{HOST}:{port}/v1/users/123456/orders/98765 HTTP/1.1\r\n\
+         Host: {HOST}:{port}\r\n\
+         Proxy-Authorization: {auth}\r\n\
+         Authorization: Bearer sk-PLAINAUTH-NOTREAL\r\n\
+         User-Agent: canary-agent/1\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\r\n{req_body}",
+        req_body.len()
+    );
+    let mut tcp = TcpStream::connect(proxy.local_addr()).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    tcp.write_all(request.as_bytes()).unwrap();
+    let mut resp = Vec::new();
+    let _ = tcp.read_to_end(&mut resp);
+    let resp_s = String::from_utf8_lossy(&resp);
+
+    // (1) The response body actually reached the client.
+    assert!(resp_s.contains("200"), "no 200 status: {resp_s}");
+    assert!(
+        resp_s.contains("PLAINBODY-OK-42"),
+        "response body did not round-trip to the client: {resp_s}"
+    );
+
+    // (3) The provider received the request body and the child's Authorization
+    //     header, but never the proxy session token; the request line is
+    //     rewritten to origin-form.
+    let got = provider.received.lock().unwrap().clone();
+    let got_s = String::from_utf8_lossy(&got);
+    assert!(
+        got_s.contains(req_body),
+        "provider missed request body: {got_s}"
+    );
+    assert!(
+        got_s.contains("Authorization: Bearer sk-PLAINAUTH-NOTREAL"),
+        "Authorization header was not forwarded: {got_s}"
+    );
+    assert!(
+        !got_s.to_lowercase().contains("proxy-authorization"),
+        "session token leaked upstream"
+    );
+    assert!(
+        got_s.starts_with("POST /v1/users/123456/orders/98765 HTTP/1.1"),
+        "request line not origin-form: {got_s}"
+    );
+
+    // (2) The recorded event uses the connect authority as host and a real
+    //     templated path — not "/:redacted".
+    let events = sink.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "exactly one plain event expected");
+    let e = &events[0];
+    assert_eq!(e.host, HOST, "host must be the validated authority");
+    assert_eq!(e.status_code, Some(200));
+    assert_ne!(e.path_template, "/:redacted", "origin-form path was lost");
+    assert!(
+        e.path_template.starts_with("/v1/users/"),
+        "unexpected template: {}",
+        e.path_template
+    );
+
+    proxy.shutdown();
+    provider.stop.store(true, Ordering::Relaxed);
+}

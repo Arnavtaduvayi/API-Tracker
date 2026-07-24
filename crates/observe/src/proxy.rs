@@ -32,6 +32,15 @@ use std::time::{Duration, Instant};
 const IO_TIMEOUT: Duration = Duration::from_secs(90);
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
 const PEEK_BUF: usize = 8 * 1024;
+/// Poll interval for the single-threaded post-upgrade opaque relay (WebSocket).
+const WS_POLL: Duration = Duration::from_millis(100);
+/// Absolute wall-clock deadline to finish reading a request head, independent of
+/// the per-read idle timeout — bounds a pre-auth Slowloris that dribbles bytes
+/// just under the idle timeout to hold a connection slot indefinitely.
+const HEAD_DEADLINE: Duration = Duration::from_secs(15);
+/// Per-read timeout during the untrusted pre-auth head read; shorter than
+/// `HEAD_DEADLINE` so the read loop wakes to observe the absolute deadline.
+const PREAUTH_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Receives observed metadata from the proxy. Implementations must be
 /// non-blocking-friendly (the proxy calls them on worker threads) and must
@@ -67,13 +76,24 @@ pub struct ProxyConfig {
     pub upstream_config: Option<Arc<rustls::ClientConfig>>,
 }
 
+/// A running worker: its join handle plus a clone of the client socket, so
+/// teardown can force-close a worker that is blocked in a socket read/write
+/// (workers only observe the shutdown flag between requests; a blocked read
+/// would otherwise stall `stop()` behind the 90s idle timeout — or indefinitely
+/// under a Slowloris that keeps resetting it).
+struct Worker {
+    handle: JoinHandle<()>,
+    client: TcpStream,
+}
+
 /// A running proxy. Dropping it (or calling [`RunningProxy::shutdown`]) stops
-/// the listener and signals workers to stop between requests.
+/// the listener, force-closes in-flight client sockets, and signals workers to
+/// stop.
 pub struct RunningProxy {
     addr: SocketAddr,
     shutdown: Arc<AtomicBool>,
     listener_handle: Option<JoinHandle<()>>,
-    workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    workers: Arc<Mutex<Vec<Worker>>>,
 }
 
 impl RunningProxy {
@@ -102,7 +122,7 @@ impl RunningProxy {
             .map_err(api_tracker_core::error::CoreError::Io)?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let workers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        let workers: Arc<Mutex<Vec<Worker>>> = Arc::new(Mutex::new(Vec::new()));
         let active = Arc::new(AtomicUsize::new(0));
         let config = Arc::new(config);
 
@@ -116,14 +136,27 @@ impl RunningProxy {
                 match stream {
                     Ok(client) => {
                         if active.load(Ordering::Relaxed) >= config.max_connections {
-                            // Over the connection cap: close immediately.
-                            drop(client);
+                            // Over the connection cap: tell well-behaved clients
+                            // to retry, then close. (The absolute head deadline
+                            // plus force-close on teardown keep an unauthenticated
+                            // client from squatting a slot indefinitely.)
+                            let mut c = client;
+                            let _ = c.set_write_timeout(Some(ACCEPT_POLL));
+                            let _ = write_all_ok(
+                                &mut c,
+                                b"HTTP/1.1 503 Service Unavailable\r\n\
+                                  Content-Length: 0\r\nConnection: close\r\n\r\n",
+                            );
+                            drop(c);
                             continue;
                         }
                         active.fetch_add(1, Ordering::Relaxed);
                         let cfg = config.clone();
                         let sd2 = sd.clone();
                         let active2 = active.clone();
+                        // Keep a clone of the client socket so teardown can
+                        // force-close a blocked worker (see `Worker`).
+                        let client_for_registry = client.try_clone().ok();
                         let handle = thread::spawn(move || {
                             let _guard = CountGuard(active2);
                             let _ = client.set_nonblocking(false);
@@ -144,7 +177,13 @@ impl RunningProxy {
                                 cfg.sink.mark_partial("proxy_internal_error");
                             }
                         });
-                        wk.lock().expect("workers lock").push(handle);
+                        if let Some(client) = client_for_registry {
+                            let mut w = wk.lock().expect("workers lock");
+                            // Reap finished workers so the registry stays bounded
+                            // by concurrency, not by cumulative connection count.
+                            w.retain(|worker| !worker.handle.is_finished());
+                            w.push(Worker { handle, client });
+                        }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(ACCEPT_POLL);
@@ -172,14 +211,20 @@ impl RunningProxy {
         if let Some(h) = self.listener_handle.take() {
             let _ = h.join();
         }
-        // Join in-flight workers best-effort; their sockets have timeouts so
-        // they cannot hang indefinitely.
-        let handles: Vec<JoinHandle<()>> = {
+        let workers: Vec<Worker> = {
             let mut w = self.workers.lock().expect("workers lock");
             std::mem::take(&mut *w)
         };
-        for h in handles {
-            let _ = h.join();
+        // Force-close each in-flight client socket FIRST so any worker blocked
+        // in a socket read/write returns immediately, then join. Without this a
+        // worker parked in a (Slowloris-extended) head read or a long opaque
+        // tunnel would stall teardown — and thus session finalization and the
+        // CLI's exit — for as long as the peer keeps the connection alive.
+        for w in &workers {
+            let _ = w.client.shutdown(std::net::Shutdown::Both);
+        }
+        for w in workers {
+            let _ = w.handle.join();
         }
     }
 }
@@ -205,7 +250,14 @@ fn write_all_ok<W: Write>(w: &mut W, bytes: &[u8]) -> bool {
 
 /// Top-level per-connection handling: authenticate, then dispatch.
 fn handle_client(mut client: TcpStream, cfg: &ProxyConfig, shutdown: &AtomicBool) {
-    let (head, _raw, leftover) = match wire::read_request_head(&mut client) {
+    // Pre-auth read: a short per-read timeout plus an absolute deadline bound
+    // an unauthenticated Slowloris to ~HEAD_DEADLINE, so it cannot squat a
+    // connection slot (and thus deny the monitored child capacity) for weeks.
+    let _ = client.set_read_timeout(Some(PREAUTH_READ_TIMEOUT));
+    let head_read = wire::read_request_head_deadline(&mut client, Instant::now() + HEAD_DEADLINE);
+    // Restore the normal idle timeout for the authenticated session.
+    let _ = client.set_read_timeout(Some(IO_TIMEOUT));
+    let (head, raw_head, leftover) = match head_read {
         Ok(v) => v,
         Err(_) => return,
     };
@@ -227,7 +279,7 @@ fn handle_client(mut client: TcpStream, cfg: &ProxyConfig, shutdown: &AtomicBool
     if head.method.eq_ignore_ascii_case("CONNECT") {
         handle_connect(client, &head, cfg, shutdown);
     } else if head.target.starts_with("http://") {
-        handle_plain(client, &head, leftover, cfg);
+        handle_plain(client, &head, &raw_head, leftover, cfg);
     } else {
         let _ = write_all_ok(
             &mut client,
@@ -471,6 +523,7 @@ fn intercept_https(
     cfg: &ProxyConfig,
     shutdown: &AtomicBool,
 ) {
+    let handshake_started = Instant::now();
     // Downstream: present a CA-minted leaf for the SNI host.
     let server_config = match tls::server_config_for_host(ca, sni) {
         Ok(c) => c,
@@ -504,15 +557,18 @@ fn intercept_https(
     let mut upstream_tls = rustls::StreamOwned::new(up_conn, upstream);
 
     // Drive the upstream handshake once so a bad provider cert surfaces as a
-    // TLS error rather than a mysterious hang.
-    if upstream_tls.flush().is_err() {
+    // TLS error rather than a mysterious hang. Classify the failure: only an
+    // actual certificate-verification error is UpstreamCertInvalid (which the
+    // alerts layer turns into corporate-root advice); a reset/timeout/other
+    // TLS error must not be misdiagnosed as a cert problem.
+    if let Err(e) = upstream_tls.flush() {
         record_transport(
             cfg,
             &bare_host,
             port,
             Protocol::Http11,
-            TransportError::UpstreamCertInvalid,
-            Instant::now(),
+            classify_upstream_handshake_error(&e),
+            handshake_started,
         );
         return;
     }
@@ -583,6 +639,7 @@ fn intercept_https(
                 &bare_host,
                 port,
                 &req_head,
+                &req_head.target,
                 &resp_head,
                 latency_ms,
                 raw_req.len() as u64 + req_body_bytes,
@@ -590,9 +647,27 @@ fn intercept_https(
                 Protocol::Websocket,
                 ObservationSource::UpgradeThenOpaque,
             );
-            // relay the remainder opaquely until either side closes
+            // The upgraded connection is now an opaque bidirectional stream we
+            // do not decode: flag partial coverage honestly, then relay bytes
+            // both ways so the child's WebSocket keeps working end to end
+            // (previously copy_between_tls was a no-op and the socket died
+            // milliseconds after a successful upgrade).
+            cfg.sink.note_compat(
+                "websocket",
+                "opaque",
+                "101 upgrade tunnelled bidirectionally without decoding frames",
+            );
+            cfg.sink.mark_partial("websocket_opaque");
+            // Any client bytes already read past the upgrade request head belong
+            // to the upstream direction; forward them before the opaque relay.
+            let _ = upstream_tls.write_all(&req_carry);
+            let _ = upstream_tls.flush();
             let _ = client_tls.flush();
-            let _ = copy_between_tls(&mut client_tls, &mut upstream_tls);
+            // Short read timeout so one thread can service both directions; a
+            // read timeout means "no data this round", not an error.
+            let _ = client_tls.sock.set_read_timeout(Some(WS_POLL));
+            let _ = upstream_tls.sock.set_read_timeout(Some(WS_POLL));
+            copy_between_tls(&mut client_tls, &mut upstream_tls, shutdown);
             break;
         }
 
@@ -611,6 +686,7 @@ fn intercept_https(
                     &bare_host,
                     port,
                     &req_head,
+                    &req_head.target,
                     &resp_head,
                     latency_ms,
                     raw_req.len() as u64 + req_body_bytes,
@@ -628,6 +704,7 @@ fn intercept_https(
             &bare_host,
             port,
             &req_head,
+            &req_head.target,
             &resp_head,
             latency_ms,
             raw_req.len() as u64 + req_body_bytes,
@@ -654,16 +731,88 @@ fn proto_of(v: wire::HttpVersion) -> Protocol {
     }
 }
 
-/// Opaque relay between two already-established TLS streams (post-upgrade).
-fn copy_between_tls<A: Read + Write, B: Read + Write>(
-    _a: &mut A,
-    _b: &mut B,
-) -> std::io::Result<()> {
-    // Post-101 we cannot easily split the rustls StreamOwned across threads;
-    // a single-direction drain is sufficient to keep the metadata honest (the
-    // event is already recorded and flagged upgrade_then_opaque). The streams
-    // drop and close when this returns.
-    Ok(())
+/// Opaque bidirectional relay between two already-established TLS streams
+/// (post-upgrade, e.g. WebSocket). Frames are never decoded — this only keeps
+/// the child's upgraded connection alive end to end. Because a rustls
+/// `StreamOwned` cannot be split across threads, both directions are serviced
+/// from one thread using the short socket read timeout set by the caller: a
+/// timed-out/would-block read is "no data this round", any buffered plaintext
+/// is returned before the socket is touched, and a clean `Ok(0)` or a real
+/// error on either side ends the relay. The `shutdown` flag lets session
+/// teardown end an idle tunnel promptly.
+fn copy_between_tls<A: Read + Write, B: Read + Write>(a: &mut A, b: &mut B, shutdown: &AtomicBool) {
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+        // a -> b
+        match a.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if b.write_all(&buf[..n]).and_then(|_| b.flush()).is_err() {
+                    break;
+                }
+            }
+            Err(e) if is_would_block(&e) => {}
+            Err(_) => break,
+        }
+        // b -> a
+        match b.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if a.write_all(&buf[..n]).and_then(|_| a.flush()).is_err() {
+                    break;
+                }
+            }
+            Err(e) if is_would_block(&e) => {}
+            Err(_) => break,
+        }
+    }
+}
+
+/// A read timeout or non-blocking would-block: not a fatal error, just "no data
+/// available right now".
+fn is_would_block(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// Classify an upstream TLS handshake/IO failure. rustls surfaces certificate
+/// verification failures as `InvalidData` wrapping a `rustls::Error`; only that
+/// certificate family should be reported as `UpstreamCertInvalid` (the signal
+/// the alerts layer turns into "add your corporate root" advice). Everything
+/// else — resets, timeouts, other TLS protocol errors — is a plain transport
+/// failure so ordinary network flakiness is not misdiagnosed as a bad cert.
+fn classify_upstream_handshake_error(e: &std::io::Error) -> TransportError {
+    use std::io::ErrorKind;
+    match e.kind() {
+        ErrorKind::TimedOut | ErrorKind::WouldBlock => TransportError::Timeout,
+        ErrorKind::ConnectionReset
+        | ErrorKind::ConnectionAborted
+        | ErrorKind::BrokenPipe
+        | ErrorKind::UnexpectedEof => TransportError::Reset,
+        ErrorKind::InvalidData => {
+            let is_cert = e
+                .get_ref()
+                .map(|inner| {
+                    let s = inner.to_string().to_ascii_lowercase();
+                    s.contains("certificate")
+                        || s.contains("unknown issuer")
+                        || s.contains("unknownissuer")
+                        || s.contains("invalid peer")
+                })
+                .unwrap_or(false);
+            if is_cert {
+                TransportError::UpstreamCertInvalid
+            } else {
+                TransportError::Reset
+            }
+        }
+        _ => TransportError::Reset,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -672,6 +821,11 @@ fn record_http(
     connect_host: &str,
     port: u16,
     req: &wire::RequestHead,
+    // The origin-form target to sanitize. For intercepted CONNECT traffic this
+    // is the tunneled request's own target (already origin-form); for the plain
+    // path it is the origin-form path extracted from the absolute-form target,
+    // NOT the absolute-form `req.target` (which sanitizes to "/:redacted").
+    effective_target: &str,
     resp: &wire::ResponseHead,
     latency_ms: i64,
     request_bytes: u64,
@@ -679,15 +833,18 @@ fn record_http(
     protocol: Protocol,
     source: ObservationSource,
 ) {
-    let host = req
-        .host
-        .clone()
-        .unwrap_or_else(|| connect_host.to_string())
-        .split(':')
-        .next()
-        .unwrap_or(connect_host)
+    // Record the policy-validated CONNECT authority as the host, never the
+    // client-supplied Host header (`req.host`): that is an unvalidated,
+    // spoofable request-header VALUE, and trusting it would (a) let arbitrary
+    // header bytes reach the inventory `host` column and (b) attribute traffic
+    // to a host that was never resolved or policy-checked. `connect_host` is
+    // already port-stripped by every caller; strip IPv6 brackets to match the
+    // normalization used by `record_transport`/`opaque_tunnel`.
+    let host = connect_host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
         .to_ascii_lowercase();
-    let (path_template, confidence) = sanitize::sanitize_path(&req.target);
+    let (path_template, confidence) = sanitize::sanitize_path(effective_target);
     cfg.sink.record(ObservedRequest {
         host,
         port,
@@ -712,6 +869,7 @@ fn record_http(
 fn handle_plain(
     mut client: TcpStream,
     head: &wire::RequestHead,
+    raw_head: &[u8],
     leftover: Vec<u8>,
     cfg: &ProxyConfig,
 ) {
@@ -764,8 +922,9 @@ fn handle_plain(
     let _ = upstream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = upstream.set_write_timeout(Some(IO_TIMEOUT));
 
-    // Rewrite the request line to origin-form and drop hop-by-hop proxy headers.
-    let rewritten = rewrite_plain_request(head, &path);
+    // Rewrite the request line to origin-form and drop hop-by-hop proxy headers,
+    // forwarding every other header (Authorization included) verbatim.
+    let rewritten = rewrite_plain_request(raw_head, &head.method, &path);
     let started = Instant::now();
     if upstream.write_all(&rewritten).is_err() {
         return;
@@ -795,9 +954,12 @@ fn handle_plain(
     if client.write_all(&raw_resp).is_err() {
         return;
     }
+    // Relay the RESPONSE body upstream -> client (src=upstream, dst=client).
+    // Reversing these starves the client and writes the response back to the
+    // server; the request relay above is the opposite direction on purpose.
     let (resp_body, _c2) = relay::relay_body(
-        &mut client,
         &mut upstream,
+        &mut client,
         BodyFramingResp(&resp_head, &head.method),
         resp_leftover,
     )
@@ -808,6 +970,7 @@ fn handle_plain(
         &host,
         port,
         head,
+        &path,
         &resp_head,
         latency_ms,
         rewritten.len() as u64 + req_body,
@@ -823,22 +986,42 @@ fn BodyFramingResp(resp: &wire::ResponseHead, method: &str) -> wire::BodyFraming
     resp.body_framing(method)
 }
 
-/// Build an origin-form request head, dropping Proxy-* hop-by-hop headers.
-fn rewrite_plain_request(head: &wire::RequestHead, origin_path: &str) -> Vec<u8> {
-    let mut out = format!("{} {} HTTP/1.1\r\n", head.method, origin_path).into_bytes();
-    // Reconstruct the minimal necessary headers from the parsed head. We only
-    // forward Host, Content-Length/Transfer-Encoding, Content-Type — enough for
-    // correct framing — never the Proxy-Authorization we just consumed.
-    if let Some(h) = &head.host {
-        out.extend_from_slice(format!("Host: {h}\r\n").as_bytes());
-    }
-    if head.chunked {
-        out.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
-    } else if let Some(n) = head.content_length {
-        out.extend_from_slice(format!("Content-Length: {n}\r\n").as_bytes());
-    }
-    if let Some(ct) = &head.content_type {
-        out.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+/// Rewrite an absolute-form plain-HTTP request head to origin-form for
+/// forwarding to the upstream.
+///
+/// Only the request line (absolute-form -> origin-form) and hop-by-hop proxy
+/// headers change: `Proxy-Authorization`/`Proxy-Connection` (which we consumed
+/// for the local proxy auth and must never leak upstream) and `Connection` (we
+/// force a single request per connection) are dropped. EVERY other header the
+/// child sent — `Authorization`, `X-Api-Key`, `User-Agent`, `Accept`, cookies,
+/// content framing — is forwarded byte-for-byte from the raw head, so observing
+/// a request does not silently change its semantics (previously all headers
+/// except Host/Content-*/Content-Type were dropped, breaking authenticated
+/// plain-HTTP calls).
+fn rewrite_plain_request(raw_head: &[u8], method: &str, origin_path: &str) -> Vec<u8> {
+    let mut out = format!("{method} {origin_path} HTTP/1.1\r\n").into_bytes();
+    // Iterate the raw head's lines (byte-exact; heads are ASCII). Skip the
+    // original request line, forward header lines verbatim except the ones we
+    // must strip, and stop at the blank line terminating the head.
+    let mut lines = raw_head.split(|&b| b == b'\n');
+    let _ = lines.next(); // original request line
+    for raw_line in lines {
+        let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+        if line.is_empty() {
+            break; // CRLFCRLF: end of head
+        }
+        let name = match line.iter().position(|&b| b == b':') {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        if name.eq_ignore_ascii_case(b"proxy-authorization")
+            || name.eq_ignore_ascii_case(b"proxy-connection")
+            || name.eq_ignore_ascii_case(b"connection")
+        {
+            continue;
+        }
+        out.extend_from_slice(line);
+        out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(b"Connection: close\r\n\r\n");
     out
@@ -866,24 +1049,95 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_drops_proxy_headers_and_uses_origin_form() {
+    fn rewrite_uses_origin_form_drops_proxy_headers_and_preserves_the_rest() {
+        // Absolute-form request head as received by the plain-HTTP path.
+        let raw = b"GET http://example.com/a?b=c HTTP/1.1\r\n\
+                    Host: example.com\r\n\
+                    Authorization: Bearer sk-LIVE-KEY\r\n\
+                    Proxy-Authorization: Basic SECRETTOKEN\r\n\
+                    Proxy-Connection: keep-alive\r\n\
+                    User-Agent: curl/8.0\r\n\
+                    Accept: application/json\r\n\r\n";
+        let out = String::from_utf8(rewrite_plain_request(raw, "GET", "/a?b=c")).unwrap();
+        // Origin-form request line.
+        assert!(out.starts_with("GET /a?b=c HTTP/1.1\r\n"));
+        // Proxy-* headers and the session token are stripped, never leaked
+        // upstream.
+        assert!(!out.to_lowercase().contains("proxy-authorization"));
+        assert!(!out.to_lowercase().contains("proxy-connection"));
+        assert!(!out.contains("SECRETTOKEN"));
+        // Every other header the child sent is forwarded verbatim — regression
+        // for the bug where Authorization (and everything but Host/Content-*)
+        // was silently dropped, breaking authenticated plain-HTTP calls.
+        assert!(out.contains("Host: example.com\r\n"));
+        assert!(out.contains("Authorization: Bearer sk-LIVE-KEY\r\n"));
+        assert!(out.contains("User-Agent: curl/8.0\r\n"));
+        assert!(out.contains("Accept: application/json\r\n"));
+        // Exactly one Connection header, forced to close.
+        assert_eq!(out.to_lowercase().matches("connection:").count(), 1);
+        assert!(out.trim_end().ends_with("Connection: close"));
+    }
+
+    #[test]
+    fn request_head_debug_redacts_query_and_proxy_token() {
         let head = wire::RequestHead {
-            method: "GET".into(),
-            target: "http://example.com/a?b=c".into(),
+            method: "POST".into(),
+            target: "/v1/x?token=SUPERSECRET".into(),
             version: wire::HttpVersion::Http11,
-            host: Some("example.com".into()),
+            host: Some("api.example.com".into()),
             content_length: None,
             chunked: false,
             connection_close: false,
-            had_authorization: false,
+            had_authorization: true,
             content_type: None,
             upgrade: None,
-            proxy_authorization: Some("Basic SECRETTOKEN".into()),
+            proxy_authorization: Some("Basic PROXYTOKEN".into()),
         };
-        let out = String::from_utf8(rewrite_plain_request(&head, "/a?b=c")).unwrap();
-        assert!(out.starts_with("GET /a?b=c HTTP/1.1\r\n"));
-        assert!(out.contains("Host: example.com"));
-        assert!(!out.to_lowercase().contains("proxy-authorization"));
-        assert!(!out.contains("SECRETTOKEN"));
+        let dbg = format!("{head:?}");
+        assert!(
+            !dbg.contains("SUPERSECRET"),
+            "query leaked into Debug: {dbg}"
+        );
+        assert!(
+            !dbg.contains("PROXYTOKEN"),
+            "token leaked into Debug: {dbg}"
+        );
+        assert!(dbg.contains("/v1/x"));
+        assert!(dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn classify_upstream_error_only_certs_are_cert_invalid() {
+        use std::io::{Error, ErrorKind};
+        // A genuine cert error (rustls surfaces as InvalidData wrapping a msg).
+        let cert = Error::new(
+            ErrorKind::InvalidData,
+            "invalid peer certificate: UnknownIssuer",
+        );
+        assert_eq!(
+            classify_upstream_handshake_error(&cert),
+            TransportError::UpstreamCertInvalid
+        );
+        // A reset is a reset, not a cert problem.
+        let reset = Error::from(ErrorKind::ConnectionReset);
+        assert_eq!(
+            classify_upstream_handshake_error(&reset),
+            TransportError::Reset
+        );
+        // A timeout is a timeout.
+        let to = Error::from(ErrorKind::TimedOut);
+        assert_eq!(
+            classify_upstream_handshake_error(&to),
+            TransportError::Timeout
+        );
+        // A non-cert TLS protocol error is not misreported as a cert problem.
+        let proto = Error::new(
+            ErrorKind::InvalidData,
+            "received fatal alert: HandshakeFailure",
+        );
+        assert_eq!(
+            classify_upstream_handshake_error(&proto),
+            TransportError::Reset
+        );
     }
 }

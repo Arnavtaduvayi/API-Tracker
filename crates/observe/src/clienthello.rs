@@ -235,7 +235,7 @@ mod tests {
     fn non_tls_input_is_rejected_without_panic() {
         assert!(!parse(b"GET / HTTP/1.1\r\n").is_tls_handshake);
         assert!(!parse(&[]).is_tls_handshake);
-        assert!(!parse(&[0x16, 0x03]).sni.is_some()); // truncated, no panic
+        assert!(parse(&[0x16, 0x03]).sni.is_none()); // truncated, no panic
     }
 
     #[test]

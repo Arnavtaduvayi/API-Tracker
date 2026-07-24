@@ -12,6 +12,7 @@
 
 use api_tracker_core::error::{CoreError, Result};
 use std::io::Read;
+use std::time::Instant;
 
 /// Maximum bytes of a single message head.
 pub const MAX_HEAD: usize = 32 * 1024;
@@ -46,7 +47,7 @@ pub enum BodyFraming {
     UntilClose,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RequestHead {
     pub method: String,
     pub target: String,
@@ -61,6 +62,32 @@ pub struct RequestHead {
     /// The `Proxy-Authorization` value, used ONLY for the proxy auth check and
     /// then dropped. Never stored, never logged.
     pub proxy_authorization: Option<String>,
+}
+
+// Manual Debug: `target` carries the raw query string and `proxy_authorization`
+// embeds the per-session proxy token. Redact both so a future `{:?}` (error
+// context, log line) can never print secret material. There is no Debug sink in
+// the hot path today; this makes that safe by construction.
+impl std::fmt::Debug for RequestHead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let path_only = self.target.split(['?', '#']).next().unwrap_or(&self.target);
+        f.debug_struct("RequestHead")
+            .field("method", &self.method)
+            .field("target", &format_args!("{path_only}?<redacted>"))
+            .field("version", &self.version)
+            .field("host", &self.host)
+            .field("content_length", &self.content_length)
+            .field("chunked", &self.chunked)
+            .field("connection_close", &self.connection_close)
+            .field("had_authorization", &self.had_authorization)
+            .field("content_type", &self.content_type)
+            .field("upgrade", &self.upgrade)
+            .field(
+                "proxy_authorization",
+                &self.proxy_authorization.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl RequestHead {
@@ -152,7 +179,7 @@ fn connection_close(headers: &[httparse::Header<'_>], version: HttpVersion) -> b
 /// the RAW head bytes (for verbatim forwarding), and any leftover bytes already
 /// read past the head (the start of the body).
 pub fn read_request_head<R: Read>(r: &mut R) -> Result<(RequestHead, Vec<u8>, Vec<u8>)> {
-    read_request_head_from(r, Vec::new())
+    read_head_inner(r, Vec::new(), None)
 }
 
 /// Like [`read_request_head`], but seeds the parse buffer with `initial` bytes
@@ -160,6 +187,27 @@ pub fn read_request_head<R: Read>(r: &mut R) -> Result<(RequestHead, Vec<u8>, Ve
 pub fn read_request_head_from<R: Read>(
     r: &mut R,
     initial: Vec<u8>,
+) -> Result<(RequestHead, Vec<u8>, Vec<u8>)> {
+    read_head_inner(r, initial, None)
+}
+
+/// Like [`read_request_head`], but also fails once `deadline` passes, an
+/// absolute wall-clock bound on completing the head that is independent of the
+/// per-read idle timeout. Used for the untrusted pre-auth read so a Slowloris
+/// dribbling bytes just under the idle timeout cannot hold a connection slot
+/// indefinitely. The caller must set a per-read timeout shorter than the
+/// deadline so the loop wakes to observe it.
+pub fn read_request_head_deadline<R: Read>(
+    r: &mut R,
+    deadline: Instant,
+) -> Result<(RequestHead, Vec<u8>, Vec<u8>)> {
+    read_head_inner(r, Vec::new(), Some(deadline))
+}
+
+fn read_head_inner<R: Read>(
+    r: &mut R,
+    initial: Vec<u8>,
+    deadline: Option<Instant>,
 ) -> Result<(RequestHead, Vec<u8>, Vec<u8>)> {
     let mut buf: Vec<u8> = initial;
     let mut tmp = [0u8; 4096];
@@ -206,7 +254,21 @@ pub fn read_request_head_from<R: Read>(
         if buf.len() > MAX_HEAD {
             return Err(CoreError::InvalidInput("request head exceeds limit".into()));
         }
-        let n = r.read(&mut tmp).map_err(CoreError::Io)?;
+        if let Some(d) = deadline {
+            if Instant::now() >= d {
+                return Err(CoreError::InvalidInput(
+                    "request head not completed before deadline".into(),
+                ));
+            }
+        }
+        let n = match r.read(&mut tmp) {
+            Ok(n) => n,
+            // With a deadline set, an idle-timeout read is not fatal: loop to
+            // re-check the absolute deadline (the caller sets a short per-read
+            // timeout so the loop wakes to observe it).
+            Err(e) if deadline.is_some() && is_would_block(&e) => continue,
+            Err(e) => return Err(CoreError::Io(e)),
+        };
         if n == 0 {
             return Err(CoreError::InvalidInput(
                 "connection closed before request head completed".into(),
@@ -214,6 +276,13 @@ pub fn read_request_head_from<R: Read>(
         }
         buf.extend_from_slice(&tmp[..n]);
     }
+}
+
+fn is_would_block(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 /// Read a complete response head. Returns the head, RAW head bytes, and
@@ -376,5 +445,63 @@ mod tests {
     fn no_response_bytes_errors() {
         let mut c = Cursor::new(Vec::new());
         assert!(read_response_head(&mut c).is_err());
+    }
+
+    /// A reader that yields scripted chunks; an empty chunk (and everything past
+    /// the script) is a would-block, i.e. an idle read timeout.
+    struct SlowReader {
+        chunks: Vec<Vec<u8>>,
+        idx: usize,
+    }
+    impl Read for SlowReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.idx >= self.chunks.len() {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            let c = self.chunks[self.idx].clone();
+            self.idx += 1;
+            if c.is_empty() {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            let n = c.len().min(buf.len());
+            buf[..n].copy_from_slice(&c[..n]);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn deadline_read_tolerates_would_block_then_completes() {
+        // Partial head, an idle read (would-block), then the terminator.
+        let mut r = SlowReader {
+            chunks: vec![
+                b"GET /p?x=1 HTTP/1.1\r\nHost: h\r\n".to_vec(),
+                Vec::new(), // would-block: must NOT be fatal with a live deadline
+                b"\r\n".to_vec(),
+            ],
+            idx: 0,
+        };
+        let (head, _raw, leftover) =
+            read_request_head_deadline(&mut r, Instant::now() + std::time::Duration::from_secs(5))
+                .expect("head should complete before the deadline");
+        assert_eq!(head.target, "/p?x=1");
+        assert_eq!(head.host.as_deref(), Some("h"));
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn deadline_read_fails_when_head_never_completes() {
+        // A Slowloris: a partial head then idle forever. The absolute deadline
+        // must fire rather than holding the connection indefinitely.
+        let mut r = SlowReader {
+            chunks: vec![b"GET / HTTP/1.1\r\n".to_vec()],
+            idx: 0,
+        };
+        let start = Instant::now();
+        let res = read_request_head_deadline(&mut r, start + std::time::Duration::from_millis(50));
+        assert!(res.is_err(), "expected a deadline error");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "deadline should fire promptly"
+        );
     }
 }
