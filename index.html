@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tethra — local-first API credential manager</title>
+<meta name="description" content="Tethra is a local-first desktop app and CLI for developers to organize, secure, and track API credentials. Encrypted on your machine. No account, no cloud, no telemetry.">
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #57534e; --card: #ffffff;
+    --border: #e7e5e4; --accent: #0f766e; --accent-fg: #ffffff;
+    --warn-bg: #fffbeb; --warn-border: #f59e0b; --code-bg: #f5f5f4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0a09; --fg: #fafaf9; --muted: #a8a29e; --card: #1c1917;
+      --border: #292524; --accent: #2dd4bf; --accent-fg: #042f2e;
+      --warn-bg: #292008; --warn-border: #b45309; --code-bg: #1c1917;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 24px; }
+  header { padding: 96px 0 56px; text-align: center; }
+  .wordmark { font-size: 44px; font-weight: 800; letter-spacing: -0.03em; }
+  .wordmark span { color: var(--accent); }
+  .tagline { margin: 16px auto 0; max-width: 620px; font-size: 19px; color: var(--muted); }
+  .cta { margin-top: 36px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 13px 26px; border-radius: 10px;
+    font-weight: 600; text-decoration: none; font-size: 16px;
+    border: 1px solid var(--border); color: var(--fg); background: var(--card);
+  }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+  .btn:hover { filter: brightness(1.06); }
+  .sub { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .sub code { font-size: 12px; }
+  .alpha {
+    margin: 0 auto; max-width: 720px; background: var(--warn-bg);
+    border: 1px solid var(--warn-border); border-radius: 12px;
+    padding: 16px 20px; text-align: left; font-size: 14.5px;
+  }
+  .alpha strong { display: block; margin-bottom: 4px; }
+  .alpha details { margin-top: 8px; }
+  .alpha summary { cursor: pointer; font-weight: 600; }
+  .alpha ol { margin: 8px 0 0 20px; }
+  section { padding: 40px 0; }
+  h2 { font-size: 24px; letter-spacing: -0.02em; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px;
+  }
+  .card h3 { font-size: 16px; margin-bottom: 6px; }
+  .card p { font-size: 14.5px; color: var(--muted); }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    background: var(--code-bg); border-radius: 6px;
+  }
+  code { padding: 2px 6px; font-size: 13.5px; }
+  pre { padding: 16px; overflow-x: auto; border: 1px solid var(--border); font-size: 13.5px; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  .local { border-left: 3px solid var(--accent); padding-left: 18px; color: var(--muted); font-size: 15px; max-width: 720px; }
+  footer {
+    margin-top: 48px; padding: 28px 0 48px; border-top: 1px solid var(--border);
+    font-size: 14px; color: var(--muted); text-align: center;
+  }
+  footer a { color: var(--muted); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="wordmark">Teth<span>ra</span></div>
+    <p class="tagline">A local-first desktop app and CLI for developers to organize,
+    secure, and track the API credentials scattered across their projects.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/tethra-0.1.0-alpha/Tethra.dmg">Download for macOS&nbsp;·&nbsp;alpha</a>
+      <a class="btn" href="https://github.com/Arnavtaduvayi/API-Tracker">View on GitHub</a>
+    </div>
+    <p class="sub">Version 0.1.0 alpha · Apple Silicon · macOS 10.13+ ·
+      <a href="https://github.com/Arnavtaduvayi/API-Tracker/releases/tag/tethra-0.1.0-alpha">checksums &amp; release notes</a><br>
+      SHA-256 <code>133504fa…b64ee115</code></p>
+  </header>
+
+  <div class="alpha">
+    <strong>⚠️ Unsigned alpha build</strong>
+    This is alpha software and the build is not yet signed or notarized, so macOS
+    Gatekeeper will warn you on first launch. Evaluate it carefully before storing
+    highly sensitive production credentials.
+    <details>
+      <summary>How to open it the first time</summary>
+      <ol>
+        <li>Open the DMG and drag <code>Tethra.app</code> to Applications.</li>
+        <li>Right-click <code>Tethra.app</code> → <b>Open</b> → <b>Open</b> (needed once),<br>
+            or run <code>xattr -dr com.apple.quarantine "Tethra.app"</code>.</li>
+        <li>Optionally verify the download first:
+            <code>shasum -a 256 Tethra.dmg</code></li>
+      </ol>
+    </details>
+  </div>
+
+  <section>
+    <h2>Everything stays on your computer</h2>
+    <p class="local">There is no account, no cloud service, no telemetry, and no Tethra
+    server. The only network traffic Tethra ever produces is direct traffic between
+    your machine and the API providers you explicitly configure — your secrets are
+    never uploaded anywhere.</p>
+  </section>
+
+  <section>
+    <h2>What it does</h2>
+    <div class="grid">
+      <div class="card"><h3>Encrypted vault</h3>
+        <p>Credentials encrypted at rest with Argon2id + XChaCha20-Poly1305.
+        Master password never stored; revealing a secret always requires
+        reauthentication.</p></div>
+      <div class="card"><h3>Projects, like folders</h3>
+        <p>Organize keys by project and environment. See at a glance what's
+        expired, expiring, unused, stale, or reused across projects — with the
+        evidence for every claim.</p></div>
+      <div class="card"><h3>Secret scanning</h3>
+        <p>Scan repositories and git history for committed secrets locally, and
+        block bad commits with a managed pre-commit hook.</p></div>
+      <div class="card"><h3>Usage &amp; cost tracking</h3>
+        <p>Sync usage from providers that support it, estimate costs against
+        versioned local pricing, and set budget alerts. Nothing is ever invented —
+        attribution limits are labeled honestly.</p></div>
+      <div class="card"><h3>Secure injection</h3>
+        <p><code>tethra run</code> injects chosen credentials into a child
+        process's environment — no <code>.env</code> file ever written, and
+        Tethra's own secrets are scrubbed from the child.</p></div>
+      <div class="card"><h3>Desktop + CLI, one vault</h3>
+        <p>The app and the <code>tethra</code> CLI share the same encrypted vault
+        and core logic. Rotation, backups, destinations, and alerts work from
+        either.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The CLI in ten seconds</h2>
+    <pre><code>tethra init                              # create the encrypted vault
+eval "$(tethra unlock --print-export)"   # start a session
+tethra project create my-app --env production
+tethra key add --project my-app --name openai --provider openai
+tethra key reveal my-app/openai          # reauthentication required</code></pre>
+    <p class="sub" style="text-align:left">The CLI ships in the
+      <a href="https://github.com/Arnavtaduvayi/API-Tracker">source repository</a> —
+      build with <code>cargo build --release -p api-tracker-cli</code>.</p>
+  </section>
+
+  <footer>
+    Tethra is open source under the
+    <a href="https://github.com/Arnavtaduvayi/API-Tracker/blob/main/LICENSE">Apache-2.0 license</a>
+    ·
+    <a href="https://github.com/Arnavtaduvayi/API-Tracker">GitHub</a>
+    ·
+    <a href="https://github.com/Arnavtaduvayi/API-Tracker/security/advisories/new">Report a vulnerability</a>
+    <br>Formerly “API Tracker” — existing vaults and scripts keep working,
+    <a href="https://github.com/Arnavtaduvayi/API-Tracker/blob/release/tethra-macos-private-alpha/docs/rebrand/TETHRA_MIGRATION_GUIDE.md">migration guide</a>.
+  </footer>
+
+</div>
+</body>
+</html>
