@@ -19,9 +19,11 @@ use api_tracker_core::runtime::{aggregate, attribution, inventory, retention, st
 use api_tracker_core::vault::UnlockedVault;
 use api_tracker_core::{clock, inject};
 use base64::Engine;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 enum Msg {
     Event(Box<ObservedRequest>),
@@ -64,6 +66,72 @@ impl ObservationSink for ChannelSink {
     }
 }
 
+/// How often the interruptible wait loop re-checks for child exit and lock
+/// signals. This is a POLL INTERVAL (bounds responsiveness), NOT a
+/// synchronization primitive — correctness depends only on the deterministic
+/// checks it performs (`try_wait`, session-file stat, elapsed deadline), never
+/// on the sleep duration.
+const LOCK_POLL: Duration = Duration::from_millis(250);
+
+/// Why an active observed run is being torn down by the lock watch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockSignal {
+    /// The session file was deleted — `api-tracker lock` (manual lock).
+    Manual,
+    /// The auto-lock deadline / session-file expiry passed (auto-lock / idle).
+    Auto,
+}
+
+impl LockSignal {
+    /// The non-secret interruption reason persisted to the session row.
+    pub fn reason(self) -> &'static str {
+        match self {
+            LockSignal::Manual => "vault_locked",
+            LockSignal::Auto => "auto_lock",
+        }
+    }
+}
+
+/// Tells [`run_monitored`] when to interrupt an active observed run because the
+/// vault has been (or should be) locked. It is evaluated IN the process that
+/// owns the live proxy + CA key (the CLI `run` process) — there is no
+/// cross-process signalling, so it is fully portable (no signals, no `/proc`).
+#[derive(Debug, Clone, Default)]
+pub struct LockPolicy {
+    /// Session file to watch. Deleted → Manual lock; present but past its
+    /// recorded expiry → Auto lock. `None` for an inline-password run (there is
+    /// no shared session file to lock).
+    pub session_file: Option<PathBuf>,
+    /// Hard wall-clock cap from run start (the vault's auto-lock TTL). Elapsed →
+    /// Auto lock. `None` when auto-lock is disabled or a session file is watched
+    /// instead (the file's own expiry is authoritative there).
+    pub max_run: Option<Duration>,
+}
+
+impl LockPolicy {
+    /// Return a lock signal if the run should be torn down now, else `None`.
+    /// Cheap and pure (one file stat + an elapsed comparison).
+    fn lock_signal(&self, started: Instant) -> Option<LockSignal> {
+        if let Some(max) = self.max_run {
+            if started.elapsed() >= max {
+                return Some(LockSignal::Auto);
+            }
+        }
+        if let Some(path) = &self.session_file {
+            match api_tracker_core::session::peek_state(path) {
+                api_tracker_core::session::SessionFileState::Missing => {
+                    return Some(LockSignal::Manual)
+                }
+                api_tracker_core::session::SessionFileState::Expired => {
+                    return Some(LockSignal::Auto)
+                }
+                api_tracker_core::session::SessionFileState::Active => {}
+            }
+        }
+        None
+    }
+}
+
 /// Parameters for a monitored run.
 pub struct RunParams {
     pub project_id: String,
@@ -75,6 +143,8 @@ pub struct RunParams {
     pub injected: Vec<attribution::InjectedCredential>,
     /// Explicit internal-destination allowlist for this run.
     pub allowlist: Vec<(String, u16)>,
+    /// When to interrupt the run because the vault locked / auto-locked.
+    pub lock: LockPolicy,
 }
 
 /// The result of a monitored run.
@@ -84,6 +154,13 @@ pub struct RunOutcome {
     pub assessment: RuntimeAssessment,
     pub exit_code: Option<i32>,
     pub attributions: usize,
+    /// `Some(reason)` when the run was interrupted (e.g. by a vault lock)
+    /// instead of the child exiting on its own; `None` on a normal finish.
+    pub interrupt_reason: Option<String>,
+    /// On an interruption, the non-secret outcome of terminating the monitored
+    /// child (e.g. "SIGTERM sent …", "already exited", "refused: …"); `None`
+    /// on a normal finish. Never contains secrets.
+    pub child_termination: Option<String>,
 }
 
 fn random_token() -> String {
@@ -269,20 +346,61 @@ pub fn run_monitored(
         None,
     );
 
-    // 6. Wait for the child.
-    let exit_code = child.wait().ok().and_then(|s| s.code());
+    // 6. Wait for the child, but REMAIN INTERRUPTIBLE. A blocking `child.wait()`
+    //    would let the proxy keep terminating TLS and hold the CA signing key in
+    //    memory for the child's whole lifetime, regardless of a manual `lock` or
+    //    the vault's auto-lock timeout. Instead we poll: on each tick check
+    //    whether the child exited, and whether the lock policy says to tear the
+    //    run down now. The poll interval bounds responsiveness only; the checks
+    //    are deterministic.
+    let started = Instant::now();
+    let mut exit_code: Option<i32> = None;
+    let mut interrupt: Option<LockSignal> = None;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_code = status.code();
+                break;
+            }
+            Ok(None) => {}
+            // Cannot wait on the child (should not happen): stop watching rather
+            // than spin, and tear down as if it is gone.
+            Err(_) => break,
+        }
+        if let Some(signal) = params.lock.lock_signal(started) {
+            interrupt = Some(signal);
+            break;
+        }
+        std::thread::sleep(LOCK_POLL);
+    }
 
-    // 7. Tear down: stop the proxy (invalidates the token, wipes leaf cache),
-    //    close the channel, join the writer.
+    // 7. Tear down. proxy.shutdown() FIRST: it force-closes every in-flight
+    //    client socket, stops the listener, releases the ephemeral port, and
+    //    kills the per-session token. NO further traffic is decrypted after this
+    //    returns — this is the security-critical step for a vault lock.
     proxy.shutdown();
+
+    // On a lock interruption the child is still running; terminate it
+    // (fail-closed) via the verified-identity path — it refuses on PID reuse /
+    // identity mismatch and never signals a bare PID. Descendants are NOT
+    // tree-killed (documented PI-03 limitation); that is safe here because the
+    // proxy is already down, so any surviving descendant can only reach a dead
+    // loopback port and cannot have its traffic decrypted.
+    let child_termination = if interrupt.is_some() {
+        Some(inject::terminate_verified(i64::from(pid), identity.as_deref()).describe())
+    } else {
+        None
+    };
+
     drop(sink); // last Sender clone → writer's rx closes → writer returns
     let _ = writer.join();
     // Dropping `ca` here drops the CertAuthority (leaf cache cleared; the
-    // reconstituted CA key is released).
+    // reconstituted CA key is released/zeroized).
     drop(ca);
     drop(trust); // deletes the temp trust files
 
     // 8. Finalize on the main thread (the writer is done, no concurrent writes).
+    //    A lock-interrupted run still has partial data worth attributing.
     let attributions =
         attribution::attribute_session(vault.connection(), &session_id, &params.injected)?;
     // Attribution just backfilled credential_id onto this session's events. If
@@ -295,7 +413,19 @@ pub fn run_monitored(
     }
     let _ = aggregate::roll_up(vault.connection(), &clock::now_rfc3339());
     let _ = retention::sweep(vault.connection());
-    store::finish_session(vault.connection(), &session_id, exit_code)?;
+    // Finalize with the honest terminal state. Both calls are compare-and-set on
+    // status='running', so they are idempotent and never overwrite a terminal
+    // state (a completed run is never relabeled interrupted, and vice versa).
+    let interrupt_reason = match interrupt {
+        Some(signal) => {
+            store::interrupt_session(vault.connection(), &session_id, signal.reason())?;
+            Some(signal.reason().to_string())
+        }
+        None => {
+            store::finish_session(vault.connection(), &session_id, exit_code)?;
+            None
+        }
+    };
 
     Ok(RunOutcome {
         session_id,
@@ -303,6 +433,8 @@ pub fn run_monitored(
         assessment,
         exit_code,
         attributions,
+        interrupt_reason,
+        child_termination,
     })
 }
 
@@ -395,4 +527,49 @@ fn write_event(
         previously_known,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod lock_policy_tests {
+    use super::*;
+
+    #[test]
+    fn max_run_elapsed_is_auto_lock() {
+        let policy = LockPolicy {
+            session_file: None,
+            max_run: Some(Duration::ZERO),
+        };
+        // started "now"; ZERO cap is already elapsed.
+        assert_eq!(policy.lock_signal(Instant::now()), Some(LockSignal::Auto));
+    }
+
+    #[test]
+    fn max_run_not_elapsed_is_none() {
+        let policy = LockPolicy {
+            session_file: None,
+            max_run: Some(Duration::from_secs(3600)),
+        };
+        assert_eq!(policy.lock_signal(Instant::now()), None);
+    }
+
+    #[test]
+    fn missing_session_file_is_manual_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = LockPolicy {
+            session_file: Some(dir.path().join("gone.json")),
+            max_run: None,
+        };
+        assert_eq!(policy.lock_signal(Instant::now()), Some(LockSignal::Manual));
+    }
+
+    #[test]
+    fn default_policy_never_signals() {
+        assert_eq!(LockPolicy::default().lock_signal(Instant::now()), None);
+    }
+
+    #[test]
+    fn reasons_are_stable_non_secret_strings() {
+        assert_eq!(LockSignal::Manual.reason(), "vault_locked");
+        assert_eq!(LockSignal::Auto.reason(), "auto_lock");
+    }
 }

@@ -189,7 +189,7 @@ fn run_observed(
         .as_deref()
         .expect("clap enforces project|grant, and grant is barred above");
 
-    let (vault, _token) = ctx.unlocked()?;
+    let (vault, token) = ctx.unlocked()?;
     let command_label = api_tracker_core::runtime::sanitize::redact_command(&args.command);
 
     // Build the credential injection through the vetted path (this decrypts
@@ -237,6 +237,24 @@ fn run_observed(
         );
     }
 
+    // Lock policy: a long-running observed run must stop if the vault locks.
+    // Under a session token, watch that session file (manual `lock` deletes it;
+    // auto-lock is its recorded expiry) — the run inherits exactly the lock
+    // behavior it was started under. With an inline password there is no shared
+    // session file, so bound the run by the vault's auto-lock TTL from start.
+    let lock = if token.is_some() {
+        api_tracker_observe::session::LockPolicy {
+            session_file: Some(vault.paths().session_path()),
+            max_run: None,
+        }
+    } else {
+        let mins = vault.settings().auto_lock_minutes;
+        api_tracker_observe::session::LockPolicy {
+            session_file: None,
+            max_run: (mins > 0).then(|| std::time::Duration::from_secs(u64::from(mins) * 60)),
+        }
+    };
+
     let params = api_tracker_observe::session::RunParams {
         project_id,
         mode,
@@ -245,12 +263,26 @@ fn run_observed(
         credential_names: injected_names,
         injected,
         allowlist,
+        lock,
     };
     let outcome = api_tracker_observe::session::run_monitored(&vault, params, cmd, &program)
         .map_err(|e| anyhow!("{e}"))?;
 
     let session = vault.observe_session(&outcome.session_id)?;
     let short = &outcome.session_id[..8.min(outcome.session_id.len())];
+    if let Some(reason) = &outcome.interrupt_reason {
+        let cause = match reason.as_str() {
+            "vault_locked" => "the vault was locked",
+            "auto_lock" => "the vault auto-locked",
+            other => other,
+        };
+        eprintln!(
+            "Monitored session {short} INTERRUPTED — {cause}: the observation proxy was shut \
+             down and the monitored process was terminated. Start a new run after unlocking."
+        );
+        // Non-zero: the run did not complete on the child's own terms.
+        std::process::exit(125);
+    }
     eprintln!(
         "Monitored session {short} finished — runtime={} ({}), requests={}, errors={}{}.",
         outcome.assessment.runtime,

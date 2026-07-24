@@ -240,3 +240,103 @@ pub fn status(paths: &VaultPaths) -> Result<Option<SessionStatus>> {
         expires_at: file.expires_at,
     }))
 }
+
+/// The lifecycle state of a session file, for a long-running observed run to
+/// watch so that a manual `lock` (which deletes the file) or an auto-lock
+/// timeout (the file's recorded `expires_at`) can interrupt it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFileState {
+    /// The file is present and not past its expiry — the session is unlocked.
+    Active,
+    /// The file is gone (or unreadable/corrupt) — treated as a MANUAL lock.
+    Missing,
+    /// The file is present but past its recorded expiry — an AUTO-lock (idle).
+    Expired,
+}
+
+/// Read-only, non-mutating check of a session file's lifecycle at `path`.
+///
+/// Unlike [`load_and_refresh`], this NEVER slides the expiry forward and NEVER
+/// deletes an expired file — it only reports state, so an observed-run lock
+/// watch can poll it cheaply without disturbing the session another process
+/// owns. Fail-closed: an unreadable/corrupt file or a corrupt expiry is treated
+/// as not-active (Missing / Expired) rather than as a live session.
+pub fn peek_state(path: &std::path::Path) -> SessionFileState {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(_) => return SessionFileState::Missing,
+    };
+    let file: SessionFile = match serde_json::from_str(&raw) {
+        Ok(f) => f,
+        Err(_) => return SessionFileState::Missing,
+    };
+    match &file.expires_at {
+        None => SessionFileState::Active, // auto-lock disabled: present == active
+        Some(exp) => match clock::parse_rfc3339(exp) {
+            Ok(t) if clock::now() >= t => SessionFileState::Expired,
+            Ok(_) => SessionFileState::Active,
+            Err(_) => SessionFileState::Expired, // corrupt expiry: fail-closed
+        },
+    }
+}
+
+#[cfg(test)]
+mod peek_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_session(dir: &std::path::Path, expires_at: Option<&str>) -> std::path::PathBuf {
+        let path = dir.join("session.json");
+        let exp = match expires_at {
+            Some(e) => format!("\"{e}\""),
+            None => "null".to_string(),
+        };
+        let json = format!(
+            "{{\"session_id\":\"s1\",\"created_at\":\"2020-01-01T00:00:00Z\",\
+              \"expires_at\":{exp},\"ttl_minutes\":15,\"payload_b64\":\"AA==\"}}"
+        );
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn peek_missing_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            peek_state(&dir.path().join("nope.json")),
+            SessionFileState::Missing
+        );
+    }
+
+    #[test]
+    fn peek_future_expiry_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let future = clock::to_rfc3339(clock::now() + time::Duration::hours(1));
+        let path = write_session(dir.path(), Some(&future));
+        assert_eq!(peek_state(&path), SessionFileState::Active);
+    }
+
+    #[test]
+    fn peek_past_expiry_is_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let past = clock::to_rfc3339(clock::now() - time::Duration::hours(1));
+        let path = write_session(dir.path(), Some(&past));
+        assert_eq!(peek_state(&path), SessionFileState::Expired);
+    }
+
+    #[test]
+    fn peek_no_expiry_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_session(dir.path(), None);
+        assert_eq!(peek_state(&path), SessionFileState::Active);
+    }
+
+    #[test]
+    fn peek_corrupt_file_is_missing_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(peek_state(&path), SessionFileState::Missing);
+    }
+}
