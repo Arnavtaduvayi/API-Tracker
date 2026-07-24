@@ -771,7 +771,7 @@ pub fn session_compat(conn: &Connection, session_id: &str) -> Result<Vec<Compati
 /// The stored CA state, including the encrypted private key. NOT `Serialize`:
 /// the ciphertext blob never crosses the IPC boundary. Use [`CertStatus`] for
 /// display.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CertStateRow {
     pub ca_cert_pem: String,
     pub key_ciphertext: Vec<u8>,
@@ -781,6 +781,27 @@ pub struct CertStateRow {
     pub not_after: String,
     pub system_trust: String,
     pub system_trust_at: Option<String>,
+}
+
+// Manual Debug elides key_ciphertext: it is encrypted (useless without the
+// vault key), but the codebase's standard is to never print even secret-adjacent
+// blobs, so a stray `{:?}` cannot dump it into logs.
+impl std::fmt::Debug for CertStateRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertStateRow")
+            .field("ca_cert_pem", &self.ca_cert_pem)
+            .field(
+                "key_ciphertext",
+                &format_args!("[elided; {} bytes]", self.key_ciphertext.len()),
+            )
+            .field("fingerprint_sha256", &self.fingerprint_sha256)
+            .field("serial", &self.serial)
+            .field("created_at", &self.created_at)
+            .field("not_after", &self.not_after)
+            .field("system_trust", &self.system_trust)
+            .field("system_trust_at", &self.system_trust_at)
+            .finish()
+    }
 }
 
 /// Non-secret certificate status for the UI/CLI (no key material, no ciphertext).

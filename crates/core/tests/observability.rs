@@ -535,6 +535,43 @@ fn run_monitor_sweeps_orphaned_observation_sessions() {
 }
 
 #[test]
+fn tampered_ca_certificate_fails_closed_and_cannot_be_materialized() {
+    // Regression (PR #13): ca_cert_pem/fingerprint were not bound to the
+    // encrypted key, so a DB-tampering attacker could swap in their own CA cert
+    // (whose private key they hold) and launder it into the OS trust store via a
+    // consented Mode C install. The AAD now binds the cert PEM, so a swapped
+    // certificate makes the key ciphertext fail to authenticate.
+    use api_tracker_core::secret::SecretBytes;
+    let (_dir, _paths, v) = new_vault();
+    v.observe_ca_store(
+        "-----BEGIN CERTIFICATE-----\nLEGITCERTDATA\n-----END CERTIFICATE-----\n",
+        &SecretBytes::new(b"legit-private-key-der-bytes".to_vec()),
+        "aa:bb:cc",
+        "01",
+        "2099-01-01T00:00:00Z",
+    )
+    .unwrap();
+    // The legitimate material decrypts fine.
+    assert!(v.observe_ca_material().unwrap().is_some());
+    // An attacker swaps the public certificate (and matching fingerprint) but
+    // cannot re-encrypt the key without the vault key.
+    v.connection()
+        .execute(
+            "UPDATE observe_certificate_state SET ca_cert_pem = ?1, fingerprint_sha256 = ?2",
+            rusqlite::params![
+                "-----BEGIN CERTIFICATE-----\nATTACKERCERT\n-----END CERTIFICATE-----\n",
+                "de:ad:be:ef"
+            ],
+        )
+        .unwrap();
+    // Materialization now fails closed — the swapped cert can never be installed.
+    assert!(
+        v.observe_ca_material().is_err(),
+        "a tampered CA certificate must fail the AAD binding, not decrypt"
+    );
+}
+
+#[test]
 fn observe_injected_resolves_reference_to_the_root_credentials_version() {
     // Regression (PR #13): observe_injected read value_version from the injected
     // row. For a reference credential that is always the schema default 1, even

@@ -24,7 +24,7 @@ api-tracker-core = { version = "0.1.0", path = "../core" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1"
 webpki-roots = "1"
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem", "zeroize"] }
 httparse = "1.10"
 socket2 = "0.6"
 base64 = "0.22"

@@ -9177,9 +9177,13 @@ impl UnlockedVault {
         match crate::runtime::store::cert_state_get(&self.conn)? {
             None => Ok(None),
             Some(row) => {
+                // AAD binds the CA CERTIFICATE PEM: if the ca_cert_pem column was
+                // tampered, the AAD no longer matches and this decrypt fails
+                // closed, so a swapped (attacker) certificate can never be
+                // materialized or installed.
                 let key = crypto::decrypt(
                     &self.vault_key,
-                    &aad::observe_ca_key(&self.vault_id),
+                    &aad::observe_ca_key(&self.vault_id, &row.ca_cert_pem),
                     &row.key_ciphertext,
                     "observe ca key",
                 )?;
@@ -9200,7 +9204,7 @@ impl UnlockedVault {
     ) -> Result<()> {
         let ct = crypto::encrypt(
             &self.vault_key,
-            &aad::observe_ca_key(&self.vault_id),
+            &aad::observe_ca_key(&self.vault_id, cert_pem),
             key_der.expose(),
         )?;
         crate::runtime::store::cert_state_set(

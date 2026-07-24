@@ -98,7 +98,8 @@ fn fingerprint(cert_der: &[u8]) -> String {
 
 /// Generate a brand-new CA for `vault_id`.
 pub fn generate_ca(vault_id: &str) -> Result<GeneratedCa> {
-    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|_| err("ca keygen"))?;
+    use zeroize::Zeroize;
+    let mut key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|_| err("ca keygen"))?;
     let mut params = ca_params(vault_id)?;
     let now = OffsetDateTime::now_utc();
     params.not_before = now - SKEW;
@@ -115,10 +116,16 @@ pub fn generate_ca(vault_id: &str) -> Result<GeneratedCa> {
         .format(&time::format_description::well_known::Rfc3339)
         .map_err(|_| err("ca time format"))?;
 
+    // The serialized key is captured in a zeroizing SecretBytes; wipe rcgen's own
+    // KeyPair buffer (rcgen's `zeroize` feature) so the plaintext CA key does not
+    // linger in this function's freed heap after generation.
+    let key_der = SecretBytes::new(key.serialize_der());
+    key.zeroize();
+
     Ok(GeneratedCa {
         cert_pem,
         cert_der,
-        key_der: SecretBytes::new(key.serialize_der()),
+        key_der,
         fingerprint_sha256,
         serial_hex,
         not_after,

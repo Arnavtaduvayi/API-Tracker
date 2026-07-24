@@ -20,8 +20,8 @@ use api_tracker_core::vault::UnlockedVault;
 use api_tracker_core::{clock, inject};
 use base64::Engine;
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
 
 enum Msg {
     Event(Box<ObservedRequest>),
@@ -33,31 +33,34 @@ enum Msg {
     Partial,
 }
 
-/// A sink that forwards observed metadata to the writer thread. `Mutex<Sender>`
-/// so it is `Sync` (many proxy worker threads call `record`).
+/// Bound on the number of unwritten events queued to the writer thread. A
+/// BOUNDED channel is essential: on loopback the request-completion rate of tiny
+/// keep-alive requests far exceeds the writer's per-event SQLite throughput, so
+/// an unbounded queue grows without bound and OOMs the host under a flood. A
+/// full channel blocks the sending proxy worker — that backpressure throttles
+/// the OBSERVED CHILD (acceptable), never a real network peer.
+const WRITER_CHANNEL_CAP: usize = 4096;
+
+/// A sink that forwards observed metadata to the writer thread. `SyncSender` is
+/// itself `Sync`, so many proxy worker threads can `record` concurrently without
+/// a `Mutex`, each blocking individually only when the bounded queue is full.
 struct ChannelSink {
-    tx: Mutex<Sender<Msg>>,
+    tx: SyncSender<Msg>,
 }
 
 impl ObservationSink for ChannelSink {
     fn record(&self, o: ObservedRequest) {
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(Msg::Event(Box::new(o)));
-        }
+        let _ = self.tx.send(Msg::Event(Box::new(o)));
     }
     fn note_compat(&self, check: &str, status: &str, detail: &str) {
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(Msg::Compat {
-                check: check.into(),
-                status: status.into(),
-                detail: detail.into(),
-            });
-        }
+        let _ = self.tx.send(Msg::Compat {
+            check: check.into(),
+            status: status.into(),
+            detail: detail.into(),
+        });
     }
     fn mark_partial(&self, _reason: &str) {
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(Msg::Partial);
-        }
+        let _ = self.tx.send(Msg::Partial);
     }
 }
 
@@ -91,7 +94,12 @@ fn random_token() -> String {
 /// Ensure the vault has a CA, generating + storing one on first use, and return
 /// a loaded [`CertAuthority`] plus the CA certificate PEM (for scoped trust).
 fn ensure_ca(vault: &UnlockedVault) -> Result<(Arc<CertAuthority>, String)> {
-    let (pem, key, fp) = match vault.observe_ca_material()? {
+    // Treat a stored CA that will not decrypt the SAME as "no CA": the AAD binds
+    // the certificate PEM, so a tampered ca_cert_pem (a laundering attempt) or a
+    // legacy-format record fails to authenticate. Regenerating a fresh CA
+    // discards the swapped certificate — it is never used or installed.
+    let existing = vault.observe_ca_material().unwrap_or_default();
+    let (pem, key, fp) = match existing {
         Some(x) => x,
         None => {
             let g = ca::generate_ca(vault.vault_id())?;
@@ -142,8 +150,8 @@ pub fn run_monitored(
 
     // 3. Proxy + channel sink + writer thread.
     let token = random_token();
-    let (tx, rx) = mpsc::channel();
-    let sink = Arc::new(ChannelSink { tx: Mutex::new(tx) });
+    let (tx, rx) = mpsc::sync_channel(WRITER_CHANNEL_CAP);
+    let sink = Arc::new(ChannelSink { tx });
     let mut allow = AllowList::new();
     for (h, p) in &params.allowlist {
         allow.insert(h, *p);
