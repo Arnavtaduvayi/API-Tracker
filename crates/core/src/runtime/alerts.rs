@@ -55,7 +55,7 @@ pub fn alerts(
         &days_ago(now, 7),
         &mut out,
     )?;
-    credential_rules(conn, &observed, label_of, &mut out)?;
+    credential_rules(conn, &observed, now, label_of, &mut out)?;
 
     Ok(out)
 }
@@ -80,10 +80,20 @@ fn status_spikes(
     out: &mut Vec<NewAlert>,
 ) -> Result<()> {
     let mut stmt = conn.prepare(
+        // COALESCE every SUM to 0: SUM over an all-NULL group returns NULL, and
+        // SUM(status_code=403) is NULL for a host whose last-hour events are all
+        // transport failures / opaque tunnels (status_code NULL). Reading that
+        // NULL as i64 errored (InvalidColumnType) and aborted the ENTIRE monitor
+        // cycle before auto-resolution ran. The transport-failure count also
+        // excludes SUCCESSFUL opaque CONNECT tunnels: those record outcome=
+        // 'transport_error' with transport_error='none' (a model quirk), so
+        // without the `transport_error <> 'none'` guard a normal h2-only session
+        // produced a false 'connection failures' alert.
         "SELECT s.id, s.host, COUNT(*),
-                SUM(e.outcome='auth_error'), SUM(e.status_code=403),
-                SUM(e.outcome='rate_limited'), SUM(e.outcome='server_error'),
-                SUM(e.outcome='transport_error'), SUM(e.outcome='tls_error')
+                COALESCE(SUM(e.outcome='auth_error'),0), COALESCE(SUM(e.status_code=403),0),
+                COALESCE(SUM(e.outcome='rate_limited'),0), COALESCE(SUM(e.outcome='server_error'),0),
+                COALESCE(SUM(e.outcome='transport_error' AND e.transport_error <> 'none'),0),
+                COALESCE(SUM(e.outcome='tls_error'),0)
          FROM runtime_request_events e JOIN observed_api_services s ON s.id = e.service_id
          WHERE e.at >= ?1 GROUP BY e.service_id",
     )?;
@@ -184,13 +194,44 @@ fn new_and_unknown_apis(
     since: &str,
     out: &mut Vec<NewAlert>,
 ) -> Result<()> {
+    struct SvcRow {
+        sid: String,
+        host: String,
+        provider: Option<String>,
+        confirmed: bool,
+        user_provider: Option<String>,
+    }
     let mut stmt = conn.prepare(
-        "SELECT id, host, provider_id FROM observed_api_services WHERE first_seen_at >= ?1",
+        "SELECT id, host, provider_id, confirmed, user_provider
+         FROM observed_api_services WHERE first_seen_at >= ?1",
     )?;
-    let rows: Vec<(String, String, Option<String>)> = stmt
-        .query_map([since], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+    let rows: Vec<SvcRow> = stmt
+        .query_map([since], |r| {
+            Ok(SvcRow {
+                sid: r.get(0)?,
+                host: r.get(1)?,
+                provider: r.get(2)?,
+                confirmed: r.get::<_, i64>(3)? != 0,
+                user_provider: r.get(4)?,
+            })
+        })?
         .collect::<rusqlite::Result<_>>()?;
-    for (sid, host, provider) in rows {
+    for SvcRow {
+        sid,
+        host,
+        provider,
+        confirmed,
+        user_provider,
+    } in rows
+    {
+        // A service the user has already classified/named is no longer
+        // "unknown"; following the alert's own remediation (classify it in the
+        // Monitor view) sets user_provider/confirmed but not provider_id, so
+        // keying only on provider_id re-emitted the alert every cycle. Suppress
+        // once the user has acted.
+        if provider.is_none() && (confirmed || user_provider.is_some()) {
+            continue;
+        }
         match provider {
             Some(p) => out.push(NewAlert {
                 kind: AlertKind::RuntimeNewApi,
@@ -226,6 +267,18 @@ fn inactive_apis(
     established_before: &str,
     out: &mut Vec<NewAlert>,
 ) -> Result<()> {
+    // Only declare individual hosts inactive if observation was actually
+    // running during the quiet window: if NO traffic to ANY host was recorded in
+    // the window, the user simply was not running `api-tracker run --observe`,
+    // and flagging every established host as "now quiet" is noise, not signal.
+    let observed_recently: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runtime_request_events WHERE at >= ?1)",
+        [quiet_since],
+        |r| r.get(0),
+    )?;
+    if !observed_recently {
+        return Ok(());
+    }
     let mut stmt = conn.prepare(
         "SELECT id, host FROM observed_api_services
          WHERE last_seen_at < ?1 AND first_seen_at < ?2",
@@ -251,23 +304,35 @@ fn inactive_apis(
     Ok(())
 }
 
+/// How recent a session's activity must be for the shared-credential rule to
+/// still consider its cross-project use "current".
+const SHARED_CREDENTIAL_WINDOW_DAYS: i64 = 7;
+
 fn credential_rules(
     conn: &Connection,
     observed: &str,
+    now: time::OffsetDateTime,
     label_of: &dyn Fn(&str) -> String,
     out: &mut Vec<NewAlert>,
 ) -> Result<()> {
     // Old credential version still in use after rotation. Compared LIVE against
     // the credential's current value_version, so it fires when a rotation
     // (days later) advances the version past a still-running session's
-    // launch-time version.
+    // launch-time version. It is bound to sessions that are STILL RUNNING: once
+    // the process exits the row no longer matches and the alert auto-resolves.
+    // Without that bound it fired forever from long-ended sessions (attributions
+    // are never pruned) and could never be cleared. Restricted to
+    // confirmed/high attributions so a heuristic 'possible' guess cannot raise a
+    // High-severity claim about a specific credential.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.credential_id, s.host, a.credential_version
          FROM credential_traffic_attributions a
          JOIN credentials c ON c.id = a.credential_id
          JOIN observed_api_services s ON s.id = a.service_id
+         JOIN observation_sessions sess ON sess.id = a.session_id
          WHERE a.credential_version IS NOT NULL AND a.credential_version < c.value_version
-           AND a.confidence IN ('confirmed','high','possible')",
+           AND a.confidence IN ('confirmed','high')
+           AND sess.status = 'running'",
     )?;
     for row in stmt.query_map([], |r| {
         Ok((
@@ -291,12 +356,18 @@ fn credential_rules(
         });
     }
 
-    // Traffic attributed to a credential marked revoked.
+    // Traffic attributed to a credential marked revoked, bound to STILL-RUNNING
+    // sessions: "still in use" means a live process is currently using it. Once
+    // the session ends the process is gone and the alert auto-resolves. Without
+    // the bound, historical (pre-revocation) traffic matched forever and the
+    // alert could never clear. Restricted to confirmed/high attributions.
     let mut stmt = conn.prepare(
         "SELECT DISTINCT a.credential_id, s.host FROM credential_traffic_attributions a
          JOIN credentials c ON c.id = a.credential_id
          JOIN observed_api_services s ON s.id = a.service_id
-         WHERE c.revoked = 1 AND a.confidence IN ('confirmed','high','possible')",
+         JOIN observation_sessions sess ON sess.id = a.session_id
+         WHERE c.revoked = 1 AND a.confidence IN ('confirmed','high')
+           AND sess.status = 'running'",
     )?;
     for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (cred, host) = row?;
@@ -314,15 +385,23 @@ fn credential_rules(
         });
     }
 
-    // Same credential's traffic across two or more projects.
+    // Same credential's traffic across two or more projects, bounded to RECENT
+    // cross-project use (a session that is running or started within the recency
+    // window). Without the bound, a single historical cross-project use matched
+    // forever — the alert could never clear after the user remediated by using a
+    // per-project credential.
+    let recent_cutoff = days_ago(now, SHARED_CREDENTIAL_WINDOW_DAYS);
     let mut stmt = conn.prepare(
         "SELECT a.credential_id, COUNT(DISTINCT sess.project_id)
          FROM credential_traffic_attributions a
          JOIN observation_sessions sess ON sess.id = a.session_id
          WHERE a.confidence IN ('confirmed','high','possible')
+           AND (sess.status = 'running' OR sess.started_at >= ?1)
          GROUP BY a.credential_id HAVING COUNT(DISTINCT sess.project_id) >= 2",
     )?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))? {
+    for row in stmt.query_map([recent_cutoff], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })? {
         let (cred, projects) = row?;
         let label = label_of(&cred);
         out.push(NewAlert {
@@ -492,5 +571,161 @@ mod tests {
         assert!(alerts
             .iter()
             .any(|a| a.kind == AlertKind::RuntimeOldCredentialVersion));
+    }
+
+    #[test]
+    fn old_version_does_not_fire_for_an_ended_session() {
+        // Regression: the rule matched attributions from ANY session forever,
+        // so every rotation produced a permanent false High alert. Bound to
+        // running sessions: an ended session must not alert.
+        let conn = mem();
+        testutil::seed_project(&conn, "p1", "web");
+        testutil::seed_credential(&conn, "c1", "p1", "openai", "openai-main");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let now_ts = crate::clock::now_rfc3339();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now_ts).unwrap();
+        store::upsert_attribution(
+            &conn,
+            &sid,
+            "c1",
+            &svc,
+            5,
+            AttributionConfidence::Confirmed,
+            "e",
+            Some(1),
+            Some(true),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE credentials SET value_version = 3 WHERE id = 'c1'",
+            [],
+        )
+        .unwrap();
+        // The session has ended.
+        conn.execute(
+            "UPDATE observation_sessions SET status = 'completed', ended_at = ?1 WHERE id = ?2",
+            params![now_ts, sid],
+        )
+        .unwrap();
+        let alerts = alerts(&conn, crate::clock::now(), &|_| {
+            "web/openai-main".to_string()
+        })
+        .unwrap();
+        assert!(
+            !alerts
+                .iter()
+                .any(|a| a.kind == AlertKind::RuntimeOldCredentialVersion),
+            "an ended session must not raise old-credential-version"
+        );
+    }
+
+    #[test]
+    fn opaque_tunnel_success_is_not_a_transport_failure_and_never_crashes() {
+        // Regression: (1) SUM(status_code=403) over an all-NULL-status group
+        // returned NULL and crashed the whole monitor cycle; (2) successful
+        // opaque CONNECT tunnels (status None, transport 'none') were counted as
+        // transport failures, producing a false 'connection failures' alert.
+        let conn = mem();
+        testutil::seed_project(&conn, "p1", "web");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Connection,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let now_ts = crate::clock::now_rfc3339();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.stream.example", None, false, &now_ts).unwrap();
+        let opaque = ObservedRequest {
+            host: "api.stream.example".into(),
+            port: 443,
+            method: HttpMethod::Connect,
+            path_template: "/:connect".into(),
+            template_confidence: crate::providers::Confidence::Low,
+            status_code: None,
+            req_content_kind: None,
+            resp_content_kind: None,
+            had_authorization: false,
+            latency_ms: Some(5),
+            request_bytes: Some(1),
+            response_bytes: Some(1),
+            protocol: Protocol::ConnectTunnel,
+            observation_source: ObservationSource::ConnectionOnly,
+            transport_error: TransportError::None,
+        };
+        for _ in 0..20 {
+            store::insert_request_event(&conn, &sid, "p1", &svc, None, &now_ts, &opaque, false)
+                .unwrap();
+        }
+        // Must not crash, and must not raise a transport-failure alert.
+        let alerts = alerts(&conn, crate::clock::now(), &|_| String::new()).unwrap();
+        assert!(
+            !alerts
+                .iter()
+                .any(|a| a.kind == AlertKind::RuntimeTransportFailures),
+            "successful opaque tunnels must not be flagged as connection failures"
+        );
+    }
+
+    #[test]
+    fn unknown_api_suppressed_after_user_classification() {
+        // Regression: classifying an unknown API (sets user_provider/confirmed,
+        // not provider_id) did not stop the alert re-emitting.
+        let conn = mem();
+        let now_ts = crate::clock::now_rfc3339();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.mystery.example", None, false, &now_ts).unwrap();
+        // Before classification: the alert fires.
+        let before = alerts(&conn, crate::clock::now(), &|_| String::new()).unwrap();
+        assert!(before
+            .iter()
+            .any(|a| a.kind == AlertKind::RuntimeUnknownApi));
+        // The user classifies it.
+        store::set_service_correction(&conn, &svc, Some("acme"), Some("Acme API"), None, None)
+            .unwrap();
+        let after = alerts(&conn, crate::clock::now(), &|_| String::new()).unwrap();
+        assert!(
+            !after.iter().any(|a| a.kind == AlertKind::RuntimeUnknownApi),
+            "classifying the API must stop the unknown-API alert"
+        );
+    }
+
+    #[test]
+    fn inactive_api_suppressed_when_observation_was_not_running() {
+        // Regression: with no recent traffic to ANY host, every established host
+        // was flagged inactive — but that just means observation was off.
+        let conn = mem();
+        // A service established and last seen long ago, and no recent events.
+        store::upsert_service(
+            &conn,
+            "api.old.example",
+            Some("acme"),
+            false,
+            "2020-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let alerts = alerts(&conn, crate::clock::now(), &|_| String::new()).unwrap();
+        assert!(
+            !alerts
+                .iter()
+                .any(|a| a.kind == AlertKind::RuntimeApiInactive),
+            "no observation coverage means no inactive-API alerts"
+        );
     }
 }

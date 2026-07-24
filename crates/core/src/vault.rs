@@ -2210,10 +2210,27 @@ impl UnlockedVault {
                 }
             }
             // Runtime API observability alerts (locally observed traffic).
-            for alert in crate::runtime::alerts::alerts(&self.conn, clock::now(), &label_of)? {
-                active_keys.push(alert.dedup_key.clone());
-                if alerts::upsert(&self.conn, &alert)? {
-                    created += 1;
+            // Isolated: one rule error must NOT abort the rest of the monitor
+            // cycle (rotation scheduling, grant expiry, repo scans). Record the
+            // failure to the audit log so the coverage gap is visible, never
+            // silent.
+            match crate::runtime::alerts::alerts(&self.conn, clock::now(), &label_of) {
+                Ok(runtime_alerts) => {
+                    for alert in runtime_alerts {
+                        active_keys.push(alert.dedup_key.clone());
+                        if alerts::upsert(&self.conn, &alert)? {
+                            created += 1;
+                        }
+                    }
+                }
+                Err(e) => {
+                    let _ = audit::record(
+                        &self.conn,
+                        "runtime_alerts_error",
+                        None,
+                        None,
+                        &format!("runtime observability alert pass failed: {e}"),
+                    );
                 }
             }
         }
