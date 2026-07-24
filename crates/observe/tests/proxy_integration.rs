@@ -523,3 +523,118 @@ fn missing_or_wrong_token_is_rejected_with_407() {
     );
     proxy.shutdown();
 }
+
+// --- Performance benchmark (run with `--ignored`) ---------------------------
+
+/// A direct HTTPS request straight to the provider (baseline, no proxy).
+fn direct_request(addr: SocketAddr, provider_ca: &[u8], request: &[u8]) {
+    let cfg = client_config_trusting(provider_ca);
+    let tcp = TcpStream::connect(addr).unwrap();
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let sn = HOST.to_string().try_into().unwrap();
+    let conn = rustls::ClientConnection::new(cfg, sn).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, tcp);
+    tls.write_all(request).unwrap();
+    tls.flush().unwrap();
+    let mut resp = Vec::new();
+    let _ = tls.read_to_end(&mut resp);
+}
+
+fn percentile(mut xs: Vec<u128>, p: f64) -> u128 {
+    xs.sort_unstable();
+    let idx = ((xs.len() as f64) * p).ceil() as usize;
+    xs[idx.saturating_sub(1).min(xs.len() - 1)]
+}
+
+#[test]
+#[ignore] // performance; run: cargo test -p api-tracker-observe --test proxy_integration -- --ignored --nocapture
+fn bench_proxy_overhead() {
+    const N: usize = 100;
+    let (server_config, provider_ca) = provider_tls(HOST);
+    let provider = start_provider(server_config, "HTTP/1.1 200 OK", "{\"ok\":true}");
+
+    let tethra = ca::generate_ca("vault-bench00000001").unwrap();
+    let authority = Arc::new(
+        ca::CertAuthority::load(
+            "vault-bench00000001",
+            &tethra.cert_pem,
+            &tethra.key_der,
+            &tethra.fingerprint_sha256,
+        )
+        .unwrap(),
+    );
+    let sink = Arc::new(CollectSink::default());
+    let mut allow = AllowList::new();
+    allow.insert(HOST, provider.addr.port());
+    let token = "BENCH-TOKEN".to_string();
+    let proxy = RunningProxy::start(ProxyConfig {
+        mode: api_tracker_core::runtime::model::ObservationMode::Metadata,
+        ca: Some(authority),
+        token: token.clone(),
+        allowlist: allow,
+        max_connections: 64,
+        sink,
+        upstream_config: Some(client_config_trusting(&provider_ca)),
+    })
+    .unwrap();
+
+    let request = format!("GET /v1/models HTTP/1.1\r\nHost: {HOST}\r\nContent-Length: 0\r\n\r\n");
+    let port = provider.addr.port();
+
+    // Warm up (leaf minting, first handshakes).
+    for _ in 0..10 {
+        through_proxy(
+            proxy.local_addr(),
+            &token,
+            HOST,
+            port,
+            &tethra.cert_der,
+            request.as_bytes(),
+        );
+        direct_request(provider.addr, &provider_ca, request.as_bytes());
+    }
+
+    let mut proxied = Vec::with_capacity(N);
+    for _ in 0..N {
+        let t = std::time::Instant::now();
+        through_proxy(
+            proxy.local_addr(),
+            &token,
+            HOST,
+            port,
+            &tethra.cert_der,
+            request.as_bytes(),
+        );
+        proxied.push(t.elapsed().as_micros());
+    }
+    let mut direct = Vec::with_capacity(N);
+    for _ in 0..N {
+        let t = std::time::Instant::now();
+        direct_request(provider.addr, &provider_ca, request.as_bytes());
+        direct.push(t.elapsed().as_micros());
+    }
+
+    let d50 = percentile(direct.clone(), 0.50);
+    let d95 = percentile(direct.clone(), 0.95);
+    let p50 = percentile(proxied.clone(), 0.50);
+    let p95 = percentile(proxied.clone(), 0.95);
+    eprintln!("BENCH per-request (new connection + handshake each), N={N}, loopback:");
+    eprintln!(
+        "  direct  p50={:.2}ms p95={:.2}ms",
+        d50 as f64 / 1000.0,
+        d95 as f64 / 1000.0
+    );
+    eprintln!(
+        "  metadata proxy p50={:.2}ms p95={:.2}ms",
+        p50 as f64 / 1000.0,
+        p95 as f64 / 1000.0
+    );
+    eprintln!(
+        "  overhead p50=+{:.2}ms p95=+{:.2}ms",
+        (p50 - d50) as f64 / 1000.0,
+        (p95.saturating_sub(d95)) as f64 / 1000.0
+    );
+
+    proxy.shutdown();
+    provider.stop.store(true, Ordering::Relaxed);
+}
