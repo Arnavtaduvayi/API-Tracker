@@ -25,7 +25,11 @@
 #![forbid(unsafe_code)]
 
 pub mod ca;
+pub mod clienthello;
 pub mod policy;
+pub mod relay;
+pub mod tls;
+pub mod wire;
 
 /// Product-neutral user-agent-style identity for any diagnostic self-probe this
 /// crate makes. Kept in the `api-tracker` namespace for data/format
