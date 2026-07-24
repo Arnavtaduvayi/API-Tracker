@@ -73,6 +73,10 @@ impl ObservationSink for ChannelSink {
 /// on the sleep duration.
 const LOCK_POLL: Duration = Duration::from_millis(250);
 
+/// Bounded best-effort attempts to reap a signalled child on the interrupt path
+/// (× LOCK_POLL ≈ 2 s), after which the OS reaps it when the launcher exits.
+const CHILD_REAP_TRIES: usize = 8;
+
 /// Why an active observed run is being torn down by the lock watch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockSignal {
@@ -387,7 +391,18 @@ pub fn run_monitored(
     // proxy is already down, so any surviving descendant can only reach a dead
     // loopback port and cannot have its traffic decrypted.
     let child_termination = if interrupt.is_some() {
-        Some(inject::terminate_verified(i64::from(pid), identity.as_deref()).describe())
+        let outcome = inject::terminate_verified(i64::from(pid), identity.as_deref()).describe();
+        // Best-effort bounded reap so the signalled child does not linger as a
+        // zombie. Give a SIGTERM-responsive child a moment to exit; do NOT block
+        // indefinitely (a child that ignores SIGTERM must not hang teardown —
+        // the OS reaps it when this launcher exits shortly after).
+        for _ in 0..CHILD_REAP_TRIES {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => std::thread::sleep(LOCK_POLL),
+            }
+        }
+        Some(outcome)
     } else {
         None
     };

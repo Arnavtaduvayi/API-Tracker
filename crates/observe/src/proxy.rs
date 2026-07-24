@@ -79,14 +79,22 @@ pub struct ProxyConfig {
     pub upstream_config: Option<Arc<rustls::ClientConfig>>,
 }
 
-/// A running worker: its join handle plus a clone of the client socket, so
-/// teardown can force-close a worker that is blocked in a socket read/write
-/// (workers only observe the shutdown flag between requests; a blocked read
+/// A slot a worker fills with a clone of its upstream socket once it connects,
+/// so teardown can force-close a worker blocked reading from the UPSTREAM
+/// provider (closing only the client socket does not unblock such a read, which
+/// could otherwise keep decrypting an in-flight relay for up to the 90s idle
+/// timeout after a vault lock).
+type UpstreamSlot = Arc<Mutex<Option<TcpStream>>>;
+
+/// A running worker: its join handle plus clones of BOTH sockets, so teardown
+/// can force-close a worker that is blocked in a socket read/write on either
+/// side (workers only observe the shutdown flag between requests; a blocked read
 /// would otherwise stall `stop()` behind the 90s idle timeout — or indefinitely
 /// under a Slowloris that keeps resetting it).
 struct Worker {
     handle: JoinHandle<()>,
     client: TcpStream,
+    upstream: UpstreamSlot,
 }
 
 /// A running proxy. Dropping it (or calling [`RunningProxy::shutdown`]) stops
@@ -153,13 +161,25 @@ impl RunningProxy {
                             drop(c);
                             continue;
                         }
+                        // Keep a clone of the client socket so teardown can
+                        // force-close a blocked worker (see `Worker`). If the
+                        // clone fails (e.g. fd exhaustion) we CANNOT track the
+                        // worker for teardown, so we must not spawn an
+                        // untrackable one — drop the connection instead (an
+                        // extreme edge; the client simply retries).
+                        let client_for_registry = match client.try_clone() {
+                            Ok(c) => c,
+                            Err(_) => {
+                                drop(client);
+                                continue;
+                            }
+                        };
                         active.fetch_add(1, Ordering::Relaxed);
                         let cfg = config.clone();
                         let sd2 = sd.clone();
                         let active2 = active.clone();
-                        // Keep a clone of the client socket so teardown can
-                        // force-close a blocked worker (see `Worker`).
-                        let client_for_registry = client.try_clone().ok();
+                        let upstream_slot: UpstreamSlot = Arc::new(Mutex::new(None));
+                        let upstream_for_worker = upstream_slot.clone();
                         let handle = thread::spawn(move || {
                             let _guard = CountGuard(active2);
                             let _ = client.set_nonblocking(false);
@@ -169,7 +189,7 @@ impl RunningProxy {
                             // listener or leak a half-open verified connection.
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    handle_client(client, &cfg, &sd2)
+                                    handle_client(client, &cfg, &sd2, &upstream_for_worker)
                                 }));
                             if result.is_err() {
                                 cfg.sink.note_compat(
@@ -180,12 +200,16 @@ impl RunningProxy {
                                 cfg.sink.mark_partial("proxy_internal_error");
                             }
                         });
-                        if let Some(client) = client_for_registry {
+                        {
                             let mut w = wk.lock().expect("workers lock");
                             // Reap finished workers so the registry stays bounded
                             // by concurrency, not by cumulative connection count.
                             w.retain(|worker| !worker.handle.is_finished());
-                            w.push(Worker { handle, client });
+                            w.push(Worker {
+                                handle,
+                                client: client_for_registry,
+                                upstream: upstream_slot,
+                            });
                         }
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -218,13 +242,19 @@ impl RunningProxy {
             let mut w = self.workers.lock().expect("workers lock");
             std::mem::take(&mut *w)
         };
-        // Force-close each in-flight client socket FIRST so any worker blocked
-        // in a socket read/write returns immediately, then join. Without this a
+        // Force-close each in-flight worker's BOTH sockets FIRST so any worker
+        // blocked in a socket read/write on either side returns immediately,
+        // then join. Closing only the client would leave a worker blocked
+        // reading from a silent upstream stalled until the 90s idle timeout —
+        // still decrypting an in-flight relay after a vault lock. Without this a
         // worker parked in a (Slowloris-extended) head read or a long opaque
         // tunnel would stall teardown — and thus session finalization and the
         // CLI's exit — for as long as the peer keeps the connection alive.
         for w in &workers {
             let _ = w.client.shutdown(std::net::Shutdown::Both);
+            if let Some(up) = w.upstream.lock().expect("upstream slot").as_ref() {
+                let _ = up.shutdown(std::net::Shutdown::Both);
+            }
         }
         for w in workers {
             let _ = w.handle.join();
@@ -251,8 +281,25 @@ fn write_all_ok<W: Write>(w: &mut W, bytes: &[u8]) -> bool {
     w.write_all(bytes).and_then(|_| w.flush()).is_ok()
 }
 
-/// Top-level per-connection handling: authenticate, then dispatch.
-fn handle_client(mut client: TcpStream, cfg: &ProxyConfig, shutdown: &AtomicBool) {
+/// Store a clone of the just-connected upstream socket in this worker's teardown
+/// slot so `stop()` can force-close it on a vault lock. Best-effort: if the
+/// clone fails, teardown still closes the client socket (the common unblock),
+/// and the 90s idle timeout remains the backstop.
+fn register_upstream(slot: &UpstreamSlot, upstream: &TcpStream) {
+    if let Ok(clone) = upstream.try_clone() {
+        *slot.lock().expect("upstream slot") = Some(clone);
+    }
+}
+
+/// Top-level per-connection handling: authenticate, then dispatch. `upstream`
+/// is this worker's teardown slot: the dispatch fills it with a clone of the
+/// upstream socket once connected, so `stop()` can force-close it on a lock.
+fn handle_client(
+    mut client: TcpStream,
+    cfg: &ProxyConfig,
+    shutdown: &AtomicBool,
+    upstream: &UpstreamSlot,
+) {
     // Pre-auth read: a short per-read timeout plus an absolute deadline bound
     // an unauthenticated Slowloris to ~HEAD_DEADLINE, so it cannot squat a
     // connection slot (and thus deny the monitored child capacity) for weeks.
@@ -280,9 +327,9 @@ fn handle_client(mut client: TcpStream, cfg: &ProxyConfig, shutdown: &AtomicBool
     }
 
     if head.method.eq_ignore_ascii_case("CONNECT") {
-        handle_connect(client, &head, cfg, shutdown);
+        handle_connect(client, &head, cfg, shutdown, upstream);
     } else if head.target.starts_with("http://") {
-        handle_plain(client, &head, &raw_head, leftover, cfg);
+        handle_plain(client, &head, &raw_head, leftover, cfg, upstream);
     } else {
         let _ = write_all_ok(
             &mut client,
@@ -333,6 +380,7 @@ fn handle_connect(
     head: &wire::RequestHead,
     cfg: &ProxyConfig,
     shutdown: &AtomicBool,
+    upstream_slot: &UpstreamSlot,
 ) {
     let Some((host, port)) = wire::parse_authority(&head.target) else {
         let _ = write_all_ok(
@@ -388,6 +436,10 @@ fn handle_connect(
     };
     let _ = upstream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = upstream.set_write_timeout(Some(IO_TIMEOUT));
+    // Register the upstream socket so teardown can force-close it on a lock (a
+    // worker blocked reading from a silent upstream would otherwise keep the
+    // relay — and decryption — alive up to the 90s idle timeout).
+    register_upstream(upstream_slot, &upstream);
 
     // Connection-only mode, or an h2-only client, gets an opaque tunnel.
     if cfg.mode != ObservationMode::Metadata || cfg.ca.is_none() {
@@ -891,6 +943,7 @@ fn handle_plain(
     raw_head: &[u8],
     leftover: Vec<u8>,
     cfg: &ProxyConfig,
+    upstream_slot: &UpstreamSlot,
 ) {
     let Some((host, port, path)) = wire::split_absolute_form(&head.target) else {
         let _ = write_all_ok(
@@ -940,6 +993,8 @@ fn handle_plain(
     };
     let _ = upstream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = upstream.set_write_timeout(Some(IO_TIMEOUT));
+    // Register the upstream socket so teardown can force-close it on a lock.
+    register_upstream(upstream_slot, &upstream);
 
     // Rewrite the request line to origin-form and drop hop-by-hop proxy headers,
     // forwarding every other header (Authorization included) verbatim.
