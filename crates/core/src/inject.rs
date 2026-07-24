@@ -610,7 +610,7 @@ pub fn terminate_pid(pid: i64) -> bool {
     // Refuse non-positive PIDs before any signal is sent. On Unix `kill 0`
     // signals the CALLER's entire process group and a negative PID signals a
     // process group, so a corrupted/edited/zero recorded PID could terminate
-    // API Tracker itself or an unrelated group (PI-06). A real child PID is
+    // Tethra itself or an unrelated group (PI-06). A real child PID is
     // always > 0. `taskkill` on Windows likewise must never receive 0/negative.
     if pid <= 0 {
         return false;
@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn terminate_pid_refuses_non_positive_pids() {
         // PI-06: 0 and negative PIDs must be refused BEFORE any signal — on
-        // Unix `kill 0` would signal API Tracker's own process group. These
+        // Unix `kill 0` would signal the app's own process group. These
         // return false without ever spawning `kill`/`taskkill`. (A positive
         // PID is not exercised here: it would send a real signal.)
         assert!(!terminate_pid(0));

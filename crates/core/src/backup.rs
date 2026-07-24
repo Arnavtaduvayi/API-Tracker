@@ -433,7 +433,7 @@ fn read_and_decrypt(path: &Path, backup_password: &SecretString) -> Result<(Back
         }
     })?;
     let file: BackupFile = serde_json::from_str(&raw)
-        .map_err(|_| CoreError::BackupInvalid("not an API Tracker backup file".into()))?;
+        .map_err(|_| CoreError::BackupInvalid("not a Tethra backup file".into()))?;
     if file.format != BACKUP_FORMAT {
         return Err(CoreError::BackupInvalid(
             "unrecognized format marker".into(),

@@ -231,8 +231,8 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
                     HookState::Overridden,
                     false,
                     format!(
-                        "core.hooksPath = {:?} points git at a different hook; the API \
-                         Tracker hook at {} never runs. Protection is NOT active.",
+                        "core.hooksPath = {:?} points git at a different hook; the \
+                         Tethra hook at {} never runs. Protection is NOT active.",
                         hooks_path_override.as_deref().unwrap_or_default(),
                         default_path.display()
                     ),
