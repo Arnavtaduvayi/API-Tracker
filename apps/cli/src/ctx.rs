@@ -44,25 +44,27 @@ impl Ctx {
     /// (scripting), otherwise fail with instructions. Returns the token when
     /// a session was used, so mutations to session state (project
     /// unlock/lock) can be persisted.
+    ///
+    /// A session variable holding a stale or invalid token does NOT wedge
+    /// scripting: if the session path fails and a password variable is set,
+    /// the password is tried before giving up. (After the rename, an eval'd
+    /// `unlock --print-export` sets BOTH session variables; an older script
+    /// that unsets only `API_TRACKER_SESSION` after `lock` would otherwise
+    /// strand a revoked token in `TETHRA_SESSION` and fail every following
+    /// password-driven command.)
     pub fn unlocked(&self) -> Result<(UnlockedVault, Option<SessionToken>)> {
-        if let Some(Ok(raw)) = envcompat::var(ENV_SESSION) {
-            // An empty variable means "no session", not an invalid token.
-            if !raw.trim().is_empty() {
-                let token = SessionToken::decode(&raw).with_context(|| {
-                    format!(
-                        "{} is not a valid session token",
-                        envcompat::active_name(ENV_SESSION)
-                            .unwrap_or_else(|| envcompat::preferred_name(ENV_SESSION))
-                    )
-                })?;
-                let vault = vault::resume_session(&self.paths, &token)?;
-                return Ok((vault, Some(token)));
-            }
-        }
+        let session_err = match self.session_unlocked() {
+            Ok(Some(ok)) => return Ok(ok),
+            Ok(None) => None,
+            Err(err) => Some(err),
+        };
         if envcompat::is_set(ENV_PASSWORD) {
             let password = env_secret(ENV_PASSWORD)?;
             let vault = vault::unlock_vault(&self.paths, &password)?;
             return Ok((vault, None));
+        }
+        if let Some(err) = session_err {
+            return Err(err);
         }
         bail!(
             "the vault is locked. Run `tethra unlock` and export {}, \
@@ -70,6 +72,27 @@ impl Ctx {
             envcompat::preferred_name(ENV_SESSION),
             envcompat::hint(ENV_PASSWORD)
         );
+    }
+
+    /// The session path alone: `Ok(None)` when no session variable is set
+    /// (or it is empty, which means "no session"), `Err` when one is set but
+    /// does not produce a live session.
+    fn session_unlocked(&self) -> Result<Option<(UnlockedVault, Option<SessionToken>)>> {
+        let Some(Ok(raw)) = envcompat::var(ENV_SESSION) else {
+            return Ok(None);
+        };
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+        let token = SessionToken::decode(&raw).with_context(|| {
+            format!(
+                "{} is not a valid session token",
+                envcompat::active_name(ENV_SESSION)
+                    .unwrap_or_else(|| envcompat::preferred_name(ENV_SESSION))
+            )
+        })?;
+        let vault = vault::resume_session(&self.paths, &token)?;
+        Ok(Some((vault, Some(token))))
     }
 
     /// Try to obtain an unlocked vault without ever prompting: only if a

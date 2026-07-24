@@ -328,3 +328,57 @@ fn run_scrubs_both_prefixes_from_children() {
         "child keeps the data-dir override so nested tethra calls work"
     );
 }
+
+#[test]
+fn stale_session_falls_back_to_password_when_available() {
+    // An old script pattern: eval the dual export, `lock`, then
+    // `unset API_TRACKER_SESSION` only — leaving a revoked token in
+    // TETHRA_SESSION. With a password variable set, commands must fall back
+    // to the password rather than wedge on the stale session.
+    let vault = TestVault::new(Flavor::Preferred);
+    let assert = vault
+        .cmd(Flavor::Preferred)
+        .args(["unlock", "--print-export"])
+        .assert()
+        .success();
+    let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let token = out
+        .lines()
+        .find_map(|l| l.strip_prefix("export TETHRA_SESSION=\""))
+        .and_then(|s| s.strip_suffix('"'))
+        .unwrap()
+        .to_owned();
+    vault.cmd(Flavor::Preferred).arg("lock").assert().success();
+
+    // Stale token + password: succeeds via the password fallback.
+    let mut cmd = Command::cargo_bin("tethra").unwrap();
+    cmd.env_clear()
+        .env("TETHRA_DIR", &vault.data_dir)
+        .env("TETHRA_INSECURE_FAST_KDF", "1")
+        .env("TETHRA_SESSION", &token)
+        .env("TETHRA_PASSWORD", MASTER_PW);
+    cmd.args(["project", "list"]).assert().success();
+
+    // Stale token + WRONG password: the password error is reported.
+    let mut cmd = Command::cargo_bin("tethra").unwrap();
+    cmd.env_clear()
+        .env("TETHRA_DIR", &vault.data_dir)
+        .env("TETHRA_INSECURE_FAST_KDF", "1")
+        .env("TETHRA_SESSION", &token)
+        .env("TETHRA_PASSWORD", "wrong-password-123");
+    cmd.args(["project", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("incorrect password"));
+
+    // Stale token and NO password: still rejected with the session error.
+    let mut cmd = Command::cargo_bin("tethra").unwrap();
+    cmd.env_clear()
+        .env("TETHRA_DIR", &vault.data_dir)
+        .env("TETHRA_INSECURE_FAST_KDF", "1")
+        .env("TETHRA_SESSION", &token);
+    cmd.args(["project", "list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unlock"));
+}
