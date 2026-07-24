@@ -128,7 +128,15 @@ const METADATA_HOSTS: &[&str] = &[
 /// - A DNS name is validated for syntax; its addresses are checked after
 ///   resolution via [`classify_ip`].
 pub fn check_authority(host: &str, port: u16, allow: &AllowList) -> Verdict {
+    // Normalize ONCE: trim, lowercase, and strip trailing FQDN dot(s). Every
+    // downstream check uses this normalized form so the metadata-name, single-
+    // label, `.local`, and allowlist tests cannot be desynchronized from
+    // is_valid_hostname (which also strips the dot). Without this, a single
+    // trailing dot flips an intended Deny to Allow — e.g. `metadata.google.
+    // internal.` skips the metadata blocklist, and `intranet.` (contains a dot)
+    // dodges the single-label guard.
     let host_l = host.trim().to_ascii_lowercase();
+    let host_l = host_l.trim_end_matches('.').to_string();
     if host_l.is_empty() {
         return Verdict::Deny(DenyReason::BadHostname);
     }
@@ -224,6 +232,11 @@ fn classify_v4(ip: Ipv4Addr) -> Verdict {
     if o[0] == 100 && (64..=127).contains(&o[1]) {
         return Verdict::Deny(DenyReason::Cgnat);
     }
+    // 192.0.0.0/24 IETF protocol assignments (incl. 192.0.0.170/.171 NAT64
+    // discovery) — not a routable destination.
+    if o[0] == 192 && o[1] == 0 && o[2] == 0 {
+        return Verdict::Deny(DenyReason::Reserved);
+    }
     // 198.18.0.0/15 benchmarking
     if o[0] == 198 && (o[1] == 18 || o[1] == 19) {
         return Verdict::Deny(DenyReason::Reserved);
@@ -260,15 +273,29 @@ fn classify_v6(ip: Ipv6Addr) -> Verdict {
     }
     // ::/96 IPv4-compatible (deprecated) — treat embedded v4
     if s[..6].iter().all(|&x| x == 0) && !(s[6] == 0 && s[7] == 0) {
-        let v4 = Ipv4Addr::new(
-            (s[6] >> 8) as u8,
-            (s[6] & 0xff) as u8,
-            (s[7] >> 8) as u8,
-            (s[7] & 0xff) as u8,
-        );
-        return classify_v4(v4);
+        return classify_v4(embedded_v4(s[6], s[7]));
+    }
+    // NAT64 well-known prefix 64:ff9b::/96 embeds an IPv4 in the low 32 bits; on
+    // a host with a NAT64/CLAT translator this would otherwise be an SSRF path
+    // to the embedded address (e.g. 64:ff9b::7f00:1 -> 127.0.0.1).
+    if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
+        return classify_v4(embedded_v4(s[6], s[7]));
+    }
+    // 6to4 2002::/16 embeds the IPv4 gateway in segments [1..3].
+    if s[0] == 0x2002 {
+        return classify_v4(embedded_v4(s[1], s[2]));
     }
     Verdict::Allow
+}
+
+/// Decode two IPv6 segments into the embedded IPv4 address they carry.
+fn embedded_v4(hi: u16, lo: u16) -> Ipv4Addr {
+    Ipv4Addr::new(
+        (hi >> 8) as u8,
+        (hi & 0xff) as u8,
+        (lo >> 8) as u8,
+        (lo & 0xff) as u8,
+    )
 }
 
 /// Parse an IP literal, accepting bracketed IPv6 (`[::1]`).
@@ -439,6 +466,71 @@ mod tests {
             check_authority("printer.local", 80, &allow),
             Verdict::Deny(DenyReason::Private)
         );
+    }
+
+    #[test]
+    fn trailing_dot_does_not_bypass_metadata_or_single_label_guards() {
+        let allow = AllowList::new();
+        // FQDN trailing dot must not skip the metadata blocklist.
+        assert_eq!(
+            check_authority("metadata.google.internal.", 80, &allow),
+            Verdict::Deny(DenyReason::CloudMetadata)
+        );
+        assert_eq!(
+            check_authority("metadata.google.internal..", 80, &allow),
+            Verdict::Deny(DenyReason::CloudMetadata)
+        );
+        // FQDN trailing dot must not flip a single-label internal name to Allow.
+        assert_eq!(
+            check_authority("intranet.", 80, &allow),
+            Verdict::Deny(DenyReason::Private)
+        );
+        assert_eq!(
+            check_authority("printer.local.", 80, &allow),
+            Verdict::Deny(DenyReason::Private)
+        );
+        // A normal FQDN with a trailing dot is still allowed.
+        assert_eq!(
+            check_authority("api.openai.com.", 443, &allow),
+            Verdict::Allow
+        );
+    }
+
+    #[test]
+    fn ipv6_transition_prefixes_decode_embedded_ipv4() {
+        // NAT64 64:ff9b::/96 embedding 127.0.0.1 must be denied as loopback.
+        assert_eq!(
+            classify_ip(ip("64:ff9b::7f00:1")),
+            Verdict::Deny(DenyReason::Loopback)
+        );
+        // NAT64 embedding 10.0.0.5 (private).
+        assert_eq!(
+            classify_ip(ip("64:ff9b::a00:5")),
+            Verdict::Deny(DenyReason::Private)
+        );
+        // 6to4 2002::/16 embedding 127.0.0.1 (2002:7f00:1::) -> loopback.
+        assert_eq!(
+            classify_ip(ip("2002:7f00:1::")),
+            Verdict::Deny(DenyReason::Loopback)
+        );
+        // NAT64 embedding a genuinely public address stays allowed.
+        assert_eq!(classify_ip(ip("64:ff9b::808:808")), Verdict::Allow);
+    }
+
+    #[test]
+    fn ietf_protocol_assignments_block_denied() {
+        // 192.0.0.0/24 (incl NAT64 discovery 192.0.0.170).
+        assert_eq!(
+            classify_ip(ip("192.0.0.170")),
+            Verdict::Deny(DenyReason::Reserved)
+        );
+        // 192.0.2.0/24 documentation is a different range, still denied.
+        assert_eq!(
+            classify_ip(ip("192.0.2.1")),
+            Verdict::Deny(DenyReason::Documentation)
+        );
+        // A normal 192.x public-ish address outside these /24s is allowed.
+        assert_eq!(classify_ip(ip("192.5.6.7")), Verdict::Allow);
     }
 
     #[test]
