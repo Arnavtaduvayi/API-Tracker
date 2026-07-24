@@ -230,7 +230,11 @@ impl CertAuthority {
     }
 
     pub fn cache_len(&self) -> usize {
-        self.cache.lock().expect("leaf cache poisoned").entries.len()
+        self.cache
+            .lock()
+            .expect("leaf cache poisoned")
+            .entries
+            .len()
     }
 }
 
@@ -243,7 +247,11 @@ mod tests {
         let ca = generate_ca("vault-abcdef123456").unwrap();
         assert!(ca.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(!ca.cert_der.is_empty());
-        assert_eq!(ca.fingerprint_sha256.matches(':').count(), 31, "sha256 = 32 bytes");
+        assert_eq!(
+            ca.fingerprint_sha256.matches(':').count(),
+            31,
+            "sha256 = 32 bytes"
+        );
         assert!(!ca.key_der.is_empty());
         // The PEM must never contain the private key.
         assert!(!ca.cert_pem.contains("PRIVATE KEY"));
@@ -252,9 +260,13 @@ mod tests {
     #[test]
     fn reconstituted_ca_mints_leaves_that_carry_the_hostname() {
         let ca = generate_ca("vault-abcdef123456").unwrap();
-        let authority =
-            CertAuthority::load("vault-abcdef123456", &ca.cert_pem, &ca.key_der, &ca.fingerprint_sha256)
-                .unwrap();
+        let authority = CertAuthority::load(
+            "vault-abcdef123456",
+            &ca.cert_pem,
+            &ca.key_der,
+            &ca.fingerprint_sha256,
+        )
+        .unwrap();
         let ck1 = authority.certified_key_for("api.openai.com").unwrap();
         assert!(!ck1.cert.is_empty());
         // cache hit returns the same Arc
@@ -273,12 +285,22 @@ mod tests {
     #[test]
     fn cache_is_bounded() {
         let ca = generate_ca("vault-bound00001").unwrap();
-        let authority =
-            CertAuthority::load("vault-bound00001", &ca.cert_pem, &ca.key_der, &ca.fingerprint_sha256)
-                .unwrap();
+        let authority = CertAuthority::load(
+            "vault-bound00001",
+            &ca.cert_pem,
+            &ca.key_der,
+            &ca.fingerprint_sha256,
+        )
+        .unwrap();
         for i in 0..(super::LEAF_CACHE_MAX + 20) {
-            authority.certified_key_for(&format!("h{i}.example.test")).unwrap();
+            authority
+                .certified_key_for(&format!("h{i}.example.test"))
+                .unwrap();
         }
-        assert_eq!(authority.cache_len(), super::LEAF_CACHE_MAX, "cache must be bounded");
+        assert_eq!(
+            authority.cache_len(),
+            super::LEAF_CACHE_MAX,
+            "cache must be bounded"
+        );
     }
 }

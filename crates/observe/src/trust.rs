@@ -21,11 +21,11 @@ use std::path::{Path, PathBuf};
 /// Candidate system CA bundle locations, most specific first. The first that
 /// exists is concatenated with the Tethra CA to form the combined bundle.
 const SYSTEM_BUNDLES: &[&str] = &[
-    "/etc/ssl/cert.pem",                       // macOS (OpenSSL), some BSDs
-    "/etc/ssl/certs/ca-certificates.crt",      // Debian/Ubuntu
-    "/etc/pki/tls/certs/ca-bundle.crt",        // RHEL/Fedora
-    "/opt/homebrew/etc/openssl@3/cert.pem",    // Homebrew (Apple silicon)
-    "/usr/local/etc/openssl@3/cert.pem",       // Homebrew (Intel)
+    "/etc/ssl/cert.pem",                    // macOS (OpenSSL), some BSDs
+    "/etc/ssl/certs/ca-certificates.crt",   // Debian/Ubuntu
+    "/etc/pki/tls/certs/ca-bundle.crt",     // RHEL/Fedora
+    "/opt/homebrew/etc/openssl@3/cert.pem", // Homebrew (Apple silicon)
+    "/usr/local/etc/openssl@3/cert.pem",    // Homebrew (Intel)
 ];
 
 /// Variables that must NEVER be set (verification-disabling). Present so the
@@ -66,10 +66,7 @@ pub fn detect_runtime(program: &str) -> RuntimeAssessment {
         "go" => ("go", TrustLevel::ConnectionOnlyFallback),
         "java" | "gradle" | "mvn" | "mvnw" => ("java", TrustLevel::Unsupported),
         "dotnet" => ("dotnet", TrustLevel::Unsupported),
-        other => (
-            if other.is_empty() { "unknown" } else { "unknown" },
-            TrustLevel::ProbablySupported,
-        ),
+        _ => ("unknown", TrustLevel::ProbablySupported),
     };
     RuntimeAssessment {
         runtime: runtime.to_string(),
@@ -130,13 +127,14 @@ impl ScopedTrust {
 
         // Combined bundle: system roots ++ Tethra CA, for replace-semantics
         // runtimes. Falls back to the bare CA if no system bundle is found.
-        let (combined, has_system_roots) = match SYSTEM_BUNDLES.iter().find(|p| Path::new(p).exists()) {
-            Some(path) => match std::fs::read_to_string(path) {
-                Ok(system) => (format!("{system}\n{ca_pem}\n"), true),
-                Err(_) => (ca_pem.to_string(), false),
-            },
-            None => (ca_pem.to_string(), false),
-        };
+        let (combined, has_system_roots) =
+            match SYSTEM_BUNDLES.iter().find(|p| Path::new(p).exists()) {
+                Some(path) => match std::fs::read_to_string(path) {
+                    Ok(system) => (format!("{system}\n{ca_pem}\n"), true),
+                    Err(_) => (ca_pem.to_string(), false),
+                },
+                None => (ca_pem.to_string(), false),
+            };
         let bundle_file = dir.join(format!(".api-tracker-tmp-{infix}-bundle.pem"));
         write_0600(&bundle_file, &combined)?;
 
@@ -213,23 +211,46 @@ mod tests {
     #[test]
     fn detects_common_runtimes() {
         assert_eq!(detect_runtime("/usr/local/bin/node").runtime, "node");
-        assert_eq!(detect_runtime("node").trust_level, TrustLevel::FullySupported);
-        assert_eq!(detect_runtime("curl").trust_level, TrustLevel::FullySupported);
+        assert_eq!(
+            detect_runtime("node").trust_level,
+            TrustLevel::FullySupported
+        );
+        assert_eq!(
+            detect_runtime("curl").trust_level,
+            TrustLevel::FullySupported
+        );
         assert_eq!(detect_runtime("python3").runtime, "python");
         assert_eq!(detect_runtime("java").trust_level, TrustLevel::Unsupported);
-        assert_eq!(detect_runtime("go").trust_level, TrustLevel::ConnectionOnlyFallback);
+        assert_eq!(
+            detect_runtime("go").trust_level,
+            TrustLevel::ConnectionOnlyFallback
+        );
     }
 
     #[test]
     fn scoped_env_sets_proxy_and_trust_never_disables_verification() {
         let dir = std::env::temp_dir();
         let infix = "test-scoped-0001";
-        let trust = ScopedTrust::prepare(&dir, 9999, "TOKEN123", "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----", ObservationMode::Metadata, infix).unwrap();
+        let trust = ScopedTrust::prepare(
+            &dir,
+            9999,
+            "TOKEN123",
+            "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----",
+            ObservationMode::Metadata,
+            infix,
+        )
+        .unwrap();
         let env = trust.child_env(Some("example.com"));
         let map: std::collections::HashMap<_, _> = env.iter().cloned().collect();
-        assert_eq!(map.get("HTTPS_PROXY").unwrap(), "http://tethra:TOKEN123@127.0.0.1:9999");
+        assert_eq!(
+            map.get("HTTPS_PROXY").unwrap(),
+            "http://tethra:TOKEN123@127.0.0.1:9999"
+        );
         assert!(map.get("NO_PROXY").unwrap().contains("127.0.0.1"));
-        assert!(map.get("NO_PROXY").unwrap().contains("example.com"), "existing NO_PROXY preserved");
+        assert!(
+            map.get("NO_PROXY").unwrap().contains("example.com"),
+            "existing NO_PROXY preserved"
+        );
         assert!(map.contains_key("NODE_EXTRA_CA_CERTS"));
         assert!(map.contains_key("REQUESTS_CA_BUNDLE"));
         assert!(map.contains_key("CURL_CA_BUNDLE"));
@@ -243,9 +264,20 @@ mod tests {
     #[test]
     fn connection_mode_sets_no_ca_trust() {
         let dir = std::env::temp_dir();
-        let trust = ScopedTrust::prepare(&dir, 9999, "T", "ca", ObservationMode::Connection, "test-conn-0001").unwrap();
+        let trust = ScopedTrust::prepare(
+            &dir,
+            9999,
+            "T",
+            "ca",
+            ObservationMode::Connection,
+            "test-conn-0001",
+        )
+        .unwrap();
         let map: std::collections::HashMap<_, _> = trust.child_env(None).into_iter().collect();
         assert!(map.contains_key("HTTPS_PROXY"));
-        assert!(!map.contains_key("NODE_EXTRA_CA_CERTS"), "connection mode does not decrypt");
+        assert!(
+            !map.contains_key("NODE_EXTRA_CA_CERTS"),
+            "connection mode does not decrypt"
+        );
     }
 }

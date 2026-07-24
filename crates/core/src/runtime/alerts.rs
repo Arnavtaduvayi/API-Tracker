@@ -48,10 +48,29 @@ pub fn alerts(
 
     status_spikes(conn, &observed, &hours_ago(now, 1), &mut out)?;
     new_and_unknown_apis(conn, &observed, &days_ago(now, 1), &mut out)?;
-    inactive_apis(conn, &observed, &days_ago(now, 3), &days_ago(now, 7), &mut out)?;
+    inactive_apis(
+        conn,
+        &observed,
+        &days_ago(now, 3),
+        &days_ago(now, 7),
+        &mut out,
+    )?;
     credential_rules(conn, &observed, label_of, &mut out)?;
 
     Ok(out)
+}
+
+/// One service's outcome counts over the recent window.
+struct SpikeRow {
+    sid: String,
+    host: String,
+    total: i64,
+    auth: i64,
+    forbidden: i64,
+    rate: i64,
+    server5: i64,
+    transport: i64,
+    tls: i64,
 }
 
 fn status_spikes(
@@ -68,24 +87,53 @@ fn status_spikes(
          FROM runtime_request_events e JOIN observed_api_services s ON s.id = e.service_id
          WHERE e.at >= ?1 GROUP BY e.service_id",
     )?;
-    let rows: Vec<(String, String, i64, i64, i64, i64, i64, i64, i64)> = stmt
+    let rows: Vec<SpikeRow> = stmt
         .query_map([since], |r| {
-            Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?,
-            ))
+            Ok(SpikeRow {
+                sid: r.get(0)?,
+                host: r.get(1)?,
+                total: r.get(2)?,
+                auth: r.get(3)?,
+                forbidden: r.get(4)?,
+                rate: r.get(5)?,
+                server5: r.get(6)?,
+                transport: r.get(7)?,
+                tls: r.get(8)?,
+            })
         })?
         .collect::<rusqlite::Result<_>>()?;
 
-    for (sid, host, total, auth, forbidden, rate, server5, transport, tls) in rows {
-        let push = |out: &mut Vec<NewAlert>, kind: AlertKind, sev: Severity, key: &str, title: String, detail: String, action: &str, conf: Confidence| {
+    for SpikeRow {
+        sid,
+        host,
+        total,
+        auth,
+        forbidden,
+        rate,
+        server5,
+        transport,
+        tls,
+    } in rows
+    {
+        let push = |out: &mut Vec<NewAlert>,
+                    kind: AlertKind,
+                    sev: Severity,
+                    key: &str,
+                    title: String,
+                    detail: String,
+                    action: &str,
+                    conf: Confidence| {
             out.push(NewAlert {
-                kind, severity: sev,
+                kind,
+                severity: sev,
                 dedup_key: format!("{key}:{sid}"),
-                title, detail,
+                title,
+                detail,
                 evidence: format!("service={host} window=last 1h total={total}"),
                 confidence: conf,
                 recommended_action: action.into(),
-                project_id: None, credential_id: None,
+                project_id: None,
+                credential_id: None,
                 observed_at: observed.to_string(),
             });
         };
@@ -183,7 +231,9 @@ fn inactive_apis(
          WHERE last_seen_at < ?1 AND first_seen_at < ?2",
     )?;
     let rows: Vec<(String, String)> = stmt
-        .query_map(params![quiet_since, established_before], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![quiet_since, established_before], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     for (sid, host) in rows {
         out.push(NewAlert {
@@ -219,7 +269,13 @@ fn credential_rules(
          WHERE a.credential_version IS NOT NULL AND a.credential_version < c.value_version
            AND a.confidence IN ('confirmed','high','possible')",
     )?;
-    for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?)))? {
+    for row in stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<i64>>(2)?,
+        ))
+    })? {
         let (cred, host, ver) = row?;
         let label = label_of(&cred);
         out.push(NewAlert {
@@ -301,12 +357,25 @@ mod tests {
 
     fn ev(status: u16, outcome_transport: TransportError) -> ObservedRequest {
         ObservedRequest {
-            host: "api.openai.com".into(), port: 443, method: HttpMethod::Post,
-            path_template: "/v1/chat".into(), template_confidence: crate::providers::Confidence::High,
-            status_code: if outcome_transport.is_failure() { None } else { Some(status) },
-            req_content_kind: None, resp_content_kind: None, had_authorization: true,
-            latency_ms: Some(20), request_bytes: Some(1), response_bytes: Some(1),
-            protocol: Protocol::Http11, observation_source: ObservationSource::Intercept, transport_error: outcome_transport,
+            host: "api.openai.com".into(),
+            port: 443,
+            method: HttpMethod::Post,
+            path_template: "/v1/chat".into(),
+            template_confidence: crate::providers::Confidence::High,
+            status_code: if outcome_transport.is_failure() {
+                None
+            } else {
+                Some(status)
+            },
+            req_content_kind: None,
+            resp_content_kind: None,
+            had_authorization: true,
+            latency_ms: Some(20),
+            request_bytes: Some(1),
+            response_bytes: Some(1),
+            protocol: Protocol::Http11,
+            observation_source: ObservationSource::Intercept,
+            transport_error: outcome_transport,
         }
     }
 
@@ -314,15 +383,56 @@ mod tests {
     fn repeated_auth_failures_raise_a_high_alert() {
         let conn = mem();
         testutil::seed_project(&conn, "p1", "web");
-        let sid = store::insert_session(&conn, &store::NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
         let now_ts = crate::clock::now_rfc3339();
-        let (svc, _) = store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now_ts).unwrap();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now_ts).unwrap();
         // 8x 401, 4x 200 = 12 total, 8/12 = 66% auth failures
-        for _ in 0..8 { store::insert_request_event(&conn, &sid, "p1", &svc, None, &now_ts, &ev(401, TransportError::None), true).unwrap(); }
-        for _ in 0..4 { store::insert_request_event(&conn, &sid, "p1", &svc, None, &now_ts, &ev(200, TransportError::None), true).unwrap(); }
+        for _ in 0..8 {
+            store::insert_request_event(
+                &conn,
+                &sid,
+                "p1",
+                &svc,
+                None,
+                &now_ts,
+                &ev(401, TransportError::None),
+                true,
+            )
+            .unwrap();
+        }
+        for _ in 0..4 {
+            store::insert_request_event(
+                &conn,
+                &sid,
+                "p1",
+                &svc,
+                None,
+                &now_ts,
+                &ev(200, TransportError::None),
+                true,
+            )
+            .unwrap();
+        }
 
-        let alerts = alerts(&conn, crate::clock::now(), &|_| "web/openai-main".to_string()).unwrap();
-        let auth = alerts.iter().find(|a| a.kind == AlertKind::RuntimeAuthFailures).expect("auth failure alert");
+        let alerts = alerts(&conn, crate::clock::now(), &|_| {
+            "web/openai-main".to_string()
+        })
+        .unwrap();
+        let auth = alerts
+            .iter()
+            .find(|a| a.kind == AlertKind::RuntimeAuthFailures)
+            .expect("auth failure alert");
         assert_eq!(auth.severity, Severity::High);
         assert!(auth.detail.contains("401"));
     }
@@ -333,7 +443,9 @@ mod tests {
         let now_ts = crate::clock::now_rfc3339();
         store::upsert_service(&conn, "api.mystery.example", None, false, &now_ts).unwrap();
         let alerts = alerts(&conn, crate::clock::now(), &|_| String::new()).unwrap();
-        assert!(alerts.iter().any(|a| a.kind == AlertKind::RuntimeUnknownApi));
+        assert!(alerts
+            .iter()
+            .any(|a| a.kind == AlertKind::RuntimeUnknownApi));
     }
 
     #[test]
@@ -341,13 +453,44 @@ mod tests {
         let conn = mem();
         testutil::seed_project(&conn, "p1", "web");
         testutil::seed_credential(&conn, "c1", "p1", "openai", "openai-main");
-        let sid = store::insert_session(&conn, &store::NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
         let now_ts = crate::clock::now_rfc3339();
-        let (svc, _) = store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now_ts).unwrap();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now_ts).unwrap();
         // launched at v1; the credential has since rotated to v3.
-        store::upsert_attribution(&conn, &sid, "c1", &svc, 5, AttributionConfidence::Confirmed, "e", Some(1), Some(true)).unwrap();
-        conn.execute("UPDATE credentials SET value_version = 3 WHERE id = 'c1'", []).unwrap();
-        let alerts = alerts(&conn, crate::clock::now(), &|_| "web/openai-main".to_string()).unwrap();
-        assert!(alerts.iter().any(|a| a.kind == AlertKind::RuntimeOldCredentialVersion));
+        store::upsert_attribution(
+            &conn,
+            &sid,
+            "c1",
+            &svc,
+            5,
+            AttributionConfidence::Confirmed,
+            "e",
+            Some(1),
+            Some(true),
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE credentials SET value_version = 3 WHERE id = 'c1'",
+            [],
+        )
+        .unwrap();
+        let alerts = alerts(&conn, crate::clock::now(), &|_| {
+            "web/openai-main".to_string()
+        })
+        .unwrap();
+        assert!(alerts
+            .iter()
+            .any(|a| a.kind == AlertKind::RuntimeOldCredentialVersion));
     }
 }

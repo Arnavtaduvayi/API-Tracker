@@ -167,7 +167,9 @@ fn parse_alpn(data: &[u8]) -> Vec<Vec<u8>> {
     }
     while r.remaining() >= 1 {
         let Some(len) = r.u8() else { break };
-        let Some(name) = r.take(len as usize) else { break };
+        let Some(name) = r.take(len as usize) else {
+            break;
+        };
         if !name.is_empty() {
             out.push(name.to_vec());
         }
@@ -186,13 +188,12 @@ mod tests {
     fn real_client_hello(server: &str, alpn: &[&[u8]]) -> Vec<u8> {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let mut config = ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        let mut config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
         config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
         let name = server.to_string().try_into().unwrap();
         let mut conn = ClientConnection::new(Arc::new(config), name).unwrap();

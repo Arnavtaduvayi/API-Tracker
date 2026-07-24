@@ -92,7 +92,8 @@ fn relay_content_length<R: Read, W: Write>(
     let mut remaining = n;
     let from_initial = std::cmp::min(initial.len() as u64, remaining) as usize;
     if from_initial > 0 {
-        dst.write_all(&initial[..from_initial]).map_err(CoreError::Io)?;
+        dst.write_all(&initial[..from_initial])
+            .map_err(CoreError::Io)?;
     }
     remaining -= from_initial as u64;
     let carryover = initial[from_initial..].to_vec();
@@ -228,7 +229,13 @@ mod tests {
         // body is 5 bytes; the reader also holds the next request.
         let mut src = Cursor::new(b"world NEXTREQ".to_vec());
         let mut dst = Vec::new();
-        let (n, carry) = relay_body(&mut src, &mut dst, BodyFraming::ContentLength(5), b"hello".to_vec()).unwrap();
+        let (n, carry) = relay_body(
+            &mut src,
+            &mut dst,
+            BodyFraming::ContentLength(5),
+            b"hello".to_vec(),
+        )
+        .unwrap();
         // initial already had the whole 5-byte body
         assert_eq!(n, 5);
         assert_eq!(dst, b"hello");
@@ -239,7 +246,13 @@ mod tests {
     fn content_length_streams_from_source() {
         let mut src = Cursor::new(b"0123456789".to_vec());
         let mut dst = Vec::new();
-        let (n, _c) = relay_body(&mut src, &mut dst, BodyFraming::ContentLength(10), Vec::new()).unwrap();
+        let (n, _c) = relay_body(
+            &mut src,
+            &mut dst,
+            BodyFraming::ContentLength(10),
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(n, 10);
         assert_eq!(dst, b"0123456789");
     }
@@ -251,7 +264,10 @@ mod tests {
         let mut dst = Vec::new();
         let (n, carry) = relay_body(&mut src, &mut dst, BodyFraming::Chunked, Vec::new()).unwrap();
         assert_eq!(dst, b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
-        assert_eq!(carry, b"AFTER", "bytes after the terminal chunk are carryover");
+        assert_eq!(
+            carry, b"AFTER",
+            "bytes after the terminal chunk are carryover"
+        );
         assert!(n > 0);
     }
 
@@ -260,7 +276,13 @@ mod tests {
         // the head-read already grabbed the first chunk
         let mut src = Cursor::new(b" world\r\n0\r\n\r\n".to_vec());
         let mut dst = Vec::new();
-        let (_n, carry) = relay_body(&mut src, &mut dst, BodyFraming::Chunked, b"5\r\nhello\r\n6\r\n".to_vec()).unwrap();
+        let (_n, carry) = relay_body(
+            &mut src,
+            &mut dst,
+            BodyFraming::Chunked,
+            b"5\r\nhello\r\n6\r\n".to_vec(),
+        )
+        .unwrap();
         assert_eq!(dst, b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n");
         assert_eq!(carry, b"");
     }
@@ -269,7 +291,13 @@ mod tests {
     fn until_close_reads_to_eof() {
         let mut src = Cursor::new(b"streamed response body".to_vec());
         let mut dst = Vec::new();
-        let (n, carry) = relay_body(&mut src, &mut dst, BodyFraming::UntilClose, b"prefix ".to_vec()).unwrap();
+        let (n, carry) = relay_body(
+            &mut src,
+            &mut dst,
+            BodyFraming::UntilClose,
+            b"prefix ".to_vec(),
+        )
+        .unwrap();
         assert_eq!(dst, b"prefix streamed response body");
         assert_eq!(n, dst.len() as u64);
         assert!(carry.is_empty());
@@ -279,7 +307,13 @@ mod tests {
     fn none_framing_carries_leftover_as_next_message() {
         let mut src = Cursor::new(Vec::new());
         let mut dst = Vec::new();
-        let (n, carry) = relay_body(&mut src, &mut dst, BodyFraming::None, b"GET /next HTTP/1.1\r\n".to_vec()).unwrap();
+        let (n, carry) = relay_body(
+            &mut src,
+            &mut dst,
+            BodyFraming::None,
+            b"GET /next HTTP/1.1\r\n".to_vec(),
+        )
+        .unwrap();
         assert_eq!(n, 0);
         assert!(dst.is_empty());
         assert_eq!(carry, b"GET /next HTTP/1.1\r\n");

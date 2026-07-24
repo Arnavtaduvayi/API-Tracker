@@ -9319,10 +9319,7 @@ impl UnlockedVault {
         crate::runtime::store::list_services(&self.conn)
     }
 
-    pub fn observe_service(
-        &self,
-        id: &str,
-    ) -> Result<crate::runtime::model::ObservedServiceRow> {
+    pub fn observe_service(&self, id: &str) -> Result<crate::runtime::model::ObservedServiceRow> {
         crate::runtime::store::get_service(&self.conn, id)?.ok_or(CoreError::NotFound {
             kind: "observed api service",
             ident: id.to_string(),

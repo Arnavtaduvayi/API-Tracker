@@ -33,7 +33,12 @@ pub fn sweep_with(
 /// Sweep using the vault's configured retention settings and the current time.
 pub fn sweep(conn: &Connection) -> Result<(usize, usize)> {
     let s = ObservabilitySettings::load(conn)?;
-    sweep_with(conn, s.event_retention_days, s.aggregate_retention_days, clock::now())
+    sweep_with(
+        conn,
+        s.event_retention_days,
+        s.aggregate_retention_days,
+        clock::now(),
+    )
 }
 
 #[cfg(test)]
@@ -49,16 +54,38 @@ mod tests {
         db::migrate(&mut conn).unwrap();
         conn.pragma_update(None, "foreign_keys", 1).unwrap();
         testutil::seed_project(&conn, "p1", "web");
-        let sid = store::insert_session(&conn, &store::NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
-        let (svc, _) = store::upsert_service(&conn, "api.openai.com", None, false, "2026-01-01T00:00:00Z").unwrap();
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.openai.com", None, false, "2026-01-01T00:00:00Z")
+                .unwrap();
 
         let req = |at: &str| {
             let e = ObservedRequest {
-                host: "api.openai.com".into(), port: 443, method: HttpMethod::Get,
-                path_template: "/v1/models".into(), template_confidence: crate::providers::Confidence::High,
-                status_code: Some(200), req_content_kind: None, resp_content_kind: None,
-                had_authorization: false, latency_ms: Some(10), request_bytes: Some(1), response_bytes: Some(1),
-                protocol: Protocol::Http11, observation_source: ObservationSource::Intercept, transport_error: TransportError::None,
+                host: "api.openai.com".into(),
+                port: 443,
+                method: HttpMethod::Get,
+                path_template: "/v1/models".into(),
+                template_confidence: crate::providers::Confidence::High,
+                status_code: Some(200),
+                req_content_kind: None,
+                resp_content_kind: None,
+                had_authorization: false,
+                latency_ms: Some(10),
+                request_bytes: Some(1),
+                response_bytes: Some(1),
+                protocol: Protocol::Http11,
+                observation_source: ObservationSource::Intercept,
+                transport_error: TransportError::None,
             };
             store::insert_request_event(&conn, &sid, "p1", &svc, None, at, &e, false).unwrap();
         };
@@ -69,7 +96,11 @@ mod tests {
 
         let (events, _buckets) = sweep_with(&conn, 7, 90, now).unwrap();
         assert_eq!(events, 1, "only the 30-day-old event is pruned");
-        let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM runtime_request_events", [], |r| r.get(0)).unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_request_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(remaining, 1);
     }
 }

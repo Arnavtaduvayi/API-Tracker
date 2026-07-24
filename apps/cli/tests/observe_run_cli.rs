@@ -19,7 +19,10 @@ impl V {
     fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let data_dir = dir.path().join("data");
-        let v = Self { _dir: dir, data_dir };
+        let v = Self {
+            _dir: dir,
+            data_dir,
+        };
         v.cmd().arg("init").assert().success();
         v
     }
@@ -34,12 +37,31 @@ impl V {
     /// `run` requires at least one credential; add one and map it to an env var.
     fn add_cred(&self, project: &str, name: &str, provider: &str, env: &str) {
         self.cmd()
-            .args(["key", "add", "--project", project, "--name", name, "--provider", provider, "--value-stdin"])
+            .args([
+                "key",
+                "add",
+                "--project",
+                project,
+                "--name",
+                name,
+                "--provider",
+                provider,
+                "--value-stdin",
+            ])
             .write_stdin("FAKE-TEST-NOT-A-REAL-KEY-000001")
             .assert()
             .success();
         self.cmd()
-            .args(["mapping", "set", "--project", project, "--credential", name, "--env", env])
+            .args([
+                "mapping",
+                "set",
+                "--project",
+                project,
+                "--credential",
+                name,
+                "--env",
+                env,
+            ])
             .assert()
             .success();
     }
@@ -49,15 +71,29 @@ impl V {
 #[test]
 fn monitored_run_creates_a_session_and_generates_a_ca() {
     let v = V::new();
-    v.cmd().args(["project", "create", "web"]).assert().success();
+    v.cmd()
+        .args(["project", "create", "web"])
+        .assert()
+        .success();
     v.add_cred("web", "k", "openai", "OPENAI_API_KEY");
 
     // Metadata mode: a no-op child. Exercises CA generation + full lifecycle.
     v.cmd()
-        .args(["run", "--observe=metadata", "--project", "web", "--", "sh", "-c", "true"])
+        .args([
+            "run",
+            "--observe=metadata",
+            "--project",
+            "web",
+            "--",
+            "sh",
+            "-c",
+            "true",
+        ])
         .assert()
         .success()
-        .stderr(predicate::str::contains("Observing this run in metadata mode"))
+        .stderr(predicate::str::contains(
+            "Observing this run in metadata mode",
+        ))
         .stderr(predicate::str::contains("Metadata only"));
 
     // A completed session now exists.
@@ -88,11 +124,23 @@ fn monitored_run_creates_a_session_and_generates_a_ca() {
 #[test]
 fn connection_mode_needs_no_certificate() {
     let v = V::new();
-    v.cmd().args(["project", "create", "svc"]).assert().success();
+    v.cmd()
+        .args(["project", "create", "svc"])
+        .assert()
+        .success();
     v.add_cred("svc", "k", "openai", "OPENAI_API_KEY");
 
     v.cmd()
-        .args(["run", "--observe=connection", "--project", "svc", "--", "sh", "-c", "true"])
+        .args([
+            "run",
+            "--observe=connection",
+            "--project",
+            "svc",
+            "--",
+            "sh",
+            "-c",
+            "true",
+        ])
         .assert()
         .success()
         .stderr(predicate::str::contains("connection mode"));
@@ -123,7 +171,15 @@ fn observe_subcommands_work_on_an_empty_vault() {
         .stdout(predicate::str::contains("7 days"));
 
     v.cmd()
-        .args(["observe", "settings", "set", "--event-days", "14", "--aggregate-days", "180"])
+        .args([
+            "observe",
+            "settings",
+            "set",
+            "--event-days",
+            "14",
+            "--aggregate-days",
+            "180",
+        ])
         .assert()
         .success();
 

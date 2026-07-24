@@ -21,7 +21,11 @@ const HOST_PROVIDERS: &[(&str, &str)] = &[
 /// Resolve a hostname to a known provider id, or `None` for an unknown/custom
 /// API. Only returns a provider whose manifest actually exists.
 pub fn provider_for_host(host: &str) -> Option<&'static str> {
-    let h = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let h = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     for (needle, provider) in HOST_PROVIDERS {
         let matched = if let Some(suffix) = needle.strip_prefix('.') {
             h == suffix || h.ends_with(&format!(".{suffix}"))
@@ -39,7 +43,11 @@ pub fn provider_for_host(host: &str) -> Option<&'static str> {
 /// (A single-label name, `.local`/`.internal`, or an IP literal in a private
 /// range.) Used only to tag inventory; the proxy policy is the real gate.
 pub fn looks_internal(host: &str) -> bool {
-    let h = host.trim().trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let h = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     if h.parse::<std::net::IpAddr>().is_ok() {
         // The proxy already blocks private IPs unless allowlisted, so an IP
         // that was actually observed and allowlisted is internal.

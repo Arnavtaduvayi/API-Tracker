@@ -100,7 +100,7 @@ mod tests {
         let conn = mem();
         let s = ObservabilitySettings {
             default_mode: ObservationMode::Metadata,
-            event_retention_days: 9999, // clamped to 90
+            event_retention_days: 9999,  // clamped to 90
             aggregate_retention_days: 1, // clamped to 7
         };
         s.save(&conn).unwrap();

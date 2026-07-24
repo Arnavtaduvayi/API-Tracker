@@ -93,7 +93,11 @@ fn metrics_from_row(r: &Row<'_>) -> rusqlite::Result<Metrics> {
         transport_errors: r.get(9)?,
         tls_errors: r.get(10)?,
         errors,
-        error_rate: if total > 0 { errors as f64 / total as f64 } else { 0.0 },
+        error_rate: if total > 0 {
+            errors as f64 / total as f64
+        } else {
+            0.0
+        },
         request_bytes: r.get(11)?,
         response_bytes: r.get(12)?,
         p50_ms: percentile(&bins, 0.50),
@@ -131,14 +135,16 @@ fn percentile(bins: &[i64; 14], p: f64) -> Option<i64> {
 }
 
 fn scope_metrics(conn: &Connection, cond: &str, ident: &str, since: &str) -> Result<Metrics> {
-    let sql = format!(
-        "SELECT {EVENT_AGG} FROM runtime_request_events WHERE {cond} AND at >= ?2"
-    );
+    let sql = format!("SELECT {EVENT_AGG} FROM runtime_request_events WHERE {cond} AND at >= ?2");
     let m = conn.query_row(&sql, params![ident, since], metrics_from_row)?;
     Ok(m)
 }
 
-pub fn service_metrics(conn: &Connection, service_id: &str, since: Option<&str>) -> Result<Metrics> {
+pub fn service_metrics(
+    conn: &Connection,
+    service_id: &str,
+    since: Option<&str>,
+) -> Result<Metrics> {
     scope_metrics(conn, "service_id = ?1", service_id, since.unwrap_or(""))
 }
 
@@ -146,7 +152,11 @@ pub fn session_metrics(conn: &Connection, session_id: &str) -> Result<Metrics> {
     scope_metrics(conn, "session_id = ?1", session_id, "")
 }
 
-pub fn project_metrics(conn: &Connection, project_id: &str, since: Option<&str>) -> Result<Metrics> {
+pub fn project_metrics(
+    conn: &Connection,
+    project_id: &str,
+    since: Option<&str>,
+) -> Result<Metrics> {
     scope_metrics(conn, "project_id = ?1", project_id, since.unwrap_or(""))
 }
 
@@ -167,8 +177,8 @@ fn hour_floor(ts: &str) -> String {
 
 /// Idempotently roll up complete hours (and days) up to `now`.
 pub fn roll_up(conn: &Connection, now: &str) -> Result<usize> {
-    let watermark = store::meta_get(conn, WATERMARK)?
-        .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+    let watermark =
+        store::meta_get(conn, WATERMARK)?.unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
     let from_hour = hour_floor(&watermark);
     let current_hour = hour_floor(now);
     if current_hour <= from_hour {
@@ -293,11 +303,19 @@ mod tests {
             method: HttpMethod::Get,
             path_template: "/v1/models".into(),
             template_confidence: crate::providers::Confidence::High,
-            status_code: if transport.is_failure() { None } else { Some(status) },
+            status_code: if transport.is_failure() {
+                None
+            } else {
+                Some(status)
+            },
             req_content_kind: None,
             resp_content_kind: None,
             had_authorization: true,
-            latency_ms: if transport.is_failure() { None } else { Some(latency) },
+            latency_ms: if transport.is_failure() {
+                None
+            } else {
+                Some(latency)
+            },
             request_bytes: Some(100),
             response_bytes: Some(500),
             protocol: Protocol::Http11,
@@ -308,16 +326,67 @@ mod tests {
 
     fn seed(conn: &Connection) -> (String, String) {
         testutil::seed_project(conn, "p1", "web");
-        let sid = store::insert_session(conn, &store::NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
+        let sid = store::insert_session(
+            conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
         let now = "2026-07-24T10:15:00Z";
-        let (svc, _) = store::upsert_service(conn, "api.openai.com", Some("openai"), false, now).unwrap();
+        let (svc, _) =
+            store::upsert_service(conn, "api.openai.com", Some("openai"), false, now).unwrap();
         // 8x 200 (varied latency), 1x 401, 1x 500, 1x transport error
         for lat in [5, 8, 12, 20, 40, 60, 90, 300] {
-            store::insert_request_event(conn, &sid, "p1", &svc, None, now, &ev(200, lat, TransportError::None), false).unwrap();
+            store::insert_request_event(
+                conn,
+                &sid,
+                "p1",
+                &svc,
+                None,
+                now,
+                &ev(200, lat, TransportError::None),
+                false,
+            )
+            .unwrap();
         }
-        store::insert_request_event(conn, &sid, "p1", &svc, None, now, &ev(401, 10, TransportError::None), false).unwrap();
-        store::insert_request_event(conn, &sid, "p1", &svc, None, now, &ev(500, 15, TransportError::None), false).unwrap();
-        store::insert_request_event(conn, &sid, "p1", &svc, None, now, &ev(0, 0, TransportError::Refused), false).unwrap();
+        store::insert_request_event(
+            conn,
+            &sid,
+            "p1",
+            &svc,
+            None,
+            now,
+            &ev(401, 10, TransportError::None),
+            false,
+        )
+        .unwrap();
+        store::insert_request_event(
+            conn,
+            &sid,
+            "p1",
+            &svc,
+            None,
+            now,
+            &ev(500, 15, TransportError::None),
+            false,
+        )
+        .unwrap();
+        store::insert_request_event(
+            conn,
+            &sid,
+            "p1",
+            &svc,
+            None,
+            now,
+            &ev(0, 0, TransportError::Refused),
+            false,
+        )
+        .unwrap();
         (sid, svc)
     }
 
@@ -330,7 +399,10 @@ mod tests {
         assert_eq!(m.success, 8, "only 2xx/3xx are success");
         assert_eq!(m.auth_errors, 1);
         assert_eq!(m.server_errors, 1);
-        assert_eq!(m.transport_errors, 1, "transport failure counted separately");
+        assert_eq!(
+            m.transport_errors, 1,
+            "transport failure counted separately"
+        );
         // the transport failure is NOT an HTTP status class
         assert_eq!(m.c5xx, 1);
         assert!(m.p95_ms.is_some());
@@ -344,10 +416,25 @@ mod tests {
         let (_sid, _svc) = seed(&conn);
         let after = "2026-07-24T12:00:00Z";
         roll_up(&conn, after).unwrap();
-        let count1: i64 = conn.query_row("SELECT COUNT(*) FROM runtime_metric_buckets WHERE granularity='hour'", [], |r| r.get(0)).unwrap();
+        let count1: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_metric_buckets WHERE granularity='hour'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         roll_up(&conn, after).unwrap();
-        let count2: i64 = conn.query_row("SELECT COUNT(*) FROM runtime_metric_buckets WHERE granularity='hour'", [], |r| r.get(0)).unwrap();
-        assert_eq!(count1, count2, "running roll_up twice must not duplicate buckets");
+        let count2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_metric_buckets WHERE granularity='hour'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count1, count2,
+            "running roll_up twice must not duplicate buckets"
+        );
         // the hour bucket totals match the events
         let total: i64 = conn.query_row("SELECT SUM(total) FROM runtime_metric_buckets WHERE granularity='hour' AND credential_id=''", [], |r| r.get(0)).unwrap();
         assert_eq!(total, 11);

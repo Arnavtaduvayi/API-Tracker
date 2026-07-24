@@ -29,10 +29,7 @@ const MAX_PARTS: usize = 20;
 pub fn sanitize_path(raw: &str) -> (String, Confidence) {
     // 1. Sever query and fragment IMMEDIATELY. Everything after the first
     //    '?' or '#' is dropped here and never assigned to a lasting binding.
-    let cut = raw
-        .find(['?', '#'])
-        .map(|i| &raw[..i])
-        .unwrap_or(raw);
+    let cut = raw.find(['?', '#']).map(|i| &raw[..i]).unwrap_or(raw);
 
     // 2. A target we do not understand (empty, not origin-form) is redacted
     //    wholesale rather than guessed at. `*` (OPTIONS asterisk-form) is a
@@ -159,7 +156,9 @@ fn is_long_hex(s: &str) -> bool {
 
 fn is_email(s: &str) -> bool {
     match s.split_once('@') {
-        Some((local, domain)) => !local.is_empty() && domain.contains('.') && !domain.starts_with('.'),
+        Some((local, domain)) => {
+            !local.is_empty() && domain.contains('.') && !domain.starts_with('.')
+        }
         None => false,
     }
 }
@@ -167,11 +166,34 @@ fn is_email(s: &str) -> bool {
 /// Known credential/token prefixes. A path segment starting with one of these
 /// is almost certainly a leaked secret in the URL and is replaced with `:token`.
 const CREDENTIAL_PREFIXES: &[&str] = &[
-    "sk-", "sk_", "pk_live", "pk_test", "rk_live", "rk_test", "whsec_",
-    "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_",
-    "xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-",
-    "AKIA", "ASIA", "AIza", "ya29.", "glpat-", "shpat_", "shpss_", "shpca_",
-    "Bearer", "eyJ",
+    "sk-",
+    "sk_",
+    "pk_live",
+    "pk_test",
+    "rk_live",
+    "rk_test",
+    "whsec_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xoxs-",
+    "AKIA",
+    "ASIA",
+    "AIza",
+    "ya29.",
+    "glpat-",
+    "shpat_",
+    "shpss_",
+    "shpca_",
+    "Bearer",
+    "eyJ",
 ];
 
 fn is_credential_shaped(s: &str) -> bool {
@@ -191,7 +213,9 @@ fn is_jwt(s: &str) -> bool {
         return false;
     }
     parts[0].starts_with("eyJ")
-        && parts.iter().all(|p| p.len() >= 8 && is_base64url_charset(p))
+        && parts
+            .iter()
+            .all(|p| p.len() >= 8 && is_base64url_charset(p))
 }
 
 /// Character-class diversity + length heuristic for opaque tokens.
@@ -211,8 +235,7 @@ fn is_high_entropy(s: &str) -> bool {
     let classes = [lower, upper, digit, other].iter().filter(|x| **x).count();
     // len ≥ 20 with ≥3 classes, OR a long base64url-ish blob with both letters
     // and digits.
-    (classes >= 3)
-        || (s.len() >= 24 && is_base64url_charset(s) && (lower || upper) && digit)
+    (classes >= 3) || (s.len() >= 24 && is_base64url_charset(s) && (lower || upper) && digit)
 }
 
 /// Longest run of consecutive ASCII digits.
@@ -257,10 +280,7 @@ fn contains_uuid_substring(s: &str) -> bool {
 /// A segment that still embeds an identifier-shaped run and therefore must not
 /// be kept verbatim.
 fn has_embedded_sensitive(s: &str) -> bool {
-    s.contains('@')
-        || max_digit_run(s) >= 5
-        || max_hex_run(s) >= 16
-        || contains_uuid_substring(s)
+    s.contains('@') || max_digit_run(s) >= 5 || max_hex_run(s) >= 16 || contains_uuid_substring(s)
 }
 
 fn looks_like_filename(s: &str) -> bool {
@@ -290,7 +310,10 @@ mod tests {
 
     #[test]
     fn worked_examples_from_the_privacy_model() {
-        assert_eq!(t("/v1/users/123456/orders/98765"), "/v1/users/:id/orders/:id");
+        assert_eq!(
+            t("/v1/users/123456/orders/98765"),
+            "/v1/users/:id/orders/:id"
+        );
         assert_eq!(
             t("/v1/files/550e8400-e29b-41d4-a716-446655440000"),
             "/v1/files/:uuid"
@@ -299,8 +322,14 @@ mod tests {
             t("/repos/octocat/hello/issues/42/comments"),
             "/repos/octocat/hello/issues/:id/comments"
         );
-        assert_eq!(t("/users/alice@example.com/profile"), "/users/:email/profile");
-        assert_eq!(t("/download/report_9f8e7d6c5b4a2210.csv"), "/download/:file");
+        assert_eq!(
+            t("/users/alice@example.com/profile"),
+            "/users/:email/profile"
+        );
+        assert_eq!(
+            t("/download/report_9f8e7d6c5b4a2210.csv"),
+            "/download/:file"
+        );
         assert_eq!(t("/"), "/");
         assert_eq!(t("/v1/models"), "/v1/models");
     }
@@ -316,7 +345,10 @@ mod tests {
 
     #[test]
     fn credential_shaped_segments_are_tokenized() {
-        assert_eq!(t("/callback/sk-proj-ABCDEFGHIJKLMNOP1234"), "/callback/:token");
+        assert_eq!(
+            t("/callback/sk-proj-ABCDEFGHIJKLMNOP1234"),
+            "/callback/:token"
+        );
         assert_eq!(
             t("/gh/ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
             "/gh/:token"
@@ -363,18 +395,41 @@ mod tests {
     /// blobs. Used to assert the output invariants for thousands of inputs.
     fn fuzz_corpus() -> Vec<String> {
         let pieces = [
-            "users", "v1", "v2", "orders", "chat", "completions", "models", "a", "ab",
-            "123", "42", "123456", "98765432101234", "octocat", "hello-world",
+            "users",
+            "v1",
+            "v2",
+            "orders",
+            "chat",
+            "completions",
+            "models",
+            "a",
+            "ab",
+            "123",
+            "42",
+            "123456",
+            "98765432101234",
+            "octocat",
+            "hello-world",
             "550e8400-e29b-41d4-a716-446655440000",
-            "9f8e7d6c5b4a32100ffeed", "deadbeefdeadbeefdeadbeef",
-            "alice@example.com", "bob.smith@corp.co.uk",
+            "9f8e7d6c5b4a32100ffeed",
+            "deadbeefdeadbeefdeadbeef",
+            "alice@example.com",
+            "bob.smith@corp.co.uk",
             "sk-proj-ABCDEFGHIJKLMNOPqrstuvwx1234",
             "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.QWERTYUIOP",
-            "report_20240101_884213.pdf", "avatar_9f8e7d6c5b4a2210.png",
-            "Zm9vYmFyMTIzNDU2Nzg5MEFCQ0RFRkdI", "café", "%E2%9C%93",
-            "user_123456", "order-98765", "", "..", "a.b.c",
-            "AKIAIOSFODNN7EXAMPLE", "xoxb-1234567890-abcdefghij",
+            "report_20240101_884213.pdf",
+            "avatar_9f8e7d6c5b4a2210.png",
+            "Zm9vYmFyMTIzNDU2Nzg5MEFCQ0RFRkdI",
+            "café",
+            "%E2%9C%93",
+            "user_123456",
+            "order-98765",
+            "",
+            "..",
+            "a.b.c",
+            "AKIAIOSFODNN7EXAMPLE",
+            "xoxb-1234567890-abcdefghij",
         ];
         let mut out = Vec::new();
         for a in &pieces {
@@ -384,7 +439,9 @@ mod tests {
                 // Distinctive canaries so we can prove nothing from the query
                 // or fragment survives (a real path segment like "users" can
                 // legitimately reappear; a canary cannot).
-                out.push(format!("/{a}/{b}?q=QUERYCANARYZZ&secret=SECRETCANARYZZ#fragCANARYZZ"));
+                out.push(format!(
+                    "/{a}/{b}?q=QUERYCANARYZZ&secret=SECRETCANARYZZ#fragCANARYZZ"
+                ));
             }
         }
         out
@@ -397,7 +454,10 @@ mod tests {
             assert!(!out.contains('?'), "P1 query leaked: {input} -> {out}");
             assert!(!out.contains('#'), "P1 fragment leaked: {input} -> {out}");
             // The query/fragment canaries must never reach the output.
-            assert!(!out.contains("CANARYZZ"), "P1 tail leaked: {input} -> {out}");
+            assert!(
+                !out.contains("CANARYZZ"),
+                "P1 tail leaked: {input} -> {out}"
+            );
         }
     }
 

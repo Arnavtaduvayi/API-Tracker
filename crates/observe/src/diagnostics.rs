@@ -24,8 +24,16 @@ pub fn run(ca_present: bool) -> Vec<Check> {
     let mut out = Vec::new();
 
     match std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)) {
-        Ok(_) => out.push(check("loopback_bind", "ok", "can bind a loopback listener on 127.0.0.1")),
-        Err(e) => out.push(check("loopback_bind", "fail", format!("cannot bind a loopback listener: {e}"))),
+        Ok(_) => out.push(check(
+            "loopback_bind",
+            "ok",
+            "can bind a loopback listener on 127.0.0.1",
+        )),
+        Err(e) => out.push(check(
+            "loopback_bind",
+            "fail",
+            format!("cannot bind a loopback listener: {e}"),
+        )),
     }
 
     out.push(check(
@@ -34,17 +42,28 @@ pub fn run(ca_present: bool) -> Vec<Check> {
         if ca_present {
             "a local certificate authority is present".to_string()
         } else {
-            "no local CA yet — one is generated automatically on the first metadata-mode run".to_string()
+            "no local CA yet — one is generated automatically on the first metadata-mode run"
+                .to_string()
         },
     ));
 
-    let existing: Vec<String> = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY"]
-        .iter()
-        .filter(|k| std::env::var(k).is_ok())
-        .map(|k| k.to_string())
-        .collect();
+    let existing: Vec<String> = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+    ]
+    .iter()
+    .filter(|k| std::env::var(k).is_ok())
+    .map(|k| k.to_string())
+    .collect();
     if existing.is_empty() {
-        out.push(check("existing_proxy", "ok", "no conflicting proxy is set in this environment"));
+        out.push(check(
+            "existing_proxy",
+            "ok",
+            "no conflicting proxy is set in this environment",
+        ));
     } else {
         out.push(check(
             "existing_proxy",

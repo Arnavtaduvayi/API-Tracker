@@ -51,53 +51,56 @@ pub fn attribute_session(
     let mut written = 0usize;
     for (service_id, host, provider_id, count) in rows {
         // Prefer the stored provider; fall back to a host→provider lookup.
-        let provider = provider_id
-            .or_else(|| inventory::provider_for_host(&host).map(|p| p.to_string()));
+        let provider =
+            provider_id.or_else(|| inventory::provider_for_host(&host).map(|p| p.to_string()));
 
         let candidates: Vec<&InjectedCredential> = match &provider {
             Some(p) => injected.iter().filter(|c| &c.provider == p).collect(),
             None => Vec::new(),
         };
 
-        let (chosen, confidence, evidence): (Option<&InjectedCredential>, AttributionConfidence, String) =
-            match candidates.len() {
-                1 => (
-                    Some(candidates[0]),
-                    AttributionConfidence::Confirmed,
-                    "single injected credential of the matching provider".into(),
-                ),
-                n if n > 1 => {
-                    // Ambiguous: record each candidate, choose none.
-                    for c in &candidates {
-                        store::upsert_attribution(
-                            conn,
-                            session_id,
-                            &c.credential_id,
-                            &service_id,
-                            count,
-                            AttributionConfidence::Ambiguous,
-                            "multiple injected credentials of this provider could explain the traffic",
-                            Some(c.launch_version),
-                            Some(c.launch_version >= c.current_version),
-                        )?;
-                        written += 1;
-                    }
-                    continue;
+        let (chosen, confidence, evidence): (
+            Option<&InjectedCredential>,
+            AttributionConfidence,
+            String,
+        ) = match candidates.len() {
+            1 => (
+                Some(candidates[0]),
+                AttributionConfidence::Confirmed,
+                "single injected credential of the matching provider".into(),
+            ),
+            n if n > 1 => {
+                // Ambiguous: record each candidate, choose none.
+                for c in &candidates {
+                    store::upsert_attribution(
+                        conn,
+                        session_id,
+                        &c.credential_id,
+                        &service_id,
+                        count,
+                        AttributionConfidence::Ambiguous,
+                        "multiple injected credentials of this provider could explain the traffic",
+                        Some(c.launch_version),
+                        Some(c.launch_version >= c.current_version),
+                    )?;
+                    written += 1;
                 }
-                _ => {
-                    // No provider match. If exactly one credential was injected
-                    // at all, it is a *possible* explanation (weak).
-                    if provider.is_none() && injected.len() == 1 {
-                        (
-                            Some(&injected[0]),
-                            AttributionConfidence::Possible,
-                            "one credential was injected; the API's provider is unknown".into(),
-                        )
-                    } else {
-                        (None, AttributionConfidence::Unattributed, String::new())
-                    }
+                continue;
+            }
+            _ => {
+                // No provider match. If exactly one credential was injected
+                // at all, it is a *possible* explanation (weak).
+                if provider.is_none() && injected.len() == 1 {
+                    (
+                        Some(&injected[0]),
+                        AttributionConfidence::Possible,
+                        "one credential was injected; the API's provider is unknown".into(),
+                    )
+                } else {
+                    (None, AttributionConfidence::Unattributed, String::new())
                 }
-            };
+            }
+        };
 
         match chosen {
             Some(c) => {
@@ -180,13 +183,38 @@ mod tests {
         testutil::seed_credential(conn, "c-openai", "p1", "openai", "openai-main");
         let sid = store::insert_session(
             conn,
-            &store::NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] },
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
         )
         .unwrap();
         let now = crate::clock::now_rfc3339();
-        let (svc, _) = store::upsert_service(conn, "api.openai.com", Some("openai"), false, &now).unwrap();
-        let (ep, k) = store::upsert_endpoint(conn, &svc, HttpMethod::Get, "/v1/models", crate::providers::Confidence::High, &now).unwrap();
-        store::insert_request_event(conn, &sid, "p1", &svc, Some(&ep), &now, &req("api.openai.com"), k).unwrap();
+        let (svc, _) =
+            store::upsert_service(conn, "api.openai.com", Some("openai"), false, &now).unwrap();
+        let (ep, k) = store::upsert_endpoint(
+            conn,
+            &svc,
+            HttpMethod::Get,
+            "/v1/models",
+            crate::providers::Confidence::High,
+            &now,
+        )
+        .unwrap();
+        store::insert_request_event(
+            conn,
+            &sid,
+            "p1",
+            &svc,
+            Some(&ep),
+            &now,
+            &req("api.openai.com"),
+            k,
+        )
+        .unwrap();
         sid
     }
 
@@ -194,13 +222,18 @@ mod tests {
     fn single_injected_match_is_confirmed() {
         let conn = mem();
         let sid = setup(&conn);
-        let n = attribute_session(&conn, &sid, &[InjectedCredential {
-            credential_id: "c-openai".into(),
-            provider: "openai".into(),
-            environment: "production".into(),
-            launch_version: 2,
-            current_version: 2,
-        }]).unwrap();
+        let n = attribute_session(
+            &conn,
+            &sid,
+            &[InjectedCredential {
+                credential_id: "c-openai".into(),
+                provider: "openai".into(),
+                environment: "production".into(),
+                launch_version: 2,
+                current_version: 2,
+            }],
+        )
+        .unwrap();
         assert_eq!(n, 1);
         let attrs = store::session_attributions(&conn, &sid).unwrap();
         assert_eq!(attrs.len(), 1);
@@ -213,15 +246,24 @@ mod tests {
     fn old_version_after_rotation_is_detectable() {
         let conn = mem();
         let sid = setup(&conn);
-        attribute_session(&conn, &sid, &[InjectedCredential {
-            credential_id: "c-openai".into(),
-            provider: "openai".into(),
-            environment: "production".into(),
-            launch_version: 1,      // launched at v1
-            current_version: 3,     // rotated to v3 since
-        }]).unwrap();
+        attribute_session(
+            &conn,
+            &sid,
+            &[InjectedCredential {
+                credential_id: "c-openai".into(),
+                provider: "openai".into(),
+                environment: "production".into(),
+                launch_version: 1,  // launched at v1
+                current_version: 3, // rotated to v3 since
+            }],
+        )
+        .unwrap();
         let attrs = store::session_attributions(&conn, &sid).unwrap();
-        assert_eq!(attrs[0].used_current_version, Some(false), "old version in use");
+        assert_eq!(
+            attrs[0].used_current_version,
+            Some(false),
+            "old version in use"
+        );
         assert_eq!(attrs[0].credential_version, Some(1));
     }
 
@@ -230,10 +272,27 @@ mod tests {
         let conn = mem();
         let sid = setup(&conn);
         testutil::seed_credential(&conn, "c-openai-2", "p1", "openai", "openai-alt");
-        let n = attribute_session(&conn, &sid, &[
-            InjectedCredential { credential_id: "c-openai".into(), provider: "openai".into(), environment: "production".into(), launch_version: 1, current_version: 1 },
-            InjectedCredential { credential_id: "c-openai-2".into(), provider: "openai".into(), environment: "production".into(), launch_version: 1, current_version: 1 },
-        ]).unwrap();
+        let n = attribute_session(
+            &conn,
+            &sid,
+            &[
+                InjectedCredential {
+                    credential_id: "c-openai".into(),
+                    provider: "openai".into(),
+                    environment: "production".into(),
+                    launch_version: 1,
+                    current_version: 1,
+                },
+                InjectedCredential {
+                    credential_id: "c-openai-2".into(),
+                    provider: "openai".into(),
+                    environment: "production".into(),
+                    launch_version: 1,
+                    current_version: 1,
+                },
+            ],
+        )
+        .unwrap();
         assert_eq!(n, 2);
         let attrs = store::session_attributions(&conn, &sid).unwrap();
         assert!(attrs.iter().all(|a| a.confidence == "ambiguous"));

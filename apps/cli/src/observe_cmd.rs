@@ -92,7 +92,9 @@ pub struct SettingsSetArgs {
 
 #[derive(Subcommand)]
 pub enum AllowCmd {
-    List { project: String },
+    List {
+        project: String,
+    },
     Add {
         project: String,
         host: String,
@@ -116,7 +118,10 @@ pub fn run(ctx: &Ctx, cmd: ObserveCmd) -> Result<()> {
         ObserveCmd::Sessions { project, limit } => sessions(ctx, &vault, project.as_deref(), limit),
         ObserveCmd::Show { session } => show_session(ctx, &vault, &session),
         ObserveCmd::DeleteSession { session, yes } => {
-            if !crate::ctx::confirm(&format!("Delete observation session '{session}' and its events?"), yes)? {
+            if !crate::ctx::confirm(
+                &format!("Delete observation session '{session}' and its events?"),
+                yes,
+            )? {
                 bail!("aborted");
             }
             vault.observe_delete_session(&session)?;
@@ -149,7 +154,9 @@ fn overview(ctx: &Ctx, vault: &UnlockedVault) -> Result<()> {
             s.provider_id.clone().unwrap_or_else(|| "(unknown)".into()),
             m.total.to_string(),
             format!("{:.0}%", m.error_rate * 100.0),
-            m.p95_ms.map(|v| format!("{v}ms")).unwrap_or_else(|| "-".into()),
+            m.p95_ms
+                .map(|v| format!("{v}ms"))
+                .unwrap_or_else(|| "-".into()),
         ]);
     }
     render::emit(ctx.json, &services, || {
@@ -171,7 +178,10 @@ fn apis(ctx: &Ctx, vault: &UnlockedVault) -> Result<()> {
             vec![
                 s.id[..8.min(s.id.len())].to_string(),
                 s.host.clone(),
-                s.user_provider.clone().or_else(|| s.provider_id.clone()).unwrap_or_else(|| "(unknown)".into()),
+                s.user_provider
+                    .clone()
+                    .or_else(|| s.provider_id.clone())
+                    .unwrap_or_else(|| "(unknown)".into()),
                 s.source.clone(),
                 s.classification.clone(),
                 s.last_seen_at.clone(),
@@ -179,7 +189,10 @@ fn apis(ctx: &Ctx, vault: &UnlockedVault) -> Result<()> {
         })
         .collect();
     render::emit(ctx.json, &services, || {
-        render::table(&["ID", "HOST", "PROVIDER", "SOURCE", "CLASS", "LAST SEEN"], &rows);
+        render::table(
+            &["ID", "HOST", "PROVIDER", "SOURCE", "CLASS", "LAST SEEN"],
+            &rows,
+        );
     });
     Ok(())
 }
@@ -188,7 +201,11 @@ fn resolve_service(vault: &UnlockedVault, selector: &str) -> Result<model::Obser
     let services = vault.observe_services()?;
     services
         .into_iter()
-        .find(|s| s.id == selector || s.id.starts_with(selector) || s.host == selector.to_ascii_lowercase())
+        .find(|s| {
+            s.id == selector
+                || s.id.starts_with(selector)
+                || s.host == selector.to_ascii_lowercase()
+        })
         .ok_or_else(|| anyhow!("no observed API matches '{selector}'"))
 }
 
@@ -198,55 +215,122 @@ fn api_detail(ctx: &Ctx, vault: &UnlockedVault, selector: &str) -> Result<()> {
     let endpoints = vault.observe_service_endpoints(&svc.id)?;
     let events = vault.observe_service_events(&svc.id, 20)?;
     if ctx.json {
-        render::emit(true, &serde_json::json!({
-            "service": svc, "metrics": metrics, "endpoints": endpoints, "recent_events": events,
-        }), || {});
+        render::emit(
+            true,
+            &serde_json::json!({
+                "service": svc, "metrics": metrics, "endpoints": endpoints, "recent_events": events,
+            }),
+            || {},
+        );
         return Ok(());
     }
     println!("API:        {}", svc.host);
-    println!("Provider:   {} (source: {})", svc.user_provider.or(svc.provider_id).unwrap_or_else(|| "(unknown)".into()), svc.source);
+    println!(
+        "Provider:   {} (source: {})",
+        svc.user_provider
+            .or(svc.provider_id)
+            .unwrap_or_else(|| "(unknown)".into()),
+        svc.source
+    );
     println!("Class:      {}", svc.classification);
     println!("First seen: {}", svc.first_seen_at);
     println!("Last seen:  {}", svc.last_seen_at);
     print_metrics(&metrics);
     println!("\nEndpoints (sanitized):");
-    let ep_rows: Vec<Vec<String>> = endpoints.iter().map(|e| vec![e.method.clone(), e.path_template.clone(), e.template_confidence.clone()]).collect();
+    let ep_rows: Vec<Vec<String>> = endpoints
+        .iter()
+        .map(|e| {
+            vec![
+                e.method.clone(),
+                e.path_template.clone(),
+                e.template_confidence.clone(),
+            ]
+        })
+        .collect();
     render::table(&["METHOD", "PATH TEMPLATE", "CONFIDENCE"], &ep_rows);
     println!("\nRecent events (sanitized):");
-    let ev_rows: Vec<Vec<String>> = events.iter().map(|e| vec![
-        e.at.clone(), e.method.clone(), e.path_template.clone(),
-        e.status_code.map(|c| c.to_string()).unwrap_or_else(|| "-".into()),
-        e.outcome.clone(),
-        e.latency_ms.map(|l| format!("{l}ms")).unwrap_or_else(|| "-".into()),
-    ]).collect();
-    render::table(&["AT", "METHOD", "PATH", "STATUS", "OUTCOME", "LATENCY"], &ev_rows);
+    let ev_rows: Vec<Vec<String>> = events
+        .iter()
+        .map(|e| {
+            vec![
+                e.at.clone(),
+                e.method.clone(),
+                e.path_template.clone(),
+                e.status_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                e.outcome.clone(),
+                e.latency_ms
+                    .map(|l| format!("{l}ms"))
+                    .unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    render::table(
+        &["AT", "METHOD", "PATH", "STATUS", "OUTCOME", "LATENCY"],
+        &ev_rows,
+    );
     Ok(())
 }
 
 fn print_metrics(m: &aggregate::Metrics) {
     println!("\nMetrics:");
-    println!("  requests:   {}  (success {}, errors {}, {:.1}% error rate)", m.total, m.success, m.errors, m.error_rate * 100.0);
-    println!("  4xx/5xx:    {} / {}   auth(401) {}  forbidden(403) {}  rate-limited(429) {}", m.c4xx, m.c5xx, m.auth_errors, m.forbidden, m.rate_limited);
-    println!("  transport:  {}   tls: {}   (transport/TLS failures are NOT counted as HTTP errors)", m.transport_errors, m.tls_errors);
+    println!(
+        "  requests:   {}  (success {}, errors {}, {:.1}% error rate)",
+        m.total,
+        m.success,
+        m.errors,
+        m.error_rate * 100.0
+    );
+    println!(
+        "  4xx/5xx:    {} / {}   auth(401) {}  forbidden(403) {}  rate-limited(429) {}",
+        m.c4xx, m.c5xx, m.auth_errors, m.forbidden, m.rate_limited
+    );
+    println!(
+        "  transport:  {}   tls: {}   (transport/TLS failures are NOT counted as HTTP errors)",
+        m.transport_errors, m.tls_errors
+    );
     let fmt = |v: Option<i64>| v.map(|x| format!("{x}ms")).unwrap_or_else(|| "-".into());
-    println!("  latency:    p50 {}  p95 {}  p99 {}  (approximate, from a histogram)", fmt(m.p50_ms), fmt(m.p95_ms), fmt(m.p99_ms));
-    println!("  bytes:      req {}  resp {}", m.request_bytes, m.response_bytes);
+    println!(
+        "  latency:    p50 {}  p95 {}  p99 {}  (approximate, from a histogram)",
+        fmt(m.p50_ms),
+        fmt(m.p95_ms),
+        fmt(m.p99_ms)
+    );
+    println!(
+        "  bytes:      req {}  resp {}",
+        m.request_bytes, m.response_bytes
+    );
 }
 
 fn sessions(ctx: &Ctx, vault: &UnlockedVault, project: Option<&str>, limit: u32) -> Result<()> {
     let sessions = vault.observe_sessions(project, limit)?;
-    let rows: Vec<Vec<String>> = sessions.iter().map(|s| vec![
-        s.id[..8.min(s.id.len())].to_string(),
-        s.mode.clone(),
-        s.status.clone(),
-        s.runtime_detected.clone().unwrap_or_else(|| "-".into()),
-        s.request_count.to_string(),
-        s.error_count.to_string(),
-        if s.partial_coverage { "PARTIAL".into() } else { "full".into() },
-        s.started_at.clone(),
-    ]).collect();
+    let rows: Vec<Vec<String>> = sessions
+        .iter()
+        .map(|s| {
+            vec![
+                s.id[..8.min(s.id.len())].to_string(),
+                s.mode.clone(),
+                s.status.clone(),
+                s.runtime_detected.clone().unwrap_or_else(|| "-".into()),
+                s.request_count.to_string(),
+                s.error_count.to_string(),
+                if s.partial_coverage {
+                    "PARTIAL".into()
+                } else {
+                    "full".into()
+                },
+                s.started_at.clone(),
+            ]
+        })
+        .collect();
     render::emit(ctx.json, &sessions, || {
-        render::table(&["ID", "MODE", "STATUS", "RUNTIME", "REQ", "ERR", "COVERAGE", "STARTED"], &rows);
+        render::table(
+            &[
+                "ID", "MODE", "STATUS", "RUNTIME", "REQ", "ERR", "COVERAGE", "STARTED",
+            ],
+            &rows,
+        );
     });
     Ok(())
 }
@@ -258,30 +342,58 @@ fn show_session(ctx: &Ctx, vault: &UnlockedVault, ident: &str) -> Result<()> {
     let compat = vault.observe_session_compat(&session.id)?;
     let events = vault.observe_session_events(&session.id, 20)?;
     if ctx.json {
-        render::emit(true, &serde_json::json!({
-            "session": session, "metrics": metrics, "attributions": attributions,
-            "compatibility": compat, "recent_events": events,
-        }), || {});
+        render::emit(
+            true,
+            &serde_json::json!({
+                "session": session, "metrics": metrics, "attributions": attributions,
+                "compatibility": compat, "recent_events": events,
+            }),
+            || {},
+        );
         return Ok(());
     }
     println!("Session:    {}", session.id);
     println!("Command:    {}", session.command);
-    println!("Mode:       {}   status: {}{}", session.mode, session.status, session.interrupt_reason.map(|r| format!(" ({r})")).unwrap_or_default());
-    println!("Runtime:    {}   trust: {}", session.runtime_detected.unwrap_or_else(|| "-".into()), session.trust_level.unwrap_or_else(|| "-".into()));
+    println!(
+        "Mode:       {}   status: {}{}",
+        session.mode,
+        session.status,
+        session
+            .interrupt_reason
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default()
+    );
+    println!(
+        "Runtime:    {}   trust: {}",
+        session.runtime_detected.unwrap_or_else(|| "-".into()),
+        session.trust_level.unwrap_or_else(|| "-".into())
+    );
     if session.partial_coverage {
-        println!("COVERAGE:   PARTIAL — some traffic bypassed monitoring (see compatibility below).");
+        println!(
+            "COVERAGE:   PARTIAL — some traffic bypassed monitoring (see compatibility below)."
+        );
     }
     print_metrics(&metrics);
     if !attributions.is_empty() {
         println!("\nCredential attribution:");
-        let rows: Vec<Vec<String>> = attributions.iter().map(|a| vec![
-            a.host.clone(),
-            a.confidence.clone(),
-            a.request_count.to_string(),
-            a.credential_version.map(|v| format!("v{v}")).unwrap_or_else(|| "-".into()),
-            a.evidence.clone(),
-        ]).collect();
-        render::table(&["API", "CONFIDENCE", "REQUESTS", "VERSION", "EVIDENCE"], &rows);
+        let rows: Vec<Vec<String>> = attributions
+            .iter()
+            .map(|a| {
+                vec![
+                    a.host.clone(),
+                    a.confidence.clone(),
+                    a.request_count.to_string(),
+                    a.credential_version
+                        .map(|v| format!("v{v}"))
+                        .unwrap_or_else(|| "-".into()),
+                    a.evidence.clone(),
+                ]
+            })
+            .collect();
+        render::table(
+            &["API", "CONFIDENCE", "REQUESTS", "VERSION", "EVIDENCE"],
+            &rows,
+        );
     }
     if !compat.is_empty() {
         println!("\nCompatibility:");
@@ -309,11 +421,19 @@ fn cert(ctx: &Ctx, vault: &UnlockedVault, cmd: CertCmd) -> Result<()> {
             let status = vault.observe_ca_status()?;
             render::emit(ctx.json, &status, || {
                 if !status.present {
-                    println!("No local CA yet — generated automatically on the first metadata-mode run.");
+                    println!(
+                        "No local CA yet — generated automatically on the first metadata-mode run."
+                    );
                 } else {
                     println!("Local CA present.");
-                    println!("  fingerprint (SHA-256): {}", status.fingerprint_sha256.as_deref().unwrap_or(""));
-                    println!("  created:   {}", status.created_at.as_deref().unwrap_or(""));
+                    println!(
+                        "  fingerprint (SHA-256): {}",
+                        status.fingerprint_sha256.as_deref().unwrap_or("")
+                    );
+                    println!(
+                        "  created:   {}",
+                        status.created_at.as_deref().unwrap_or("")
+                    );
                     println!("  expires:   {}", status.not_after.as_deref().unwrap_or(""));
                     println!("  system trust: {}", status.system_trust);
                 }
@@ -323,9 +443,19 @@ fn cert(ctx: &Ctx, vault: &UnlockedVault, cmd: CertCmd) -> Result<()> {
         CertCmd::Rotate => {
             let pw = crate::ctx::prompt_secret("Master password")?;
             vault.observe_ca_remove(&pw)?; // reauth + clear
-            let g = api_tracker_observe::ca::generate_ca(vault.vault_id()).map_err(|e| anyhow!("{e}"))?;
-            vault.observe_ca_store(&g.cert_pem, &g.key_der, &g.fingerprint_sha256, &g.serial_hex, &g.not_after)?;
-            println!("CA rotated. New fingerprint (SHA-256): {}", g.fingerprint_sha256);
+            let g = api_tracker_observe::ca::generate_ca(vault.vault_id())
+                .map_err(|e| anyhow!("{e}"))?;
+            vault.observe_ca_store(
+                &g.cert_pem,
+                &g.key_der,
+                &g.fingerprint_sha256,
+                &g.serial_hex,
+                &g.not_after,
+            )?;
+            println!(
+                "CA rotated. New fingerprint (SHA-256): {}",
+                g.fingerprint_sha256
+            );
             println!("If you had installed the previous CA in your system trust store, remove it and reinstall this one.");
             Ok(())
         }
@@ -367,7 +497,8 @@ fn cert_install(vault: &UnlockedVault, yes: bool) -> Result<()> {
         .ok_or_else(|| anyhow!("no local CA yet — run a metadata-mode observation first"))?;
     let dir = vault.paths().data_dir.clone();
     api_tracker_observe::systemtrust::install(&dir, &pem).map_err(|e| anyhow!("{e}"))?;
-    vault.observe_ca_set_system_trust("installed", Some(&api_tracker_core::clock::now_rfc3339()))?;
+    vault
+        .observe_ca_set_system_trust("installed", Some(&api_tracker_core::clock::now_rfc3339()))?;
     println!("Installed. Fingerprint (SHA-256): {fp}");
     Ok(())
 }
@@ -386,7 +517,8 @@ fn settings(ctx: &Ctx, vault: &UnlockedVault, cmd: SettingsCmd) -> Result<()> {
         SettingsCmd::Set(args) => {
             let mut s = vault.observe_settings()?;
             if let Some(m) = &args.default_mode {
-                s.default_mode = ObservationMode::parse(m).ok_or_else(|| anyhow!("invalid mode '{m}'"))?;
+                s.default_mode =
+                    ObservationMode::parse(m).ok_or_else(|| anyhow!("invalid mode '{m}'"))?;
             }
             if let Some(d) = args.event_days {
                 s.event_retention_days = d;
@@ -405,18 +537,30 @@ fn allow(ctx: &Ctx, vault: &UnlockedVault, cmd: AllowCmd) -> Result<()> {
     match cmd {
         AllowCmd::List { project } => {
             let list = vault.observe_allowlist(&project)?;
-            let rows: Vec<Vec<String>> = list.iter().map(|(h, p, n)| vec![h.clone(), p.to_string(), n.clone()]).collect();
+            let rows: Vec<Vec<String>> = list
+                .iter()
+                .map(|(h, p, n)| vec![h.clone(), p.to_string(), n.clone()])
+                .collect();
             render::emit(ctx.json, &list, || {
                 render::table(&["HOST", "PORT", "NOTE"], &rows);
             });
             Ok(())
         }
-        AllowCmd::Add { project, host, port, note } => {
+        AllowCmd::Add {
+            project,
+            host,
+            port,
+            note,
+        } => {
             vault.observe_allowlist_add(&project, &host, port, &note)?;
             println!("Allowlisted {host}:{port} for project '{project}'. WARNING: traffic to it bypasses the private-address block.");
             Ok(())
         }
-        AllowCmd::Remove { project, host, port } => {
+        AllowCmd::Remove {
+            project,
+            host,
+            port,
+        } => {
             if vault.observe_allowlist_remove(&project, &host, port)? {
                 println!("Removed {host}:{port} from project '{project}'.");
             } else {

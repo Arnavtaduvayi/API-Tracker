@@ -273,7 +273,10 @@ fn classify_v6(ip: Ipv6Addr) -> Verdict {
 
 /// Parse an IP literal, accepting bracketed IPv6 (`[::1]`).
 fn parse_ip_literal(host: &str) -> Option<IpAddr> {
-    let trimmed = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let trimmed = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     trimmed.parse::<IpAddr>().ok()
 }
 
@@ -289,7 +292,9 @@ fn is_valid_hostname(host: &str) -> bool {
             && label.len() <= 63
             && !label.starts_with('-')
             && !label.ends_with('-')
-            && label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     })
 }
 
@@ -310,12 +315,27 @@ mod tests {
 
     #[test]
     fn loopback_and_private_denied() {
-        assert_eq!(classify_ip(ip("127.0.0.1")), Verdict::Deny(DenyReason::Loopback));
+        assert_eq!(
+            classify_ip(ip("127.0.0.1")),
+            Verdict::Deny(DenyReason::Loopback)
+        );
         assert_eq!(classify_ip(ip("::1")), Verdict::Deny(DenyReason::Loopback));
-        assert_eq!(classify_ip(ip("10.0.0.5")), Verdict::Deny(DenyReason::Private));
-        assert_eq!(classify_ip(ip("172.16.0.1")), Verdict::Deny(DenyReason::Private));
-        assert_eq!(classify_ip(ip("192.168.1.1")), Verdict::Deny(DenyReason::Private));
-        assert_eq!(classify_ip(ip("fd00::1")), Verdict::Deny(DenyReason::Private));
+        assert_eq!(
+            classify_ip(ip("10.0.0.5")),
+            Verdict::Deny(DenyReason::Private)
+        );
+        assert_eq!(
+            classify_ip(ip("172.16.0.1")),
+            Verdict::Deny(DenyReason::Private)
+        );
+        assert_eq!(
+            classify_ip(ip("192.168.1.1")),
+            Verdict::Deny(DenyReason::Private)
+        );
+        assert_eq!(
+            classify_ip(ip("fd00::1")),
+            Verdict::Deny(DenyReason::Private)
+        );
     }
 
     #[test]
@@ -324,19 +344,46 @@ mod tests {
         // land in a deny bucket regardless of the metadata name.
         assert!(!classify_ip(ip("169.254.169.254")).is_allowed());
         assert!(!classify_ip(ip("fd00:ec2::254")).is_allowed());
-        assert_eq!(classify_ip(ip("100.100.100.200")), Verdict::Deny(DenyReason::Cgnat));
+        assert_eq!(
+            classify_ip(ip("100.100.100.200")),
+            Verdict::Deny(DenyReason::Cgnat)
+        );
     }
 
     #[test]
     fn special_ranges_denied() {
-        assert_eq!(classify_ip(ip("169.254.1.1")), Verdict::Deny(DenyReason::LinkLocal));
-        assert_eq!(classify_ip(ip("100.64.0.1")), Verdict::Deny(DenyReason::Cgnat));
-        assert_eq!(classify_ip(ip("224.0.0.1")), Verdict::Deny(DenyReason::Multicast));
-        assert_eq!(classify_ip(ip("255.255.255.255")), Verdict::Deny(DenyReason::Broadcast));
-        assert_eq!(classify_ip(ip("0.0.0.0")), Verdict::Deny(DenyReason::Unspecified));
-        assert_eq!(classify_ip(ip("240.0.0.1")), Verdict::Deny(DenyReason::Reserved));
-        assert_eq!(classify_ip(ip("198.18.0.1")), Verdict::Deny(DenyReason::Reserved));
-        assert_eq!(classify_ip(ip("192.0.2.1")), Verdict::Deny(DenyReason::Documentation));
+        assert_eq!(
+            classify_ip(ip("169.254.1.1")),
+            Verdict::Deny(DenyReason::LinkLocal)
+        );
+        assert_eq!(
+            classify_ip(ip("100.64.0.1")),
+            Verdict::Deny(DenyReason::Cgnat)
+        );
+        assert_eq!(
+            classify_ip(ip("224.0.0.1")),
+            Verdict::Deny(DenyReason::Multicast)
+        );
+        assert_eq!(
+            classify_ip(ip("255.255.255.255")),
+            Verdict::Deny(DenyReason::Broadcast)
+        );
+        assert_eq!(
+            classify_ip(ip("0.0.0.0")),
+            Verdict::Deny(DenyReason::Unspecified)
+        );
+        assert_eq!(
+            classify_ip(ip("240.0.0.1")),
+            Verdict::Deny(DenyReason::Reserved)
+        );
+        assert_eq!(
+            classify_ip(ip("198.18.0.1")),
+            Verdict::Deny(DenyReason::Reserved)
+        );
+        assert_eq!(
+            classify_ip(ip("192.0.2.1")),
+            Verdict::Deny(DenyReason::Documentation)
+        );
     }
 
     #[test]
@@ -355,8 +402,14 @@ mod tests {
     #[test]
     fn authority_checks_port_and_metadata_and_literals() {
         let allow = AllowList::new();
-        assert_eq!(check_authority("api.openai.com", 443, &allow), Verdict::Allow);
-        assert_eq!(check_authority("api.openai.com", 80, &allow), Verdict::Allow);
+        assert_eq!(
+            check_authority("api.openai.com", 443, &allow),
+            Verdict::Allow
+        );
+        assert_eq!(
+            check_authority("api.openai.com", 80, &allow),
+            Verdict::Allow
+        );
         assert_eq!(
             check_authority("api.openai.com", 8080, &allow),
             Verdict::Deny(DenyReason::BadPort)
@@ -378,8 +431,14 @@ mod tests {
     #[test]
     fn single_label_and_mdns_names_are_internal() {
         let allow = AllowList::new();
-        assert_eq!(check_authority("localhost", 80, &allow), Verdict::Deny(DenyReason::Private));
-        assert_eq!(check_authority("printer.local", 80, &allow), Verdict::Deny(DenyReason::Private));
+        assert_eq!(
+            check_authority("localhost", 80, &allow),
+            Verdict::Deny(DenyReason::Private)
+        );
+        assert_eq!(
+            check_authority("printer.local", 80, &allow),
+            Verdict::Deny(DenyReason::Private)
+        );
     }
 
     #[test]
@@ -389,7 +448,10 @@ mod tests {
         // allowlisted host+port on a non-standard port is allowed
         assert_eq!(check_authority("localhost", 3000, &allow), Verdict::Allow);
         // but a different port for the same host is not
-        assert_eq!(check_authority("localhost", 3001, &allow), Verdict::Deny(DenyReason::BadPort));
+        assert_eq!(
+            check_authority("localhost", 3001, &allow),
+            Verdict::Deny(DenyReason::BadPort)
+        );
         // a resolved private IP is allowed only when the caller says allowlisted
         assert_eq!(check_resolved(ip("127.0.0.1"), true), Verdict::Allow);
         assert_eq!(
@@ -407,8 +469,18 @@ mod tests {
     #[test]
     fn malformed_hostnames_denied() {
         let allow = AllowList::new();
-        for bad in ["", " ", "-bad.com", "bad-.com", "a..b.com", "toolonglabel-toolonglabel-toolonglabel-toolonglabel-toolonglabel-x.com"] {
-            assert!(!check_authority(bad, 443, &allow).is_allowed(), "{bad:?} should be denied");
+        for bad in [
+            "",
+            " ",
+            "-bad.com",
+            "bad-.com",
+            "a..b.com",
+            "toolonglabel-toolonglabel-toolonglabel-toolonglabel-toolonglabel-x.com",
+        ] {
+            assert!(
+                !check_authority(bad, 443, &allow).is_allowed(),
+                "{bad:?} should be denied"
+            );
         }
     }
 

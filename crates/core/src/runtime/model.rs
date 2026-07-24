@@ -247,7 +247,12 @@ impl ContentKind {
     /// `;` (charset, multipart boundary, …) is severed before mapping, so no
     /// parameter is ever inspected or stored.
     pub fn classify(raw: &str) -> Self {
-        let base = raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        let base = raw
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
         match base.as_str() {
             "application/json" => Self::Json,
             "application/graphql" => Self::Graphql,
@@ -322,7 +327,9 @@ pub struct ObservedRequest {
 
 impl ObservedRequest {
     pub fn status_class(&self) -> StatusClass {
-        self.status_code.map(StatusClass::of).unwrap_or(StatusClass::None)
+        self.status_code
+            .map(StatusClass::of)
+            .unwrap_or(StatusClass::None)
     }
     pub fn outcome(&self) -> Outcome {
         outcome_of(self.status_code, self.transport_error)
@@ -431,19 +438,43 @@ mod tests {
             Outcome::TransportError
         );
         // A TCP success with no HTTP response is NOT a request success.
-        assert_eq!(outcome_of(None, TransportError::None), Outcome::TransportError);
+        assert_eq!(
+            outcome_of(None, TransportError::None),
+            Outcome::TransportError
+        );
         // Upstream cert failure is a TLS error, distinct from HTTP.
         assert_eq!(
             outcome_of(Some(200), TransportError::UpstreamCertInvalid),
             Outcome::TlsError
         );
-        assert_eq!(outcome_of(Some(200), TransportError::None), Outcome::Success);
-        assert_eq!(outcome_of(Some(301), TransportError::None), Outcome::Success);
-        assert_eq!(outcome_of(Some(401), TransportError::None), Outcome::AuthError);
-        assert_eq!(outcome_of(Some(403), TransportError::None), Outcome::ClientError);
-        assert_eq!(outcome_of(Some(429), TransportError::None), Outcome::RateLimited);
-        assert_eq!(outcome_of(Some(404), TransportError::None), Outcome::ClientError);
-        assert_eq!(outcome_of(Some(500), TransportError::None), Outcome::ServerError);
+        assert_eq!(
+            outcome_of(Some(200), TransportError::None),
+            Outcome::Success
+        );
+        assert_eq!(
+            outcome_of(Some(301), TransportError::None),
+            Outcome::Success
+        );
+        assert_eq!(
+            outcome_of(Some(401), TransportError::None),
+            Outcome::AuthError
+        );
+        assert_eq!(
+            outcome_of(Some(403), TransportError::None),
+            Outcome::ClientError
+        );
+        assert_eq!(
+            outcome_of(Some(429), TransportError::None),
+            Outcome::RateLimited
+        );
+        assert_eq!(
+            outcome_of(Some(404), TransportError::None),
+            Outcome::ClientError
+        );
+        assert_eq!(
+            outcome_of(Some(500), TransportError::None),
+            Outcome::ServerError
+        );
     }
 
     #[test]
@@ -452,19 +483,38 @@ mod tests {
             ContentKind::classify("multipart/form-data; boundary=----abcXYZ123"),
             ContentKind::Multipart
         );
-        assert_eq!(ContentKind::classify("application/json; charset=utf-8"), ContentKind::Json);
-        assert_eq!(ContentKind::classify("text/event-stream"), ContentKind::EventStream);
-        assert_eq!(ContentKind::classify("application/grpc+proto"), ContentKind::Grpc);
-        assert_eq!(ContentKind::classify("application/vnd.api+json"), ContentKind::Json);
+        assert_eq!(
+            ContentKind::classify("application/json; charset=utf-8"),
+            ContentKind::Json
+        );
+        assert_eq!(
+            ContentKind::classify("text/event-stream"),
+            ContentKind::EventStream
+        );
+        assert_eq!(
+            ContentKind::classify("application/grpc+proto"),
+            ContentKind::Grpc
+        );
+        assert_eq!(
+            ContentKind::classify("application/vnd.api+json"),
+            ContentKind::Json
+        );
         assert_eq!(ContentKind::classify("text/csv"), ContentKind::Text);
     }
 
     #[test]
     fn enums_roundtrip_through_db_strings() {
-        for m in [ObservationMode::Off, ObservationMode::Connection, ObservationMode::Metadata] {
+        for m in [
+            ObservationMode::Off,
+            ObservationMode::Connection,
+            ObservationMode::Metadata,
+        ] {
             assert_eq!(ObservationMode::from_db(m.as_str()), Some(m));
         }
-        assert_eq!(SessionStatus::from_db("interrupted"), Some(SessionStatus::Interrupted));
+        assert_eq!(
+            SessionStatus::from_db("interrupted"),
+            Some(SessionStatus::Interrupted)
+        );
         assert_eq!(Outcome::from_db("auth_error"), Some(Outcome::AuthError));
         assert_eq!(HttpMethod::parse("PATCH"), HttpMethod::Patch);
         assert_eq!(HttpMethod::parse("WEIRD"), HttpMethod::Other);
@@ -472,8 +522,14 @@ mod tests {
 
     #[test]
     fn mode_parse_accepts_aliases() {
-        assert_eq!(ObservationMode::parse("META"), Some(ObservationMode::Metadata));
-        assert_eq!(ObservationMode::parse("conn"), Some(ObservationMode::Connection));
+        assert_eq!(
+            ObservationMode::parse("META"),
+            Some(ObservationMode::Metadata)
+        );
+        assert_eq!(
+            ObservationMode::parse("conn"),
+            Some(ObservationMode::Connection)
+        );
         assert_eq!(ObservationMode::parse("off"), Some(ObservationMode::Off));
         assert_eq!(ObservationMode::parse("bogus"), None);
     }

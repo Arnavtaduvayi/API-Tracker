@@ -8,8 +8,8 @@
 //! in any recorded metadata.
 
 use api_tracker_core::runtime::model::ObservedRequest;
-use api_tracker_observe::policy::AllowList;
 use api_tracker_observe::ca;
+use api_tracker_observe::policy::AllowList;
 use api_tracker_observe::proxy::{ObservationSink, ProxyConfig, RunningProxy};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls_pki_types::CertificateDer;
@@ -64,16 +64,13 @@ fn provider_tls(host: &str) -> (Arc<ServerConfig>, Vec<u8>) {
 
 fn client_config_trusting(ca_der: &[u8]) -> Arc<ClientConfig> {
     let mut roots = RootCertStore::empty();
-    roots
-        .add(CertificateDer::from(ca_der.to_vec()))
-        .unwrap();
-    let mut cfg = ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    roots.add(CertificateDer::from(ca_der.to_vec())).unwrap();
+    let mut cfg =
+        ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     Arc::new(cfg)
 }
@@ -86,7 +83,11 @@ struct Provider {
     stop: Arc<AtomicBool>,
 }
 
-fn start_provider(server_config: Arc<ServerConfig>, status_line: &'static str, body: &'static str) -> Provider {
+fn start_provider(
+    server_config: Arc<ServerConfig>,
+    status_line: &'static str,
+    body: &'static str,
+) -> Provider {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -113,7 +114,11 @@ fn start_provider(server_config: Arc<ServerConfig>, status_line: &'static str, b
                                 let head = String::from_utf8_lossy(&buf[..pos]).to_string();
                                 let content_len: usize = head
                                     .lines()
-                                    .find_map(|l| l.to_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().ok()))
+                                    .find_map(|l| {
+                                        l.to_lowercase()
+                                            .strip_prefix("content-length:")
+                                            .map(|v| v.trim().parse::<usize>().ok())
+                                    })
                                     .flatten()
                                     .unwrap_or(0);
                                 if buf.len() - pos >= content_len {
@@ -133,7 +138,7 @@ fn start_provider(server_config: Arc<ServerConfig>, status_line: &'static str, b
                         );
                         let _ = tls.write_all(resp.as_bytes());
                         let _ = tls.flush();
-                        let _ = tls.conn.send_close_notify();
+                        tls.conn.send_close_notify();
                         let _ = tls.flush();
                     });
                 }
@@ -144,7 +149,11 @@ fn start_provider(server_config: Arc<ServerConfig>, status_line: &'static str, b
             }
         }
     });
-    Provider { addr, received, stop }
+    Provider {
+        addr,
+        received,
+        stop,
+    }
 }
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
@@ -208,7 +217,8 @@ fn provider_tls_is_valid_directly() {
     let sn = "127.0.0.1".try_into().unwrap();
     let conn = rustls::ClientConnection::new(cfg, sn).unwrap();
     let mut tls = rustls::StreamOwned::new(conn, tcp);
-    tls.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n").unwrap();
+    tls.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
+        .unwrap();
     tls.flush().unwrap();
     let mut resp = Vec::new();
     let _ = tls.read_to_end(&mut resp);
@@ -223,8 +233,13 @@ fn provider_tls_is_valid_directly() {
 #[test]
 fn minted_leaf_completes_a_real_handshake() {
     let tethra = ca::generate_ca("vault-hs00000001").unwrap();
-    let authority =
-        ca::CertAuthority::load("vault-hs00000001", &tethra.cert_pem, &tethra.key_der, &tethra.fingerprint_sha256).unwrap();
+    let authority = ca::CertAuthority::load(
+        "vault-hs00000001",
+        &tethra.cert_pem,
+        &tethra.key_der,
+        &tethra.fingerprint_sha256,
+    )
+    .unwrap();
     let ck = authority.certified_key_for("127.0.0.1").unwrap();
     let server_config = api_tracker_observe::tls::server_config_for(ck);
 
@@ -239,7 +254,7 @@ fn minted_leaf_completes_a_real_handshake() {
         let _ = tls.read(&mut buf);
         let _ = tls.write_all(b"OK");
         let _ = tls.flush();
-        let _ = tls.conn.send_close_notify();
+        tls.conn.send_close_notify();
         let _ = tls.flush();
     });
 
@@ -260,13 +275,23 @@ fn minted_leaf_completes_a_real_handshake() {
 #[test]
 fn intercept_captures_sanitized_metadata_and_leaks_no_payload() {
     let (server_config, provider_ca) = provider_tls(HOST);
-    let provider = start_provider(server_config, "HTTP/1.1 200 OK", "{\"reply\":\"RESPONSECANARY-9z\"}");
+    let provider = start_provider(
+        server_config,
+        "HTTP/1.1 200 OK",
+        "{\"reply\":\"RESPONSECANARY-9z\"}",
+    );
 
     // Build the proxy trusting the provider CA upstream; capture the Tethra CA
     // for the client. We rebuild the tethra CA here to get its DER.
     let tethra = ca::generate_ca("vault-inttest00001").unwrap();
     let authority = Arc::new(
-        ca::CertAuthority::load("vault-inttest00001", &tethra.cert_pem, &tethra.key_der, &tethra.fingerprint_sha256).unwrap(),
+        ca::CertAuthority::load(
+            "vault-inttest00001",
+            &tethra.cert_pem,
+            &tethra.key_der,
+            &tethra.fingerprint_sha256,
+        )
+        .unwrap(),
     );
     let sink = Arc::new(CollectSink::default());
     let mut allow = AllowList::new();
@@ -294,15 +319,28 @@ fn intercept_captures_sanitized_metadata_and_leaks_no_payload() {
          Content-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    let resp = through_proxy(proxy.local_addr(), &token, HOST, provider.addr.port(), &tethra.cert_der, request.as_bytes());
+    let resp = through_proxy(
+        proxy.local_addr(),
+        &token,
+        HOST,
+        provider.addr.port(),
+        &tethra.cert_der,
+        request.as_bytes(),
+    );
     let resp_str = String::from_utf8_lossy(&resp);
 
     // The provider received the body (proving streaming worked end to end)...
     let received = String::from_utf8_lossy(&provider.received.lock().unwrap()).to_string();
-    assert!(received.contains("AIPROMPTCANARY-7"), "provider should have received the streamed body");
+    assert!(
+        received.contains("AIPROMPTCANARY-7"),
+        "provider should have received the streamed body"
+    );
     assert!(received.contains("canary@leak.test"));
     // ...and the client got the response body.
-    assert!(resp_str.contains("RESPONSECANARY-9z"), "client should get the response body: {resp_str}");
+    assert!(
+        resp_str.contains("RESPONSECANARY-9z"),
+        "client should get the response body: {resp_str}"
+    );
 
     proxy.shutdown();
     provider.stop.store(true, Ordering::Relaxed);
@@ -313,9 +351,15 @@ fn intercept_captures_sanitized_metadata_and_leaks_no_payload() {
     let ev = &events[0];
     assert_eq!(ev.host, "127.0.0.1");
     assert_eq!(ev.method, api_tracker_core::runtime::model::HttpMethod::Get);
-    assert_eq!(ev.path_template, "/v1/users/:id/orders/:id", "identifiers templated");
+    assert_eq!(
+        ev.path_template, "/v1/users/:id/orders/:id",
+        "identifiers templated"
+    );
     assert_eq!(ev.status_code, Some(200));
-    assert!(ev.had_authorization, "auth header presence noted (value never read)");
+    assert!(
+        ev.had_authorization,
+        "auth header presence noted (value never read)"
+    );
     assert!(ev.latency_ms.is_some());
     assert!(ev.request_bytes.unwrap() > 0);
     assert!(ev.response_bytes.unwrap() > 0);
@@ -335,7 +379,10 @@ fn intercept_captures_sanitized_metadata_and_leaks_no_payload() {
         "Bearer",
         "session=",
     ] {
-        assert!(!serialized.contains(canary), "canary '{canary}' LEAKED into recorded metadata: {serialized}");
+        assert!(
+            !serialized.contains(canary),
+            "canary '{canary}' LEAKED into recorded metadata: {serialized}"
+        );
     }
 }
 
@@ -357,7 +404,13 @@ fn ssrf_targets_are_blocked() {
     let sink = Arc::new(CollectSink::default());
     let tethra = ca::generate_ca("vault-ssrf00000001").unwrap();
     let authority = Arc::new(
-        ca::CertAuthority::load("vault-ssrf00000001", &tethra.cert_pem, &tethra.key_der, &tethra.fingerprint_sha256).unwrap(),
+        ca::CertAuthority::load(
+            "vault-ssrf00000001",
+            &tethra.cert_pem,
+            &tethra.key_der,
+            &tethra.fingerprint_sha256,
+        )
+        .unwrap(),
     );
     let cfg = ProxyConfig {
         mode: api_tracker_core::runtime::model::ObservationMode::Metadata,
@@ -370,25 +423,42 @@ fn ssrf_targets_are_blocked() {
     };
     let proxy = RunningProxy::start(cfg).unwrap();
 
-    for target in ["169.254.169.254:80", "127.0.0.1:5432", "10.0.0.5:443", "metadata.google.internal:80"] {
+    for target in [
+        "169.254.169.254:80",
+        "127.0.0.1:5432",
+        "10.0.0.5:443",
+        "metadata.google.internal:80",
+    ] {
         let mut tcp = TcpStream::connect(proxy.local_addr()).unwrap();
         tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let auth = RunningProxy::expected_auth("T");
         let (h, p) = target.rsplit_once(':').unwrap();
-        let connect = format!("CONNECT {h}:{p} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: {auth}\r\n\r\n");
+        let connect = format!(
+            "CONNECT {h}:{p} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: {auth}\r\n\r\n"
+        );
         tcp.write_all(connect.as_bytes()).unwrap();
         let mut resp = Vec::new();
         let mut tmp = [0u8; 256];
         while let Ok(n) = tcp.read(&mut tmp) {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             resp.extend_from_slice(&tmp[..n]);
-            if find_double_crlf(&resp).is_some() { break; }
+            if find_double_crlf(&resp).is_some() {
+                break;
+            }
         }
         let s = String::from_utf8_lossy(&resp);
-        assert!(s.contains("403"), "SSRF target {target} must be blocked, got: {s}");
+        assert!(
+            s.contains("403"),
+            "SSRF target {target} must be blocked, got: {s}"
+        );
     }
     proxy.shutdown();
-    assert!(!sink.compat.lock().unwrap().is_empty(), "blocks recorded as compat notes");
+    assert!(
+        !sink.compat.lock().unwrap().is_empty(),
+        "blocks recorded as compat notes"
+    );
 }
 
 #[test]
@@ -408,27 +478,48 @@ fn missing_or_wrong_token_is_rejected_with_407() {
     // no proxy-authorization
     let mut tcp = TcpStream::connect(proxy.local_addr()).unwrap();
     tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    tcp.write_all(b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n").unwrap();
+    tcp.write_all(b"CONNECT api.openai.com:443 HTTP/1.1\r\nHost: api.openai.com:443\r\n\r\n")
+        .unwrap();
     let mut resp = Vec::new();
     let mut tmp = [0u8; 256];
     while let Ok(n) = tcp.read(&mut tmp) {
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         resp.extend_from_slice(&tmp[..n]);
-        if find_double_crlf(&resp).is_some() { break; }
+        if find_double_crlf(&resp).is_some() {
+            break;
+        }
     }
-    assert!(String::from_utf8_lossy(&resp).contains("407"), "missing token must 407");
+    assert!(
+        String::from_utf8_lossy(&resp).contains("407"),
+        "missing token must 407"
+    );
 
     // wrong token
     let mut tcp = TcpStream::connect(proxy.local_addr()).unwrap();
     tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let auth = RunningProxy::expected_auth("WRONG-TOKEN");
-    tcp.write_all(format!("CONNECT api.openai.com:443 HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {auth}\r\n\r\n").as_bytes()).unwrap();
+    tcp.write_all(
+        format!(
+            "CONNECT api.openai.com:443 HTTP/1.1\r\nHost: x\r\nProxy-Authorization: {auth}\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .unwrap();
     let mut resp = Vec::new();
     while let Ok(n) = tcp.read(&mut tmp) {
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         resp.extend_from_slice(&tmp[..n]);
-        if find_double_crlf(&resp).is_some() { break; }
+        if find_double_crlf(&resp).is_some() {
+            break;
+        }
     }
-    assert!(String::from_utf8_lossy(&resp).contains("407"), "wrong token must 407");
+    assert!(
+        String::from_utf8_lossy(&resp).contains("407"),
+        "wrong token must 407"
+    );
     proxy.shutdown();
 }

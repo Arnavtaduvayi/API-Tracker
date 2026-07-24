@@ -95,7 +95,13 @@ fn ensure_ca(vault: &UnlockedVault) -> Result<(Arc<CertAuthority>, String)> {
         Some(x) => x,
         None => {
             let g = ca::generate_ca(vault.vault_id())?;
-            vault.observe_ca_store(&g.cert_pem, &g.key_der, &g.fingerprint_sha256, &g.serial_hex, &g.not_after)?;
+            vault.observe_ca_store(
+                &g.cert_pem,
+                &g.key_der,
+                &g.fingerprint_sha256,
+                &g.serial_hex,
+                &g.not_after,
+            )?;
             (g.cert_pem, g.key_der, g.fingerprint_sha256)
         }
     };
@@ -191,7 +197,9 @@ pub fn run_monitored(
             drop(sink);
             let _ = writer.join();
             store::interrupt_session(vault.connection(), &session_id, "child_spawn_failed")?;
-            return Err(CoreError::InvalidInput(format!("failed to launch '{program}': {e}")));
+            return Err(CoreError::InvalidInput(format!(
+                "failed to launch '{program}': {e}"
+            )));
         }
     };
     let pid = child.id();
@@ -223,7 +231,8 @@ pub fn run_monitored(
     drop(trust); // deletes the temp trust files
 
     // 8. Finalize on the main thread (the writer is done, no concurrent writes).
-    let attributions = attribution::attribute_session(vault.connection(), &session_id, &params.injected)?;
+    let attributions =
+        attribution::attribute_session(vault.connection(), &session_id, &params.injected)?;
     let _ = aggregate::roll_up(vault.connection(), &clock::now_rfc3339());
     let _ = retention::sweep(vault.connection());
     store::finish_session(vault.connection(), &session_id, exit_code)?;
@@ -256,7 +265,11 @@ fn run_writer(db_path: &std::path::Path, session_id: &str, rx: Receiver<Msg>) {
             Msg::Event(o) => {
                 let _ = write_event(&conn, session_id, &project_id, &o);
             }
-            Msg::Compat { check, status, detail } => {
+            Msg::Compat {
+                check,
+                status,
+                detail,
+            } => {
                 let _ = store::record_compat(&conn, session_id, &check, &status, &detail);
             }
             Msg::Partial => {
@@ -275,15 +288,22 @@ fn write_event(
     let now = clock::now_rfc3339();
     let is_internal = inventory::looks_internal(&o.host);
     let provider = inventory::provider_for_host(&o.host);
-    let (service_id, service_known) = store::upsert_service(conn, &o.host, provider, is_internal, &now)?;
+    let (service_id, service_known) =
+        store::upsert_service(conn, &o.host, provider, is_internal, &now)?;
 
     // Connection-only events (opaque tunnels) have no endpoint.
     let (endpoint_id, previously_known) =
         if o.method == HttpMethod::Connect && o.path_template == "/:connect" {
             (None, service_known)
         } else {
-            let (ep, ep_known) =
-                store::upsert_endpoint(conn, &service_id, o.method, &o.path_template, o.template_confidence, &now)?;
+            let (ep, ep_known) = store::upsert_endpoint(
+                conn,
+                &service_id,
+                o.method,
+                &o.path_template,
+                o.template_confidence,
+                &now,
+            )?;
             (Some(ep), ep_known)
         };
 

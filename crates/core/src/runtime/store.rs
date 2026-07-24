@@ -429,7 +429,8 @@ fn row_to_session(r: &Row<'_>) -> rusqlite::Result<ObservationSessionRow> {
 }
 
 /// The correlated request/error counters appended to every session select.
-const SESSION_COUNTS: &str = "(SELECT COUNT(*) FROM runtime_request_events e WHERE e.session_id = s.id), \
+const SESSION_COUNTS: &str =
+    "(SELECT COUNT(*) FROM runtime_request_events e WHERE e.session_id = s.id), \
      (SELECT COUNT(*) FROM runtime_request_events e WHERE e.session_id = s.id \
         AND e.outcome != 'success')";
 
@@ -438,9 +439,7 @@ pub fn list_sessions(
     project_id: Option<&str>,
     limit: u32,
 ) -> Result<Vec<ObservationSessionRow>> {
-    let base = format!(
-        "SELECT {SESSION_COLS}, {SESSION_COUNTS} FROM observation_sessions s"
-    );
+    let base = format!("SELECT {SESSION_COLS}, {SESSION_COUNTS} FROM observation_sessions s");
     let mut out = Vec::new();
     match project_id {
         Some(pid) => {
@@ -452,8 +451,7 @@ pub fn list_sessions(
             }
         }
         None => {
-            let mut stmt =
-                conn.prepare(&format!("{base} ORDER BY s.started_at DESC LIMIT ?1"))?;
+            let mut stmt = conn.prepare(&format!("{base} ORDER BY s.started_at DESC LIMIT ?1"))?;
             for row in stmt.query_map([limit], row_to_session)? {
                 out.push(row?);
             }
@@ -484,8 +482,7 @@ pub fn resolve_session(conn: &Connection, ident: &str) -> Result<String> {
     {
         return Ok(id);
     }
-    let mut stmt =
-        conn.prepare("SELECT id FROM observation_sessions WHERE id LIKE ?1")?;
+    let mut stmt = conn.prepare("SELECT id FROM observation_sessions WHERE id LIKE ?1")?;
     let ids: Vec<String> = stmt
         .query_map([format!("{ident}%")], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -784,7 +781,14 @@ pub fn cert_state_set(
             ca_cert_pem = excluded.ca_cert_pem, key_ciphertext = excluded.key_ciphertext,
             fingerprint_sha256 = excluded.fingerprint_sha256, serial = excluded.serial,
             created_at = excluded.created_at, not_after = excluded.not_after",
-        params![ca_cert_pem, key_ciphertext, fingerprint_sha256, serial, created_at, not_after],
+        params![
+            ca_cert_pem,
+            key_ciphertext,
+            fingerprint_sha256,
+            serial,
+            created_at,
+            not_after
+        ],
     )?;
     Ok(())
 }
@@ -815,15 +819,30 @@ pub fn allowlist_add(
         "INSERT INTO observe_internal_allowlist (project_id, host, port, note, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(project_id, host, port) DO UPDATE SET note = excluded.note",
-        params![project_id, host.trim().to_ascii_lowercase(), i64::from(port), note, clock::now_rfc3339()],
+        params![
+            project_id,
+            host.trim().to_ascii_lowercase(),
+            i64::from(port),
+            note,
+            clock::now_rfc3339()
+        ],
     )?;
     Ok(())
 }
 
-pub fn allowlist_remove(conn: &Connection, project_id: &str, host: &str, port: u16) -> Result<bool> {
+pub fn allowlist_remove(
+    conn: &Connection,
+    project_id: &str,
+    host: &str,
+    port: u16,
+) -> Result<bool> {
     let n = conn.execute(
         "DELETE FROM observe_internal_allowlist WHERE project_id = ?1 AND host = ?2 AND port = ?3",
-        params![project_id, host.trim().to_ascii_lowercase(), i64::from(port)],
+        params![
+            project_id,
+            host.trim().to_ascii_lowercase(),
+            i64::from(port)
+        ],
     )?;
     Ok(n > 0)
 }
@@ -837,7 +856,11 @@ pub fn allowlist_for_project(
         "SELECT host, port, note FROM observe_internal_allowlist WHERE project_id = ?1 ORDER BY host, port",
     )?;
     let rows = stmt.query_map([project_id], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u16, r.get::<_, String>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)? as u16,
+            r.get::<_, String>(2)?,
+        ))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -848,10 +871,22 @@ pub fn allowlist_for_project(
 /// attributions/compat cascade). Services are host-scoped and shared, so they
 /// are left as inventory; use [`delete_all`] to remove everything.
 pub fn delete_project_data(conn: &Connection, project_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM observation_sessions WHERE project_id = ?1", [project_id])?;
-    conn.execute("DELETE FROM runtime_request_events WHERE project_id = ?1", [project_id])?;
-    conn.execute("DELETE FROM runtime_metric_buckets WHERE project_id = ?1", [project_id])?;
-    conn.execute("DELETE FROM observe_internal_allowlist WHERE project_id = ?1", [project_id])?;
+    conn.execute(
+        "DELETE FROM observation_sessions WHERE project_id = ?1",
+        [project_id],
+    )?;
+    conn.execute(
+        "DELETE FROM runtime_request_events WHERE project_id = ?1",
+        [project_id],
+    )?;
+    conn.execute(
+        "DELETE FROM runtime_metric_buckets WHERE project_id = ?1",
+        [project_id],
+    )?;
+    conn.execute(
+        "DELETE FROM observe_internal_allowlist WHERE project_id = ?1",
+        [project_id],
+    )?;
     Ok(())
 }
 
@@ -910,7 +945,13 @@ pub(crate) mod testutil {
     }
 
     /// A minimal credential row (FK target for attribution tests).
-    pub fn seed_credential(conn: &Connection, id: &str, project_id: &str, provider: &str, name: &str) {
+    pub fn seed_credential(
+        conn: &Connection,
+        id: &str,
+        project_id: &str,
+        provider: &str,
+        name: &str,
+    ) {
         conn.execute(
             "INSERT INTO credentials
                 (id, project_id, provider, name, ciphertext, fingerprint, masked_value, created_at, updated_at)
@@ -957,15 +998,32 @@ mod tests {
     fn service_and_endpoint_upsert_track_previously_known() {
         let conn = mem();
         let now = clock::now_rfc3339();
-        let (svc, known1) = upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
+        let (svc, known1) =
+            upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
         assert!(!known1, "first observation is not previously known");
         let (svc2, known2) = upsert_service(&conn, "API.OpenAI.com", None, false, &now).unwrap();
         assert_eq!(svc, svc2, "host match is case-insensitive");
         assert!(known2, "second observation is previously known");
 
-        let (ep, ek1) = upsert_endpoint(&conn, &svc, HttpMethod::Get, "/v1/models", Confidence::High, &now).unwrap();
+        let (ep, ek1) = upsert_endpoint(
+            &conn,
+            &svc,
+            HttpMethod::Get,
+            "/v1/models",
+            Confidence::High,
+            &now,
+        )
+        .unwrap();
         assert!(!ek1);
-        let (ep2, ek2) = upsert_endpoint(&conn, &svc, HttpMethod::Get, "/v1/models", Confidence::High, &now).unwrap();
+        let (ep2, ek2) = upsert_endpoint(
+            &conn,
+            &svc,
+            HttpMethod::Get,
+            "/v1/models",
+            Confidence::High,
+            &now,
+        )
+        .unwrap();
         assert_eq!(ep, ep2);
         assert!(ek2);
     }
@@ -987,14 +1045,46 @@ mod tests {
         .unwrap();
 
         let now = clock::now_rfc3339();
-        let (svc, _) = upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
-        let (ep, known) = upsert_endpoint(&conn, &svc, HttpMethod::Get, "/v1/models", Confidence::High, &now).unwrap();
-        insert_request_event(&conn, &sid, "p1", &svc, Some(&ep), &now, &sample_request("api.openai.com", 200), known).unwrap();
-        insert_request_event(&conn, &sid, "p1", &svc, Some(&ep), &now, &sample_request("api.openai.com", 401), known).unwrap();
+        let (svc, _) =
+            upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
+        let (ep, known) = upsert_endpoint(
+            &conn,
+            &svc,
+            HttpMethod::Get,
+            "/v1/models",
+            Confidence::High,
+            &now,
+        )
+        .unwrap();
+        insert_request_event(
+            &conn,
+            &sid,
+            "p1",
+            &svc,
+            Some(&ep),
+            &now,
+            &sample_request("api.openai.com", 200),
+            known,
+        )
+        .unwrap();
+        insert_request_event(
+            &conn,
+            &sid,
+            "p1",
+            &svc,
+            Some(&ep),
+            &now,
+            &sample_request("api.openai.com", 401),
+            known,
+        )
+        .unwrap();
 
         let session = get_session(&conn, &sid).unwrap().unwrap();
         assert_eq!(session.request_count, 2);
-        assert_eq!(session.error_count, 1, "the 401 is an error, the 200 is not");
+        assert_eq!(
+            session.error_count, 1,
+            "the 401 is an error, the 200 is not"
+        );
         assert_eq!(session.status, "running");
 
         let events = recent_events_for_session(&conn, &sid, 10).unwrap();
@@ -1005,14 +1095,27 @@ mod tests {
         assert!(!json.contains("?"));
 
         finish_session(&conn, &sid, Some(0)).unwrap();
-        assert_eq!(get_session(&conn, &sid).unwrap().unwrap().status, "completed");
+        assert_eq!(
+            get_session(&conn, &sid).unwrap().unwrap().status,
+            "completed"
+        );
     }
 
     #[test]
     fn interrupt_is_not_overwritten_by_finish() {
         let conn = mem();
         testutil::seed_project(&conn, "p1", "web");
-        let sid = insert_session(&conn, &NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
+        let sid = insert_session(
+            &conn,
+            &NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
         interrupt_session(&conn, &sid, "vault_locked").unwrap();
         finish_session(&conn, &sid, Some(0)).unwrap();
         let s = get_session(&conn, &sid).unwrap().unwrap();
@@ -1025,14 +1128,63 @@ mod tests {
         let conn = mem();
         testutil::seed_project(&conn, "p1", "web");
         testutil::seed_credential(&conn, "c1", "p1", "openai", "openai-main");
-        let sid = insert_session(&conn, &NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
+        let sid = insert_session(
+            &conn,
+            &NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
         let now = clock::now_rfc3339();
-        let (svc, _) = upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
-        let (ep, k) = upsert_endpoint(&conn, &svc, HttpMethod::Get, "/v1/models", Confidence::High, &now).unwrap();
-        insert_request_event(&conn, &sid, "p1", &svc, Some(&ep), &now, &sample_request("api.openai.com", 200), k).unwrap();
+        let (svc, _) =
+            upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
+        let (ep, k) = upsert_endpoint(
+            &conn,
+            &svc,
+            HttpMethod::Get,
+            "/v1/models",
+            Confidence::High,
+            &now,
+        )
+        .unwrap();
+        insert_request_event(
+            &conn,
+            &sid,
+            "p1",
+            &svc,
+            Some(&ep),
+            &now,
+            &sample_request("api.openai.com", 200),
+            k,
+        )
+        .unwrap();
 
-        upsert_attribution(&conn, &sid, "c1", &svc, 1, AttributionConfidence::Confirmed, "injected credential", Some(3), Some(true)).unwrap();
-        let updated = set_event_attribution_for_session_service(&conn, &sid, &svc, "c1", AttributionConfidence::Confirmed, Some(3), Some(true)).unwrap();
+        upsert_attribution(
+            &conn,
+            &sid,
+            "c1",
+            &svc,
+            1,
+            AttributionConfidence::Confirmed,
+            "injected credential",
+            Some(3),
+            Some(true),
+        )
+        .unwrap();
+        let updated = set_event_attribution_for_session_service(
+            &conn,
+            &sid,
+            &svc,
+            "c1",
+            AttributionConfidence::Confirmed,
+            Some(3),
+            Some(true),
+        )
+        .unwrap();
         assert_eq!(updated, 1);
 
         let attrs = session_attributions(&conn, &sid).unwrap();
@@ -1046,15 +1198,47 @@ mod tests {
     fn deleting_project_cascades_but_keeps_service_inventory() {
         let conn = mem();
         testutil::seed_project(&conn, "p1", "web");
-        let sid = insert_session(&conn, &NewSession { project_id: "p1", mode: ObservationMode::Metadata, source: "cli_run", command: "x", credential_names: &[] }).unwrap();
+        let sid = insert_session(
+            &conn,
+            &NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
         let now = clock::now_rfc3339();
         let (svc, _) = upsert_service(&conn, "api.openai.com", None, false, &now).unwrap();
-        let (ep, k) = upsert_endpoint(&conn, &svc, HttpMethod::Get, "/v1/models", Confidence::High, &now).unwrap();
-        insert_request_event(&conn, &sid, "p1", &svc, Some(&ep), &now, &sample_request("api.openai.com", 200), k).unwrap();
+        let (ep, k) = upsert_endpoint(
+            &conn,
+            &svc,
+            HttpMethod::Get,
+            "/v1/models",
+            Confidence::High,
+            &now,
+        )
+        .unwrap();
+        insert_request_event(
+            &conn,
+            &sid,
+            "p1",
+            &svc,
+            Some(&ep),
+            &now,
+            &sample_request("api.openai.com", 200),
+            k,
+        )
+        .unwrap();
 
         delete_project_data(&conn, "p1").unwrap();
         assert!(list_sessions(&conn, Some("p1"), 10).unwrap().is_empty());
-        let events: i64 = conn.query_row("SELECT COUNT(*) FROM runtime_request_events", [], |r| r.get(0)).unwrap();
+        let events: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runtime_request_events", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
         assert_eq!(events, 0);
         // inventory (the host) remains
         assert_eq!(list_services(&conn).unwrap().len(), 1);
@@ -1078,12 +1262,24 @@ mod tests {
     #[test]
     fn cert_state_roundtrip_no_ciphertext_in_status() {
         let conn = mem();
-        cert_state_set(&conn, "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----", b"CIPHERTEXTBLOB", "ab:cd", "0011", "2026-01-01T00:00:00Z", "2029-01-01T00:00:00Z").unwrap();
+        cert_state_set(
+            &conn,
+            "-----BEGIN CERTIFICATE-----\nX\n-----END CERTIFICATE-----",
+            b"CIPHERTEXTBLOB",
+            "ab:cd",
+            "0011",
+            "2026-01-01T00:00:00Z",
+            "2029-01-01T00:00:00Z",
+        )
+        .unwrap();
         let status = cert_status(&conn).unwrap();
         assert!(status.present);
         assert_eq!(status.fingerprint_sha256.as_deref(), Some("ab:cd"));
         let json = serde_json::to_string(&status).unwrap();
-        assert!(!json.contains("CIPHERTEXTBLOB"), "ciphertext must not be in the status DTO");
+        assert!(
+            !json.contains("CIPHERTEXTBLOB"),
+            "ciphertext must not be in the status DTO"
+        );
         cert_set_system_trust(&conn, "installed", Some("2026-07-24T00:00:00Z")).unwrap();
         assert_eq!(cert_status(&conn).unwrap().system_trust, "installed");
         cert_state_clear(&conn).unwrap();

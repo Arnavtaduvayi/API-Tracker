@@ -252,7 +252,9 @@ pub fn read_response_head<R: Read>(r: &mut R) -> Result<(ResponseHead, Vec<u8>, 
             Err(_) => return Err(CoreError::InvalidInput("malformed response head".into())),
         }
         if buf.len() > MAX_HEAD {
-            return Err(CoreError::InvalidInput("response head exceeds limit".into()));
+            return Err(CoreError::InvalidInput(
+                "response head exceeds limit".into(),
+            ));
         }
         let n = r.read(&mut tmp).map_err(CoreError::Io)?;
         if n == 0 {
@@ -317,7 +319,10 @@ mod tests {
         assert_eq!(head.host.as_deref(), Some("api.openai.com"));
         assert!(head.had_authorization);
         assert_eq!(head.content_length, Some(5));
-        assert_eq!(head.content_type.as_deref(), Some("application/json; charset=utf-8"));
+        assert_eq!(
+            head.content_type.as_deref(),
+            Some("application/json; charset=utf-8")
+        );
         assert_eq!(head.body_framing(), BodyFraming::ContentLength(5));
         assert_eq!(leftover, b"helloEXTRA");
     }
@@ -347,7 +352,10 @@ mod tests {
 
     #[test]
     fn connect_authority_parsing() {
-        assert_eq!(parse_authority("api.openai.com:443"), Some(("api.openai.com".into(), 443)));
+        assert_eq!(
+            parse_authority("api.openai.com:443"),
+            Some(("api.openai.com".into(), 443))
+        );
         assert_eq!(parse_authority("[::1]:8443"), Some(("[::1]".into(), 8443)));
         assert_eq!(parse_authority("nope"), None);
     }

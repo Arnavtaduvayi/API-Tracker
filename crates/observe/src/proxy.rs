@@ -94,7 +94,9 @@ impl RunningProxy {
     pub fn start(config: ProxyConfig) -> api_tracker_core::error::Result<Self> {
         let listener = TcpListener::bind((IpAddr::from([127, 0, 0, 1]), 0))
             .map_err(api_tracker_core::error::CoreError::Io)?;
-        let addr = listener.local_addr().map_err(api_tracker_core::error::CoreError::Io)?;
+        let addr = listener
+            .local_addr()
+            .map_err(api_tracker_core::error::CoreError::Io)?;
         listener
             .set_nonblocking(true)
             .map_err(api_tracker_core::error::CoreError::Io)?;
@@ -129,9 +131,10 @@ impl RunningProxy {
                             let _ = client.set_write_timeout(Some(IO_TIMEOUT));
                             // A panic in one connection must not take down the
                             // listener or leak a half-open verified connection.
-                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                || handle_client(client, &cfg, &sd2),
-                            ));
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    handle_client(client, &cfg, &sd2)
+                                }));
                             if result.is_err() {
                                 cfg.sink.note_compat(
                                     "proxy_internal_error",
@@ -254,15 +257,24 @@ fn resolve_validated(
     Err(policy::DenyReason::Private)
 }
 
-fn handle_connect(mut client: TcpStream, head: &wire::RequestHead, cfg: &ProxyConfig, shutdown: &AtomicBool) {
+fn handle_connect(
+    mut client: TcpStream,
+    head: &wire::RequestHead,
+    cfg: &ProxyConfig,
+    shutdown: &AtomicBool,
+) {
     let Some((host, port)) = wire::parse_authority(&head.target) else {
-        let _ = write_all_ok(&mut client, b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        let _ = write_all_ok(
+            &mut client,
+            b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n",
+        );
         return;
     };
 
     // Policy on the literal authority first.
     if let policy::Verdict::Deny(reason) = policy::check_authority(&host, port, &cfg.allowlist) {
-        cfg.sink.note_compat("ssrf_policy", "blocked", reason.as_str());
+        cfg.sink
+            .note_compat("ssrf_policy", "blocked", reason.as_str());
         let _ = write_all_ok(
             &mut client,
             b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -273,7 +285,8 @@ fn handle_connect(mut client: TcpStream, head: &wire::RequestHead, cfg: &ProxyCo
     let addr = match resolve_validated(&host, port, &cfg.allowlist) {
         Ok(a) => a,
         Err(reason) => {
-            cfg.sink.note_compat("ssrf_policy", "blocked", reason.as_str());
+            cfg.sink
+                .note_compat("ssrf_policy", "blocked", reason.as_str());
             let _ = write_all_ok(
                 &mut client,
                 b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -291,7 +304,14 @@ fn handle_connect(mut client: TcpStream, head: &wire::RequestHead, cfg: &ProxyCo
     let upstream = match TcpStream::connect(addr) {
         Ok(s) => s,
         Err(_) => {
-            record_transport(cfg, &host, port, Protocol::ConnectTunnel, TransportError::Refused, connect_started);
+            record_transport(
+                cfg,
+                &host,
+                port,
+                Protocol::ConnectTunnel,
+                TransportError::Refused,
+                connect_started,
+            );
             return;
         }
     };
@@ -300,7 +320,14 @@ fn handle_connect(mut client: TcpStream, head: &wire::RequestHead, cfg: &ProxyCo
 
     // Connection-only mode, or an h2-only client, gets an opaque tunnel.
     if cfg.mode != ObservationMode::Metadata || cfg.ca.is_none() {
-        opaque_tunnel(client, upstream, &host, port, cfg, ObservationSource::ConnectionOnly);
+        opaque_tunnel(
+            client,
+            upstream,
+            &host,
+            port,
+            cfg,
+            ObservationSource::ConnectionOnly,
+        );
         return;
     }
 
@@ -309,9 +336,20 @@ fn handle_connect(mut client: TcpStream, head: &wire::RequestHead, cfg: &ProxyCo
     let n = client.peek(&mut peek).unwrap_or(0);
     let info = clienthello::parse(&peek[..n]);
     if info.is_h2_only() {
-        cfg.sink.note_compat("http2", "opaque", "client offered only HTTP/2; tunnelled without decoding");
+        cfg.sink.note_compat(
+            "http2",
+            "opaque",
+            "client offered only HTTP/2; tunnelled without decoding",
+        );
         cfg.sink.mark_partial("h2_only_client");
-        opaque_tunnel(client, upstream, &host, port, cfg, ObservationSource::ConnectionOnly);
+        opaque_tunnel(
+            client,
+            upstream,
+            &host,
+            port,
+            cfg,
+            ObservationSource::ConnectionOnly,
+        );
         return;
     }
     let sni = info.sni.clone().unwrap_or_else(|| host.clone());
@@ -329,7 +367,10 @@ fn record_transport(
     started: Instant,
 ) {
     cfg.sink.record(ObservedRequest {
-        host: host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase(),
+        host: host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase(),
         port,
         method: HttpMethod::Connect,
         path_template: "/:connect".to_string(),
@@ -379,7 +420,10 @@ fn opaque_tunnel(
     let _ = t.join();
 
     cfg.sink.record(ObservedRequest {
-        host: host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase(),
+        host: host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_ascii_lowercase(),
         port,
         method: HttpMethod::Connect,
         path_template: "/:connect".to_string(),
@@ -441,7 +485,10 @@ fn intercept_https(
     // Upstream: connect TLS to the REAL provider, fully verified against
     // webpki-roots. Verify against the real hostname, not the SNI the client
     // sent (they are normally the same).
-    let bare_host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let bare_host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
     let server_name = match rustls_pki_types::ServerName::try_from(bare_host.clone()) {
         Ok(n) => n,
         Err(_) => return,
@@ -459,7 +506,14 @@ fn intercept_https(
     // Drive the upstream handshake once so a bad provider cert surfaces as a
     // TLS error rather than a mysterious hang.
     if upstream_tls.flush().is_err() {
-        record_transport(cfg, &bare_host, port, Protocol::Http11, TransportError::UpstreamCertInvalid, Instant::now());
+        record_transport(
+            cfg,
+            &bare_host,
+            port,
+            Protocol::Http11,
+            TransportError::UpstreamCertInvalid,
+            Instant::now(),
+        );
         return;
     }
 
@@ -477,22 +531,41 @@ fn intercept_https(
         let request_started = Instant::now();
         // Forward the request head verbatim upstream, then stream the body.
         if upstream_tls.write_all(&raw_req).is_err() {
-            record_transport(cfg, &bare_host, port, Protocol::Http11, TransportError::Reset, request_started);
+            record_transport(
+                cfg,
+                &bare_host,
+                port,
+                Protocol::Http11,
+                TransportError::Reset,
+                request_started,
+            );
             break;
         }
         let req_framing = req_head.body_framing();
-        let (req_body_bytes, req_carry) =
-            match relay::relay_body(&mut client_tls, &mut upstream_tls, req_framing, req_leftover) {
-                Ok(v) => v,
-                Err(_) => break,
-            };
+        let (req_body_bytes, req_carry) = match relay::relay_body(
+            &mut client_tls,
+            &mut upstream_tls,
+            req_framing,
+            req_leftover,
+        ) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
         let _ = upstream_tls.flush();
 
         // Read the response head, forward verbatim, stream the body.
-        let (resp_head, raw_resp, resp_leftover) = match wire::read_response_head(&mut upstream_tls) {
+        let (resp_head, raw_resp, resp_leftover) = match wire::read_response_head(&mut upstream_tls)
+        {
             Ok(v) => v,
             Err(_) => {
-                record_transport(cfg, &bare_host, port, Protocol::Http11, TransportError::Reset, request_started);
+                record_transport(
+                    cfg,
+                    &bare_host,
+                    port,
+                    Protocol::Http11,
+                    TransportError::Reset,
+                    request_started,
+                );
                 break;
             }
         };
@@ -505,9 +578,18 @@ fn intercept_https(
         // is an opaque bidirectional stream we do not decode.
         if resp_head.status == 101 {
             let _ = client_tls.write_all(&resp_leftover);
-            record_http(cfg, &bare_host, port, &req_head, &resp_head, latency_ms,
-                raw_req.len() as u64 + req_body_bytes, raw_resp.len() as u64,
-                Protocol::Websocket, ObservationSource::UpgradeThenOpaque);
+            record_http(
+                cfg,
+                &bare_host,
+                port,
+                &req_head,
+                &resp_head,
+                latency_ms,
+                raw_req.len() as u64 + req_body_bytes,
+                raw_resp.len() as u64,
+                Protocol::Websocket,
+                ObservationSource::UpgradeThenOpaque,
+            );
             // relay the remainder opaquely until either side closes
             let _ = client_tls.flush();
             let _ = copy_between_tls(&mut client_tls, &mut upstream_tls);
@@ -515,22 +597,44 @@ fn intercept_https(
         }
 
         let resp_framing = resp_head.body_framing(&req_head.method);
-        let (resp_body_bytes, resp_carry) =
-            match relay::relay_body(&mut upstream_tls, &mut client_tls, resp_framing, resp_leftover) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Still record what we saw (status is known).
-                    record_http(cfg, &bare_host, port, &req_head, &resp_head, latency_ms,
-                        raw_req.len() as u64 + req_body_bytes, raw_resp.len() as u64,
-                        Protocol::Http11, ObservationSource::Intercept);
-                    break;
-                }
-            };
+        let (resp_body_bytes, resp_carry) = match relay::relay_body(
+            &mut upstream_tls,
+            &mut client_tls,
+            resp_framing,
+            resp_leftover,
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                // Still record what we saw (status is known).
+                record_http(
+                    cfg,
+                    &bare_host,
+                    port,
+                    &req_head,
+                    &resp_head,
+                    latency_ms,
+                    raw_req.len() as u64 + req_body_bytes,
+                    raw_resp.len() as u64,
+                    Protocol::Http11,
+                    ObservationSource::Intercept,
+                );
+                break;
+            }
+        };
         let _ = client_tls.flush();
 
-        record_http(cfg, &bare_host, port, &req_head, &resp_head, latency_ms,
-            raw_req.len() as u64 + req_body_bytes, raw_resp.len() as u64 + resp_body_bytes,
-            proto_of(req_head.version), ObservationSource::Intercept);
+        record_http(
+            cfg,
+            &bare_host,
+            port,
+            &req_head,
+            &resp_head,
+            latency_ms,
+            raw_req.len() as u64 + req_body_bytes,
+            raw_resp.len() as u64 + resp_body_bytes,
+            proto_of(req_head.version),
+            ObservationSource::Intercept,
+        );
 
         // Close the connection if either side signalled it. Carry over any
         // pipelined request bytes (req_carry after a no-body request; resp_carry
@@ -551,7 +655,10 @@ fn proto_of(v: wire::HttpVersion) -> Protocol {
 }
 
 /// Opaque relay between two already-established TLS streams (post-upgrade).
-fn copy_between_tls<A: Read + Write, B: Read + Write>(_a: &mut A, _b: &mut B) -> std::io::Result<()> {
+fn copy_between_tls<A: Read + Write, B: Read + Write>(
+    _a: &mut A,
+    _b: &mut B,
+) -> std::io::Result<()> {
     // Post-101 we cannot easily split the rustls StreamOwned across threads;
     // a single-direction drain is sufficient to keep the metadata honest (the
     // event is already recorded and flagged upgrade_then_opaque). The streams
@@ -602,29 +709,55 @@ fn record_http(
 
 /// Plain HTTP (absolute-form) proxying: rewrite to origin-form, drop proxy
 /// headers, forward, and record metadata.
-fn handle_plain(mut client: TcpStream, head: &wire::RequestHead, leftover: Vec<u8>, cfg: &ProxyConfig) {
+fn handle_plain(
+    mut client: TcpStream,
+    head: &wire::RequestHead,
+    leftover: Vec<u8>,
+    cfg: &ProxyConfig,
+) {
     let Some((host, port, path)) = wire::split_absolute_form(&head.target) else {
-        let _ = write_all_ok(&mut client, b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        let _ = write_all_ok(
+            &mut client,
+            b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n",
+        );
         return;
     };
     if let policy::Verdict::Deny(reason) = policy::check_authority(&host, port, &cfg.allowlist) {
-        cfg.sink.note_compat("ssrf_policy", "blocked", reason.as_str());
-        let _ = write_all_ok(&mut client, b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+        cfg.sink
+            .note_compat("ssrf_policy", "blocked", reason.as_str());
+        let _ = write_all_ok(
+            &mut client,
+            b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n",
+        );
         return;
     }
     let addr = match resolve_validated(&host, port, &cfg.allowlist) {
         Ok(a) => a,
         Err(reason) => {
-            cfg.sink.note_compat("ssrf_policy", "blocked", reason.as_str());
-            let _ = write_all_ok(&mut client, b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+            cfg.sink
+                .note_compat("ssrf_policy", "blocked", reason.as_str());
+            let _ = write_all_ok(
+                &mut client,
+                b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n",
+            );
             return;
         }
     };
     let mut upstream = match TcpStream::connect(addr) {
         Ok(s) => s,
         Err(_) => {
-            record_transport(cfg, &host, port, Protocol::PlainHttp, TransportError::Refused, Instant::now());
-            let _ = write_all_ok(&mut client, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+            record_transport(
+                cfg,
+                &host,
+                port,
+                Protocol::PlainHttp,
+                TransportError::Refused,
+                Instant::now(),
+            );
+            let _ = write_all_ok(
+                &mut client,
+                b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n",
+            );
             return;
         }
     };
@@ -637,16 +770,24 @@ fn handle_plain(mut client: TcpStream, head: &wire::RequestHead, leftover: Vec<u
     if upstream.write_all(&rewritten).is_err() {
         return;
     }
-    let (req_body, _c) = match relay::relay_body(&mut client, &mut upstream, head.body_framing(), leftover) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+    let (req_body, _c) =
+        match relay::relay_body(&mut client, &mut upstream, head.body_framing(), leftover) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
     let _ = upstream.flush();
 
     let (resp_head, raw_resp, resp_leftover) = match wire::read_response_head(&mut upstream) {
         Ok(v) => v,
         Err(_) => {
-            record_transport(cfg, &host, port, Protocol::PlainHttp, TransportError::Reset, started);
+            record_transport(
+                cfg,
+                &host,
+                port,
+                Protocol::PlainHttp,
+                TransportError::Reset,
+                started,
+            );
             return;
         }
     };
@@ -654,13 +795,26 @@ fn handle_plain(mut client: TcpStream, head: &wire::RequestHead, leftover: Vec<u
     if client.write_all(&raw_resp).is_err() {
         return;
     }
-    let (resp_body, _c2) = relay::relay_body(&mut client, &mut upstream, BodyFramingResp(&resp_head, &head.method), resp_leftover)
-        .map(|(a, b)| (a, b))
-        .unwrap_or((0, Vec::new()));
+    let (resp_body, _c2) = relay::relay_body(
+        &mut client,
+        &mut upstream,
+        BodyFramingResp(&resp_head, &head.method),
+        resp_leftover,
+    )
+    .unwrap_or((0, Vec::new()));
 
-    record_http(cfg, &host, port, head, &resp_head, latency_ms,
-        rewritten.len() as u64 + req_body, raw_resp.len() as u64 + resp_body,
-        Protocol::PlainHttp, ObservationSource::Intercept);
+    record_http(
+        cfg,
+        &host,
+        port,
+        head,
+        &resp_head,
+        latency_ms,
+        rewritten.len() as u64 + req_body,
+        raw_resp.len() as u64 + resp_body,
+        Protocol::PlainHttp,
+        ObservationSource::Intercept,
+    );
 }
 
 /// Helper so `relay_body` can be called with a response-derived framing.
