@@ -601,17 +601,29 @@ pub fn sweep_orphaned_sessions(conn: &Connection) -> Result<usize> {
 /// wrongly closed.
 #[cfg(target_os = "linux")]
 fn pid_is_definitely_gone(pid: i64) -> bool {
-    // Absence of /proc/<pid> is authoritative and needs no `ps`, so this is
-    // robust on BusyBox/Alpine where `ps -p` is unsupported and exits 1 (which
-    // the ps-based convention would misread as "gone", closing live sessions).
-    !std::path::Path::new(&format!("/proc/{pid}")).exists()
+    // Absence of /proc/<pid> is authoritative ONLY when /proc is actually
+    // mounted. On a /proc-less host (hardened container / minimal chroot) EVERY
+    // path is absent, which would wrongly close live sessions — so require
+    // /proc/self first, and otherwise fall back to the `ps` convention. This is
+    // also robust on BusyBox/Alpine where `ps -p` is unsupported and exits 1
+    // (the ps-based convention alone would misread that as "gone").
+    if std::path::Path::new("/proc/self").exists() {
+        !std::path::Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        pid_gone_via_ps(pid)
+    }
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn pid_is_definitely_gone(pid: i64) -> bool {
-    // macOS/BSD have no /proc: use `ps -p`, where exit code EXACTLY 1 means "no
-    // such process". Any other outcome (including a `ps` that doesn't support
-    // the flag) proves nothing and must not close a live session.
+    pid_gone_via_ps(pid)
+}
+
+/// `ps -p <pid>` liveness, where exit code EXACTLY 1 means "no such process".
+/// Any other outcome (including a `ps` that doesn't support the flag) proves
+/// nothing and must not close a live session.
+#[cfg(unix)]
+fn pid_gone_via_ps(pid: i64) -> bool {
     matches!(
         std::process::Command::new("ps")
             .args(["-p", &pid.to_string()])

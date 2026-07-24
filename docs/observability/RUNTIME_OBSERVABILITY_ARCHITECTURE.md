@@ -297,7 +297,7 @@ variables at that.
   point at the local observation proxy; upstream connections go **direct** to
   the providers. Upstream CONNECT chaining is **not implemented** in this
   version, and there is no `--proxy-conflict` flag. A monitored run therefore
-  requires direct egress; `observe doctor` warns when a proxy variable is
+  requires direct egress; `observe diagnostics` warns when a proxy variable is
   present.
 - The parent shell's environment is never modified, so there is nothing to
   restore.

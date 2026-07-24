@@ -131,7 +131,7 @@ Mode B never touches the system store (it only sets child-scoped env vars);
 
 | Situation | Behaviour |
 |---|---|
-| Existing `HTTP(S)_PROXY` (corporate) | the child's proxy vars are OVERRIDDEN to the local observation proxy; upstream connections go **direct** (no chaining), so a monitored run needs direct egress. `observe doctor` warns when a proxy var is present. Parent env never modified. |
+| Existing `HTTP(S)_PROXY` (corporate) | the child's proxy vars are OVERRIDDEN to the local observation proxy; upstream connections go **direct** (no chaining), so a monitored run needs direct egress. `observe diagnostics` warns when a proxy var is present. Parent env never modified. |
 | `NO_PROXY` / `no_proxy` set | both casings preserved and merged; `localhost,127.0.0.1,::1` always added |
 | Managed / MDM machine | Mode C typically blocked by policy; failure reported plainly, never escalated |
 | Multi-user machine | loopback-only listener; token in child env readable only by same user |

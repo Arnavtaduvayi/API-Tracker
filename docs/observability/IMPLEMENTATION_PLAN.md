@@ -62,8 +62,11 @@ Tables (all `STRICT`, ASCII identifiers, no `sqlite_` prefix, none named
   system_trust (`absent`/`installed`/`orphaned`), system_trust_at.
 - `observe_internal_allowlist` — (project_id, host, port) user-approved
   internal destinations.
-- `runtime_alert_baselines` — (rule_key, metric) → baseline value, sample_count,
-  window_start, updated_at (for warm-up / regression rules).
+
+(A `runtime_alert_baselines` table for rolling warm-up/regression baselines was
+planned but is **not implemented**: it was dropped from migration 12 and the
+shipped alert rules use fixed thresholds with sample floors, not stored
+baselines. Adding warm-up baselines is future work.)
 
 Observability settings live in `vault_meta` via `runtime::settings`
 (`observe_default_mode`, `observe_event_retention_days`,
@@ -175,6 +178,19 @@ proven from the launch-time version capture, not from the wire.
   *approximate*. Bounded memory, never per-sample storage.
 
 ## 8. Test plan → requirement mapping
+
+> **Status note (honest):** the file names below were the PLANNED test layout.
+> The shipped tests are consolidated, not one file per row. Authoritative
+> mapping of what actually exists vs. what is manual/untested is the
+> `RUNTIME_COMPATIBILITY_MATRIX.md` and `audit/PR13_TEST_COVERAGE_GAPS.md`. In
+> particular the real Rust integration tests are
+> `crates/observe/tests/proxy_integration.rs` (intercept, plain-HTTP, SSRF,
+> proxy-auth) and `crates/observe/tests/no_insecure_verifier.rs` (TLS-bypass
+> guard); the no-leak canary lives inside `proxy_integration.rs`; migration/
+> retention/aggregation/alerts/attribution are covered by in-module unit tests
+> and `crates/core/tests/observability.rs`. The `tls_*.rs`, `ssrf.rs`,
+> `scope_*.rs`, `proxy_auth.rs`, `privacy_no_leak.rs`, `systemtrust_*.rs`, and
+> per-`runtime_*.rs` files named below were NOT created as separate files.
 
 | Brief §22 category | Where |
 |---|---|

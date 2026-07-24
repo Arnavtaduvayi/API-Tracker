@@ -257,7 +257,7 @@ for the monitored child so its traffic goes to the local observation proxy.
 Upstream connections then go **directly** to the providers — they are **not
 chained** through your corporate proxy. A monitored run therefore requires
 direct egress; if egress is only permitted via the corporate proxy, monitored
-requests will fail. `observe doctor` warns when a proxy variable is present.
+requests will fail. `observe diagnostics` warns when a proxy variable is present.
 Your parent shell's environment is never modified. (Upstream CONNECT chaining
 is not implemented in this version.)
 

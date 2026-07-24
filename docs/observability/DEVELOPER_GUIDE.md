@@ -89,10 +89,15 @@ itself. A panic records a compatibility result, marks the session
 `partial_coverage`, and closes the socket on unwind so the child never sees a
 half-open connection that appears verified.
 
-`observe::session` orchestrates lifecycle: launch, `on_lock()`, `Drop`
-(stop listener, join threads with a 2 s deadline, zeroize, mark
-`interrupted`). Sessions are never silently marked `completed`;
-`interrupted` is a distinct state with a machine-readable reason.
+`observe::session::run_monitored` orchestrates lifecycle: ensure CA → open
+session → start proxy + writer → launch child → `child.wait()` → teardown
+(stop listener, force-close client sockets, join the writer, drop + zeroize the
+CA, delete temp trust files) → attribute/aggregate/finish. There is NO
+`on_lock()` hook (locking the vault does not interrupt a running run — RO-13).
+A completed run finalizes `completed`; a pre-launch failure or a crashed
+launcher yields `interrupted` with a machine-readable reason
+(`trust_setup_failed` / `child_spawn_failed` / `launcher_gone`), never a silent
+`completed`.
 
 ## TLS architecture (`observe::tls`, `observe::clienthello`)
 

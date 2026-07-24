@@ -459,22 +459,24 @@ Exact navigation: API activity → Overview → 127.0.0.1 → each endpoint and
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values: the OD §8 grep sweep, run twice — once with the vault
-  unlocked, once after Lock vault; plus:
+  unlocked, once after Lock vault; plus (there is no `observe export` command
+  in this version — inspect the CLI/JSON surfaces directly instead):
     api-tracker observe api 127.0.0.1
-    api-tracker observe export > ~/at-obs-test/export.json   (if available)
-    grep -c "OBS-.*CANARY\|canary@leak.test" ~/at-obs-test/export.json
+    api-tracker observe show <session-id> --json > ~/at-obs-test/show.json
+    grep -c "OBS-.*CANARY\|canary@leak.test" ~/at-obs-test/show.json
 Expected visible result: every UI surface shows templated paths with NO query
   string (no "?" anywhere), no header values, no cookie, no body fragment;
   content type shown only as a category (json / multipart); the multipart
   boundary string appears nowhere
-Expected persisted result: the grep sweep prints no LEAK lines; the export
-  grep finds 0 matches; the canaries exist only in the synthetic server's
-  terminal
+Expected persisted result: the grep sweep prints no LEAK lines; the
+  `observe show --json` grep finds 0 matches; the canaries exist only in the
+  synthetic server's terminal
 Expected audit/alert result: audit/activity tables also contain no canary
   (covered by the sweep against the whole vault.db)
-Expected security behavior: this is the manual mirror of the automated
-  privacy_no_leak canary test; a single hit anywhere fails the entire plan
-Cleanup: rm ~/at-obs-test/export.json
+Expected security behavior: this is the manual mirror of the automated canary
+  test (intercept_captures_sanitized_metadata_and_leaks_no_payload in
+  proxy_integration.rs); a single hit anywhere fails the entire plan
+Cleanup: rm ~/at-obs-test/show.json
 Screenshot checkpoint: an event detail showing sanitized path + boolean
   authorization-present
 Pass/fail: ☐
@@ -615,13 +617,21 @@ Pass/fail: ☐
 
 ### Lifecycle and teardown
 
-#### OBS-16 — locking the vault stops observation
+#### OBS-16 — locking the vault does NOT stop an already-running observed run
+
+> NOTE (current behaviour): a lock/auto-lock does **not** interrupt an active
+> `run --observe`. That run holds its own copy of the vault key and the
+> reconstituted CA signing key in memory and keeps observing until the child
+> exits. There is no `on_lock` hook and no `vault_locked` interrupt reason in
+> the shipped code (see THREAT_MODEL RO-13 — a lock-teardown hook is required
+> follow-up before public release). This test verifies that HONEST behaviour,
+> not a teardown that does not exist.
 
 ```text
 Mode: Manual UI + CLI
-Requirement: a vault lock tears down interception: the CA key and leaf cache
-  are zeroized, new connections stop, the session is marked interrupted with
-  reason, and decryption cannot continue
+Requirement: a lock during an active observed run does NOT tear down
+  interception; the run continues until the child exits and finalizes normally.
+  (A lock-teardown control is not implemented in this version.)
 Starting state: app unlocked; servers running
 Prerequisites: two terminals
 Exact navigation: top bar → Lock vault (while the run is active); then unlock
@@ -631,22 +641,21 @@ Exact fields to fill: Master password (on unlock)
 Exact test values: in terminal 1 start a long observed loop:
   api-tracker run --project obs-app --observe=metadata -- sh -c \
     'while true; do curl -s --max-time 5 http://127.0.0.1:8484/v1/tick \
-       >/dev/null || echo "request failed (expected after lock)"; \
-       sleep 1; done'
+       >/dev/null; sleep 1; done'
   then lock the vault from the desktop app while it loops
-Expected visible result: within a few seconds of the lock the loop starts
-  printing "request failed (expected after lock)" — the child keeps running
-  but its proxied requests error honestly rather than silently bypassing;
-  after unlocking, Sessions shows that session as "interrupted" with reason
-  vault_locked — never relabeled completed
-Expected persisted result: the interrupted state and reason survive relaunch;
-  events recorded before the lock remain
+Expected visible result: the loop keeps making SUCCESSFUL observed requests
+  after the lock (interception continues); locking the vault does not interrupt
+  it. When you Ctrl-C the loop (or the child exits), the session finalizes as
+  "completed", not "interrupted/vault_locked".
+Expected persisted result: events recorded during the run remain; the session
+  is "completed" after the child exits.
 Expected audit/alert result: —
-Expected security behavior: no new TLS interception is possible while locked
-  (the CA signing key exists only under the vault key and was zeroized);
-  Ctrl-C the loop, unlock, and confirm a fresh observed run works again
+Expected security behavior: the CA signing key remains in the run process's
+  memory for the child's lifetime regardless of the lock — to end that exposure
+  window, stop the monitored process. Confirm a fresh observed run still works
+  after unlocking.
 Cleanup: Ctrl-C the loop; unlock the vault
-Screenshot checkpoint: the interrupted session with its reason
+Screenshot checkpoint: the completed session after the child exits
 Pass/fail: ☐
 ```
 

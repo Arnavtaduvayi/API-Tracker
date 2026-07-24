@@ -104,7 +104,7 @@ placeholder:
 | Email (`x@y.z`) | `:email` | `alice@example.com` → `:email` |
 | Credential-shaped prefix (`sk-`,`sk-proj-`,`ghp_`,`gho_`,`github_pat_`,`xox[baprs]-`,`AKIA…`,`AIza…`,`glpat-`,`shpat_`,`Bearer…`) | `:token` | `sk-proj-abc123…` → `:token` |
 | Long hex (≥ 16 hex chars) | `:hash` | `9f8e7d6c5b4a3210ff` → `:hash` |
-| Base64/high-entropy (len ≥ 20, ≥ 3 char classes, or base64url charset len ≥ 24) | `:token` | `dGhpcyBpcyBhIHRlc3Q…` → `:token` |
+| High-entropy / opaque token (len ≥ 16; any of: ≥ 3 char classes; base64url+digit ≥ 20; single-class alphabetic with low vowel ratio / long consonant run, or ≥ 24; upper+lower letters ≥ 20) | `:token` | `xkqjwhdmzpvtrbnsgcfywq` → `:token`, `Ab3Xy9Qw2Lm5Zt8Nk` → `:token` |
 | Pure digits, len ≥ 2 | `:id` | `123456` → `:id`, `98765` → `:id` |
 | Filename with a sensitive embedded run (has an extension **and** contains a uuid/long-hex/≥5-digit run) | `:file` | `invoice_20240101_8842.pdf` → `:file` |
 | Segment > 40 bytes, or contains non-printable/reserved chars | `:redacted` (→ confidence `low`) | |
@@ -193,26 +193,29 @@ hand-rolled fuzz over thousands of composed segments) asserts:
 
 ## 6. The end-to-end leakage proof
 
-`crates/observe/tests/privacy_no_leak.rs` runs a **real** monitored HTTPS
-request through the proxy where the URL path, query string, request headers
-(including `Authorization: Bearer <marker>` and `Cookie: <marker>`), request
-body, and response body are each stuffed with a **distinct** high-entropy
-marker (fake API keys `sk-proj-LEAKCANARY…`, an email `canary@leak.test`, a
-JWT, a UUID, `AI-PROMPT-CANARY`, source code, a multipart form, a phone
-number). After the session ends the test asserts **every** marker is byte-for-
-byte absent from:
+`crates/observe/tests/proxy_integration.rs`
+(`intercept_captures_sanitized_metadata_and_leaks_no_payload`) runs a **real**
+monitored HTTPS request through the proxy where the URL path, query string,
+request headers (including `Authorization: Bearer <marker>` and
+`Cookie: <marker>`), and request/response bodies are each stuffed with a
+**distinct** high-entropy marker (fake API keys `sk-proj-LEAKCANARY…`, an email
+`canary@leak.test`, a query canary, a response canary). The test asserts every
+marker is absent from the metadata the proxy emits — the `Debug` rendering of
+the recorded `ObservedRequest` events collected by an in-memory test sink, which
+are the **only** thing that ever reaches the store — while confirming the
+provider *received* the streamed body (proving streaming worked) and the client
+got the response.
 
-- the SQLite database file (raw bytes) and its `-wal` / `-shm` sidecars,
-- process stdout and stderr,
-- the `Debug` and `Display` rendering of every public type,
-- every serialized DTO / export JSON,
-- the `audit_events` and `activity_events` tables,
-- every temp file the session created (enumerated before/after),
-- the diagnostics report.
+The guarantee is **structural**, not test-coverage: `ObservedRequest` has no
+field able to hold a body, header value, cookie, query string, or raw URL, so
+there is nothing to leak into the database in the first place, and query strings
+are severed before any value is constructed.
 
-The only place a marker legitimately appears is inside the **live relayed
-bytes**, which are never captured — the test observes the provider *received*
-the body (proving streaming worked) while Tethra *stored* none of it.
+Scope note (honest): the canary asserts over the emitted metadata, not the raw
+SQLite file bytes / WAL, captured stdout/stderr, the `audit_events` /
+`activity_events` tables, temp files, or the diagnostics report. Extending it to
+scan those byte streams end-to-end is tracked as follow-up (see
+`audit/PR13_TEST_COVERAGE_GAPS.md`).
 
 ## 7. Retention and deletion
 

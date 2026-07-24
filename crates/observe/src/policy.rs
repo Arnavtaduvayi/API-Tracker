@@ -275,10 +275,14 @@ fn classify_v6(ip: Ipv6Addr) -> Verdict {
     if s[..6].iter().all(|&x| x == 0) && !(s[6] == 0 && s[7] == 0) {
         return classify_v4(embedded_v4(s[6], s[7]));
     }
-    // NAT64 well-known prefix 64:ff9b::/96 embeds an IPv4 in the low 32 bits; on
-    // a host with a NAT64/CLAT translator this would otherwise be an SSRF path
-    // to the embedded address (e.g. 64:ff9b::7f00:1 -> 127.0.0.1).
-    if s[0] == 0x0064 && s[1] == 0xff9b && s[2..6].iter().all(|&x| x == 0) {
+    // NAT64: the well-known prefix 64:ff9b::/96 and the RFC 8215 local-use
+    // prefix 64:ff9b:1::/48 both live in the 64:ff9b::/32 allocation and embed an
+    // IPv4 in the low 32 bits (for the common `::`-filled literal form). On a
+    // host with a NAT64/CLAT translator this would otherwise be an SSRF path to
+    // the embedded address (e.g. 64:ff9b::7f00:1 or 64:ff9b:1::7f00:1 ->
+    // 127.0.0.1). Match the whole /32 and decode the low 32 bits; a non-embedded
+    // low half classifies to 0.0.0.0/8 and is denied anyway (fail-safe).
+    if s[0] == 0x0064 && s[1] == 0xff9b {
         return classify_v4(embedded_v4(s[6], s[7]));
     }
     // 6to4 2002::/16 embeds the IPv4 gateway in segments [1..3].
@@ -515,6 +519,11 @@ mod tests {
         );
         // NAT64 embedding a genuinely public address stays allowed.
         assert_eq!(classify_ip(ip("64:ff9b::808:808")), Verdict::Allow);
+        // RFC 8215 local-use NAT64 prefix 64:ff9b:1::/48 embedding 127.0.0.1.
+        assert_eq!(
+            classify_ip(ip("64:ff9b:1::7f00:1")),
+            Verdict::Deny(DenyReason::Loopback)
+        );
     }
 
     #[test]

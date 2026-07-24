@@ -17,7 +17,8 @@ and then **proven absent** from everything Tethra persists. If any §5 value is
 ever found in `vault.db` (or its `-wal`/`-shm` sidecars), the UI, an export,
 a log, or a temp file, that is an automatic FAIL of the whole plan — report it
 as a security bug. This mirrors the automated end-to-end canary test
-(`crates/observe/tests/privacy_no_leak.rs`) described in
+(`intercept_captures_sanitized_metadata_and_leaks_no_payload` in
+`crates/observe/tests/proxy_integration.rs`) described in
 `RUNTIME_OBSERVABILITY_PRIVACY_MODEL.md` §6.
 
 ## 1. Workspace layout
