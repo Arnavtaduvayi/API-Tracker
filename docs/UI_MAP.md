@@ -22,7 +22,7 @@ same SQLite vault in the same data directory.
 ## 1. Sitemap
 
 There is no URL router; navigation is a view enum in `App.tsx`. Top-level
-destinations are the 15 nav buttons plus the two vault gate screens.
+destinations are the 16 nav buttons plus the two vault gate screens.
 
 ```text
 API Tracker (window)
@@ -63,6 +63,7 @@ API Tracker (window)
     ├── Alerts          (run checks, acknowledge, resolve)
     ├── Notifications   (webhook channels, delivery history)
     ├── Usage           (usage & cost, records, budget, activity)
+    ├── API activity    (runtime observability: sessions, services, certificate, diagnostics — metadata only)
     ├── Pricing         (records, overrides, import/export)
     ├── Templates       (catalog, apply, stack detection, learned decisions)
     ├── Backup          (create, verify, restore)
@@ -70,8 +71,8 @@ API Tracker (window)
     └── Lock vault      (right-aligned button, locks immediately)
 ```
 
-Screen count: **17 top-level screens** (15 nav destinations + the 2 vault
-gate screens); **24 distinct screens/views** counting the nested
+Screen count: **18 top-level screens** (16 nav destinations + the 2 vault
+gate screens); **25 distinct screens/views** counting the nested
 project/credential/provider forms and detail pages.
 
 ## 2. Global behavior (App.tsx)
@@ -83,8 +84,8 @@ project/credential/provider forms and detail pages.
 - **Top bar** (only while unlocked): brand text **API Tracker**, then
   link-style buttons, exact labels: **Projects · Providers · Scan ·
   Env files · Destinations · Sync plans · Rotation · Temporary access ·
-  Alerts · Notifications · Usage · Pricing · Templates · Backup ·
-  Settings**, and right-aligned **Lock vault**.
+  Alerts · Notifications · Usage · API activity · Pricing · Templates ·
+  Backup · Settings**, and right-aligned **Lock vault**.
 - **Auto-lock:** enforced by the backend on every command after
   `auto_lock_minutes` (default 15) of inactivity. Any command then fails
   with code `vault_locked`, which flips the UI to *Unlock vault*
@@ -952,6 +953,42 @@ project/credential/provider forms and detail pages.
   passwords do not match." Success: "Master password changed. Create a
   fresh backup when convenient."
 
+### 3.23 API activity — nav **API activity** (feat/runtime-api-observability)
+
+*Appended as 3.23 to preserve the existing numbering; in the top bar the
+button sits between **Usage** and **Pricing**.*
+
+| | |
+| --- | --- |
+| Page title | `API activity` |
+| Component | `components/ApiActivityView.tsx` |
+| Purpose | inspect metadata-only runtime API observability (observed services, endpoints, sessions, certificate state); observation runs are launched from the CLI, the desktop inspects |
+| CLI equivalent | `api-tracker observe …` (and `api-tracker run --observe=off\|connection\|metadata`) |
+
+- Intro (muted): "Metadata only — endpoint paths are sanitized;
+  request/response bodies, header values, cookies, and query strings are
+  never stored, and your traffic never leaves this device."
+- Tab bar, exact labels: **Overview · Sessions · Certificate · Settings ·
+  Diagnostics · Privacy**.
+  - **Overview** — observed API services and their sanitized endpoints
+    with request/error/latency aggregates; drill-down per service.
+  - **Sessions** — recorded observation sessions (most recent 50) with
+    their per-session request events.
+  - **Certificate** — per-vault observation CA state (create / export /
+    remove); certificate and delete actions reauthenticate through the
+    shared **ReauthDialog**.
+  - **Settings** — observation retention and mode preferences.
+  - **Diagnostics** — compatibility results and honest visibility notes
+    (e.g. QUIC/HTTP-3 bypass, certificate pinning, runtimes that ignore
+    trust variables).
+  - **Privacy** — the metadata-only guarantees, including "The certificate
+    can be removed at any time from the Certificate tab."
+- Honesty guarantee: the screen never renders request/response bodies,
+  header values, query strings, or secret values — metadata only, matching
+  the privacy model in `docs/observability/PRIVACY_MODEL.md`.
+- Launching observation is CLI-only (`api-tracker observe`, `run
+  --observe`); the desktop screen inspects and manages what was recorded.
+
 ---
 
 ## 4. Requirement → UI mapping
@@ -1017,6 +1054,8 @@ the per-screen sections above and asserted per test in the test plan.
 | Offline operation | everything local; failed syncs change nothing | — | shared | — | no | yes |
 | Templates & stack detection | Templates | **Details / apply**, **Detect** | shared | no | no | yes |
 | Versioned pricing | Pricing | **Save override** / **Validate and import** | shared | no | no | yes |
+| Runtime API observability (inspect) | API activity → Overview/Sessions/Diagnostics | *(navigate; runs start via CLI `api-tracker observe` / `run --observe`)* | shared (launch is CLI) | no | no | yes |
+| Observation CA management | API activity → Certificate | **Certificate** tab actions (ReauthDialog for cert/delete) | shared | no | no | yes |
 | Provider-account identity | Provider detail → **Sync account identity** | **Sync account identity** | shared | yes | admin/credential connection | no (OpenAI: honestly unsupported) |
 | Provider-created test keys | Credential detail → **Create test key…** | **Create test key…** | shared | yes | OpenAI/Supabase admin | no |
 | Provider-side revocation | Credential detail → **Revoke at provider…** | **Revoke at provider…** | shared | yes | admin connection | no |
@@ -1039,3 +1078,14 @@ declined (undocumented units); no per-key permission *changes* anywhere
 (dashboard or rotation); no API-issued short-lived credentials; OpenAI has
 no account-identity endpoint; Anthropic revoke is a soft archive;
 GitHub/Vercel destinations verify by existence only (write-only APIs).
+
+---
+
+## Addendum: verification baseline
+
+The verbatim-label baseline of this document was verified against commit
+`7605142`. The **API activity** additions (sitemap entry, top-bar label,
+section 3.23, and the runtime-observability mapping rows) reflect the
+`feat/runtime-api-observability` branch; see the gate documents under
+`docs/observability/` for the authoritative architecture, threat model,
+and privacy model.
