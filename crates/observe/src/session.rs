@@ -233,6 +233,14 @@ pub fn run_monitored(
     // 8. Finalize on the main thread (the writer is done, no concurrent writes).
     let attributions =
         attribution::attribute_session(vault.connection(), &session_id, &params.injected)?;
+    // Attribution just backfilled credential_id onto this session's events. If
+    // the periodic monitor already rolled up the session's earlier hours while
+    // those events were still unattributed, their per-credential buckets are
+    // missing and the watermark has moved past them; recompute exactly this
+    // session's hour range (watermark untouched) so they are restored.
+    if let Ok(Some((first_at, last_at))) = span_of_session_events(vault.connection(), &session_id) {
+        let _ = aggregate::reroll_hours(vault.connection(), &first_at, &last_at);
+    }
     let _ = aggregate::roll_up(vault.connection(), &clock::now_rfc3339());
     let _ = retention::sweep(vault.connection());
     store::finish_session(vault.connection(), &session_id, exit_code)?;
@@ -244,6 +252,23 @@ pub fn run_monitored(
         exit_code,
         attributions,
     })
+}
+
+/// The `(MIN(at), MAX(at))` timestamp span of a session's recorded events, or
+/// `None` if it recorded none.
+fn span_of_session_events(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT MIN(at), MAX(at) FROM runtime_request_events WHERE session_id = ?1",
+        [session_id],
+        |r| {
+            let a: Option<String> = r.get(0)?;
+            let b: Option<String> = r.get(1)?;
+            Ok(a.zip(b))
+        },
+    )
 }
 
 /// The writer thread: owns its own DB connection and persists observed events.

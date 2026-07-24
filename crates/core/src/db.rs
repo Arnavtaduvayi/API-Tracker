@@ -858,17 +858,6 @@ CREATE TABLE observe_internal_allowlist (
     created_at TEXT NOT NULL,
     PRIMARY KEY (project_id, host, port)
 ) STRICT;
-
--- Rolling baselines for warm-up / regression alert rules (latency, volume).
-CREATE TABLE runtime_alert_baselines (
-    rule_key     TEXT NOT NULL,
-    metric       TEXT NOT NULL,
-    value        REAL NOT NULL,
-    sample_count INTEGER NOT NULL DEFAULT 0,
-    window_start TEXT,
-    updated_at   TEXT NOT NULL,
-    PRIMARY KEY (rule_key, metric)
-) STRICT;
 "#,
     },
 ];

@@ -1824,6 +1824,15 @@ impl UnlockedVault {
         let model = self.credential_model(&row)?;
         self.conn
             .execute("DELETE FROM credentials WHERE id = ?1", [&row.id])?;
+        // Events SET NULL and attributions cascade on the FK, but the
+        // per-credential metric buckets have no FK (a '' sentinel, not NULL, is
+        // the all-credential row), so clear this credential's buckets explicitly
+        // — otherwise its per-credential traffic counters survive deletion until
+        // aggregate retention expires them.
+        self.conn.execute(
+            "DELETE FROM runtime_metric_buckets WHERE credential_id = ?1",
+            [&row.id],
+        )?;
         audit::record(
             &self.conn,
             "credential_deleted",

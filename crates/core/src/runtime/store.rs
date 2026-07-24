@@ -18,6 +18,17 @@ fn new_id() -> String {
 
 // --- Services (the automatic API inventory) --------------------------------
 
+/// Longest host string we will store (RFC 1123 maximum). Hosts normally come
+/// from the policy-validated CONNECT authority, but never persist an over-long
+/// or empty host into the permanent inventory.
+const MAX_HOST_LEN: usize = 253;
+/// Cap on distinct services in the inventory. Past this, new hosts fold into a
+/// single shared `(other)` service so a wildcard-DNS / random-host flood cannot
+/// grow the inventory (and its per-service metric buckets) without bound.
+const MAX_SERVICES: i64 = 5000;
+/// Sentinel host for folded-over services / oversized hosts.
+const OVERFLOW_HOST: &str = "(other)";
+
 /// Find-or-create the service row for `host`. Returns `(service_id,
 /// previously_known)` where `previously_known` is false only when this call
 /// created the row (i.e. the host was first observed now).
@@ -28,7 +39,10 @@ pub fn upsert_service(
     is_internal: bool,
     now: &str,
 ) -> Result<(String, bool)> {
-    let host = host.trim().to_ascii_lowercase();
+    let mut host = host.trim().to_ascii_lowercase();
+    if host.is_empty() || host.len() > MAX_HOST_LEN {
+        host = OVERFLOW_HOST.to_string();
+    }
     if let Some(id) = conn
         .query_row(
             "SELECT id FROM observed_api_services WHERE host = ?1",
@@ -45,6 +59,15 @@ pub fn upsert_service(
             params![now, provider_id, id],
         )?;
         return Ok((id, true));
+    }
+    // A genuinely new host: enforce the cardinality cap before creating a row.
+    if host != OVERFLOW_HOST {
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM observed_api_services", [], |r| {
+            r.get(0)
+        })?;
+        if count >= MAX_SERVICES {
+            return upsert_service(conn, OVERFLOW_HOST, None, is_internal, now);
+        }
     }
     let id = new_id();
     let classification = if is_internal {
@@ -148,6 +171,14 @@ pub fn set_service_correction(
 
 // --- Endpoints -------------------------------------------------------------
 
+/// Cap on distinct endpoints per service. The sanitizer bounds each template's
+/// length and segment count, but distinct non-numeric word segments can still
+/// produce unbounded templates; past this cap new templates fold into a shared
+/// `/:other` endpoint.
+const MAX_ENDPOINTS_PER_SERVICE: i64 = 2000;
+/// Sentinel path template for folded-over endpoints.
+const OVERFLOW_TEMPLATE: &str = "/:other";
+
 /// Find-or-create the endpoint row. Returns `(endpoint_id, previously_known)`.
 pub fn upsert_endpoint(
     conn: &Connection,
@@ -171,6 +202,24 @@ pub fn upsert_endpoint(
             params![now, id],
         )?;
         return Ok((id, true));
+    }
+    // A genuinely new template: enforce the per-service cardinality cap.
+    if path_template != OVERFLOW_TEMPLATE {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM observed_endpoints WHERE service_id = ?1",
+            [service_id],
+            |r| r.get(0),
+        )?;
+        if count >= MAX_ENDPOINTS_PER_SERVICE {
+            return upsert_endpoint(
+                conn,
+                service_id,
+                method,
+                OVERFLOW_TEMPLATE,
+                Confidence::Low,
+                now,
+            );
+        }
     }
     let id = new_id();
     conn.execute(
@@ -891,8 +940,8 @@ pub fn delete_project_data(conn: &Connection, project_id: &str) -> Result<()> {
 }
 
 /// Delete ALL observability data (events, buckets, sessions, endpoints,
-/// services, attributions, compat, baselines, allowlist). Does NOT touch the
-/// certificate state — removing the CA is a separate, explicit action.
+/// services, attributions, compat, allowlist). Does NOT touch the certificate
+/// state — removing the CA is a separate, explicit action.
 pub fn delete_all(conn: &Connection) -> Result<()> {
     for table in [
         "runtime_request_events",
@@ -903,7 +952,6 @@ pub fn delete_all(conn: &Connection) -> Result<()> {
         "observed_endpoints",
         "observed_api_services",
         "observe_internal_allowlist",
-        "runtime_alert_baselines",
     ] {
         conn.execute(&format!("DELETE FROM {table}"), [])?;
     }
@@ -992,6 +1040,27 @@ mod tests {
             observation_source: ObservationSource::Intercept,
             transport_error: TransportError::None,
         }
+    }
+
+    #[test]
+    fn oversized_or_empty_host_folds_into_overflow_service() {
+        let conn = mem();
+        let now = clock::now_rfc3339();
+        let huge = "a".repeat(MAX_HOST_LEN + 50);
+        let (svc_huge, _) = upsert_service(&conn, &huge, None, false, &now).unwrap();
+        let (svc_empty, _) = upsert_service(&conn, "   ", None, false, &now).unwrap();
+        // Both fold into the single shared overflow service, so the raw
+        // over-long host never lands in the inventory.
+        assert_eq!(svc_huge, svc_empty);
+        let stored_host: String = conn
+            .query_row(
+                "SELECT host FROM observed_api_services WHERE id = ?1",
+                [&svc_huge],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_host, OVERFLOW_HOST);
+        assert!(!stored_host.contains(&huge));
     }
 
     #[test]

@@ -29,18 +29,27 @@ const COUNTER_COLS: &str = "total, c2xx, c3xx, c4xx, c5xx, auth_errors, forbidde
      lat_le_500, lat_le_1000, lat_le_2500, lat_le_5000, lat_le_10000, lat_gt_10000";
 
 /// The aggregate expressions over `runtime_request_events`, in COUNTER_COLS order.
+///
+/// EVERY SUM is wrapped in COALESCE(...,0). SQLite's SUM over a group where the
+/// operand is NULL for every row returns NULL (not 0). status_class/outcome/
+/// latency are NULL for transport-failure events, so an hour (or an empty
+/// scope) whose rows are all transport failures would otherwise yield NULL —
+/// which (a) fails the STRICT NOT NULL columns in runtime_metric_buckets,
+/// permanently bricking roll_up and all downstream aggregation, and (b) errors
+/// metrics_from_row (InvalidColumnType Null) on the empty-state view every user
+/// sees first. COALESCE makes both cases a clean 0.
 const EVENT_AGG: &str = "COUNT(*), \
-     SUM(status_class='2xx'), SUM(status_class='3xx'), SUM(status_class='4xx'), SUM(status_class='5xx'), \
-     SUM(outcome='auth_error'), SUM(status_code=403), SUM(outcome='rate_limited'), \
-     SUM(outcome='server_error'), SUM(outcome='transport_error'), SUM(outcome='tls_error'), \
+     COALESCE(SUM(status_class='2xx'),0), COALESCE(SUM(status_class='3xx'),0), COALESCE(SUM(status_class='4xx'),0), COALESCE(SUM(status_class='5xx'),0), \
+     COALESCE(SUM(outcome='auth_error'),0), COALESCE(SUM(status_code=403),0), COALESCE(SUM(outcome='rate_limited'),0), \
+     COALESCE(SUM(outcome='server_error'),0), COALESCE(SUM(outcome='transport_error'),0), COALESCE(SUM(outcome='tls_error'),0), \
      COALESCE(SUM(request_bytes),0), COALESCE(SUM(response_bytes),0), \
-     SUM(latency_ms<=1), SUM(latency_ms>1 AND latency_ms<=2), SUM(latency_ms>2 AND latency_ms<=5), \
-     SUM(latency_ms>5 AND latency_ms<=10), SUM(latency_ms>10 AND latency_ms<=25), \
-     SUM(latency_ms>25 AND latency_ms<=50), SUM(latency_ms>50 AND latency_ms<=100), \
-     SUM(latency_ms>100 AND latency_ms<=250), SUM(latency_ms>250 AND latency_ms<=500), \
-     SUM(latency_ms>500 AND latency_ms<=1000), SUM(latency_ms>1000 AND latency_ms<=2500), \
-     SUM(latency_ms>2500 AND latency_ms<=5000), SUM(latency_ms>5000 AND latency_ms<=10000), \
-     SUM(latency_ms>10000)";
+     COALESCE(SUM(latency_ms<=1),0), COALESCE(SUM(latency_ms>1 AND latency_ms<=2),0), COALESCE(SUM(latency_ms>2 AND latency_ms<=5),0), \
+     COALESCE(SUM(latency_ms>5 AND latency_ms<=10),0), COALESCE(SUM(latency_ms>10 AND latency_ms<=25),0), \
+     COALESCE(SUM(latency_ms>25 AND latency_ms<=50),0), COALESCE(SUM(latency_ms>50 AND latency_ms<=100),0), \
+     COALESCE(SUM(latency_ms>100 AND latency_ms<=250),0), COALESCE(SUM(latency_ms>250 AND latency_ms<=500),0), \
+     COALESCE(SUM(latency_ms>500 AND latency_ms<=1000),0), COALESCE(SUM(latency_ms>1000 AND latency_ms<=2500),0), \
+     COALESCE(SUM(latency_ms>2500 AND latency_ms<=5000),0), COALESCE(SUM(latency_ms>5000 AND latency_ms<=10000),0), \
+     COALESCE(SUM(latency_ms>10000),0)";
 
 /// Aggregated metrics for a scope + window. `success` = 2xx/3xx, everything
 /// else counted as an error subclass; the two are never conflated.
@@ -166,34 +175,41 @@ pub fn overview_metrics(conn: &Connection, since: Option<&str>) -> Result<Metric
     Ok(conn.query_row(&sql, params![since.unwrap_or("")], metrics_from_row)?)
 }
 
+/// The last hour processed by [`roll_up`] (the aggregation watermark), if any.
+/// Retention uses this so it never prunes an event that was not yet rolled into
+/// a metric bucket.
+pub(crate) fn watermark(conn: &Connection) -> Result<Option<String>> {
+    store::meta_get(conn, WATERMARK)
+}
+
 fn hour_floor(ts: &str) -> String {
-    // "YYYY-MM-DDTHH:..." -> "YYYY-MM-DDTHH:00:00Z"
-    if ts.len() >= 13 {
-        format!("{}:00:00Z", &ts[..13])
-    } else {
-        "1970-01-01T00:00:00Z".to_string()
+    // "YYYY-MM-DDTHH:..." -> "YYYY-MM-DDTHH:00:00Z". `get(..13)` (not `[..13]`)
+    // returns None on a short OR non-char-boundary watermark, so a corrupted
+    // vault_meta value fails safe to the epoch instead of panicking the
+    // monitor/session-finalize path.
+    match ts.get(..13) {
+        Some(prefix) => format!("{prefix}:00:00Z"),
+        None => "1970-01-01T00:00:00Z".to_string(),
     }
 }
 
-/// Idempotently roll up complete hours (and days) up to `now`.
-pub fn roll_up(conn: &Connection, now: &str) -> Result<usize> {
-    let watermark =
-        store::meta_get(conn, WATERMARK)?.unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
-    let from_hour = hour_floor(&watermark);
-    let current_hour = hour_floor(now);
-    if current_hour <= from_hour {
-        return Ok(0);
+fn day_floor(hour: &str) -> String {
+    match hour.get(..10) {
+        Some(d) => format!("{d}T00:00:00Z"),
+        None => "1970-01-01T00:00:00Z".to_string(),
     }
+}
 
+/// Delete and recompute the hour buckets (all-credential and per-credential)
+/// for the half-open range `[from_hour, to_hour)` from the raw events.
+fn recompute_hour_buckets(conn: &Connection, from_hour: &str, to_hour: &str) -> Result<()> {
     let insert_cols = format!(
         "id, granularity, bucket_start, project_id, service_id, endpoint_id, credential_id, first_at, last_at, {COUNTER_COLS}"
     );
-
-    // Recompute the affected hour buckets: delete then insert (idempotent).
     conn.execute(
         "DELETE FROM runtime_metric_buckets
          WHERE granularity = 'hour' AND bucket_start >= ?1 AND bucket_start < ?2",
-        params![from_hour, current_hour],
+        params![from_hour, to_hour],
     )?;
     // all-credential hour buckets
     conn.execute(
@@ -206,7 +222,7 @@ pub fn roll_up(conn: &Connection, now: &str) -> Result<usize> {
              WHERE at >= ?1 AND at < ?2
              GROUP BY strftime('%Y-%m-%dT%H:00:00Z', at), project_id, service_id"
         ),
-        params![from_hour, current_hour],
+        params![from_hour, to_hour],
     )?;
     // per-credential hour buckets
     conn.execute(
@@ -219,19 +235,27 @@ pub fn roll_up(conn: &Connection, now: &str) -> Result<usize> {
              WHERE at >= ?1 AND at < ?2 AND credential_id IS NOT NULL
              GROUP BY strftime('%Y-%m-%dT%H:00:00Z', at), project_id, service_id, credential_id"
         ),
-        params![from_hour, current_hour],
+        params![from_hour, to_hour],
     )?;
+    Ok(())
+}
 
-    // Recompute day buckets from the hour buckets (which persist beyond event
-    // retention), for the affected days.
-    let from_day = format!("{}T00:00:00Z", &from_hour[..10]);
+/// Delete and recompute the day buckets for every day `>= from_day` from the
+/// hour buckets (which persist beyond the short event retention). The DELETE
+/// and the source SELECT MUST use the SAME lower bound: binding the SELECT to a
+/// mid-day watermark instead dropped that day's earlier hours, permanently
+/// undercounting every day that saw more than one roll_up.
+fn recompute_day_buckets(conn: &Connection, from_day: &str) -> Result<()> {
+    let insert_cols = format!(
+        "id, granularity, bucket_start, project_id, service_id, endpoint_id, credential_id, first_at, last_at, {COUNTER_COLS}"
+    );
     conn.execute(
         "DELETE FROM runtime_metric_buckets WHERE granularity = 'day' AND bucket_start >= ?1",
         params![from_day],
     )?;
     let sum_cols = COUNTER_COLS
         .split(',')
-        .map(|c| format!("SUM({})", c.trim()))
+        .map(|c| format!("COALESCE(SUM({}),0)", c.trim()))
         .collect::<Vec<_>>()
         .join(", ");
     conn.execute(
@@ -244,11 +268,66 @@ pub fn roll_up(conn: &Connection, now: &str) -> Result<usize> {
              WHERE granularity = 'hour' AND bucket_start >= ?1
              GROUP BY strftime('%Y-%m-%dT00:00:00Z', bucket_start), project_id, service_id, credential_id"
         ),
-        params![from_hour],
+        params![from_day],
     )?;
+    Ok(())
+}
 
-    store::meta_set(conn, WATERMARK, &current_hour)?;
+/// Idempotently roll up complete hours (and days) up to `now`.
+pub fn roll_up(conn: &Connection, now: &str) -> Result<usize> {
+    let watermark =
+        store::meta_get(conn, WATERMARK)?.unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string());
+    let from_hour = hour_floor(&watermark);
+    let current_hour = hour_floor(now);
+    if current_hour <= from_hour {
+        return Ok(0);
+    }
+
+    // The delete+insert+watermark sequence must be atomic: a crash or a
+    // concurrent roll_up (desktop monitor + CLI finalize) interleaving these
+    // statements could leave day buckets deleted-but-not-reinserted, or make
+    // the loser's INSERT abort on the UNIQUE constraint mid-way. IMMEDIATE
+    // takes the write lock up front; on any `?` the transaction drops and rolls
+    // back rather than leaving partial state.
+    let tx = conn.unchecked_transaction()?;
+    recompute_hour_buckets(&tx, &from_hour, &current_hour)?;
+    recompute_day_buckets(&tx, &day_floor(&from_hour))?;
+    store::meta_set(&tx, WATERMARK, &current_hour)?;
+    tx.commit()?;
     Ok(1)
+}
+
+/// Recompute the metric buckets for the hour range covering `[first_at,
+/// last_at]`, regardless of the watermark. Called at session finalize AFTER
+/// attribution backfills `credential_id` onto the session's events: the
+/// periodic monitor may have already rolled up the session's earlier hours
+/// while those events still had `credential_id = NULL`, producing no
+/// per-credential buckets for them and advancing the watermark so they were
+/// never revisited. Recomputing the session's exact hours restores the
+/// per-credential buckets without disturbing the watermark.
+pub fn reroll_hours(conn: &Connection, first_at: &str, last_at: &str) -> Result<()> {
+    let from_hour = hour_floor(first_at);
+    // Make the range inclusive of the last event's hour by advancing one hour.
+    let to_hour = next_hour(&hour_floor(last_at));
+    if to_hour <= from_hour {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    recompute_hour_buckets(&tx, &from_hour, &to_hour)?;
+    recompute_day_buckets(&tx, &day_floor(&from_hour))?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The hour-floor string one hour after `hour_floor_str` ("…THH:00:00Z"), with
+/// correct day/month/year rollover. Re-floored through `hour_floor` so its
+/// format matches the other bounds exactly, whatever `to_rfc3339` emits.
+fn next_hour(hour_floor_str: &str) -> String {
+    use time::format_description::well_known::Rfc3339;
+    match time::OffsetDateTime::parse(hour_floor_str, &Rfc3339) {
+        Ok(dt) => hour_floor(&crate::clock::to_rfc3339(dt + time::Duration::hours(1))),
+        Err(_) => hour_floor_str.to_string(),
+    }
 }
 
 /// A point in a time series (for the requests-over-time chart).
@@ -438,5 +517,225 @@ mod tests {
         // the hour bucket totals match the events
         let total: i64 = conn.query_row("SELECT SUM(total) FROM runtime_metric_buckets WHERE granularity='hour' AND credential_id=''", [], |r| r.get(0)).unwrap();
         assert_eq!(total, 11);
+    }
+
+    #[test]
+    fn rollup_survives_an_hour_of_only_transport_errors() {
+        // Regression: an hour whose events are ALL transport failures has NULL
+        // status_class/outcome/latency, so bare SUM() returned NULL and the
+        // STRICT NOT NULL insert failed — permanently bricking roll_up.
+        let conn = mem();
+        testutil::seed_project(&conn, "p1", "web");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let now = "2026-07-24T10:30:00Z";
+        let (svc, _) = store::upsert_service(&conn, "api.down.example", None, false, now).unwrap();
+        for _ in 0..6 {
+            store::insert_request_event(
+                &conn,
+                &sid,
+                "p1",
+                &svc,
+                None,
+                now,
+                &ev(0, 0, TransportError::Refused),
+                false,
+            )
+            .unwrap();
+        }
+        roll_up(&conn, "2026-07-24T12:00:00Z")
+            .expect("roll_up must survive a transport-error-only hour");
+        let (total, c2xx, transport): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT total, c2xx, transport_errors FROM runtime_metric_buckets
+                 WHERE granularity='hour' AND credential_id=''",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(total, 6);
+        assert_eq!(c2xx, 0);
+        assert_eq!(transport, 6);
+    }
+
+    #[test]
+    fn day_bucket_includes_all_hours_not_just_since_watermark() {
+        // Regression: the day recompute SELECT was bound to the watermark hour
+        // instead of the start of the day, so a second same-day roll_up dropped
+        // that day's earlier hours and undercounted the day bucket.
+        let conn = mem();
+        testutil::seed_project(&conn, "p1", "web");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let (svc, _) = store::upsert_service(
+            &conn,
+            "api.openai.com",
+            Some("openai"),
+            false,
+            "2026-07-24T09:00:00Z",
+        )
+        .unwrap();
+        for _ in 0..2 {
+            store::insert_request_event(
+                &conn,
+                &sid,
+                "p1",
+                &svc,
+                None,
+                "2026-07-24T09:30:00Z",
+                &ev(200, 10, TransportError::None),
+                false,
+            )
+            .unwrap();
+        }
+        roll_up(&conn, "2026-07-24T10:00:00Z").unwrap(); // processes hour 09
+        store::insert_request_event(
+            &conn,
+            &sid,
+            "p1",
+            &svc,
+            None,
+            "2026-07-24T10:30:00Z",
+            &ev(200, 10, TransportError::None),
+            false,
+        )
+        .unwrap();
+        roll_up(&conn, "2026-07-24T11:00:00Z").unwrap(); // processes hour 10
+        let day_total: i64 = conn
+            .query_row(
+                "SELECT total FROM runtime_metric_buckets
+                 WHERE granularity='day' AND credential_id='' AND service_id=?1",
+                params![svc],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(day_total, 3, "day bucket must include hour 09 + hour 10");
+        let hour_total: i64 = conn
+            .query_row(
+                "SELECT SUM(total) FROM runtime_metric_buckets
+                 WHERE granularity='hour' AND credential_id=''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hour_total, 3);
+    }
+
+    #[test]
+    fn reroll_hours_backfills_per_credential_buckets_after_attribution() {
+        // Regression: the monitor rolls up a session's hours while credential_id
+        // is still NULL (no per-credential bucket), advancing the watermark;
+        // after attribution backfills credential_id, reroll_hours recomputes
+        // those hours so the per-credential bucket appears.
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::migrate(&mut conn).unwrap();
+        // foreign_keys OFF so we can set a synthetic credential_id without
+        // creating a full credential row (this test exercises bucket SQL only).
+        conn.pragma_update(None, "foreign_keys", 0).unwrap();
+        testutil::seed_project(&conn, "p1", "web");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let (svc, _) = store::upsert_service(
+            &conn,
+            "api.openai.com",
+            Some("openai"),
+            false,
+            "2026-07-24T09:00:00Z",
+        )
+        .unwrap();
+        for _ in 0..3 {
+            store::insert_request_event(
+                &conn,
+                &sid,
+                "p1",
+                &svc,
+                None,
+                "2026-07-24T09:30:00Z",
+                &ev(200, 10, TransportError::None),
+                false,
+            )
+            .unwrap();
+        }
+        // Monitor rolls up hour 09 while credential_id is NULL.
+        roll_up(&conn, "2026-07-24T10:00:00Z").unwrap();
+        let per_cred_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_metric_buckets WHERE granularity='hour' AND credential_id<>''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(per_cred_before, 0, "no per-credential bucket yet");
+
+        // Attribution backfills the credential onto the session's events.
+        conn.execute(
+            "UPDATE runtime_request_events SET credential_id = 'cred1' WHERE session_id = ?1",
+            params![sid],
+        )
+        .unwrap();
+        // reroll the session's hour range (watermark untouched).
+        reroll_hours(&conn, "2026-07-24T09:30:00Z", "2026-07-24T09:30:00Z").unwrap();
+
+        let (cred, total): (String, i64) = conn
+            .query_row(
+                "SELECT credential_id, total FROM runtime_metric_buckets
+                 WHERE granularity='hour' AND credential_id<>''",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cred, "cred1");
+        assert_eq!(total, 3, "per-credential bucket restored after reroll");
+        // The all-credential bucket is unchanged (still total 3).
+        let all: i64 = conn
+            .query_row(
+                "SELECT total FROM runtime_metric_buckets WHERE granularity='hour' AND credential_id=''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(all, 3);
+    }
+
+    #[test]
+    fn empty_scope_metrics_return_zeros_not_error() {
+        // Regression: SUM over zero rows is NULL, so metrics_from_row errored
+        // (InvalidColumnType Null) on the empty-state view every user sees first.
+        let conn = mem();
+        let m = overview_metrics(&conn, None).expect("overview on empty DB must not error");
+        assert_eq!(m.total, 0);
+        assert_eq!(m.success, 0);
+        assert_eq!(m.error_rate, 0.0);
+        assert!(m.p50_ms.is_none());
+        let sm = service_metrics(&conn, "no-such-service", Some("2026-07-24T00:00:00Z"))
+            .expect("service metrics on an empty window must not error");
+        assert_eq!(sm.total, 0);
     }
 }

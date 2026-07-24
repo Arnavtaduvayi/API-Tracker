@@ -19,9 +19,18 @@ pub fn sweep_with(
 ) -> Result<(usize, usize)> {
     let event_cutoff = clock::to_rfc3339(now - Duration::days(i64::from(event_days)));
     let agg_cutoff = clock::to_rfc3339(now - Duration::days(i64::from(agg_days)));
+    // Bound event deletion by the aggregation watermark AS WELL as by age: never
+    // delete an event that has not yet been rolled into a metric bucket. Without
+    // this, a stalled or not-yet-run roll_up silently converts short (7-day)
+    // event retention into permanent loss of that hour's metrics. If roll_up has
+    // never run (no watermark), prune nothing.
+    let event_bound = match crate::runtime::aggregate::watermark(conn)? {
+        None => String::new(),
+        Some(w) => std::cmp::min(w, event_cutoff.clone()),
+    };
     let events = conn.execute(
         "DELETE FROM runtime_request_events WHERE at < ?1",
-        params![event_cutoff],
+        params![event_bound],
     )?;
     let buckets = conn.execute(
         "DELETE FROM runtime_metric_buckets WHERE bucket_start < ?1",
@@ -94,6 +103,10 @@ mod tests {
         req(&clock::to_rfc3339(now - Duration::days(30)));
         req(&clock::to_rfc3339(now - Duration::hours(1)));
 
+        // Roll up first, exactly as run_monitor does before sweeping, so the
+        // watermark advances and retention is allowed to prune aggregated events.
+        crate::runtime::aggregate::roll_up(&conn, &clock::to_rfc3339(now)).unwrap();
+
         let (events, _buckets) = sweep_with(&conn, 7, 90, now).unwrap();
         assert_eq!(events, 1, "only the 30-day-old event is pruned");
         let remaining: i64 = conn
@@ -102,5 +115,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn sweep_never_deletes_events_not_yet_aggregated() {
+        // Regression: retention pruned by age alone. If roll_up has not yet
+        // covered an old event (no/older watermark), deleting it would destroy
+        // the only record of that hour's metrics. With no watermark, prune none.
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::migrate(&mut conn).unwrap();
+        conn.pragma_update(None, "foreign_keys", 1).unwrap();
+        testutil::seed_project(&conn, "p1", "web");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.openai.com", None, false, "2026-01-01T00:00:00Z")
+                .unwrap();
+        let now = time::macros::datetime!(2026-07-24 12:00:00 UTC);
+        let e = ObservedRequest {
+            host: "api.openai.com".into(),
+            port: 443,
+            method: HttpMethod::Get,
+            path_template: "/v1/models".into(),
+            template_confidence: crate::providers::Confidence::High,
+            status_code: Some(200),
+            req_content_kind: None,
+            resp_content_kind: None,
+            had_authorization: false,
+            latency_ms: Some(10),
+            request_bytes: Some(1),
+            response_bytes: Some(1),
+            protocol: Protocol::Http11,
+            observation_source: ObservationSource::Intercept,
+            transport_error: TransportError::None,
+        };
+        // An old event, but roll_up is never called: no watermark exists.
+        store::insert_request_event(
+            &conn,
+            &sid,
+            "p1",
+            &svc,
+            None,
+            &clock::to_rfc3339(now - Duration::days(30)),
+            &e,
+            false,
+        )
+        .unwrap();
+        let (events, _buckets) = sweep_with(&conn, 7, 90, now).unwrap();
+        assert_eq!(events, 0, "un-aggregated events must never be pruned");
     }
 }
