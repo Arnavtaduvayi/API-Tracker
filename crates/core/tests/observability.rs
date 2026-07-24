@@ -617,3 +617,127 @@ fn observe_injected_resolves_reference_to_the_root_credentials_version() {
         "reference must resolve to the ROOT's value_version, not the default 1"
     );
 }
+
+#[test]
+fn raw_database_and_wal_never_contain_path_or_query_canaries() {
+    // Privacy proof at the persistence layer: after a sanitized event derived
+    // from a canary-laden raw request target is stored, the RAW bytes of the
+    // vault DB file (and its -wal / -shm sidecars) must not contain any canary.
+    // The observability metadata columns (host, path_template) are plaintext by
+    // design, so this raw-byte scan is meaningful and not defeated by
+    // value-level encryption elsewhere in the vault.
+    use api_tracker_core::runtime::model::{
+        ContentKind, HttpMethod, ObservationMode, ObservationSource, ObservedRequest, Protocol,
+        TransportError,
+    };
+    use api_tracker_core::runtime::{sanitize, store};
+
+    let (_dir, paths, mut v) = new_vault();
+    let project = add_project(&mut v, "app");
+    let sid = v
+        .observe_open_session("app", ObservationMode::Metadata, "cli_run", "cmd", &[])
+        .unwrap();
+    let now = api_tracker_core::clock::now_rfc3339();
+    let (svc, _) = store::upsert_service(
+        v.connection(),
+        "api.example.com",
+        Some("openai"),
+        false,
+        &now,
+    )
+    .unwrap();
+
+    // Distinctive canaries embedded where a leak could occur: a credential in
+    // the path, and secrets in the query string.
+    const PATH_SECRET: &str = "sk-proj-LEAKCANARYZZ0000000000";
+    const QUERY_SECRET: &str = "QUERYCANARYZZ";
+    const EMAIL: &str = "canary@leak.test";
+    let raw_target =
+        format!("/password-reset/{PATH_SECRET}/step?token={QUERY_SECRET}&email={EMAIL}");
+    let (path_template, confidence) = sanitize::sanitize_path(&raw_target);
+
+    // Structured assertion: the sanitizer stripped the secrets before storage.
+    assert!(
+        !path_template.contains("LEAKCANARY"),
+        "path secret survived sanitize"
+    );
+    assert!(
+        !path_template.contains("QUERYCANARY"),
+        "query secret survived sanitize"
+    );
+    assert!(!path_template.contains('@'), "email survived sanitize");
+
+    let req = ObservedRequest {
+        host: "api.example.com".into(),
+        port: 443,
+        method: HttpMethod::Post,
+        path_template,
+        template_confidence: confidence,
+        status_code: Some(200),
+        req_content_kind: Some(ContentKind::Json),
+        resp_content_kind: Some(ContentKind::Json),
+        had_authorization: true, // presence only; the value is never stored
+        latency_ms: Some(12),
+        request_bytes: Some(100),
+        response_bytes: Some(200),
+        protocol: Protocol::Http11,
+        observation_source: ObservationSource::Intercept,
+        transport_error: TransportError::None,
+    };
+    store::insert_request_event(
+        v.connection(),
+        &sid,
+        &project.id,
+        &svc,
+        None,
+        &now,
+        &req,
+        false,
+    )
+    .unwrap();
+
+    // Flush the WAL into the main DB file so the scan sees committed data.
+    v.connection()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+
+    // Structured assertion: the stored template is the sanitized form.
+    let stored: String = v
+        .connection()
+        .query_row(
+            "SELECT path_template FROM runtime_request_events WHERE session_id = ?1",
+            [&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "/password-reset/:token/step");
+
+    // Raw-artifact assertion: scan the DB file and every sidecar for canaries.
+    let db = paths.db_path();
+    let mut scanned = 0usize;
+    for suffix in ["", "-wal", "-shm"] {
+        let p = if suffix.is_empty() {
+            db.clone()
+        } else {
+            db.with_extension(format!("db{suffix}"))
+        };
+        if let Ok(bytes) = std::fs::read(&p) {
+            scanned += 1;
+            for needle in [
+                PATH_SECRET.as_bytes(),
+                QUERY_SECRET.as_bytes(),
+                EMAIL.as_bytes(),
+                b"LEAKCANARY",
+                b"CANARY",
+            ] {
+                assert!(
+                    bytes.windows(needle.len()).all(|w| w != needle),
+                    "canary {:?} found in raw artifact {}",
+                    String::from_utf8_lossy(needle),
+                    p.display()
+                );
+            }
+        }
+    }
+    assert!(scanned >= 1, "expected to scan at least the DB file");
+}
