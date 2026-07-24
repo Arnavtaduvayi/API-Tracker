@@ -18,6 +18,7 @@
 //!   provider-reported sync).
 
 pub mod aggregate;
+pub mod alerts;
 pub mod attribution;
 pub mod inventory;
 pub mod model;

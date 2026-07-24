@@ -2133,6 +2133,10 @@ impl UnlockedVault {
         // Findings (vault-matched or not) raise an alert; silent coverage
         // gaps are not acceptable in a security tool.
         let _ = self.prune_observability_state();
+        // Runtime observability maintenance: roll up complete hours/days into
+        // metric buckets, then prune expired events/buckets. Best-effort.
+        let _ = crate::runtime::aggregate::roll_up(&self.conn, &clock::now_rfc3339());
+        let _ = crate::runtime::retention::sweep(&self.conn);
         let mut repos_scanned = 0usize;
         let mut repo_findings = 0usize;
         if let Ok(reports) = self.scan_repos_incremental() {
@@ -2196,6 +2200,13 @@ impl UnlockedVault {
                     created += 1;
                 }
             }
+            // Runtime API observability alerts (locally observed traffic).
+            for alert in crate::runtime::alerts::alerts(&self.conn, clock::now(), &label_of)? {
+                active_keys.push(alert.dedup_key.clone());
+                if alerts::upsert(&self.conn, &alert)? {
+                    created += 1;
+                }
+            }
         }
 
         let mut managed = crate::monitor::managed_credential_kinds();
@@ -2208,6 +2219,7 @@ impl UnlockedVault {
             alerts::AlertKind::RotationStuck,
         ]);
         managed.extend(crate::observe::managed_kinds());
+        managed.extend(crate::runtime::alerts::managed_kinds());
         let resolved = alerts::auto_resolve_stale(&self.conn, &managed, &active_keys)?;
         Ok(MonitorSummary {
             repos_scanned,

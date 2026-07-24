@@ -57,6 +57,19 @@ pub enum AlertKind {
     DestinationDrift,
     AccessGrantExpired,
     PricingStale,
+    // --- Runtime API observability (locally observed traffic) ---
+    RuntimeAuthFailures,
+    RuntimeForbidden,
+    RuntimeRateLimited,
+    RuntimeServerErrors,
+    RuntimeTransportFailures,
+    RuntimeTlsFailures,
+    RuntimeApiInactive,
+    RuntimeNewApi,
+    RuntimeUnknownApi,
+    RuntimeOldCredentialVersion,
+    RuntimeRevokedCredentialInUse,
+    RuntimeSharedCredential,
 }
 
 impl AlertKind {
@@ -93,6 +106,18 @@ impl AlertKind {
             AlertKind::DestinationDrift => "destination_drift",
             AlertKind::AccessGrantExpired => "access_grant_expired",
             AlertKind::PricingStale => "pricing_stale",
+            AlertKind::RuntimeAuthFailures => "runtime_auth_failures",
+            AlertKind::RuntimeForbidden => "runtime_forbidden",
+            AlertKind::RuntimeRateLimited => "runtime_rate_limited",
+            AlertKind::RuntimeServerErrors => "runtime_server_errors",
+            AlertKind::RuntimeTransportFailures => "runtime_transport_failures",
+            AlertKind::RuntimeTlsFailures => "runtime_tls_failures",
+            AlertKind::RuntimeApiInactive => "runtime_api_inactive",
+            AlertKind::RuntimeNewApi => "runtime_new_api",
+            AlertKind::RuntimeUnknownApi => "runtime_unknown_api",
+            AlertKind::RuntimeOldCredentialVersion => "runtime_old_credential_version",
+            AlertKind::RuntimeRevokedCredentialInUse => "runtime_revoked_credential_in_use",
+            AlertKind::RuntimeSharedCredential => "runtime_shared_credential",
         }
     }
 }
