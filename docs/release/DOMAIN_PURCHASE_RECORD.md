@@ -12,11 +12,19 @@
   (standard new-registration locks)
 - **Verified:** via authoritative Verisign whois + RDAP on 2026-07-24,
   read-only. No agent payment was involved; no card details exist to record.
-- **Pending user-provided details:** first-year price paid, displayed
-  renewal price, auto-renew status, WHOIS-privacy status, order number
-  (partially redacted). To be filled in when the user supplies them.
-- **DNS / website / email / analytics:** intentionally NOT configured —
-  not yet authorized.
+- **First-year price paid:** $14 (user-reported, paid directly by the user)
+- **Renewal price displayed:** $20/year (user-reported)
+- **Auto-renew:** user's intent is OFF (user-reported; account-side toggle
+  managed by the user in Squarespace — not verified by the agent)
+- **WHOIS privacy:** ACTIVE at no extra charge (verified via public whois:
+  registrant "REDACTED FOR PRIVACY")
+- **Order number:** not recorded (not available to the user at the time of
+  writing; the receipt lives in the user's Squarespace account email)
+- **DNS / website:** configured with the user's authorization on
+  2026-07-24 — four apex A records to GitHub Pages (185.199.108–111.153)
+  and `www` CNAME to `arnavtaduvayi.github.io`, added by the user in
+  Squarespace; the landing site is served from the repository's `gh-pages`
+  branch. Email / analytics: not configured.
 
 ---
 
