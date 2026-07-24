@@ -27,6 +27,7 @@
 pub mod ca;
 pub mod clienthello;
 pub mod policy;
+pub mod proxy;
 pub mod relay;
 pub mod tls;
 pub mod wire;

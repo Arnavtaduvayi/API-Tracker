@@ -148,9 +148,10 @@ fn connection_close(headers: &[httparse::Header<'_>], version: HttpVersion) -> b
     }
 }
 
-/// Read bytes until a complete message head is parsed. Returns the parsed head
-/// and any leftover bytes already read past the head (the start of the body).
-pub fn read_request_head<R: Read>(r: &mut R) -> Result<(RequestHead, Vec<u8>)> {
+/// Read bytes until a complete message head is parsed. Returns the parsed head,
+/// the RAW head bytes (for verbatim forwarding), and any leftover bytes already
+/// read past the head (the start of the body).
+pub fn read_request_head<R: Read>(r: &mut R) -> Result<(RequestHead, Vec<u8>, Vec<u8>)> {
     read_request_head_from(r, Vec::new())
 }
 
@@ -159,7 +160,7 @@ pub fn read_request_head<R: Read>(r: &mut R) -> Result<(RequestHead, Vec<u8>)> {
 pub fn read_request_head_from<R: Read>(
     r: &mut R,
     initial: Vec<u8>,
-) -> Result<(RequestHead, Vec<u8>)> {
+) -> Result<(RequestHead, Vec<u8>, Vec<u8>)> {
     let mut buf: Vec<u8> = initial;
     let mut tmp = [0u8; 4096];
     loop {
@@ -179,6 +180,7 @@ pub fn read_request_head_from<R: Read>(
                 let upgrade = header_str(hs, "upgrade");
                 let host = header_str(hs, "host");
                 let proxy_authorization = header_str(hs, "proxy-authorization");
+                let raw_head = buf[..n].to_vec();
                 let leftover = buf[n..].to_vec();
                 return Ok((
                     RequestHead {
@@ -194,6 +196,7 @@ pub fn read_request_head_from<R: Read>(
                         upgrade,
                         proxy_authorization,
                     },
+                    raw_head,
                     leftover,
                 ));
             }
@@ -213,8 +216,9 @@ pub fn read_request_head_from<R: Read>(
     }
 }
 
-/// Read a complete response head. Returns the head and leftover body bytes.
-pub fn read_response_head<R: Read>(r: &mut R) -> Result<(ResponseHead, Vec<u8>)> {
+/// Read a complete response head. Returns the head, RAW head bytes, and
+/// leftover body bytes.
+pub fn read_response_head<R: Read>(r: &mut R) -> Result<(ResponseHead, Vec<u8>, Vec<u8>)> {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
     loop {
@@ -229,6 +233,7 @@ pub fn read_response_head<R: Read>(r: &mut R) -> Result<(ResponseHead, Vec<u8>)>
                 let chunked = is_chunked(hs);
                 let close = connection_close(hs, version);
                 let content_type = header_str(hs, "content-type");
+                let raw_head = buf[..n].to_vec();
                 let leftover = buf[n..].to_vec();
                 return Ok((
                     ResponseHead {
@@ -239,6 +244,7 @@ pub fn read_response_head<R: Read>(r: &mut R) -> Result<(ResponseHead, Vec<u8>)>
                         connection_close: close,
                         content_type,
                     },
+                    raw_head,
                     leftover,
                 ));
             }
@@ -304,7 +310,8 @@ mod tests {
     fn parses_a_request_head_and_leftover_body() {
         let raw = b"POST /v1/chat?k=SECRET HTTP/1.1\r\nHost: api.openai.com\r\nAuthorization: Bearer sk-SECRET\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 5\r\n\r\nhelloEXTRA";
         let mut c = Cursor::new(raw.to_vec());
-        let (head, leftover) = read_request_head(&mut c).unwrap();
+        let (head, raw_head, leftover) = read_request_head(&mut c).unwrap();
+        assert!(raw_head.starts_with(b"POST /v1/chat"));
         assert_eq!(head.method, "POST");
         assert_eq!(head.target, "/v1/chat?k=SECRET"); // raw; sanitized elsewhere
         assert_eq!(head.host.as_deref(), Some("api.openai.com"));
@@ -319,7 +326,7 @@ mod tests {
     fn parses_response_head_framing() {
         let raw = b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
         let mut c = Cursor::new(raw.to_vec());
-        let (head, _leftover) = read_response_head(&mut c).unwrap();
+        let (head, _raw, _leftover) = read_response_head(&mut c).unwrap();
         assert_eq!(head.status, 429);
         assert!(head.chunked);
         assert_eq!(head.body_framing("GET"), BodyFraming::Chunked);
