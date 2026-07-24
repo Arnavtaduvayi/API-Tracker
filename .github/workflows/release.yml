@@ -53,25 +53,28 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release/api-tracker"
-          out="api-tracker-${{ matrix.target }}"
-          tar -czf "$out.tar.gz" -C "$(dirname "$bin")" api-tracker
+          # The archive ships BOTH entry points: the preferred `tethra`
+          # binary and the legacy `api-tracker` compatibility binary.
+          dir="target/${{ matrix.target }}/release"
+          out="tethra-${{ matrix.target }}"
+          tar -czf "$out.tar.gz" -C "$dir" tethra api-tracker
           shasum -a 256 "$out.tar.gz" > "$out.tar.gz.sha256"
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release/api-tracker.exe"
-          out="api-tracker-${{ matrix.target }}"
-          cp "$bin" "api-tracker.exe"
-          7z a "$out.zip" api-tracker.exe
+          dir="target/${{ matrix.target }}/release"
+          out="tethra-${{ matrix.target }}"
+          cp "$dir/tethra.exe" tethra.exe
+          cp "$dir/api-tracker.exe" api-tracker.exe
+          7z a "$out.zip" tethra.exe api-tracker.exe
           certutil -hashfile "$out.zip" SHA256 > "$out.zip.sha256"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: cli-${{ matrix.target }}
           path: |
-            api-tracker-*.tar.gz*
-            api-tracker-*.zip*
+            tethra-*.tar.gz*
+            tethra-*.zip*
 
   desktop:
     name: Desktop (${{ matrix.os }})
@@ -110,7 +113,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
-          releaseName: "API Tracker ${{ github.ref_name }} (alpha)"
+          releaseName: "Tethra ${{ github.ref_name }} (alpha)"
           releaseBody: "Unsigned public-alpha build. See docs/INSTALL.md and docs/PACKAGING.md."
           releaseDraft: true
           prerelease: true
@@ -131,11 +134,11 @@ jobs:
       # No `|| true`: if checksum generation fails, fail the job rather than
       # publishing artifacts without an integrity manifest.
       - name: Combined checksums
-        run: cd dist && sha256sum api-tracker-* > SHA256SUMS.txt
+        run: cd dist && sha256sum tethra-* > SHA256SUMS.txt
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           draft: true
           prerelease: true
           files: |
-            dist/api-tracker-*
+            dist/tethra-*
             dist/SHA256SUMS.txt

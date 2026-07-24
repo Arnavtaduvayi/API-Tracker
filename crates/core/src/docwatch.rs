@@ -382,7 +382,7 @@ impl HttpFetcher {
             // non-success status (handled as a failed check), never as a
             // fetch of the redirect target.
             .max_redirects(0)
-            .user_agent("api-tracker-docwatch/0.1 (+local, respects conditional requests)")
+            .user_agent("tethra-docwatch/0.1 (+local, respects conditional requests)")
             .build();
         Self {
             agent: config.into(),

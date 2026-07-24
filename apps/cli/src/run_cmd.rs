@@ -1,4 +1,4 @@
-//! `api-tracker run` — secure process injection.
+//! `tethra run` — secure process injection.
 //!
 //! Decrypts only the selected credentials of one project and injects them
 //! into the child process's environment. Values are never written to disk,
@@ -82,9 +82,9 @@ pub fn run(ctx: &Ctx, args: RunArgs) -> Result<()> {
     let program = &args.command[0];
     let mut cmd = std::process::Command::new(program);
     cmd.args(&args.command[1..]);
-    // Do NOT leak API Tracker's own secret environment (passwords, the
+    // Do NOT leak Tethra's own secret environment (passwords, the
     // session token, admin keys) into the child. Deny-by-default over the
-    // whole API_TRACKER_ prefix — an enumerated list here once missed
+    // whole TETHRA_/API_TRACKER_ prefix pair — an enumerated list here once missed
     // API_TRACKER_NEW_PASSWORD (PI-01). The child inherits the rest of the
     // parent environment plus only the credentials we inject.
     api_tracker_core::inject::scrub_own_env(&mut cmd);

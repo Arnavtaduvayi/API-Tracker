@@ -131,7 +131,7 @@ export function ProviderConnectionPanel(props: { provider: string }) {
     <div>
       <h2>Administrative connection</h2>
       <p className="muted">
-        An administrative (organization) key lets API Tracker read usage, costs, and key
+        An administrative (organization) key lets Tethra read usage, costs, and key
         metadata for your whole organization — it is more powerful than an ordinary API key. It
         is stored encrypted in this vault, used only for direct requests to the provider, never
         displayed once stored, and can be removed at any time. All synced data stays on this

@@ -239,7 +239,7 @@ pub enum DriftKind {
     /// A likely secret in a file with no vault counterpart.
     UnmappedSecret,
     /// A mapping exists but no file carries the variable (normal under
-    /// `api-tracker run`; informational).
+    /// `tethra run`; informational).
     MappingNotInFiles,
     /// A production credential's value sits in a development/test file.
     ProductionValueInDevFile,
@@ -264,7 +264,7 @@ impl DriftKind {
 /// preserved verbatim; missing keys are appended with empty values.
 pub fn generate_example(values: &EnvDocument, existing_example: Option<&EnvDocument>) -> String {
     let mut example = existing_example.cloned().unwrap_or_else(|| {
-        EnvDocument::parse("# Environment variables for this project.\n# Copy to .env and fill in values, or use `api-tracker run`.\n")
+        EnvDocument::parse("# Environment variables for this project.\n# Copy to .env and fill in values, or use `tethra run`.\n")
     });
     for entry in values.entries() {
         if example.get(&entry.key).is_none() {

@@ -14,7 +14,10 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$REPO_ROOT/$TARGET_DIR" ;; esac
-BIN="$TARGET_DIR/release/api-tracker"
+# The preferred `tethra` binary is exercised; the legacy API_TRACKER_* env
+# vars below stay on purpose — the smoke suite doubles as the rebrand
+# compatibility check (new binary + legacy variables).
+BIN="$TARGET_DIR/release/tethra"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/api-tracker-smoke.XXXXXX")" \
   || { echo "smoke: failed to create a temp dir under ${TMPDIR:-/tmp}" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT

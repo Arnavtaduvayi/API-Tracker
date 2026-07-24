@@ -133,7 +133,7 @@ impl UreqClient {
     pub fn new() -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
-            .user_agent("api-tracker/0.1 (+local)")
+            .user_agent("tethra/0.1 (+local)")
             // Non-2xx responses are VALUES here, with their bodies intact:
             // adapters parse error bodies (e.g. AWS `__type`) to decide
             // create-on-missing and to report honest errors.

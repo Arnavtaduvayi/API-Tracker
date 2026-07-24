@@ -3,7 +3,7 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-/// Typed errors for the API Tracker core.
+/// Typed errors for the Tethra core.
 ///
 /// Error messages must never contain secret material. Variants carry
 /// identifiers, names, and paths only; cryptographic failures carry a static
@@ -16,7 +16,7 @@ pub enum CoreError {
     #[error("a vault already exists at {0}")]
     VaultExists(PathBuf),
 
-    #[error("no vault found at {0} (create one with `api-tracker init` or the desktop app)")]
+    #[error("no vault found at {0} (create one with `tethra init` or the desktop app)")]
     VaultNotFound(PathBuf),
 
     #[error("the vault is locked; unlock it first")]
@@ -25,10 +25,10 @@ pub enum CoreError {
     #[error("project '{0}' is password-locked; unlock it first")]
     ProjectLocked(String),
 
-    #[error("no active session; run `api-tracker unlock` first")]
+    #[error("no active session; run `tethra unlock` first")]
     SessionMissing,
 
-    #[error("the session has expired (auto-lock); run `api-tracker unlock` again")]
+    #[error("the session has expired (auto-lock); run `tethra unlock` again")]
     SessionExpired,
 
     #[error("the session token is not valid for the current session")]
@@ -55,7 +55,7 @@ pub enum CoreError {
     #[error("decryption failed for {context}: wrong key/password, corrupted data, or tampering")]
     Crypto { context: &'static str },
 
-    #[error("another API Tracker process is writing to the vault; try again")]
+    #[error("another Tethra process is writing to the vault; try again")]
     Busy,
 
     #[error("backup file is not valid: {0}")]
@@ -66,7 +66,7 @@ pub enum CoreError {
 
     #[error(
         "this vault uses database schema v{found}, but this build supports up to v{supported} — \
-         it was created or upgraded by a newer version of API Tracker; upgrade this installation \
+         it was created or upgraded by a newer version of Tethra; upgrade this installation \
          instead of opening the vault with an older build"
     )]
     SchemaTooNew { found: i64, supported: i64 },

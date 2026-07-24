@@ -413,7 +413,7 @@ impl Connector for GitHub {
             .header("Authorization", format!("Bearer {}", admin_secret.expose()))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", "api-tracker");
+            .header("User-Agent", "tethra");
         let resp = http.send(&req)?;
         if resp.status == 403 || resp.status == 404 {
             return Err(CoreError::Unsupported {

@@ -1,4 +1,4 @@
-//! `api-tracker rotation` — safe, durable credential rotation.
+//! `tethra rotation` — safe, durable credential rotation.
 //!
 //! `plan` is a dry run. `approve`, `advance`, `provide-key`, `rollback`,
 //! `complete-manual`, and `cancel` are reauthentication-gated. Nothing here

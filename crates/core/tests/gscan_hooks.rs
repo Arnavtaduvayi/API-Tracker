@@ -46,18 +46,26 @@ fn init_repo(dir: &Path) {
     git(dir, &["init", "-q"]);
 }
 
-/// A stub `api-tracker` that records its invocation and exits per
-/// STUB_EXIT (default 0 = scan clean).
+/// Stub scanner binaries that record their invocation and exit per
+/// STUB_EXIT (default 0 = scan clean). Installed under BOTH the preferred
+/// `tethra` name and the legacy `api-tracker` name — the hook template
+/// prefers `tethra` and falls back to `api-tracker`.
 fn write_stub(stub_dir: &Path) {
+    write_stub_named(stub_dir, &["tethra", "api-tracker"]);
+}
+
+fn write_stub_named(stub_dir: &Path, names: &[&str]) {
     std::fs::create_dir_all(stub_dir).unwrap();
-    let stub = stub_dir.join("api-tracker");
-    std::fs::write(
-        &stub,
-        "#!/bin/sh\necho \"$@\" >> \"$MARKER\"\nexit ${STUB_EXIT:-0}\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for name in names {
+        let stub = stub_dir.join(name);
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\necho \"$@\" >> \"$MARKER\"\nexit ${STUB_EXIT:-0}\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 }
 
 /// Stage a unique file and run `git commit` with the stub first on PATH.
@@ -417,5 +425,69 @@ fn hooks_path_with_spaces_is_safe() {
     assert!(
         recorded.contains(canon.file_name().unwrap().to_str().unwrap()),
         "hook passed the repo root through correctly: {recorded}"
+    );
+}
+
+#[test]
+fn hook_falls_back_to_the_legacy_binary_name() {
+    // A machine that only has the pre-rename `api-tracker` binary on PATH
+    // (e.g. an old install) must still run the scan through the new hook.
+    let _l = lock();
+    let r = setup("repo");
+    write_stub_named(&r.stub_dir, &["api-tracker"]);
+    let _ = std::fs::remove_file(r.stub_dir.join("tethra"));
+    hooks::install(&r.root, false).expect("install");
+    let (ok, ran) = commit_with_stub(&r.root, &r.stub_dir, &r.marker, 0);
+    assert!(ok, "clean scan lets the commit through");
+    assert!(ran, "the legacy-named binary still runs the scan");
+}
+
+#[test]
+fn legacy_installed_hook_is_recognized_and_upgraded() {
+    // A hook installed by a pre-rename build (old body between the SAME
+    // sentinels) must be reported as ours and replaced in place on
+    // reinstall — never treated as a foreign hook.
+    let _l = lock();
+    let r = setup("repo");
+    let hook = r.root.join(".git/hooks/pre-commit");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    let legacy_body = "#!/bin/sh\n# >>> api-tracker pre-commit hook >>>\n\
+# Managed by API Tracker. Blocks commits containing high-confidence secrets.\n\
+# Remove with: api-tracker hooks remove <path>\n\
+if command -v api-tracker >/dev/null 2>&1; then\n\
+  api-tracker scan --staged --hook \"$(git rev-parse --show-toplevel)\" || exit 1\n\
+else\n\
+  echo 'api-tracker not found on PATH; skipping secret pre-commit scan' >&2\n\
+fi\n\
+# <<< api-tracker pre-commit hook <<<\n";
+    std::fs::write(&hook, legacy_body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let status = hooks::status(&r.root).expect("status");
+    assert!(
+        status.active,
+        "legacy-format hook must be recognized as ours and active"
+    );
+
+    hooks::install(&r.root, false).expect("reinstall over legacy hook");
+    let content = std::fs::read_to_string(&hook).unwrap();
+    assert!(
+        content.contains("tethra scan --staged --hook"),
+        "upgraded hook prefers the tethra binary"
+    );
+    assert_eq!(
+        content
+            .matches(">>> api-tracker pre-commit hook >>>")
+            .count(),
+        1,
+        "exactly one managed block after upgrade"
+    );
+
+    hooks::remove(&r.root).expect("remove upgraded hook");
+    let content = std::fs::read_to_string(&hook).unwrap_or_default();
+    assert!(
+        !content.contains("pre-commit hook >>>"),
+        "managed block removed"
     );
 }

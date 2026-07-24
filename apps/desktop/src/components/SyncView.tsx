@@ -260,7 +260,7 @@ export function SyncView() {
           )}
           {plan.manual_steps.length > 0 && (
             <div className="warnbox">
-              <strong>Manual steps required</strong> — API Tracker cannot write these for you:
+              <strong>Manual steps required</strong> — Tethra cannot write these for you:
               <ul>
                 {plan.manual_steps.map((m, i) => (
                   <li key={i}>{m}</li>

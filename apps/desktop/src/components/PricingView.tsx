@@ -225,7 +225,7 @@ export function PricingView() {
       <h3>Import reviewed pricing</h3>
       <p className="muted">
         Paste a pricing JSON file (for example one produced by{" "}
-        <code>api-tracker pricing propose</code> and reviewed against the provider&apos;s
+        <code>tethra pricing propose</code> and reviewed against the provider&apos;s
         published pricing page). Records are validated; malformed or negative prices are
         rejected. History is preserved.
       </p>

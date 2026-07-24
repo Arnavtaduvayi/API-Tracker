@@ -142,7 +142,7 @@ pub fn evaluate(
     if inputs.manually_disabled {
         findings.push(Finding {
             status: Status::ManuallyDisabled,
-            reason: "the credential was manually disabled in API Tracker".into(),
+            reason: "the credential was manually disabled in Tethra".into(),
             source: manual_source.into(),
             observed_at: observed.clone(),
             confidence: Confidence::High,
