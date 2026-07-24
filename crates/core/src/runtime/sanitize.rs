@@ -113,7 +113,7 @@ fn classify_segment(seg: &str) -> (String, Confidence) {
     if has_embedded_sensitive(seg) {
         return (":redacted".into(), Confidence::Low);
     }
-    if seg.len() > 40 || has_unprintable(seg) {
+    if seg.len() > 40 || has_unprintable(seg) || has_encoded_control(seg) {
         return (":redacted".into(), Confidence::Low);
     }
     // Kept: a stable, low-entropy collection/resource name (users, v1, chat…).
@@ -125,7 +125,10 @@ fn is_hex_byte(b: u8) -> bool {
 }
 
 fn is_uuid(s: &str) -> bool {
-    let b = s.as_bytes();
+    is_uuid_bytes(s.as_bytes())
+}
+
+fn is_uuid_bytes(b: &[u8]) -> bool {
     if b.len() != 36 {
         return false;
     }
@@ -219,8 +222,16 @@ fn is_jwt(s: &str) -> bool {
 }
 
 /// Character-class diversity + length heuristic for opaque tokens.
+///
+/// The previous version required ≥3 character classes (or a ≥24-char base64url
+/// blob that contained a digit), so opaque secrets with ≤2 classes and no digit
+/// — e.g. a 22-char lowercase reset token, or a 20-char upper+lower camelCase
+/// token — slipped through and were kept verbatim in stored path templates.
+/// The rules below close that gap while staying conservative enough that real
+/// low-entropy resource names (`completions`, `subscriptions`, …) are kept.
 fn is_high_entropy(s: &str) -> bool {
-    if s.len() < 20 {
+    let n = s.len();
+    if n < 16 {
         return false;
     }
     let (mut lower, mut upper, mut digit, mut other) = (false, false, false, false);
@@ -233,9 +244,85 @@ fn is_high_entropy(s: &str) -> bool {
         }
     }
     let classes = [lower, upper, digit, other].iter().filter(|x| **x).count();
-    // len ≥ 20 with ≥3 classes, OR a long base64url-ish blob with both letters
-    // and digits.
-    (classes >= 3) || (s.len() >= 24 && is_base64url_charset(s) && (lower || upper) && digit)
+    // ≥3 classes at ≥16 chars: an opaque mixed token (e.g. Ab3Xy9Qw2Lm5Zt8Nk).
+    if classes >= 3 {
+        return true;
+    }
+    // A base64url/alnum blob mixing letters and digits (2 classes), ≥20 chars.
+    if is_base64url_charset(s) && digit && (lower || upper) && n >= 20 {
+        return true;
+    }
+    // A single-class alphabetic blob, ≥16 chars, is opaque when it lacks the
+    // vowel structure of a real word (random tokens have few vowels and long
+    // consonant runs) or is simply longer than any real resource name (≥24).
+    if classes == 1
+        && (lower || upper)
+        && n >= 16
+        && (n >= 24 || vowel_ratio(s) < 0.20 || max_consonant_run(s) >= 6)
+    {
+        return true;
+    }
+    // A long two-class letters-only token (upper+lower, no digits/other), ≥20:
+    // opaque camelCase token material rather than a readable segment name.
+    if classes == 2 && lower && upper && !digit && !other && n >= 20 {
+        return true;
+    }
+    false
+}
+
+fn is_vowel(b: u8) -> bool {
+    matches!(
+        b,
+        b'a' | b'e' | b'i' | b'o' | b'u' | b'A' | b'E' | b'I' | b'O' | b'U'
+    )
+}
+
+/// Fraction of ASCII-letter characters that are vowels (0.0 if no letters).
+fn vowel_ratio(s: &str) -> f64 {
+    let letters = s.bytes().filter(|b| b.is_ascii_alphabetic()).count();
+    if letters == 0 {
+        return 0.0;
+    }
+    let vowels = s.bytes().filter(|&b| is_vowel(b)).count();
+    vowels as f64 / letters as f64
+}
+
+/// Longest run of consecutive non-vowel ASCII letters.
+fn max_consonant_run(s: &str) -> usize {
+    let mut best = 0;
+    let mut cur = 0;
+    for b in s.bytes() {
+        if b.is_ascii_alphabetic() && !is_vowel(b) {
+            cur += 1;
+            best = best.max(cur);
+        } else {
+            cur = 0;
+        }
+    }
+    best
+}
+
+/// True if the segment contains a percent-encoded control byte (`%00`–`%1F` or
+/// `%7F`). Such encodings never appear in legitimate structural path segments
+/// and would otherwise smuggle raw control bytes past [`has_unprintable`], so
+/// the segment is redacted rather than kept verbatim.
+fn has_encoded_control(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = 0;
+    while i + 2 < b.len() {
+        if b[i] == b'%' {
+            let hi = (b[i + 1] as char).to_digit(16);
+            let lo = (b[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                let v = (h * 16 + l) as u8;
+                if v < 0x20 || v == 0x7f {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Longest run of consecutive ASCII digits.
@@ -269,12 +356,14 @@ fn max_hex_run(s: &str) -> usize {
 }
 
 fn contains_uuid_substring(s: &str) -> bool {
-    // cheap scan: any 36-char window that is a UUID.
+    // cheap scan: any 36-BYTE window that is a UUID. Operate on bytes so a
+    // multibyte UTF-8 char in the segment can never trigger a char-boundary
+    // slice panic (UUIDs are pure ASCII, so a byte window is exactly right).
     let b = s.as_bytes();
     if b.len() < 36 {
         return false;
     }
-    (0..=b.len() - 36).any(|i| is_uuid(&s[i..i + 36]))
+    (0..=b.len() - 36).any(|i| is_uuid_bytes(&b[i..i + 36]))
 }
 
 /// A segment that still embeds an identifier-shaped run and therefore must not
@@ -430,6 +519,14 @@ mod tests {
             "a.b.c",
             "AKIAIOSFODNN7EXAMPLE",
             "xoxb-1234567890-abcdefghij",
+            // Opaque tokens with <=2 character classes and no digit/hex/uuid run
+            // that older heuristics kept verbatim (PR-13 audit regressions).
+            "xkqjwhdmzpvtrbnsgcfywq",        // 22 lowercase, single class
+            "ghijklmnopqrstuvwxyzghijklmno", // 29 lowercase, single class
+            "TokenValueSecretAbcdefg",       // 23 upper+lower, no digit
+            "Ab3Xy9Qw2Lm5Zt8Nk",             // 18, three classes
+            "cb/%73%65%63%72%65%74%41%42",   // percent-encoded (as one segment)
+            "reset%00token",                 // encoded control byte
         ];
         let mut out = Vec::new();
         for a in &pieces {
@@ -465,20 +562,75 @@ mod tests {
     fn property_no_sensitive_runs_survive() {
         for input in fuzz_corpus() {
             let (out, _) = sanitize_path(&input);
+            // P2–P5 use metrics independent of the classifier, so they can
+            // genuinely fail if a sensitive run survives.
             assert!(max_digit_run(&out) < 5, "P2 digit run: {input} -> {out}");
             assert!(max_hex_run(&out) < 16, "P3 hex run: {input} -> {out}");
             assert!(!contains_uuid_substring(&out), "P4 uuid: {input} -> {out}");
             assert!(!out.contains('@'), "P5 email: {input} -> {out}");
-            // P6: every output segment is a placeholder or not high-entropy
+            // P6 uses an INDEPENDENT oracle (Shannon entropy over the segment's
+            // own byte distribution), NOT the production is_high_entropy — so
+            // this test can fail if a real opaque secret is kept verbatim,
+            // instead of being tautologically green. Any kept (non-placeholder)
+            // segment long enough to matter must be low-entropy structure.
             for seg in out.split('/') {
-                if !seg.is_empty() && !seg.starts_with(':') && seg != "*" {
+                if !seg.is_empty() && !seg.starts_with(':') && seg != "*" && seg.len() >= 20 {
                     assert!(
-                        !is_high_entropy(seg),
-                        "P6 high-entropy segment survived: {input} -> {out} ({seg})"
+                        shannon_bits_per_char(seg) < 4.0,
+                        "P6 high-entropy segment survived: {input} -> {out} ({seg}, {:.2} bits/char)",
+                        shannon_bits_per_char(seg)
                     );
                 }
             }
         }
+    }
+
+    /// Independent high-entropy oracle for P6: Shannon entropy per character
+    /// over the segment's own byte histogram. Deliberately does NOT call the
+    /// production `is_high_entropy`, so the property test is not circular.
+    fn shannon_bits_per_char(s: &str) -> f64 {
+        use std::collections::HashMap;
+        let mut counts: HashMap<u8, usize> = HashMap::new();
+        for b in s.bytes() {
+            *counts.entry(b).or_default() += 1;
+        }
+        let n = s.len() as f64;
+        -counts
+            .values()
+            .map(|&c| {
+                let p = c as f64 / n;
+                p * p.log2()
+            })
+            .sum::<f64>()
+    }
+
+    #[test]
+    fn opaque_tokens_are_never_kept_verbatim() {
+        // Non-circular: assert the literal opaque token is absent from the
+        // output (it was replaced by a placeholder). Covers the exact PR-13
+        // audit examples: <=2 character classes / no digit, and 16–19 char
+        // mixed tokens the length floor used to let through.
+        let opaque = [
+            "xkqjwhdmzpvtrbnsgcfywq",        // 22 lowercase
+            "ghijklmnopqrstuvwxyzghijklmno", // 29 lowercase
+            "TokenValueSecretAbcdefg",       // 23 upper+lower, no digit
+            "Ab3Xy9Qw2Lm5Zt8Nk",             // 18, three classes
+            "correcthorsebatterystaple",     // 25 lowercase
+        ];
+        for tok in opaque {
+            let (out, _c) = sanitize_path(&format!("/api/{tok}/end"));
+            assert!(
+                !out.contains(tok),
+                "opaque token kept verbatim: {tok} -> {out}"
+            );
+            assert_eq!(
+                out, "/api/:token/end",
+                "expected placeholder for {tok}: {out}"
+            );
+        }
+        // Percent-encoded control bytes are redacted, not kept.
+        let (out, _c) = sanitize_path("/cb/reset%00token");
+        assert_eq!(out, "/cb/:redacted");
     }
 
     #[test]
