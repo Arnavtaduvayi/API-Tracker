@@ -1,9 +1,26 @@
 # Domain Purchase Record — UseTethra.com
 
 - **Exact domain:** `usetethra.com` (brand styling: UseTethra.com)
-- **Status:** **NOT PURCHASED — BLOCKED.** No order was placed, no payment
-  was attempted, and no registrar account was created or modified.
-- **Date of attempt:** 2026-07-24
+- **Status:** **PURCHASED BY THE USER DIRECTLY** on 2026-07-24 (the earlier
+  agent-mediated attempt the same day was blocked — original record below).
+- **Registrar:** Squarespace Domains LLC
+- **Registered (registry Creation Date):** 2026-07-24T15:43:24Z
+- **Expiration (Registry Expiry Date):** 2027-07-24T15:43:24Z (one-year
+  registration, as planned)
+- **Nameservers:** NSB1–NSB4.SQUARESPACEDNS.COM (registrar defaults)
+- **Registry status:** clientDeleteProhibited, clientTransferProhibited
+  (standard new-registration locks)
+- **Verified:** via authoritative Verisign whois + RDAP on 2026-07-24,
+  read-only. No agent payment was involved; no card details exist to record.
+- **Pending user-provided details:** first-year price paid, displayed
+  renewal price, auto-renew status, WHOIS-privacy status, order number
+  (partially redacted). To be filled in when the user supplies them.
+- **DNS / website / email / analytics:** intentionally NOT configured —
+  not yet authorized.
+
+---
+
+## Original blocked-attempt record (2026-07-24, earlier the same day)
 
 ## Availability (verified read-only)
 
