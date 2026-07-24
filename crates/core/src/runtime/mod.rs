@@ -17,4 +17,6 @@
 //!   `usage_snapshots` (whose totals would then double-count against
 //!   provider-reported sync).
 
+pub mod model;
 pub mod sanitize;
+pub mod store;
