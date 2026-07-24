@@ -33,23 +33,46 @@ pub fn attribute_session(
     session_id: &str,
     injected: &[InjectedCredential],
 ) -> Result<usize> {
-    // Services this session actually touched, with the resolved provider id and
-    // a request count.
+    // Services this session actually touched, with the resolved provider id, a
+    // request count, and how many of those requests carried a recognized auth
+    // header (presence only — the value is never read). Attribution keys off
+    // that presence so unauthenticated traffic is not asserted as credential use.
+    struct SvcTraffic {
+        service_id: String,
+        host: String,
+        provider_id: Option<String>,
+        count: i64,
+        auth_count: i64,
+    }
     let mut stmt = conn.prepare(
-        "SELECT e.service_id, s.host, s.provider_id, COUNT(*)
+        "SELECT e.service_id, s.host, s.provider_id, COUNT(*), COALESCE(SUM(e.had_authorization),0)
          FROM runtime_request_events e
          JOIN observed_api_services s ON s.id = e.service_id
          WHERE e.session_id = ?1
          GROUP BY e.service_id",
     )?;
-    let rows: Vec<(String, String, Option<String>, i64)> = stmt
+    let rows: Vec<SvcTraffic> = stmt
         .query_map([session_id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            Ok(SvcTraffic {
+                service_id: r.get(0)?,
+                host: r.get(1)?,
+                provider_id: r.get(2)?,
+                count: r.get(3)?,
+                auth_count: r.get(4)?,
+            })
         })?
         .collect::<rusqlite::Result<_>>()?;
 
     let mut written = 0usize;
-    for (service_id, host, provider_id, count) in rows {
+    for SvcTraffic {
+        service_id,
+        host,
+        provider_id,
+        count,
+        auth_count,
+    } in rows
+    {
+        let has_auth = auth_count > 0;
         // Prefer the stored provider; fall back to a host→provider lookup.
         let provider =
             provider_id.or_else(|| inventory::provider_for_host(&host).map(|p| p.to_string()));
@@ -64,14 +87,24 @@ pub fn attribute_session(
             AttributionConfidence,
             String,
         ) = match candidates.len() {
-            1 => (
+            1 if has_auth => (
                 Some(candidates[0]),
                 AttributionConfidence::Confirmed,
-                "single injected credential of the matching provider".into(),
+                "single injected credential of the matching provider; an authorization header was observed".into(),
+            ),
+            1 => (
+                // Provider host matched, but NO request to it carried an auth
+                // header (e.g. an unauthenticated fetch, or a robots.txt call):
+                // do not assert the credential was used — downgrade to Possible.
+                Some(candidates[0]),
+                AttributionConfidence::Possible,
+                "single injected credential of the matching provider, but no authorization header was observed".into(),
             ),
             n if n > 1 => {
                 // Ambiguous: record each candidate, choose none.
                 for c in &candidates {
+                    let current = current_value_version(conn, &c.credential_id)
+                        .unwrap_or(c.current_version);
                     store::upsert_attribution(
                         conn,
                         session_id,
@@ -81,20 +114,23 @@ pub fn attribute_session(
                         AttributionConfidence::Ambiguous,
                         "multiple injected credentials of this provider could explain the traffic",
                         Some(c.launch_version),
-                        Some(c.launch_version >= c.current_version),
+                        Some(c.launch_version >= current),
                     )?;
                     written += 1;
                 }
                 continue;
             }
             _ => {
-                // No provider match. If exactly one credential was injected
-                // at all, it is a *possible* explanation (weak).
-                if provider.is_none() && injected.len() == 1 {
+                // No provider match. Attribute to the sole injected credential as
+                // a *possible* explanation ONLY if some request actually carried
+                // an auth header — otherwise (package registries, telemetry, an
+                // allowlisted internal host) it is Unattributed, so a key is
+                // never credited with traffic it demonstrably did not send.
+                if provider.is_none() && injected.len() == 1 && has_auth {
                     (
                         Some(&injected[0]),
                         AttributionConfidence::Possible,
-                        "one credential was injected; the API's provider is unknown".into(),
+                        "one credential was injected and an authorization header was observed; the API's provider is unknown".into(),
                     )
                 } else {
                     (None, AttributionConfidence::Unattributed, String::new())
@@ -102,46 +138,62 @@ pub fn attribute_session(
             }
         };
 
-        match chosen {
-            Some(c) => {
-                let used_current = c.launch_version >= c.current_version;
-                store::upsert_attribution(
-                    conn,
-                    session_id,
-                    &c.credential_id,
-                    &service_id,
-                    count,
-                    confidence,
-                    &evidence,
-                    Some(c.launch_version),
-                    Some(used_current),
-                )?;
-                // Backfill events only for confident (non-ambiguous) attributions.
-                store::set_event_attribution_for_session_service(
-                    conn,
-                    session_id,
-                    &service_id,
-                    &c.credential_id,
-                    confidence,
-                    Some(c.launch_version),
-                    Some(used_current),
-                )?;
-                written += 1;
-            }
-            None => { /* Unattributed: no row, event credential stays NULL */ }
+        if let Some(c) = chosen {
+            // Re-read the root credential's LIVE value_version at session end:
+            // a rotation during the run advances it, so comparing against the
+            // launch-time placeholder (which equalled launch_version) always
+            // reported "used current version = true".
+            let current =
+                current_value_version(conn, &c.credential_id).unwrap_or(c.current_version);
+            let used_current = c.launch_version >= current;
+            store::upsert_attribution(
+                conn,
+                session_id,
+                &c.credential_id,
+                &service_id,
+                count,
+                confidence,
+                &evidence,
+                Some(c.launch_version),
+                Some(used_current),
+            )?;
+            // Backfill the per-event credential for any chosen attribution
+            // (Confirmed or Possible); ambiguous/unattributed leave events NULL.
+            store::set_event_attribution_for_session_service(
+                conn,
+                session_id,
+                &service_id,
+                &c.credential_id,
+                confidence,
+                Some(c.launch_version),
+                Some(used_current),
+            )?;
+            written += 1;
         }
     }
 
-    // Update credentials.last_used_at from observed traffic (so the existing
-    // "unused credential" rule benefits), for any credential we attributed.
+    // Bump credentials.last_used_at ONLY for confirmed/high attributions — never
+    // for a weak 'possible' guess, so the "unused credential" rule is not
+    // silenced by traffic the key may not have sent.
     conn.execute(
         "UPDATE credentials SET last_used_at = ?2
          WHERE id IN (SELECT DISTINCT credential_id FROM credential_traffic_attributions
-                      WHERE session_id = ?1 AND confidence IN ('confirmed','high','possible'))",
+                      WHERE session_id = ?1 AND confidence IN ('confirmed','high'))",
         params![session_id, crate::clock::now_rfc3339()],
     )?;
 
     Ok(written)
+}
+
+/// The root credential's current `value_version` (its id is already resolved to
+/// the value-bearing root by `observe_injected`).
+fn current_value_version(conn: &Connection, credential_id: &str) -> Option<i64> {
+    conn.query_row(
+        "SELECT value_version FROM credentials WHERE id = ?1",
+        [credential_id],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 #[cfg(test)]
@@ -246,6 +298,14 @@ mod tests {
     fn old_version_after_rotation_is_detectable() {
         let conn = mem();
         let sid = setup(&conn);
+        // Rotate the stored credential to v3 (as a real rotation would), so the
+        // current version is re-read live at attribution time rather than taken
+        // from a launch-time constant that was always equal to launch_version.
+        conn.execute(
+            "UPDATE credentials SET value_version = 3 WHERE id = 'c-openai'",
+            [],
+        )
+        .unwrap();
         attribute_session(
             &conn,
             &sid,
@@ -254,7 +314,7 @@ mod tests {
                 provider: "openai".into(),
                 environment: "production".into(),
                 launch_version: 1,  // launched at v1
-                current_version: 3, // rotated to v3 since
+                current_version: 1, // launch-time placeholder (ignored; re-read)
             }],
         )
         .unwrap();
@@ -265,6 +325,107 @@ mod tests {
             "old version in use"
         );
         assert_eq!(attrs[0].credential_version, Some(1));
+    }
+
+    #[test]
+    fn unauthenticated_provider_traffic_is_not_confirmed_and_does_not_bump_last_used() {
+        // Regression: a provider-host match alone yielded Confirmed and bumped
+        // last_used_at even with zero authorization evidence.
+        let conn = mem();
+        testutil::seed_project(&conn, "p1", "web");
+        testutil::seed_credential(&conn, "c-openai", "p1", "openai", "openai-main");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let now = crate::clock::now_rfc3339();
+        let (svc, _) =
+            store::upsert_service(&conn, "api.openai.com", Some("openai"), false, &now).unwrap();
+        // An UNAUTHENTICATED request to the provider host.
+        let mut e = req("api.openai.com");
+        e.had_authorization = false;
+        store::insert_request_event(&conn, &sid, "p1", &svc, None, &now, &e, false).unwrap();
+
+        attribute_session(
+            &conn,
+            &sid,
+            &[InjectedCredential {
+                credential_id: "c-openai".into(),
+                provider: "openai".into(),
+                environment: "production".into(),
+                launch_version: 1,
+                current_version: 1,
+            }],
+        )
+        .unwrap();
+        let attrs = store::session_attributions(&conn, &sid).unwrap();
+        assert_eq!(
+            attrs[0].confidence, "possible",
+            "no auth header => not confirmed"
+        );
+        let last_used: Option<String> = conn
+            .query_row(
+                "SELECT last_used_at FROM credentials WHERE id='c-openai'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            last_used.is_none(),
+            "possible attribution must not bump last_used_at"
+        );
+    }
+
+    #[test]
+    fn unknown_host_without_auth_is_unattributed() {
+        // Regression: every unknown-provider host was attributed 'possible' to
+        // the sole injected credential — even package registries with no auth.
+        let conn = mem();
+        testutil::seed_project(&conn, "p1", "web");
+        testutil::seed_credential(&conn, "c-openai", "p1", "openai", "openai-main");
+        let sid = store::insert_session(
+            &conn,
+            &store::NewSession {
+                project_id: "p1",
+                mode: ObservationMode::Metadata,
+                source: "cli_run",
+                command: "x",
+                credential_names: &[],
+            },
+        )
+        .unwrap();
+        let now = crate::clock::now_rfc3339();
+        // An unknown provider host (a package registry), no auth header.
+        let (svc, _) =
+            store::upsert_service(&conn, "registry.npmjs.org", None, false, &now).unwrap();
+        let mut e = req("registry.npmjs.org");
+        e.had_authorization = false;
+        store::insert_request_event(&conn, &sid, "p1", &svc, None, &now, &e, false).unwrap();
+
+        let n = attribute_session(
+            &conn,
+            &sid,
+            &[InjectedCredential {
+                credential_id: "c-openai".into(),
+                provider: "openai".into(),
+                environment: "production".into(),
+                launch_version: 1,
+                current_version: 1,
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            n, 0,
+            "unauthenticated unknown-host traffic must be unattributed"
+        );
+        assert!(store::session_attributions(&conn, &sid).unwrap().is_empty());
     }
 
     #[test]

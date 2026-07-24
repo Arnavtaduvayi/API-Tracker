@@ -488,3 +488,48 @@ fn process_sessions_list_with_pids_and_termination_is_guarded() {
     let status = child.wait().unwrap();
     assert!(!status.success(), "sleep must have been terminated");
 }
+
+#[test]
+fn observe_injected_resolves_reference_to_the_root_credentials_version() {
+    // Regression (PR #13): observe_injected read value_version from the injected
+    // row. For a reference credential that is always the schema default 1, even
+    // after the ROOT rotates — so old-version/revoked attribution was silently
+    // inert for shared credentials. It must resolve to the value-bearing root.
+    let (_dir, _paths, mut v) = new_vault();
+    add_project(&mut v, "app");
+    add_project(&mut v, "app2");
+    let (root, _) = add_key(
+        &mut v,
+        "app",
+        "openai-main",
+        FAKE_KEY,
+        Environment::Production,
+    );
+    let reference = v
+        .add_credential_reference(api_tracker_core::vault::AddReference {
+            project: "app2".to_owned(),
+            source: root.id.clone(),
+            name: "openai-ref".to_owned(),
+            environment: Environment::Production,
+            docs_url: String::new(),
+            notes: String::new(),
+        })
+        .expect("add reference");
+
+    // Simulate a rotation of the ROOT: only the root's value_version advances.
+    v.connection()
+        .execute(
+            "UPDATE credentials SET value_version = 2 WHERE id = ?1",
+            [&root.id],
+        )
+        .unwrap();
+
+    let injected = v.observe_injected(&[reference.id.clone()]).unwrap();
+    assert_eq!(injected.len(), 1);
+    // Resolved to the root credential and its live version, not the reference's.
+    assert_eq!(injected[0].credential_id, root.id);
+    assert_eq!(
+        injected[0].launch_version, 2,
+        "reference must resolve to the ROOT's value_version, not the default 1"
+    );
+}

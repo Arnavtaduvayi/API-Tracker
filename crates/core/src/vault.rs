@@ -9263,28 +9263,38 @@ impl UnlockedVault {
         )
     }
 
-    /// Resolve injected credential ids into attribution inputs (provider,
-    /// environment, and the current `value_version`, captured as the launch
-    /// version). Unknown ids are skipped.
+    /// Resolve injected credential ids into attribution inputs. Each id is
+    /// resolved to its VALUE-BEARING ROOT: a reference credential shares the
+    /// root's value, and rotation bumps `value_version` (and sets `revoked`)
+    /// ONLY on the root — the reference row's `value_version` stays 1 forever.
+    /// Attribution and the version/revoked alerts must key off the root, so we
+    /// record the root's id, provider, and launch `value_version` here. Unknown
+    /// ids are skipped.
     pub fn observe_injected(
         &self,
         credential_ids: &[String],
     ) -> Result<Vec<crate::runtime::attribution::InjectedCredential>> {
         let mut out = Vec::new();
         for id in credential_ids {
-            let row: Option<(String, String, i64)> = self
+            let row: Option<(String, String, String, i64)> = self
                 .conn
                 .query_row(
-                    "SELECT provider, environment, value_version FROM credentials WHERE id = ?1",
+                    "SELECT root.id, root.provider, root.environment, root.value_version
+                     FROM credentials ref
+                     JOIN credentials root
+                       ON root.id = COALESCE(ref.linked_credential_id, ref.id)
+                     WHERE ref.id = ?1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()?;
-            if let Some((provider, environment, version)) = row {
+            if let Some((root_id, provider, environment, version)) = row {
                 out.push(crate::runtime::attribution::InjectedCredential {
-                    credential_id: id.clone(),
+                    credential_id: root_id,
                     provider: crate::providers::normalize(&provider),
                     environment,
+                    // `current_version` is a launch-time placeholder; attribution
+                    // re-reads the root's live value_version at session end.
                     launch_version: version,
                     current_version: version,
                 });

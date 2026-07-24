@@ -223,7 +223,15 @@ fn read_head_inner<R: Read>(
                 let content_length = header_str(hs, "content-length").and_then(|v| v.parse().ok());
                 let chunked = is_chunked(hs);
                 let close = connection_close(hs, version);
-                let had_authorization = header_ci(hs, "authorization").is_some();
+                // Presence (never the value) of any recognized auth header.
+                // Covers providers that authenticate via `x-api-key`
+                // (Anthropic), `x-goog-api-key` (Google), or `api-key` (Azure),
+                // not only `Authorization` — so attribution can tell an
+                // authenticated call from an unauthenticated one for them too.
+                let had_authorization = header_ci(hs, "authorization").is_some()
+                    || header_ci(hs, "x-api-key").is_some()
+                    || header_ci(hs, "x-goog-api-key").is_some()
+                    || header_ci(hs, "api-key").is_some();
                 let content_type = header_str(hs, "content-type");
                 let upgrade = header_str(hs, "upgrade");
                 let host = header_str(hs, "host");
