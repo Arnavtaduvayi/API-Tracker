@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ca;
 pub mod policy;
 
 /// Product-neutral user-agent-style identity for any diagnostic self-probe this
