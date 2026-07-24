@@ -9237,6 +9237,36 @@ impl UnlockedVault {
         )
     }
 
+    /// Resolve injected credential ids into attribution inputs (provider,
+    /// environment, and the current `value_version`, captured as the launch
+    /// version). Unknown ids are skipped.
+    pub fn observe_injected(
+        &self,
+        credential_ids: &[String],
+    ) -> Result<Vec<crate::runtime::attribution::InjectedCredential>> {
+        let mut out = Vec::new();
+        for id in credential_ids {
+            let row: Option<(String, String, i64)> = self
+                .conn
+                .query_row(
+                    "SELECT provider, environment, value_version FROM credentials WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            if let Some((provider, environment, version)) = row {
+                out.push(crate::runtime::attribution::InjectedCredential {
+                    credential_id: id.clone(),
+                    provider: crate::providers::normalize(&provider),
+                    environment,
+                    launch_version: version,
+                    current_version: version,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     pub fn observe_sessions(
         &self,
         project: Option<&str>,

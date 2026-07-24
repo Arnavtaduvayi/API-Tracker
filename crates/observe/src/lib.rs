@@ -26,10 +26,12 @@
 
 pub mod ca;
 pub mod clienthello;
+pub mod diagnostics;
 pub mod policy;
 pub mod proxy;
 pub mod relay;
 pub mod session;
+pub mod systemtrust;
 pub mod tls;
 pub mod trust;
 pub mod wire;
