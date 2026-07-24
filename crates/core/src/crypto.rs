@@ -217,6 +217,11 @@ pub mod aad {
     pub fn notification_channel(vault_id: &str, channel_id: &str) -> String {
         format!("api-tracker:v1:notification-channel:{vault_id}:{channel_id}")
     }
+    /// The runtime-observability local CA private key (vault-level; encrypted
+    /// under the vault key, never written in plaintext).
+    pub fn observe_ca_key(vault_id: &str) -> String {
+        format!("api-tracker:v1:observe-ca-key:{vault_id}")
+    }
 }
 
 #[cfg(test)]

@@ -9119,3 +9119,240 @@ fn parse_optional_ts_lenient(value: Option<&str>) -> (Option<time::OffsetDateTim
         },
     }
 }
+
+// ---------------------------------------------------------------------------
+// Runtime API observability
+//
+// The vault owns CA-key encryption/storage and reauthentication-gated actions;
+// certificate GENERATION and the proxy live in the separate `api-tracker-
+// observe` crate (which depends on this one), so nothing here pulls in TLS or
+// certificate dependencies. Query methods delegate to `crate::runtime::store`.
+// ---------------------------------------------------------------------------
+impl UnlockedVault {
+    /// The decrypted local CA (cert PEM, PKCS#8 private key, fingerprint), or
+    /// `None` if no CA has been generated yet. The key is decrypted under the
+    /// vault key and returned in a zeroizing buffer.
+    pub fn observe_ca_material(&self) -> Result<Option<(String, SecretBytes, String)>> {
+        match crate::runtime::store::cert_state_get(&self.conn)? {
+            None => Ok(None),
+            Some(row) => {
+                let key = crypto::decrypt(
+                    &self.vault_key,
+                    &aad::observe_ca_key(&self.vault_id),
+                    &row.key_ciphertext,
+                    "observe ca key",
+                )?;
+                Ok(Some((row.ca_cert_pem, key, row.fingerprint_sha256)))
+            }
+        }
+    }
+
+    /// Persist a freshly generated CA. The PKCS#8 key is encrypted under the
+    /// vault key (AAD binds the vault id); only ciphertext is stored.
+    pub fn observe_ca_store(
+        &self,
+        cert_pem: &str,
+        key_der: &SecretBytes,
+        fingerprint: &str,
+        serial: &str,
+        not_after: &str,
+    ) -> Result<()> {
+        let ct = crypto::encrypt(
+            &self.vault_key,
+            &aad::observe_ca_key(&self.vault_id),
+            key_der.expose(),
+        )?;
+        crate::runtime::store::cert_state_set(
+            &self.conn,
+            cert_pem,
+            &ct,
+            fingerprint,
+            serial,
+            &clock::now_rfc3339(),
+            not_after,
+        )?;
+        audit::record(&self.conn, "observability_ca_created", None, None, "")?;
+        Ok(())
+    }
+
+    pub fn observe_ca_status(&self) -> Result<crate::runtime::store::CertStatus> {
+        crate::runtime::store::cert_status(&self.conn)
+    }
+
+    /// Remove the local CA (reauthentication-gated). Does NOT remove a system-
+    /// trust installation — that is a separate, explicit action.
+    pub fn observe_ca_remove(&self, master_password: &SecretString) -> Result<()> {
+        self.verify_master_password(master_password)?;
+        crate::runtime::store::cert_state_clear(&self.conn)?;
+        audit::record(&self.conn, "observability_ca_removed", None, None, "")?;
+        Ok(())
+    }
+
+    pub fn observe_ca_set_system_trust(&self, status: &str, at: Option<&str>) -> Result<()> {
+        crate::runtime::store::cert_set_system_trust(&self.conn, status, at)
+    }
+
+    pub fn observe_settings(&self) -> Result<crate::runtime::settings::ObservabilitySettings> {
+        crate::runtime::settings::ObservabilitySettings::load(&self.conn)
+    }
+
+    pub fn observe_settings_set(
+        &self,
+        settings: &crate::runtime::settings::ObservabilitySettings,
+    ) -> Result<()> {
+        settings.save(&self.conn)
+    }
+
+    /// Record the start of a monitored session; returns its id.
+    pub fn observe_open_session(
+        &self,
+        project: &str,
+        mode: crate::runtime::model::ObservationMode,
+        source: &str,
+        command: &str,
+        credential_names: &[String],
+    ) -> Result<String> {
+        let project_id = self.get_project(project)?.id;
+        crate::runtime::store::insert_session(
+            &self.conn,
+            &crate::runtime::store::NewSession {
+                project_id: &project_id,
+                mode,
+                source,
+                command,
+                credential_names,
+            },
+        )
+    }
+
+    pub fn observe_sessions(
+        &self,
+        project: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::runtime::model::ObservationSessionRow>> {
+        let pid = match project {
+            Some(p) => Some(self.get_project(p)?.id),
+            None => None,
+        };
+        crate::runtime::store::list_sessions(&self.conn, pid.as_deref(), limit)
+    }
+
+    pub fn observe_session(
+        &self,
+        ident: &str,
+    ) -> Result<crate::runtime::model::ObservationSessionRow> {
+        let id = crate::runtime::store::resolve_session(&self.conn, ident)?;
+        crate::runtime::store::get_session(&self.conn, &id)?.ok_or(CoreError::NotFound {
+            kind: "observation session",
+            ident: ident.to_string(),
+        })
+    }
+
+    pub fn observe_session_events(
+        &self,
+        ident: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::runtime::model::RuntimeEventRow>> {
+        let id = crate::runtime::store::resolve_session(&self.conn, ident)?;
+        crate::runtime::store::recent_events_for_session(&self.conn, &id, limit)
+    }
+
+    pub fn observe_session_attributions(
+        &self,
+        ident: &str,
+    ) -> Result<Vec<crate::runtime::model::CredentialAttributionRow>> {
+        let id = crate::runtime::store::resolve_session(&self.conn, ident)?;
+        crate::runtime::store::session_attributions(&self.conn, &id)
+    }
+
+    pub fn observe_session_compat(
+        &self,
+        ident: &str,
+    ) -> Result<Vec<crate::runtime::model::CompatibilityResultRow>> {
+        let id = crate::runtime::store::resolve_session(&self.conn, ident)?;
+        crate::runtime::store::session_compat(&self.conn, &id)
+    }
+
+    pub fn observe_services(&self) -> Result<Vec<crate::runtime::model::ObservedServiceRow>> {
+        crate::runtime::store::list_services(&self.conn)
+    }
+
+    pub fn observe_service(
+        &self,
+        id: &str,
+    ) -> Result<crate::runtime::model::ObservedServiceRow> {
+        crate::runtime::store::get_service(&self.conn, id)?.ok_or(CoreError::NotFound {
+            kind: "observed api service",
+            ident: id.to_string(),
+        })
+    }
+
+    pub fn observe_service_endpoints(
+        &self,
+        id: &str,
+    ) -> Result<Vec<crate::runtime::model::ObservedEndpointRow>> {
+        crate::runtime::store::list_endpoints_for_service(&self.conn, id)
+    }
+
+    pub fn observe_service_events(
+        &self,
+        id: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::runtime::model::RuntimeEventRow>> {
+        crate::runtime::store::recent_events_for_service(&self.conn, id, limit)
+    }
+
+    pub fn observe_credential_activity(
+        &self,
+        selector: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::runtime::model::CredentialAttributionRow>> {
+        let cred = self.get_credential(selector)?;
+        crate::runtime::store::credential_attributions(&self.conn, &cred.id, limit)
+    }
+
+    pub fn observe_allowlist(&self, project: &str) -> Result<Vec<(String, u16, String)>> {
+        let pid = self.get_project(project)?.id;
+        crate::runtime::store::allowlist_for_project(&self.conn, &pid)
+    }
+
+    pub fn observe_allowlist_add(
+        &self,
+        project: &str,
+        host: &str,
+        port: u16,
+        note: &str,
+    ) -> Result<()> {
+        let pid = self.get_project(project)?.id;
+        crate::runtime::store::allowlist_add(&self.conn, &pid, host, port, note)
+    }
+
+    pub fn observe_allowlist_remove(&self, project: &str, host: &str, port: u16) -> Result<bool> {
+        let pid = self.get_project(project)?.id;
+        crate::runtime::store::allowlist_remove(&self.conn, &pid, host, port)
+    }
+
+    pub fn observe_delete_session(&self, ident: &str) -> Result<()> {
+        let id = crate::runtime::store::resolve_session(&self.conn, ident)?;
+        crate::runtime::store::delete_session(&self.conn, &id)?;
+        db::checkpoint_truncate(&self.conn);
+        Ok(())
+    }
+
+    pub fn observe_delete_project(&self, project: &str) -> Result<()> {
+        let pid = self.get_project(project)?.id;
+        crate::runtime::store::delete_project_data(&self.conn, &pid)?;
+        db::checkpoint_truncate(&self.conn);
+        Ok(())
+    }
+
+    /// Delete ALL observability data (reauthentication-gated). Certificate
+    /// state is untouched; removing the CA is a separate explicit action.
+    pub fn observe_delete_all(&self, master_password: &SecretString) -> Result<()> {
+        self.verify_master_password(master_password)?;
+        crate::runtime::store::delete_all(&self.conn)?;
+        audit::record(&self.conn, "observability_data_deleted", None, None, "")?;
+        db::checkpoint_truncate(&self.conn);
+        Ok(())
+    }
+}

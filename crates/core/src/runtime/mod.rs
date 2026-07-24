@@ -17,6 +17,11 @@
 //!   `usage_snapshots` (whose totals would then double-count against
 //!   provider-reported sync).
 
+pub mod aggregate;
+pub mod attribution;
+pub mod inventory;
 pub mod model;
+pub mod retention;
 pub mod sanitize;
+pub mod settings;
 pub mod store;
