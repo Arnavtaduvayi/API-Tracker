@@ -983,3 +983,134 @@ export interface ApiError {
   code: string;
   message: string;
 }
+
+// --- Runtime API observability (metadata only) ---
+
+export interface ObservedService {
+  id: string;
+  host: string;
+  provider_id: string | null;
+  source: string;
+  classification: string;
+  is_internal: boolean;
+  user_provider: string | null;
+  user_api_name: string | null;
+  user_notes: string | null;
+  confirmed: boolean;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface ObservedEndpoint {
+  id: string;
+  service_id: string;
+  method: string;
+  path_template: string;
+  template_confidence: string;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+export interface RuntimeEvent {
+  at: string;
+  host: string;
+  method: string;
+  path_template: string;
+  status_code: number | null;
+  outcome: string;
+  latency_ms: number | null;
+  request_bytes: number | null;
+  response_bytes: number | null;
+  protocol: string;
+  observation_source: string;
+  attribution_confidence: string | null;
+}
+
+export interface ObservationSession {
+  id: string;
+  project_id: string;
+  mode: string;
+  source: string;
+  status: string;
+  interrupt_reason: string | null;
+  command: string;
+  credential_names: string;
+  runtime_detected: string | null;
+  trust_level: string | null;
+  partial_coverage: boolean;
+  proxy_port: number | null;
+  pid: number | null;
+  started_at: string;
+  ended_at: string | null;
+  exit_code: number | null;
+  request_count: number;
+  error_count: number;
+}
+
+export interface CredentialAttribution {
+  session_id: string;
+  credential_id: string;
+  service_id: string;
+  host: string;
+  request_count: number;
+  confidence: string;
+  evidence: string;
+  credential_version: number | null;
+  used_current_version: boolean | null;
+}
+
+export interface CompatibilityResult {
+  session_id: string;
+  check: string;
+  status: string;
+  detail: string;
+}
+
+export interface ObserveMetrics {
+  total: number;
+  success: number;
+  c2xx: number;
+  c3xx: number;
+  c4xx: number;
+  c5xx: number;
+  auth_errors: number;
+  forbidden: number;
+  rate_limited: number;
+  server_errors: number;
+  transport_errors: number;
+  tls_errors: number;
+  errors: number;
+  error_rate: number;
+  request_bytes: number;
+  response_bytes: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  p99_ms: number | null;
+  latency_approximate: boolean;
+}
+
+export interface ServiceOverview extends ObservedService {
+  metrics: ObserveMetrics;
+}
+
+export interface ObserveCertStatus {
+  present: boolean;
+  fingerprint_sha256: string | null;
+  serial: string | null;
+  created_at: string | null;
+  not_after: string | null;
+  system_trust: string;
+  system_trust_at: string | null;
+}
+
+export interface ObservabilitySettings {
+  default_mode: string;
+  event_retention_days: number;
+  aggregate_retention_days: number;
+}
+
+export interface DiagnosticCheck {
+  name: string;
+  status: string;
+  detail: string;
+}
