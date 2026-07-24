@@ -51,8 +51,13 @@ Rust unit/integration (all passing):
 3. **Canary over raw byte streams** (M31): the canary asserts over emitted
    `ObservedRequest` metadata; extending it to scan the SQLite file/WAL,
    captured stderr, and temp files end-to-end is follow-up.
-4. **Vault-lock interruption** (H12): no test because the behavior is not
-   implemented; a `vault_lock.rs` accompanies the required lock-hook follow-up.
+4. **Vault-lock interruption** (H12): IMPLEMENTED and tested (2026-07-24
+   remediation). Covered by `crates/observe/tests/lock_lifecycle.rs` (manual
+   lock, auto-lock deadline, mid-run session-file deletion, normal completion),
+   the `core::session::peek_state` unit tests (Linux+Windows CI), the
+   `LockPolicy` unit tests, and packaged release-binary validation
+   (`PR13_PACKAGED_LOCK_VALIDATION.md`). Observe's own tests now run in the
+   Linux CI job. See `PR13_VAULT_LOCK_COMPLETION.md` / `PR13_VAULT_LOCK_REAUDIT.md`.
 5. **WebSocket / SSE / redirect / compression / chunked-streaming** integration
    coverage: the WS bidirectional relay and framing are implemented and unit-
    level tested (relay.rs), but no end-to-end protocol integration tests exist.
