@@ -1,4 +1,4 @@
-# Contributing to API Tracker
+# Contributing to Tethra
 
 Thanks for helping build a trustworthy local-first credential manager.
 
@@ -9,7 +9,7 @@ Thanks for helping build a trustworthy local-first credential manager.
   and zeroize). Any new code path that touches secrets needs a test proving
   it does not leak them.
 - **Local-first.** No telemetry, no analytics, no calls to any
-  API-Tracker-operated service. All network I/O (provider connectors,
+  Tethra-operated service. All network I/O (provider connectors,
   destination adapters, the documentation watcher, webhook channels) goes
   directly from the user's device to endpoints the user explicitly
   configured, and is mockable in tests (`HttpClient`) — tests never make
@@ -21,13 +21,13 @@ Thanks for helping build a trustworthy local-first credential manager.
 - **Test credentials must be obvious fakes**, e.g.
   `FAKE-TEST-NOT-A-REAL-KEY-000001`. Never anything resembling a real key.
 - Tests must not touch the developer's real vault: always use temp dirs
-  (`API_TRACKER_DIR`).
+  (`TETHRA_DIR`; the legacy `API_TRACKER_*` env var names still work).
 
 ## Repository layout
 
 ```text
 crates/core/          shared Rust core (vault, crypto, db, models, services)
-apps/cli/             api-tracker CLI
+apps/cli/             tethra CLI
 apps/desktop/         React/TS UI + src-tauri (Tauri v2 backend)
 docs/                 product spec, architecture, ADRs (docs/decisions/)
 ```
@@ -46,7 +46,7 @@ platform.
 # Rust checks (run all of these before pushing)
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli
+TETHRA_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli
 
 # Frontend checks
 cd apps/desktop
@@ -58,14 +58,18 @@ npm run build
 npx tauri dev
 ```
 
-`API_TRACKER_INSECURE_FAST_KDF=1` weakens Argon2id **in debug builds only**
+`TETHRA_INSECURE_FAST_KDF=1` weakens Argon2id **in debug builds only**
 so tests are fast; release builds ignore it.
 
 To experiment without touching your real vault:
 
 ```bash
-API_TRACKER_DIR=/tmp/at-dev target/debug/api-tracker init
+TETHRA_DIR=/tmp/at-dev target/debug/tethra init
 ```
+
+The legacy `api-tracker` command remains available as a compatibility
+alias for the same program — see
+[docs/rebrand/TETHRA_MIGRATION_GUIDE.md](docs/rebrand/TETHRA_MIGRATION_GUIDE.md).
 
 ## Adding a provider or detection pattern
 

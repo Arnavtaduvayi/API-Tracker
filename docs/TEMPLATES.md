@@ -10,10 +10,13 @@ credential-separation, permission, and rotation guidance, documentation
 links, and suggested deployment destinations.
 
 ```bash
-api-tracker template list
-api-tracker template show fullstack-saas
-api-tracker template apply openai-app --project my-app --write-example ~/code/my-app
+tethra template list
+tethra template show fullstack-saas
+tethra template apply openai-app --project my-app --write-example ~/code/my-app
 ```
+
+The legacy `api-tracker` command remains available as a compatibility
+alias for the same program; see `docs/rebrand/TETHRA_MIGRATION_GUIDE.md`.
 
 Hard guarantees:
 
@@ -32,9 +35,9 @@ Templates: `openai-app`, `anthropic-app`, `supabase-web`, `stripe-app`,
 ## Stack detection
 
 ```bash
-api-tracker template detect --repo ~/code/my-app     # or --project my-app
-api-tracker template confirm openai-app --repo ~/code/my-app
-api-tracker template dismiss node-backend --repo ~/code/my-app
+tethra template detect --repo ~/code/my-app     # or --project my-app
+tethra template confirm openai-app --repo ~/code/my-app
+tethra template dismiss node-backend --repo ~/code/my-app
 ```
 
 Detection is **deterministic rules plus a locally stored confirm/dismiss
@@ -59,9 +62,9 @@ The complete "learning" store is one local table of
 time:
 
 ```bash
-api-tracker template prefs                       # list every stored decision
-api-tracker template prefs --reset-repo <dir>    # forget one repository
-api-tracker template prefs --clear-all           # delete ALL learned stack data
+tethra template prefs                       # list every stored decision
+tethra template prefs --reset-repo <dir>    # forget one repository
+tethra template prefs --clear-all           # delete ALL learned stack data
 ```
 
 The desktop Templates screen offers the same catalog, guidance, apply,

@@ -8,10 +8,11 @@ docs = []
 destinations = ["env_mapping", "env_export", "github_actions"]
 credential_separation = """
 One variable per external service, one credential per environment. Prefer
-`api-tracker run` (runtime injection) over .env files; if a framework needs
+`tethra run` (runtime injection) over .env files; if a framework needs
 a file, use a temporary export with a TTL so plaintext does not linger.
 Django's SECRET_KEY must be unique per environment and never reused from a
-tutorial."""
+tutorial. The legacy `api-tracker` command remains a compatibility alias
+for `tethra` (see docs/rebrand/TETHRA_MIGRATION_GUIDE.md)."""
 permission_guidance = """
 Scope database users and third-party keys to least privilege; avoid
 project-wide admin tokens inside request-serving code."""

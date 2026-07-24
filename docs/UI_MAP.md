@@ -1,5 +1,13 @@
 # Desktop UI Map
 
+> **Naming note (2026-07-24):** API Tracker was renamed **Tethra** after this
+> report was produced. This map remains the verified record of the
+> **pre-rename baseline `7d81090`**: the window/app title is now "Tethra",
+> native notifications are titled "Tethra", the preferred CLI command is
+> `tethra` (legacy `api-tracker` still works), and preferred env vars are
+> `TETHRA_*` (legacy `API_TRACKER_*` still honored). Baseline content below
+> is intentionally unchanged; see docs/rebrand/TETHRA_REBRAND_PLAN.md.
+
 An exact, button-by-button inventory of the API Tracker desktop application,
 verified against the source on `main` (commit `7d81090`, 2026-07-18; this is
 the current `main`, six commits ahead of the `v0.3.0-alpha-rc1` tag — the

@@ -1,9 +1,35 @@
 # Changelog
 
-All notable changes to API Tracker are documented here. The project is in
-**public alpha**; expect breaking changes before 1.0. Dates are UTC.
+All notable changes to Tethra (formerly API Tracker) are documented here.
+The project is in **public alpha**; expect breaking changes before 1.0.
+Dates are UTC.
 
 ## [Unreleased]
+
+### Changed — product renamed to Tethra
+API Tracker is now **Tethra**. The rename is compatibility-safe: no data
+migration occurs and nothing existing breaks. Details in
+`docs/rebrand/TETHRA_MIGRATION_GUIDE.md` and
+`docs/rebrand/TETHRA_COMPATIBILITY_MATRIX.md`.
+- App display name, window title, Finder bundle (`Tethra.app`), DMG, and
+  native notification titles now say Tethra; the macOS bundle identifier is
+  unchanged so macOS treats this as an upgrade of the same app.
+- New preferred CLI command `tethra`; `api-tracker` remains installed as a
+  byte-identical compatibility binary with unchanged output.
+- New preferred `TETHRA_*` environment variables for the whole set
+  (`TETHRA_DIR`, `TETHRA_PASSWORD`, `TETHRA_SESSION`, …); legacy
+  `API_TRACKER_*` names keep working. When both are set the `TETHRA_*`
+  name wins; conflicting `*_DIR` values produce a warning and are never
+  combined. `run` scrubs **both** prefixes from injected children.
+- `unlock --print-export` now prints the legacy export line first and a
+  `TETHRA_SESSION` line second; `eval` sets both.
+- Newly installed git hooks prefer `tethra` and fall back to
+  `api-tracker`; hooks installed by older builds remain recognized,
+  upgradable, and removable.
+- Preserved on purpose: vault data directory (`api-tracker`), database and
+  session filenames, encryption AAD labels, backup format marker, keychain
+  service/account defaults, webhook `source` field, and hook sentinels —
+  existing vaults, backups, hooks, and scripts work unchanged.
 
 ### Security — release-blocker remediation
 Fixes for the confirmed release blockers from the deep technical audit

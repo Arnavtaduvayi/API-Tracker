@@ -18,7 +18,7 @@ permission_guidance = """
 Anthropic keys are scoped by workspace membership; there are no per-key
 scopes to reduce. Keep production keys in a dedicated workspace."""
 rotation_guidance = """
-New keys must be created in the console (no create API); API Tracker's
+New keys must be created in the console (no create API); Tethra's
 rotation workflow guides the manual creation and then disables/archives the
 old key via the Admin API."""
 

@@ -326,8 +326,8 @@ export function AccessView() {
               </ul>
               <p>
                 Use the Sessions list below (or the CLI&apos;s{" "}
-                <code>tethra access end {endResult.grant.id} --kill</code>) to send SIGTERM
-                to these processes.
+                <code>tethra access end {endResult.grant.id} --kill</code>) to send SIGTERM to
+                these processes.
               </p>
             </>
           )}

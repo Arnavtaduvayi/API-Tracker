@@ -16,12 +16,12 @@ GitHub Actions, prefer the built-in GITHUB_TOKEN over a PAT wherever it
 suffices."""
 permission_guidance = """
 Fine-grained tokens: choose per-repository access and the minimal
-permission set. Classic PATs expose scopes via the API (API Tracker reads
+permission set. Classic PATs expose scopes via the API (Tethra reads
 them); fine-grained permissions are not API-readable — record them in
 notes."""
 rotation_guidance = """
 Tokens are regenerated in the web UI; fine-grained tokens should carry an
-expiration so GitHub forces rotation. API Tracker records the
+expiration so GitHub forces rotation. Tethra records the
 provider-reported expiration and alerts before it lapses."""
 
 [[env]]

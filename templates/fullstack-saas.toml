@@ -19,7 +19,7 @@ app projects instead of pasting the same value twice."""
 permission_guidance = """
 Restricted Stripe keys for exactly the billing operations used; Supabase
 secret key server-side only with RLS on; LLM keys project-scoped with
-budgets set in API Tracker."""
+budgets set in Tethra."""
 rotation_guidance = """
 Attach every production secret to its deployment destination (Vercel /
 GitHub Actions) so one reviewed sync plan rotates the whole surface;

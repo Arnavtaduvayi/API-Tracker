@@ -3,13 +3,16 @@
 A definitive audit of product requirements against the **actual code**, not
 prior session reports. Every claim below was verified by inspecting the
 modules and tests named. Last audited: **2026-07-19, gap-closure branch**
-(migrations v1–v10, backup format v2).
+(migrations v1–v10, backup format v2). CLI examples use the `tethra`
+command; the legacy `api-tracker` command remains available as a
+compatibility alias for the same program — see
+[rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md).
 
 Classifications:
 
 - **Fully implemented** — the workflow works end to end, with tests.
-- **Provider-limited** — bounded by what providers officially expose; API
-  Tracker implements the most precise supported level and labels it.
+- **Provider-limited** — bounded by what providers officially expose; Tethra
+  implements the most precise supported level and labels it.
 - **Local-only by design** — implemented with local data; no provider
   round-trip is possible or claimed.
 - **Advisory-only** — informs and warns but cannot enforce; labeled as such
@@ -163,7 +166,7 @@ possible-secret-exposure signal never clears just because a later
 incremental scan stopped re-emitting it (unchanged / unavailable / failed /
 skipped repo, or the secret left the working tree but remains in history).
 It stays open until an explicit resolution or a qualifying clean full
-re-scan — `api-tracker scan <repo> --reverify` (or the desktop
+re-scan — `tethra scan <repo> --reverify` (or the desktop
 `scan_reverify` command), which resolves the alerts only when a full
 history + working-tree scan finds nothing.
 
@@ -263,7 +266,7 @@ appearance. Tests: `account_metadata.rs` (6).
 
 No provider account-password storage exists anywhere in the codebase (every
 `password` reference is the vault's own master/project/backup password).
-API Tracker is a credential manager for API keys, not a general password
+Tethra is a credential manager for API keys, not a general password
 manager; storing console login passwords would expand the threat model
 (console takeover, password-reuse, 2FA-reset surface) for little benefit
 over a real password manager. Preserved instead: org labels, official

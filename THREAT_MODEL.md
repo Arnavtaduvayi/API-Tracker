@@ -1,6 +1,6 @@
 # Threat Model
 
-This describes what API Tracker protects, from whom, and — just as
+This describes what Tethra protects, from whom, and — just as
 importantly — what it cannot protect. It reflects the current
 implementation (encrypted vault, projects/credentials, reuse detection,
 backups, CLI sessions); it will be revised as scanning and provider
@@ -48,7 +48,7 @@ integrations land.
   no crawling); and **provider connectors** (validation, metadata, permission
   reads, and usage/cost sync) that send the credential only in a request
   header to the provider's own official API endpoint. No secret is ever sent
-  to an API-Tracker-operated server. Connectors are built to the documented
+  to a Tethra-operated server. Connectors are built to the documented
   API shapes and tested offline against fixtures.
 - The **OpenAI administrative connection** stores an Admin API key encrypted
   under the vault key (AAD binds it to this vault + provider). It is
@@ -148,7 +148,7 @@ integrations land.
 - The fingerprint key is per-vault and wrapped, so reuse detection cannot be
   turned into an offline oracle.
 - Sessions expire on a sliding inactivity window and can be revoked by
-  deleting the session file (`api-tracker lock`).
+  deleting the session file (`tethra lock`).
 
 ## Known trade-offs and open items
 

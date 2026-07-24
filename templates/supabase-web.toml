@@ -19,7 +19,7 @@ A key's privilege is fixed by its type: publishable (client-safe) vs secret
 type, and enable RLS on every table."""
 rotation_guidance = """
 New-format secret keys (sb_secret_...) rotate fully via the Management API
-through API Tracker's rotation workflow. Legacy JWT keys can only be rolled
+through Tethra's rotation workflow. Legacy JWT keys can only be rolled
 in the dashboard."""
 
 [[env]]
