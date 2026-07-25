@@ -42,6 +42,7 @@ import { SyncView } from "./components/SyncView";
 import { RotationView } from "./components/RotationView";
 import { AccessView } from "./components/AccessView";
 import { NotifyView } from "./components/NotifyView";
+import { ApiActivityView } from "./components/ApiActivityView";
 
 export type View =
   | { name: "projects" }
@@ -62,6 +63,7 @@ export type View =
   | { name: "alerts" }
   | { name: "notify" }
   | { name: "usage" }
+  | { name: "api-activity" }
   | { name: "pricing" }
   | { name: "templates" }
   | { name: "settings" }
@@ -219,6 +221,9 @@ export default function App() {
         <button className="link" onClick={() => setView({ name: "usage" })}>
           Usage
         </button>
+        <button className="link" onClick={() => setView({ name: "api-activity" })}>
+          API activity
+        </button>
         <button className="link" onClick={() => setView({ name: "pricing" })}>
           Pricing
         </button>
@@ -300,6 +305,7 @@ export default function App() {
       {view.name === "alerts" && <AlertsView />}
       {view.name === "notify" && <NotifyView />}
       {view.name === "usage" && <UsageView />}
+      {view.name === "api-activity" && <ApiActivityView />}
       {view.name === "pricing" && <PricingView />}
       {view.name === "templates" && <TemplatesView />}
       {view.name === "settings" && (

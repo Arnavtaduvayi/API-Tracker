@@ -24,9 +24,25 @@ fn ok(body: &str) -> HttpResponse {
 
 /// Bucket window entirely inside the current month (30 minutes ago → now),
 /// so month-to-date queries include it.
+// The synthetic usage window used by every mock in this file. It is memoized
+// for the life of the test PROCESS so that all reads return the SAME window:
+// `usage_sync` replaces rows for the exact window it syncs, and the
+// "overlapping window replaces the old rows" scenario relies on the re-sync
+// hitting the identical window. Re-reading `clock::now()` per call is
+// second-granular, so two reads separated by real work (a full mock sync + DB
+// writes) can straddle a 1-second boundary and yield different windows — a
+// latent race that surfaced on the slower Windows CI runner
+// (docs/observability/audit/PR13_CI_FAILURE_ANALYSIS.md). No test asserts the
+// window's absolute recency (all query `usage_totals("2000-01-01…")`), and
+// staleness tests age `last_success_at` independently, so pinning is
+// behaviour-preserving and removes the nondeterminism.
 fn bucket_times() -> (i64, i64) {
-    let now = api_tracker_core::clock::now().unix_timestamp();
-    (now - 1800, now)
+    use std::sync::OnceLock;
+    static WINDOW: OnceLock<(i64, i64)> = OnceLock::new();
+    *WINDOW.get_or_init(|| {
+        let now = api_tracker_core::clock::now().unix_timestamp();
+        (now - 1800, now)
+    })
 }
 
 fn usage_page(ws: i64, we: i64) -> String {

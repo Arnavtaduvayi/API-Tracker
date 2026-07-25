@@ -654,6 +654,212 @@ ALTER TABLE provider_connections ADD COLUMN account_synced_at TEXT;
 ALTER TABLE process_sessions ADD COLUMN proc_identity TEXT;
 "#,
     },
+    Migration {
+        version: 12,
+        name: "runtime api observability (metadata-only)",
+        sql: r#"
+-- Runtime API observability. These tables store ONLY sanitized operational
+-- metadata about traffic observed by the local observation proxy: never
+-- request/response bodies, header values, cookies, authorization values,
+-- query strings, or raw URLs (see
+-- docs/observability/RUNTIME_OBSERVABILITY_PRIVACY_MODEL.md). They are kept
+-- deliberately separate from usage_snapshots so locally observed request
+-- counts are never summed with provider-reported usage.
+
+-- One monitored run. `command`/`credential_names` are labels/names only.
+-- `status` is running|completed|interrupted; an interrupted session is a
+-- distinct, honestly-recorded state (vault locked, launcher gone, proxy
+-- error) — a session is never silently marked completed.
+CREATE TABLE observation_sessions (
+    id                TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    mode              TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT 'cli_run',
+    status            TEXT NOT NULL DEFAULT 'running',
+    interrupt_reason  TEXT,
+    command           TEXT NOT NULL DEFAULT '',
+    credential_names  TEXT NOT NULL DEFAULT '',
+    runtime_detected  TEXT,
+    trust_level       TEXT,
+    partial_coverage  INTEGER NOT NULL DEFAULT 0,
+    proxy_port        INTEGER,
+    pid               INTEGER,
+    proc_identity     TEXT,
+    started_at        TEXT NOT NULL,
+    ended_at          TEXT,
+    exit_code         INTEGER
+) STRICT;
+CREATE INDEX idx_obs_sessions_project ON observation_sessions(project_id);
+CREATE INDEX idx_obs_sessions_status ON observation_sessions(status);
+
+-- One row per observed host (the automatic API inventory). provider_id is the
+-- resolved manifest id when known; source labels how the row was learned;
+-- user_* hold explicit user corrections that must be preserved.
+CREATE TABLE observed_api_services (
+    id             TEXT PRIMARY KEY,
+    host           TEXT NOT NULL UNIQUE,
+    provider_id    TEXT,
+    source         TEXT NOT NULL DEFAULT 'locally_observed',
+    classification TEXT NOT NULL DEFAULT 'external',
+    is_internal    INTEGER NOT NULL DEFAULT 0,
+    user_provider  TEXT,
+    user_api_name  TEXT,
+    user_notes     TEXT,
+    confirmed      INTEGER NOT NULL DEFAULT 0,
+    first_seen_at  TEXT NOT NULL,
+    last_seen_at   TEXT NOT NULL
+) STRICT;
+
+-- One row per (service, method, sanitized path template).
+CREATE TABLE observed_endpoints (
+    id                  TEXT PRIMARY KEY,
+    service_id          TEXT NOT NULL REFERENCES observed_api_services(id) ON DELETE CASCADE,
+    method              TEXT NOT NULL,
+    path_template       TEXT NOT NULL,
+    template_confidence TEXT NOT NULL DEFAULT 'high',
+    first_seen_at       TEXT NOT NULL,
+    last_seen_at        TEXT NOT NULL,
+    UNIQUE (service_id, method, path_template)
+) STRICT;
+
+-- One sanitized request event. Short retention (default 7 days). Every column
+-- here is on the privacy-model allowlist; there is deliberately no column able
+-- to hold a body, header value, cookie, query string, or raw URL.
+CREATE TABLE runtime_request_events (
+    id                     TEXT PRIMARY KEY,
+    session_id             TEXT NOT NULL REFERENCES observation_sessions(id) ON DELETE CASCADE,
+    project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    service_id             TEXT NOT NULL REFERENCES observed_api_services(id) ON DELETE CASCADE,
+    endpoint_id            TEXT REFERENCES observed_endpoints(id) ON DELETE CASCADE,
+    at                     TEXT NOT NULL,
+    host                   TEXT NOT NULL,
+    port                   INTEGER NOT NULL,
+    method                 TEXT NOT NULL,
+    path_template          TEXT NOT NULL,
+    template_confidence    TEXT NOT NULL DEFAULT 'high',
+    status_code            INTEGER,
+    status_class           TEXT NOT NULL DEFAULT 'none',
+    outcome                TEXT NOT NULL,
+    latency_ms             INTEGER,
+    request_bytes          INTEGER,
+    response_bytes         INTEGER,
+    req_content_kind       TEXT,
+    resp_content_kind      TEXT,
+    had_authorization      INTEGER NOT NULL DEFAULT 0,
+    protocol               TEXT NOT NULL,
+    observation_source     TEXT NOT NULL,
+    transport_error        TEXT NOT NULL DEFAULT 'none',
+    previously_known       INTEGER NOT NULL DEFAULT 0,
+    credential_id          TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    attribution_confidence TEXT,
+    credential_version     INTEGER,
+    used_current_version   INTEGER
+) STRICT;
+CREATE INDEX idx_rre_session ON runtime_request_events(session_id);
+CREATE INDEX idx_rre_service_at ON runtime_request_events(service_id, at);
+CREATE INDEX idx_rre_at ON runtime_request_events(at);
+CREATE INDEX idx_rre_project ON runtime_request_events(project_id);
+CREATE INDEX idx_rre_credential ON runtime_request_events(credential_id);
+
+-- Pre-aggregated hourly/daily counters + a fixed 14-bin latency histogram.
+-- Longer retention (default 90 days). endpoint_id/credential_id use '' as the
+-- "all" sentinel so the UNIQUE key works (SQLite treats NULLs as distinct).
+CREATE TABLE runtime_metric_buckets (
+    id                 TEXT PRIMARY KEY,
+    granularity        TEXT NOT NULL,
+    bucket_start       TEXT NOT NULL,
+    project_id         TEXT NOT NULL,
+    service_id         TEXT NOT NULL,
+    endpoint_id        TEXT NOT NULL DEFAULT '',
+    credential_id      TEXT NOT NULL DEFAULT '',
+    credential_version INTEGER,
+    total              INTEGER NOT NULL DEFAULT 0,
+    c2xx               INTEGER NOT NULL DEFAULT 0,
+    c3xx               INTEGER NOT NULL DEFAULT 0,
+    c4xx               INTEGER NOT NULL DEFAULT 0,
+    c5xx               INTEGER NOT NULL DEFAULT 0,
+    auth_errors        INTEGER NOT NULL DEFAULT 0,
+    forbidden          INTEGER NOT NULL DEFAULT 0,
+    rate_limited       INTEGER NOT NULL DEFAULT 0,
+    server_errors      INTEGER NOT NULL DEFAULT 0,
+    transport_errors   INTEGER NOT NULL DEFAULT 0,
+    tls_errors         INTEGER NOT NULL DEFAULT 0,
+    request_bytes      INTEGER NOT NULL DEFAULT 0,
+    response_bytes     INTEGER NOT NULL DEFAULT 0,
+    lat_le_1           INTEGER NOT NULL DEFAULT 0,
+    lat_le_2           INTEGER NOT NULL DEFAULT 0,
+    lat_le_5           INTEGER NOT NULL DEFAULT 0,
+    lat_le_10          INTEGER NOT NULL DEFAULT 0,
+    lat_le_25          INTEGER NOT NULL DEFAULT 0,
+    lat_le_50          INTEGER NOT NULL DEFAULT 0,
+    lat_le_100         INTEGER NOT NULL DEFAULT 0,
+    lat_le_250         INTEGER NOT NULL DEFAULT 0,
+    lat_le_500         INTEGER NOT NULL DEFAULT 0,
+    lat_le_1000        INTEGER NOT NULL DEFAULT 0,
+    lat_le_2500        INTEGER NOT NULL DEFAULT 0,
+    lat_le_5000        INTEGER NOT NULL DEFAULT 0,
+    lat_le_10000       INTEGER NOT NULL DEFAULT 0,
+    lat_gt_10000       INTEGER NOT NULL DEFAULT 0,
+    first_at           TEXT,
+    last_at            TEXT,
+    UNIQUE (granularity, bucket_start, project_id, service_id, endpoint_id, credential_id)
+) STRICT;
+CREATE INDEX idx_rmb_lookup ON runtime_metric_buckets(service_id, granularity, bucket_start);
+CREATE INDEX idx_rmb_project ON runtime_metric_buckets(project_id);
+
+-- Per-session credential attribution rollup, with confidence + evidence and
+-- the launch-time version (so "old version after rotation" is provable).
+CREATE TABLE credential_traffic_attributions (
+    session_id           TEXT NOT NULL REFERENCES observation_sessions(id) ON DELETE CASCADE,
+    credential_id        TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    service_id           TEXT NOT NULL REFERENCES observed_api_services(id) ON DELETE CASCADE,
+    request_count        INTEGER NOT NULL DEFAULT 0,
+    confidence           TEXT NOT NULL,
+    evidence             TEXT NOT NULL DEFAULT '',
+    credential_version   INTEGER,
+    used_current_version INTEGER,
+    updated_at           TEXT NOT NULL,
+    PRIMARY KEY (session_id, credential_id, service_id)
+) STRICT;
+
+-- Honest per-session compatibility diagnosis (trust support, proxy conflict,
+-- pinning/bypass symptoms, cleanup). `check_name` avoids the SQL keyword.
+CREATE TABLE observation_compatibility_results (
+    session_id TEXT NOT NULL REFERENCES observation_sessions(id) ON DELETE CASCADE,
+    check_name TEXT NOT NULL,
+    status     TEXT NOT NULL,
+    detail     TEXT NOT NULL DEFAULT '',
+    at         TEXT NOT NULL,
+    PRIMARY KEY (session_id, check_name)
+) STRICT;
+
+-- Singleton local-CA state. The CA PRIVATE KEY is stored ONLY as vault-key
+-- ciphertext (key_ciphertext); the certificate (ca_cert_pem) is public. The
+-- CHECK enforces a single row.
+CREATE TABLE observe_certificate_state (
+    id                 TEXT PRIMARY KEY CHECK (id = 'ca'),
+    ca_cert_pem        TEXT NOT NULL,
+    key_ciphertext     BLOB NOT NULL,
+    fingerprint_sha256 TEXT NOT NULL,
+    serial             TEXT NOT NULL,
+    created_at         TEXT NOT NULL,
+    not_after          TEXT NOT NULL,
+    system_trust       TEXT NOT NULL DEFAULT 'absent',
+    system_trust_at    TEXT
+) STRICT;
+
+-- Explicit per-project internal-destination allowlist (bypasses the private-
+-- range denial for exactly these host:port pairs; surfaced with a warning).
+CREATE TABLE observe_internal_allowlist (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    host       TEXT NOT NULL,
+    port       INTEGER NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, host, port)
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

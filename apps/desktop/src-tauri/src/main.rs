@@ -2097,6 +2097,281 @@ fn credential_provider_revoke(
     })
 }
 
+// --- Runtime API observability (metadata only) ---
+
+use api_tracker_core::runtime::aggregate;
+use api_tracker_core::runtime::model as obs_model;
+
+/// A service plus its metrics, for the overview dashboard.
+#[derive(Serialize)]
+struct ObserveServiceOverview {
+    #[serde(flatten)]
+    service: obs_model::ObservedServiceRow,
+    metrics: aggregate::Metrics,
+}
+
+#[tauri::command]
+fn observe_overview(state: State<'_, AppState>) -> CmdResult<Vec<ObserveServiceOverview>> {
+    with_vault(&state, |vault| {
+        let mut out = Vec::new();
+        for service in vault.observe_services()? {
+            let metrics = aggregate::service_metrics(vault.connection(), &service.id, None)?;
+            out.push(ObserveServiceOverview { service, metrics });
+        }
+        Ok(out)
+    })
+}
+
+#[tauri::command]
+fn observe_services(state: State<'_, AppState>) -> CmdResult<Vec<obs_model::ObservedServiceRow>> {
+    with_vault(&state, |vault| vault.observe_services())
+}
+
+#[tauri::command]
+fn observe_service(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<obs_model::ObservedServiceRow> {
+    with_vault(&state, |vault| vault.observe_service(&id))
+}
+
+#[tauri::command]
+fn observe_service_metrics(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<aggregate::Metrics> {
+    with_vault(&state, |vault| {
+        aggregate::service_metrics(vault.connection(), &id, None)
+    })
+}
+
+#[tauri::command]
+fn observe_service_endpoints(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<obs_model::ObservedEndpointRow>> {
+    with_vault(&state, |vault| vault.observe_service_endpoints(&id))
+}
+
+#[tauri::command]
+fn observe_service_events(
+    state: State<'_, AppState>,
+    id: String,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::RuntimeEventRow>> {
+    with_vault(&state, |vault| vault.observe_service_events(&id, limit))
+}
+
+#[tauri::command]
+fn observe_sessions(
+    state: State<'_, AppState>,
+    project: Option<String>,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::ObservationSessionRow>> {
+    with_vault(&state, |vault| {
+        vault.observe_sessions(project.as_deref(), limit)
+    })
+}
+
+#[tauri::command]
+fn observe_session(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<obs_model::ObservationSessionRow> {
+    with_vault(&state, |vault| vault.observe_session(&id))
+}
+
+#[tauri::command]
+fn observe_session_metrics(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<aggregate::Metrics> {
+    with_vault(&state, |vault| {
+        aggregate::session_metrics(vault.connection(), &vault.observe_session(&id)?.id)
+    })
+}
+
+#[tauri::command]
+fn observe_session_events(
+    state: State<'_, AppState>,
+    id: String,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::RuntimeEventRow>> {
+    with_vault(&state, |vault| vault.observe_session_events(&id, limit))
+}
+
+#[tauri::command]
+fn observe_session_attributions(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<obs_model::CredentialAttributionRow>> {
+    with_vault(&state, |vault| vault.observe_session_attributions(&id))
+}
+
+#[tauri::command]
+fn observe_session_compat(
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<Vec<obs_model::CompatibilityResultRow>> {
+    with_vault(&state, |vault| vault.observe_session_compat(&id))
+}
+
+#[tauri::command]
+fn observe_credential_activity(
+    state: State<'_, AppState>,
+    selector: String,
+    limit: u32,
+) -> CmdResult<Vec<obs_model::CredentialAttributionRow>> {
+    with_vault(&state, |vault| {
+        vault.observe_credential_activity(&selector, limit)
+    })
+}
+
+#[tauri::command]
+fn observe_cert_status(
+    state: State<'_, AppState>,
+) -> CmdResult<api_tracker_core::runtime::store::CertStatus> {
+    with_vault(&state, |vault| vault.observe_ca_status())
+}
+
+/// Rotate the local CA. Reauthenticated in core (the CA removal verifies the
+/// master password); generation happens in the observe crate.
+#[tauri::command]
+fn observe_cert_rotate(
+    state: State<'_, AppState>,
+    password: String,
+) -> CmdResult<api_tracker_core::runtime::store::CertStatus> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault.observe_ca_remove(&password)?;
+        let g = api_tracker_observe::ca::generate_ca(vault.vault_id())?;
+        vault.observe_ca_store(
+            &g.cert_pem,
+            &g.key_der,
+            &g.fingerprint_sha256,
+            &g.serial_hex,
+            &g.not_after,
+        )?;
+        vault.observe_ca_status()
+    })
+}
+
+#[tauri::command]
+fn observe_cert_remove(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| vault.observe_ca_remove(&password))
+}
+
+/// Mode C: install the CA into the OS trust store. Reauthenticated; the OS
+/// shows its own prompt (never suppressed).
+#[tauri::command]
+fn observe_cert_install_system(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| {
+        vault.verify_master_password(&password)?;
+        let (pem, _key, _fp) = vault
+            .observe_ca_material()?
+            .ok_or_else(|| CoreError::InvalidInput("no local CA yet".into()))?;
+        let dir = vault.paths().data_dir.clone();
+        api_tracker_observe::systemtrust::install(&dir, &pem)?;
+        vault
+            .observe_ca_set_system_trust("installed", Some(&api_tracker_core::clock::now_rfc3339()))
+    })
+}
+
+#[tauri::command]
+fn observe_cert_uninstall_system(state: State<'_, AppState>) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        api_tracker_observe::systemtrust::remove()?;
+        vault.observe_ca_set_system_trust("absent", None)
+    })
+}
+
+#[tauri::command]
+fn observe_settings_get(
+    state: State<'_, AppState>,
+) -> CmdResult<api_tracker_core::runtime::settings::ObservabilitySettings> {
+    with_vault(&state, |vault| vault.observe_settings())
+}
+
+#[tauri::command]
+fn observe_settings_set(
+    state: State<'_, AppState>,
+    default_mode: Option<String>,
+    event_days: Option<u32>,
+    aggregate_days: Option<u32>,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        let mut s = vault.observe_settings()?;
+        if let Some(m) = default_mode {
+            s.default_mode = obs_model::ObservationMode::parse(&m)
+                .ok_or_else(|| CoreError::InvalidInput(format!("invalid mode '{m}'")))?;
+        }
+        if let Some(d) = event_days {
+            s.event_retention_days = d;
+        }
+        if let Some(d) = aggregate_days {
+            s.aggregate_retention_days = d;
+        }
+        vault.observe_settings_set(&s)
+    })
+}
+
+#[tauri::command]
+fn observe_diagnostics(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<api_tracker_observe::diagnostics::Check>> {
+    with_vault(&state, |vault| {
+        let present = vault.observe_ca_status()?.present;
+        Ok(api_tracker_observe::diagnostics::run(present))
+    })
+}
+
+#[tauri::command]
+fn observe_delete_session(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    with_vault(&state, |vault| vault.observe_delete_session(&id))
+}
+
+/// Delete ALL observability data (reauthenticated in core).
+#[tauri::command]
+fn observe_delete_all(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = SecretString::new(password);
+    with_vault(&state, |vault| vault.observe_delete_all(&password))
+}
+
+#[tauri::command]
+fn observe_allowlist(
+    state: State<'_, AppState>,
+    project: String,
+) -> CmdResult<Vec<(String, u16, String)>> {
+    with_vault(&state, |vault| vault.observe_allowlist(&project))
+}
+
+#[tauri::command]
+fn observe_allowlist_add(
+    state: State<'_, AppState>,
+    project: String,
+    host: String,
+    port: u16,
+    note: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        vault.observe_allowlist_add(&project, &host, port, &note)
+    })
+}
+
+#[tauri::command]
+fn observe_allowlist_remove(
+    state: State<'_, AppState>,
+    project: String,
+    host: String,
+    port: u16,
+) -> CmdResult<bool> {
+    with_vault(&state, |vault| {
+        vault.observe_allowlist_remove(&project, &host, port)
+    })
+}
+
 fn main() {
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
     tauri::Builder::default()
@@ -2247,6 +2522,32 @@ fn main() {
             provider_list_keys,
             test_key_create,
             credential_provider_revoke,
+            observe_overview,
+            observe_services,
+            observe_service,
+            observe_service_metrics,
+            observe_service_endpoints,
+            observe_service_events,
+            observe_sessions,
+            observe_session,
+            observe_session_metrics,
+            observe_session_events,
+            observe_session_attributions,
+            observe_session_compat,
+            observe_credential_activity,
+            observe_cert_status,
+            observe_cert_rotate,
+            observe_cert_remove,
+            observe_cert_install_system,
+            observe_cert_uninstall_system,
+            observe_settings_get,
+            observe_settings_set,
+            observe_diagnostics,
+            observe_delete_session,
+            observe_delete_all,
+            observe_allowlist,
+            observe_allowlist_add,
+            observe_allowlist_remove,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the API Tracker desktop app");

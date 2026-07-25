@@ -217,6 +217,22 @@ pub mod aad {
     pub fn notification_channel(vault_id: &str, channel_id: &str) -> String {
         format!("api-tracker:v1:notification-channel:{vault_id}:{channel_id}")
     }
+    /// The runtime-observability local CA private key (vault-level; encrypted
+    /// under the vault key, never written in plaintext).
+    ///
+    /// The AAD binds the vault id AND a hash of the CA *certificate* PEM, so the
+    /// public `ca_cert_pem` column is cryptographically tied to the encrypted
+    /// key. An attacker with DB write access who swaps in a foreign certificate
+    /// (to launder their own CA — whose private key they hold — into the OS
+    /// trust store via a consented Mode C install) changes this hash, so the key
+    /// ciphertext no longer authenticates and every decrypt fails CLOSED. The
+    /// swapped certificate can therefore never be materialized or installed.
+    pub fn observe_ca_key(vault_id: &str, cert_pem: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(cert_pem.as_bytes());
+        let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
+        format!("api-tracker:v1:observe-ca-key:{vault_id}:{hex}")
+    }
 }
 
 #[cfg(test)]

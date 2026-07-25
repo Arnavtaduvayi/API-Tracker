@@ -41,11 +41,14 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -p api-tracker-core -p api-tracker-cli --all-targets -- -D warnings
+        run: cargo clippy -p api-tracker-core -p api-tracker-cli -p api-tracker-observe --all-targets -- -D warnings
       - name: Tests
         env:
           API_TRACKER_INSECURE_FAST_KDF: "1"
-        run: cargo test -p api-tracker-core -p api-tracker-cli
+        # api-tracker-observe is included so the runtime-observability proxy,
+        # sanitizer, and (security-critical) vault-lock lifecycle tests run in
+        # CI — previously observe's own test targets were never executed by CI.
+        run: cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe
 
   rust-windows:
     name: Rust core (Windows)

@@ -9,6 +9,17 @@ import type {
   ActivityEvent,
   Alert,
   ApiError,
+  ObservedService,
+  ObservedEndpoint,
+  RuntimeEvent,
+  ObservationSession,
+  CredentialAttribution,
+  CompatibilityResult,
+  ObserveMetrics,
+  ServiceOverview,
+  ObserveCertStatus,
+  ObservabilitySettings,
+  DiagnosticCheck,
   Attachment,
   DriftCheckOutcome,
   BackupInfo,
@@ -479,4 +490,50 @@ export const api = {
   }) => call<TestKeyResult>("test_key_create", args),
   credentialProviderRevoke: (id: string, password: string) =>
     call<string>("credential_provider_revoke", { id, password }),
+
+  // --- Runtime API observability (metadata only) ---
+  observeOverview: () => call<ServiceOverview[]>("observe_overview"),
+  observeServices: () => call<ObservedService[]>("observe_services"),
+  observeService: (id: string) => call<ObservedService>("observe_service", { id }),
+  observeServiceMetrics: (id: string) =>
+    call<ObserveMetrics>("observe_service_metrics", { id }),
+  observeServiceEndpoints: (id: string) =>
+    call<ObservedEndpoint[]>("observe_service_endpoints", { id }),
+  observeServiceEvents: (id: string, limit: number) =>
+    call<RuntimeEvent[]>("observe_service_events", { id, limit }),
+  observeSessions: (project: string | null, limit: number) =>
+    call<ObservationSession[]>("observe_sessions", { project, limit }),
+  observeSession: (id: string) => call<ObservationSession>("observe_session", { id }),
+  observeSessionMetrics: (id: string) =>
+    call<ObserveMetrics>("observe_session_metrics", { id }),
+  observeSessionEvents: (id: string, limit: number) =>
+    call<RuntimeEvent[]>("observe_session_events", { id, limit }),
+  observeSessionAttributions: (id: string) =>
+    call<CredentialAttribution[]>("observe_session_attributions", { id }),
+  observeSessionCompat: (id: string) =>
+    call<CompatibilityResult[]>("observe_session_compat", { id }),
+  observeCredentialActivity: (selector: string, limit: number) =>
+    call<CredentialAttribution[]>("observe_credential_activity", { selector, limit }),
+  observeCertStatus: () => call<ObserveCertStatus>("observe_cert_status"),
+  observeCertRotate: (password: string) =>
+    call<ObserveCertStatus>("observe_cert_rotate", { password }),
+  observeCertRemove: (password: string) => call<void>("observe_cert_remove", { password }),
+  observeCertInstallSystem: (password: string) =>
+    call<void>("observe_cert_install_system", { password }),
+  observeCertUninstallSystem: () => call<void>("observe_cert_uninstall_system"),
+  observeSettingsGet: () => call<ObservabilitySettings>("observe_settings_get"),
+  observeSettingsSet: (args: {
+    defaultMode?: string | null;
+    eventDays?: number | null;
+    aggregateDays?: number | null;
+  }) => call<void>("observe_settings_set", args),
+  observeDiagnostics: () => call<DiagnosticCheck[]>("observe_diagnostics"),
+  observeDeleteSession: (id: string) => call<void>("observe_delete_session", { id }),
+  observeDeleteAll: (password: string) => call<void>("observe_delete_all", { password }),
+  observeAllowlist: (project: string) =>
+    call<[string, number, string][]>("observe_allowlist", { project }),
+  observeAllowlistAdd: (project: string, host: string, port: number, note: string) =>
+    call<void>("observe_allowlist_add", { project, host, port, note }),
+  observeAllowlistRemove: (project: string, host: string, port: number) =>
+    call<boolean>("observe_allowlist_remove", { project, host, port }),
 };
