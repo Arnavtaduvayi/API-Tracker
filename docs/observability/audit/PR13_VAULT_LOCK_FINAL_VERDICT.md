@@ -37,16 +37,30 @@ the LOW/INFO findings that were then fixed) and re-verified on the final head by
 direct code review. So the fully-independent 5-area agent re-audit of the final
 commit is **incomplete** — an infrastructure blocker, not a code defect.
 
-## What closes the gate
+Update: a further attempt to complete the missing independent-agent review of
+the CA/leaf-key/temp-file/privacy area (both the 5-agent workflow and a single
+cheap Sonnet agent) was also blocked by the **monthly spend limit** — the agents
+could not launch. That area was therefore completed by direct code review on the
+final head `5dc95ed`, including the one open question (CA `Arc` drop ordering):
+the proxy's `ProxyConfig` holds the `Arc<CertAuthority>`; `proxy.shutdown()` →
+`stop()` joins the listener AND every worker thread before returning
+(proxy.rs), so no thread retains a `ProxyConfig`/`Arc<CertAuthority>` clone
+afterward, and the subsequent `drop(ca)` (session.rs:414) drops the last
+`Arc<CertAuthority>` — clearing the `Mutex<CacheInner>` leaf cache and releasing
+the signing key, so no new leaf can be minted after a lock. Temp PEM files are
+removed by `ScopedTrust::drop` (trust.rs); `peek_state` is a pure read (no
+decrypt/write/delete); the session write is atomic (temp-sibling + rename); the
+raw-DB/WAL canary asserts both the structured record and raw byte-absence.
 
-Re-run the focused independent re-audit
-(`Workflow scriptPath pr13-vault-lock-reaudit-*.js`, args
-`{"root":"…/API-Tracker-pr13-lock-audit"}` at head `5dc95ed`) once the spend
-limit is lifted, or have a maintainer perform the independent review of the
-CA/leaf-key/temp-file/privacy area and the four fixes. Given the prior
-independent review found the mechanism sound (surfacing only the now-fixed
-LOW/INFO items), CI is green, and packaged validation passed, this is expected
-to return PASS.
+## What still closes the process gate
+
+An **independent** party (a re-audit agent once the spend limit is lifted, or a
+maintainer) should review the same surfaces on `5dc95ed`. The engineering
+review is complete and every property is verified; what remains is
+independence-of-reviewer on the final commit, which the spend limit prevented
+from being an agent this run. Re-run:
+`Workflow scriptPath pr13-vault-lock-reaudit-*.js`,
+args `{"root":"…/API-Tracker-pr13-lock-audit"}`.
 
 ## PR status
 
