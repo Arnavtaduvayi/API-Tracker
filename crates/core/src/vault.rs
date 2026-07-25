@@ -1451,7 +1451,7 @@ impl UnlockedVault {
         // otherwise break every listing, alert pass, and detail view
         // vault-wide (OBS-004). Parse leniently: a bad value contributes no
         // date (no fabrication) and is flagged so the UI can show "invalid".
-        // `created_at` stays strict: it is always API-Tracker-generated, so a
+        // `created_at` stays strict: it is always Tethra-generated, so a
         // bad value is genuine vault corruption, not untrusted provider input.
         let (expires_at_ts, expires_at_invalid) =
             parse_optional_ts_lenient(row.expires_at.as_deref());
@@ -5786,7 +5786,7 @@ impl UnlockedVault {
             source: "api-tracker",
             kind: "test",
             severity: "info",
-            title: "API Tracker test notification",
+            title: "Tethra test notification",
             detail: "channel connectivity test — no alert condition exists",
             recommended_action: "none",
             observed_at: &now,
@@ -8566,7 +8566,7 @@ impl UnlockedVault {
             expires_at: Some(expires.clone()),
             docs_url: String::new(),
             notes: format!(
-                "Test key created by API Tracker ({created_detail}). The expiration is a \
+                "Test key created by Tethra ({created_detail}). The expiration is a \
                  LOCAL reminder — this provider's keys stay valid until revoked."
             ),
         })?;

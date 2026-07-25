@@ -1,4 +1,4 @@
-//! api-tracker-core: shared security-sensitive core for the API Tracker
+//! api-tracker-core: shared security-sensitive core for the Tethra
 //! desktop application and CLI.
 //!
 //! This crate owns the encrypted vault, the SQLite database and migrations,

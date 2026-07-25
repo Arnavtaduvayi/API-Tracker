@@ -32,7 +32,7 @@ const SENTINEL_END: &str = "# <<< api-tracker pre-commit hook <<<";
 fn hook_body() -> String {
     format!(
         "{SENTINEL}\n\
-# Managed by API Tracker. Blocks commits containing high-confidence secrets.\n\
+# Managed by Tethra. Blocks commits containing high-confidence secrets.\n\
 # Remove with: api-tracker hooks remove <path>\n\
 if command -v api-tracker >/dev/null 2>&1; then\n\
   api-tracker scan --staged --hook \"$(git rev-parse --show-toplevel)\" || exit 1\n\
@@ -75,7 +75,7 @@ pub enum HookState {
     Absent,
     /// Our managed hook is installed where git looks.
     Installed,
-    /// A foreign (non-API-Tracker) hook exists where git looks.
+    /// A foreign (non-Tethra) hook exists where git looks.
     Foreign,
     /// The hook where git looks contains our chained block plus foreign
     /// content; ours runs first.
@@ -131,7 +131,7 @@ fn read_hook_text(path: &Path) -> Result<Option<String>> {
         Ok(bytes) => match String::from_utf8(bytes) {
             Ok(text) => Ok(Some(text)),
             Err(_) => Err(CoreError::InvalidInput(format!(
-                "existing hook {} is not a text script (binary?); API Tracker \
+                "existing hook {} is not a text script (binary?); Tethra \
                  cannot chain into it. Remove or relocate it, then re-run.",
                 path.display()
             ))),
@@ -170,7 +170,7 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
             false,
             format!(
                 "the hook file git would run ({}) is unreadable or not a text \
-                 script; API Tracker cannot assess or chain into it",
+                 script; Tethra cannot assess or chain into it",
                 path.display()
             ),
         ),
@@ -180,7 +180,7 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
                     HookState::Overridden,
                     false,
                     format!(
-                        "core.hooksPath = {:?} makes git ignore the API Tracker hook \
+                        "core.hooksPath = {:?} makes git ignore the Tethra hook \
                          installed at {}; protection is NOT active. Re-run install to \
                          move it where git looks.",
                         hooks_path_override.as_deref().unwrap_or_default(),
@@ -214,9 +214,9 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
                         path.display()
                     )
                 } else if state == HookState::ChainedIntoForeign {
-                    "the API Tracker scan runs first, then the pre-existing hook".to_string()
+                    "the Tethra scan runs first, then the pre-existing hook".to_string()
                 } else {
-                    "the API Tracker scan runs on every commit".to_string()
+                    "the Tethra scan runs on every commit".to_string()
                 };
                 (state, executable, detail)
             } else if stale_ours_in_default {
@@ -234,7 +234,7 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
                 (
                     HookState::Foreign,
                     false,
-                    "a non-API-Tracker pre-commit hook exists; install with force to \
+                    "a non-Tethra pre-commit hook exists; install with force to \
                      chain the scan in front of it"
                         .to_string(),
                 )
@@ -375,7 +375,7 @@ pub fn install(repo: &Path, force: bool) -> Result<HookState> {
             if !force {
                 return Err(CoreError::InvalidInput(format!(
                     "a pre-commit hook already exists at {}. Re-run with --force to chain \
-                     the API Tracker scan IN FRONT of it (your existing hook is preserved \
+                     the Tethra scan IN FRONT of it (your existing hook is preserved \
                      and still runs when the scan passes).",
                     path.display()
                 )));
@@ -450,7 +450,7 @@ pub fn remove(repo: &Path) -> Result<HookState> {
             });
         }
         return Err(CoreError::InvalidInput(
-            "the pre-commit hook is not managed by API Tracker; leaving it untouched".into(),
+            "the pre-commit hook is not managed by Tethra; leaving it untouched".into(),
         ));
     }
     if is_managed_only(&content) {

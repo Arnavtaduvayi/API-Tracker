@@ -1,6 +1,6 @@
 # Destination Support Matrix
 
-A **destination** is a place API Tracker can *deploy* a credential value to,
+A **destination** is a place Tethra can *deploy* a credential value to,
 separate from the provider that *issues* it (see ADR 0012). Each kind reports
 an honest capability matrix; run `api-tracker destination kinds` for the live,
 per-kind status generated from the code — including, per kind, the

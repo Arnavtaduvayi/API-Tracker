@@ -24,7 +24,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum DestSupport {
     Implemented,
-    /// The destination offers it, API Tracker does not implement it yet.
+    /// The destination offers it, Tethra does not implement it yet.
     SupportedNotImplemented,
     /// The destination itself cannot do this.
     Unsupported,
@@ -81,7 +81,7 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
     static CATALOG: &[DestinationKindInfo] = &[
         DestinationKindInfo {
             kind: "vault",
-            name: "API Tracker local vault",
+            name: "Tethra local vault",
             description: "The encrypted local vault itself — the source of truth every plan starts from.",
             auth: "master password (already required)",
             platforms: "all",

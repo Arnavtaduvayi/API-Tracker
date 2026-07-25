@@ -1,4 +1,4 @@
-# API Tracker — Security Remediation Phase 2
+# Tethra — Security Remediation Phase 2
 
 **Model / provenance:** Claude Fable 5 (`claude-fable-5`), highest available
 effort (ultracode: xhigh reasoning + dynamic workflow orchestration),
@@ -96,7 +96,7 @@ zero.
 **Root cause.** Hook install/status hard-coded `.git/hooks/pre-commit` and
 never consulted `core.hooksPath`, so with a hook manager configured (husky,
 global hooks) git ran a different file while status still reported
-`Installed` (GScan-01). Force-chain APPENDED the API Tracker block after a
+`Installed` (GScan-01). Force-chain APPENDED the Tethra block after a
 foreign hook, so an early `exit`/`exec` in the foreign hook skipped the scan
 while status still said "chained" (GScan-02).
 
@@ -304,7 +304,7 @@ string is preserved and two new `Credential` fields
 (`expires_at_invalid` / `provider_expires_at_invalid`) surface the invalid
 state. The status engine gains `expiration_unparseable`, emitting an explicit
 `Unknown` finding ("could not be parsed … expiry is unknown") rather than
-guessing. `created_at` stays strict (always API-Tracker-generated; a bad value
+guessing. `created_at` stays strict (always Tethra-generated; a bad value
 is genuine corruption). CLI and desktop render "invalid" instead of a
 fabricated date.
 
@@ -481,7 +481,7 @@ remain untested.
 
 ---
 
-## Phase 9 — RA-4: scrub API Tracker env vars across platforms
+## Phase 9 — RA-4: scrub Tethra env vars across platforms
 
 **Root cause.** `scrub_own_env` matched the `API_TRACKER_` prefix
 case-sensitively. On Windows, env lookups are case-insensitive, so a variable

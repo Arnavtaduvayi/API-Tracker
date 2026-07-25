@@ -1,6 +1,6 @@
 # Backup & Recovery
 
-API Tracker stores everything locally. If you lose the data directory and have
+Tethra stores everything locally. If you lose the data directory and have
 no backup, the data is gone — so back up regularly.
 
 ## Create a backup
@@ -40,7 +40,7 @@ force-restore against an in-use vault fails with a clear error and changes
 nothing. After restore, unlock with the **master password that was in
 effect when the backup was created**.
 
-A backup made by an **older** version of API Tracker restores fine: the data
+A backup made by an **older** version of Tethra restores fine: the data
 is imported at its original schema version and then upgraded to the current
 one automatically. A backup made by a **newer** version is refused with a
 clear error — restore it with that newer version instead.

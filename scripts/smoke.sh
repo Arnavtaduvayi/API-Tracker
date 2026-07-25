@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# API Tracker automated smoke test.
+# Tethra automated smoke test.
 #
 #   bash scripts/smoke.sh
 #

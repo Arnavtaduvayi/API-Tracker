@@ -1,6 +1,6 @@
 # OpenAI usage & cost synchronization
 
-API Tracker can connect an OpenAI **administrative** account and synchronize
+Tethra can connect an OpenAI **administrative** account and synchronize
 real usage and cost data into the local vault. Everything is local-first: the
 admin key is encrypted inside your vault, every request goes directly from
 your device to `api.openai.com`, and all synchronized data stays on your
@@ -17,7 +17,7 @@ This is **not** an ordinary workload API key:
 
 - it has organization-wide read access to usage, costs, projects, and API-key
   metadata;
-- API Tracker stores it separately from project credentials, labels it
+- Tethra stores it separately from project credentials, labels it
   administrative everywhere, and encrypts it under the vault key;
 - once stored it can be **replaced or removed but never displayed**;
 - replacing, removing, or live-testing it requires re-entering your master
@@ -90,12 +90,12 @@ reported and displays one of these attribution levels:
 | `provider_project` | Only the provider project is known. |
 | `provider_account` | Organization-level; no finer dimension was reported. |
 
-Rules API Tracker never breaks:
+Rules Tethra never breaks:
 
 - Usage is **never divided among local keys** as though it were measured
   per key.
 - A provider key id counts against a local credential **only after you
-  confirm the association** (`provider link`). API Tracker suggests a match
+  confirm the association** (`provider link`). Tethra suggests a match
   when the provider's redacted value (`sk-proj...1234`) is consistent with a
   vault credential — but a suggestion is evidence, not proof, and is never
   applied automatically.
@@ -107,7 +107,7 @@ Rules API Tracker never breaks:
 
 ## Reported cost vs. estimated cost
 
-These are different numbers from different sources, and API Tracker keeps
+These are different numbers from different sources, and Tethra keeps
 them strictly separate:
 
 - **Provider-reported cost** comes from the OpenAI costs endpoint, exactly

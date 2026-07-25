@@ -1,8 +1,8 @@
-# API Tracker — Repository Instructions
+# Tethra — Repository Instructions
 
 ## Read this first
 
-API Tracker is an open-source, local-first desktop application for individual developers to organize, secure, monitor, and manage API credentials across their projects.
+Tethra is an open-source, local-first desktop application for individual developers to organize, secure, monitor, and manage API credentials across their projects.
 
 Before making architectural or implementation decisions, read:
 
@@ -152,8 +152,8 @@ Autonomy does not permit silently changing the fundamental product.
 Do not independently change these core requirements:
 
 * The application is local-first.
-* API Tracker does not require an API Tracker-hosted backend.
-* Credential values must not be uploaded to an API Tracker server.
+* Tethra does not require a Tethra-hosted backend.
+* Credential values must not be uploaded to a Tethra server.
 * Sensitive information must be encrypted at rest.
 * Security cannot be weakened merely to accelerate implementation.
 * The primary initial user is an individual developer.
@@ -268,11 +268,11 @@ The interface should be plain, accessible, understandable, and functional.
 
 ## Local-first requirements
 
-API Tracker must function without:
+Tethra must function without:
 
-* An API Tracker account
-* An API Tracker cloud service
-* A hosted API Tracker backend
+* A Tethra account
+* A Tethra cloud service
+* A hosted Tethra backend
 * Internet access, except when communicating directly with selected API providers or official documentation websites
 
 Sensitive user information must remain on the user’s computer, including:
@@ -294,13 +294,13 @@ Do not add:
 * User tracking
 * Cloud synchronization
 * Hosted crash reporting
-* Requests to an API Tracker-owned server
+* Requests to a Tethra-owned server
 
 Provider requests and documentation checks must be made directly from the user’s device.
 
 ## Security requirements
 
-Treat API Tracker as security-sensitive software.
+Treat Tethra as security-sensitive software.
 
 Never:
 

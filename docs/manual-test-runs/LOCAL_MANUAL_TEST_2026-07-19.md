@@ -1,6 +1,6 @@
 # Local Manual UI Test Run — 2026-07-19
 
-A guided, hands-on manual UI pressure test of API Tracker's safe, local,
+A guided, hands-on manual UI pressure test of Tethra's safe, local,
 offline-capable functionality. A human tester performed every GUI action and
 personally reported every observed result; the conductor recorded only what
 the tester reported. CLI-mode steps (Mode: CLI in the plan) were executed by
@@ -54,7 +54,7 @@ Phase 2 / the UI redesign" at the end for what must be re-executed on
    `cd apps/desktop && API_TRACKER_DIR=~/at-manual-test/vault npm run tauri dev`
    — per verified Part 1.2/1.4 of the test plan.
 2. **Packaged launch**: the pre-existing bundle at
-   `/Users/arnavtaduvayi/Documents/GitHub/API-Tracker/target/release/bundle/macos/API Tracker.app`
+   `/Users/arnavtaduvayi/Documents/GitHub/API-Tracker/target/release/bundle/macos/Tethra.app`
    turned out to be **stale** — its binary was built Jul 18 **20:29**,
    2.5 h *before* the `7d81090` merge (22:56), and it supports only schema
    ≤ v7 (baseline code expects v10). It was therefore NOT used as the
@@ -62,7 +62,7 @@ Phase 2 / the UI redesign" at the end for what must be re-executed on
    worktree (`npx tauri build --bundles app`, production code =
    `7d81090`) and used for all packaged-app results. Launched ONLY via the
    inner binary with the vault override, per the plan's Part 1.3 warning:
-   `API_TRACKER_DIR=~/at-manual-test/vault ".../API Tracker.app/Contents/MacOS/api-tracker-desktop"`
+   `API_TRACKER_DIR=~/at-manual-test/vault ".../Tethra.app/Contents/MacOS/api-tracker-desktop"`
    — never via `open` (which would resolve the default data dir = the real
    vault).
 
@@ -83,7 +83,7 @@ Phase 2 / the UI redesign" at the end for what must be re-executed on
   launched via `open`.
 - **External event (not caused by this session):** at 09:55:54 a packaged
   `api-tracker-desktop` instance (PID 46592, binary
-  `…/API-Tracker-ui-map/target/release/bundle/macos/API Tracker.app/Contents/MacOS/api-tracker-desktop`)
+  `…/API-Tracker-ui-map/target/release/bundle/macos/Tethra.app/Contents/MacOS/api-tracker-desktop`)
   started with **no `API_TRACKER_DIR`** in its environment — i.e., pointed
   at the DEFAULT data dir (the real vault). At 09:56:03–09:56:07 the real
   vault changed: `vault.db` 184320 → 372736 bytes, `vault.db-wal`
@@ -302,7 +302,7 @@ _(indexed per test as collected)_
 - **Concurrent clipboard contention:** the parallel deep-audit session
   (separate worktree, not touched) writes large text to the **system
   clipboard** during this run (observed: a full "Session Completion
-  Report" appeared on the clipboard mid-test). Because API Tracker's
+  Report" appeared on the clipboard mid-test). Because Tethra's
   clipboard auto-clear is deliberately best-effort ("only clears if the
   clipboard still holds this value"), an external clipboard write both
   (a) legitimately suppresses the app's clear and (b) makes precise
@@ -411,8 +411,8 @@ component)_
 - Build: dev profile, compiled in 35.65 s, `target/debug/api-tracker-desktop`
   (app 0.1.0)
 - Result: **PASS** (tester-observed, screenshot 10:09:55)
-- Actual: window titled "API Tracker"; heading "Create your vault"; intro
-  "API Tracker stores all data encrypted on this computer at
+- Actual: window titled "Tethra"; heading "Create your vault"; intro
+  "Tethra stores all data encrypted on this computer at
   /Users/arnavtaduvayi/at-manual-test/vault. No account, no cloud."; fields
   "Master password (at least 12 characters; a long multi-word passphrase is
   best)" (autofocused) + "Confirm master password"; button "Create
@@ -542,7 +542,7 @@ component)_
   GUI surfaces the schema guard (CLI variant tested later in BCK-07)
 - Actual (tester-observed, verbatim): "this vault uses database schema
   v10, but this build supports up to v7 — it was created or upgraded by a
-  newer version of API Tracker; upgrade this installation instead of
+  newer version of Tethra; upgrade this installation instead of
   opening the vault with an older build" + "Vault location:
   /Users/arnavtaduvayi/at-manual-test/vault"
 - Analysis: the bundle's binary is dated Jul 18 20:29; baseline merge
@@ -1402,9 +1402,9 @@ contains a secret value.
   "Foreign"; **plain install REFUSES** ("a pre-commit hook already
   exists… Re-run with --force… your existing hook is preserved");
   **force** install → "ChainedIntoForeign", the file now holds both the
-  custom line and the API-Tracker sentinel block, and a clean
+  custom line and the Tethra sentinel block, and a clean
   `git commit --allow-empty` **prints CUSTOM-HOOK-RAN and succeeds**;
-  **Remove** deletes only the API-Tracker block, leaving the file as
+  **Remove** deletes only the Tethra block, leaving the file as
   exactly the original custom script (0 api-tracker markers, custom line
   intact).
 - Expected: matched (plan SCN-09) — foreign hooks are never clobbered.
@@ -1449,7 +1449,7 @@ contains a secret value.
   "Checks last ran … · last success 7/19/2026, 1:30:20 PM" matches CLI
   `monitor --status` (Last run / Last success 2026-07-19T17:30:20Z; Last
   failure never; "2 new alert(s)"). The **native macOS notification**
-  (banner titled "API Tracker") and the OS notification-permission prompt
+  (banner titled "Tethra") and the OS notification-permission prompt
   require human observation — flagged under "Items needing human
   confirmation".
 - Evidence: UI status line; CLI `monitor --status`.
@@ -1963,7 +1963,7 @@ contains a secret value.
 
 - Result: **PASS** — a vault copy with `PRAGMA user_version=99` is refused:
   "this vault uses database schema v99, but this build supports up to v10
-  — it was created or upgraded by a newer version of API Tracker; upgrade
+  — it was created or upgraded by a newer version of Tethra; upgrade
   this installation…" (SchemaTooNew). The vault is NOT opened. (Same guard
   the packaged app surfaced interactively earlier in the session.)
 - Evidence: CLI open attempt on the v99 copy.
@@ -1986,7 +1986,7 @@ contains a secret value.
 ### Packaged `.app` re-check (fresh bundle) — **PASS**
 
 - Screen/workflow: quit dev app → launch the **freshly built** bundle
-  (`API-Tracker-manual-test/target/release/bundle/macos/API Tracker.app`,
+  (`API-Tracker-manual-test/target/release/bundle/macos/Tethra.app`,
   built this session from prod code `7d81090`) via its inner binary with
   `API_TRACKER_DIR=~/at-manual-test/vault`
 - Result: **PASS** — the packaged app shows "Unlock vault" with **"Vault

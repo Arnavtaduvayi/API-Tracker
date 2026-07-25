@@ -1,4 +1,4 @@
-# API Tracker
+# Tethra
 
 A local-first desktop app and CLI for individual developers to organize,
 secure, and track the API credentials scattered across their projects.
@@ -9,12 +9,12 @@ state each key is in — expired, expiring soon, unused, stale, reused across
 projects — with the reason and evidence for every claim.
 
 Everything stays on your computer. There is **no account**, no cloud service, no
-telemetry, and no API Tracker server. The only network traffic API Tracker ever
+telemetry, and no Tethra server. The only network traffic Tethra ever
 produces is direct traffic between your machine and API providers (or
 documentation pages) you explicitly configure — your secrets are never uploaded
-to an API Tracker server.
+to a Tethra server.
 
-> **Public alpha.** API Tracker is usable and well-tested, but it is alpha
+> **Public alpha.** Tethra is usable and well-tested, but it is alpha
 > software: evaluate it carefully before storing highly sensitive production
 > credentials. Local-first reduces exposure but does **not** eliminate
 > local-device risks (malware, an unlocked machine, memory inspection) — see

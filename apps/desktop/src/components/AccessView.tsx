@@ -151,7 +151,7 @@ export function AccessView() {
       <p className="muted">
         A grant bounds what <code>api-tracker run</code> will inject on this machine: which
         credentials, until when, how many launches, and (optionally) how long each launched
-        process may live. These are LOCAL controls enforced by API Tracker on this device — they
+        process may live. These are LOCAL controls enforced by Tethra on this device — they
         never constrain the provider-side credential, and local expiry is not provider
         revocation.
       </p>

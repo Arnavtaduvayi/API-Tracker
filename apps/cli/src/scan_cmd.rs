@@ -54,7 +54,7 @@ pub enum HooksCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Remove the API Tracker pre-commit hook.
+    /// Remove the Tethra pre-commit hook.
     Remove {
         #[arg(default_value = ".")]
         path: PathBuf,

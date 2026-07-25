@@ -508,7 +508,7 @@ export function RotationView() {
           )}
           {rotation.manual_instructions && (
             <div className="warnbox">
-              <strong>Manual steps</strong> — API Tracker cannot do these for you:
+              <strong>Manual steps</strong> — Tethra cannot do these for you:
               <ul>
                 {rotation.manual_instructions.split("\n").map((line, i) => (
                   <li key={i}>{line}</li>

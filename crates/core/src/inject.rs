@@ -21,7 +21,7 @@ pub struct EnvMapping {
     pub env_var: String,
 }
 
-/// The environment-variable prefix owned by API Tracker.
+/// The environment-variable prefix owned by Tethra.
 pub const ENV_PREFIX: &str = "API_TRACKER_";
 
 /// The only `API_TRACKER_*` variables a spawned child may inherit. Every
@@ -59,7 +59,7 @@ fn ascii_ci_starts_with(bytes: &[u8], prefix: &[u8]) -> bool {
 /// Windows env lookups are case-insensitive, so ANY casing of the
 /// `API_TRACKER_` prefix (e.g. `Api_Tracker_Password`) is an alias the app
 /// could still read and must be scrubbed (RA-4); Unix env names are
-/// case-sensitive, so only the exact-case prefix is API Tracker's and a
+/// case-sensitive, so only the exact-case prefix is Tethra's and a
 /// differently-cased name is an unrelated variable left untouched. The
 /// child-safe allowlist is matched with the same case sensitivity.
 pub fn env_name_is_scrubbed(name: &[u8], case_insensitive: bool) -> bool {
@@ -83,10 +83,10 @@ pub fn env_name_is_scrubbed(name: &[u8], case_insensitive: bool) -> bool {
     !child_safe
 }
 
-/// Remove every API Tracker environment variable that is not explicitly
+/// Remove every Tethra environment variable that is not explicitly
 /// child-safe from a command about to be spawned. An injected child must
 /// receive only the credentials mapped for it — never the master password,
-/// session token, or other API Tracker authentication material that may sit
+/// session token, or other Tethra authentication material that may sit
 /// in the parent's environment for scripting (PI-01). Byte-level prefix
 /// matching so a non-UTF-8 name cannot dodge the scrub. On Windows the match
 /// is case-insensitive so an unusual-casing alias cannot leak (RA-4); on
@@ -592,7 +592,7 @@ pub fn terminate_pid(pid: i64) -> bool {
     // Refuse non-positive PIDs before any signal is sent. On Unix `kill 0`
     // signals the CALLER's entire process group and a negative PID signals a
     // process group, so a corrupted/edited/zero recorded PID could terminate
-    // API Tracker itself or an unrelated group (PI-06). A real child PID is
+    // Tethra itself or an unrelated group (PI-06). A real child PID is
     // always > 0. `taskkill` on Windows likewise must never receive 0/negative.
     if pid <= 0 {
         return false;
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn unix_scrub_preserves_case_sensitive_semantics() {
         // On Unix, env names are case-sensitive and the app reads exact-case
-        // names, so only the exact-case prefix is API Tracker's. A
+        // names, so only the exact-case prefix is Tethra's. A
         // differently-cased name is an unrelated variable, left untouched.
         let ci = false;
         assert!(env_name_is_scrubbed(b"API_TRACKER_SESSION", ci));
@@ -667,7 +667,7 @@ mod tests {
     #[test]
     fn terminate_pid_refuses_non_positive_pids() {
         // PI-06: 0 and negative PIDs must be refused BEFORE any signal — on
-        // Unix `kill 0` would signal API Tracker's own process group. These
+        // Unix `kill 0` would signal Tethra's own process group. These
         // return false without ever spawning `kill`/`taskkill`. (A positive
         // PID is not exercised here: it would send a real signal.)
         assert!(!terminate_pid(0));

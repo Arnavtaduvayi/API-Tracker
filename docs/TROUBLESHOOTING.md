@@ -4,7 +4,7 @@
 
 - **macOS "cannot be opened because the developer cannot be verified"** — the
   alpha is unsigned. Right-click → *Open* → *Open*, or run
-  `xattr -dr com.apple.quarantine "API Tracker.app"`.
+  `xattr -dr com.apple.quarantine "Tethra.app"`.
 - **Windows SmartScreen "unrecognized app"** — *More info* → *Run anyway*.
 - **Linux AppImage won't run** — `chmod +x` it; install `libfuse2` if it
   complains about FUSE.

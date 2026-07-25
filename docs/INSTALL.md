@@ -1,7 +1,7 @@
 # Installation & First-Run Guide
 
-API Tracker is a **local-first** desktop app + CLI. There is **no account**, no
-cloud service, and your secrets are never uploaded to an API Tracker server.
+Tethra is a **local-first** desktop app + CLI. There is **no account**, no
+cloud service, and your secrets are never uploaded to a Tethra server.
 This is an **alpha**: evaluate it carefully before storing highly sensitive
 production credentials, and read the [security limitations](../SECURITY.md).
 
@@ -26,7 +26,7 @@ certutil -hashfile api-tracker-x86_64-pc-windows-msvc.zip SHA256
 **These builds are unsigned (alpha).** You will see OS warnings:
 
 - **macOS**: right-click the app → *Open* → *Open* (bypasses Gatekeeper once),
-  or `xattr -dr com.apple.quarantine "API Tracker.app"`. Gatekeeper flags it
+  or `xattr -dr com.apple.quarantine "Tethra.app"`. Gatekeeper flags it
   because it is not notarized.
 - **Windows**: SmartScreen → *More info* → *Run anyway*.
 - **Linux (AppImage)**: `chmod +x API_Tracker*.AppImage && ./API_Tracker*.AppImage`.

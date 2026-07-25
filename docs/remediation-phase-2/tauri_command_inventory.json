@@ -1,5 +1,5 @@
 {
-  "generated_for": "API Tracker Security Remediation Phase 2 (Phase 7)",
+  "generated_for": "Tethra Security Remediation Phase 2 (Phase 7)",
   "source": "apps/desktop/src-tauri/src/main.rs invoke_handler registration",
   "total_commands": 137,
   "legend": {

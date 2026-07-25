@@ -7,7 +7,7 @@
 *.p12
 *.pfx
 
-# API Tracker vault data and backups
+# Tethra vault data and backups
 *.db
 *.db-shm
 *.db-wal

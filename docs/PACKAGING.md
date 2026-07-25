@@ -1,6 +1,6 @@
 # Packaging & Release
 
-API Tracker ships a CLI binary and a Tauri desktop app for macOS, Windows, and
+Tethra ships a CLI binary and a Tauri desktop app for macOS, Windows, and
 Linux. The `.github/workflows/release.yml` workflow builds and attaches
 artifacts to a **draft** GitHub Release when a `v*` tag is pushed.
 
@@ -20,7 +20,7 @@ a combined `SHA256SUMS.txt`. Users should verify checksums before running (see
 
 At alpha-completion the **macOS arm64** artifacts were built and inspected
 locally: the release CLI (`cargo build --release -p api-tracker-cli`) and the
-Tauri desktop bundle (`npx tauri build` → `API Tracker.app` + a `.dmg`). The
+Tauri desktop bundle (`npx tauri build` → `Tethra.app` + a `.dmg`). The
 bundle was swept for leaked dev vaults, `.env` files, backups, logs,
 machine-specific paths, test-fixture secrets, and Claude attribution — clean.
 

@@ -110,7 +110,7 @@ jobs:
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
-          releaseName: "API Tracker ${{ github.ref_name }} (alpha)"
+          releaseName: "Tethra ${{ github.ref_name }} (alpha)"
           releaseBody: "Unsigned public-alpha build. See docs/INSTALL.md and docs/PACKAGING.md."
           releaseDraft: true
           prerelease: true

@@ -158,7 +158,7 @@ async function notifyNewAlerts(severities: string[]) {
     if (granted) {
       // Alert counts and severities only — titles could name credentials.
       sendNotification({
-        title: "API Tracker",
+        title: "Tethra",
         body: `${notable.length} new alert(s) — top severity: ${top}. Open Alerts for details.`,
       });
     }
@@ -259,7 +259,7 @@ export default function App() {
     return (
       <div className="center-page">
         <div>
-          <h1>API Tracker</h1>
+          <h1>Tethra</h1>
           <p className="error">Startup error: {fatal}</p>
         </div>
       </div>
@@ -310,7 +310,7 @@ export default function App() {
       <aside className={navCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="brand">
           <span className="brand-mark" />
-          <span className="brand-name">API Tracker</span>
+          <span className="brand-name">Tethra</span>
           <span className="spacer" />
           <button
             className="nav-toggle"

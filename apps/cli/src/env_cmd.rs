@@ -537,7 +537,7 @@ fn cleanup(ctx: &Ctx, args: CleanupArgs) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
     if args.all
         && !ctx::confirm(
-            "Remove EVERY exported .env file recorded by API Tracker?",
+            "Remove EVERY exported .env file recorded by Tethra?",
             args.yes,
         )?
     {

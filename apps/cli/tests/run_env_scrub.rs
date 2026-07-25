@@ -19,7 +19,7 @@ use tempfile::TempDir;
 const MASTER_PW: &str = "run-scrub-master-password-01";
 const FAKE_KEY: &str = "FAKE-TEST-NOT-A-REAL-KEY-SCRUB01";
 
-/// Sentinel values for every sensitive API Tracker variable a parent shell
+/// Sentinel values for every sensitive Tethra variable a parent shell
 /// might hold, plus a hypothetical future variable proving deny-by-default.
 /// (`API_TRACKER_SESSION` is exercised separately with a REAL token — the
 /// CLI validates it before running, so a sentinel would refuse the launch.)
@@ -128,7 +128,7 @@ fn injected_child_sees_mapped_credentials_but_no_api_tracker_auth_vars() {
         "API_TRACKER_DIR is classified child-safe and must survive"
     );
 
-    // No API Tracker authentication material of any kind reaches the child:
+    // No Tethra authentication material of any kind reaches the child:
     // not the scripting master password, not the live session token, and
     // none of the sensitive set.
     assert!(
@@ -163,7 +163,7 @@ fn injected_child_sees_mapped_credentials_but_no_api_tracker_auth_vars() {
     for name in vars.keys().filter(|n| n.starts_with("API_TRACKER_")) {
         assert!(
             api_tracker_core::inject::CHILD_SAFE_ENV.contains(name),
-            "unexpected API Tracker variable in the child environment: {name}"
+            "unexpected Tethra variable in the child environment: {name}"
         );
     }
 }

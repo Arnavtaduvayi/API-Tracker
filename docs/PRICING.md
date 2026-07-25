@@ -1,6 +1,6 @@
 # Pricing and Cost Estimation
 
-API Tracker computes **local estimates** from token counts and a versioned
+Tethra computes **local estimates** from token counts and a versioned
 pricing dataset. Estimates are always labeled, kept strictly separate from
 provider-reported cost (which is authoritative wherever it is synced), and
 **never invented**: an unknown model yields "estimate unavailable", not a

@@ -1,4 +1,4 @@
-You are Claude Code working as the lead engineer for an open-source, local-first desktop application currently called **API Tracker**.
+You are Claude Code working as the lead engineer for an open-source, local-first desktop application currently called **Tethra**.
 
 Your job in this session is to inspect the repository, design the architecture, and implement as much of the first shippable product as possible. Do not stop after creating a plan or scaffolding. Build the product, run it, test it, document it, and commit working milestones.
 
@@ -17,9 +17,9 @@ The mental model is:
 * The developer can see all credentials associated with a project.
 * The developer can inspect status, expiration, usage, permissions, documentation, and security warnings.
 * All sensitive information remains on the developer’s computer.
-* The product must not require a hosted backend or an API Tracker account.
+* The product must not require a hosted backend or a Tethra account.
 * Any requests to API providers or documentation websites must be sent directly from the user’s device.
-* No API keys, usage records, project information, or telemetry should be sent to an API Tracker server.
+* No API keys, usage records, project information, or telemetry should be sent to a Tethra server.
 * Telemetry must be disabled by default. Do not add third-party analytics.
 
 This product is intended to become a serious open-source developer tool, not a hackathon prototype.
@@ -110,7 +110,7 @@ Do not build these yet unless all required work is complete:
 * User accounts
 * Organization management
 * Enterprise SSO
-* A hosted API Tracker backend
+* A hosted Tethra backend
 * Mobile applications
 * Complex UI design
 * A mandatory API proxy
@@ -990,7 +990,7 @@ Write documentation that makes it possible for another developer to:
 * Run tests.
 * Report a vulnerability safely.
 
-Avoid branding work. Use “API Tracker” as the working name throughout the codebase.
+Avoid branding work. Use “Tethra” as the working name throughout the codebase.
 
 ## 24. Git and GitHub workflow
 

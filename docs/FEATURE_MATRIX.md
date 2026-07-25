@@ -263,7 +263,7 @@ appearance. Tests: `account_metadata.rs` (6).
 
 No provider account-password storage exists anywhere in the codebase (every
 `password` reference is the vault's own master/project/backup password).
-API Tracker is a credential manager for API keys, not a general password
+Tethra is a credential manager for API keys, not a general password
 manager; storing console login passwords would expand the threat model
 (console takeover, password-reuse, 2FA-reset surface) for little benefit
 over a real password manager. Preserved instead: org labels, official

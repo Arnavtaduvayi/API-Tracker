@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to API Tracker are documented here. The project is in
+All notable changes to Tethra are documented here. The project is in
 **public alpha**; expect breaking changes before 1.0. Dates are UTC.
 
 ## [Unreleased]
@@ -21,7 +21,7 @@ schema migration or data-format change.
 - **OBS-003** — malformed provider usage buckets (missing/blank/inverted
   time ranges) are skipped before any replace-range deletion, so a
   malformed provider response can no longer wipe stored usage history.
-- **PI-01/CLI-01** — `run` scrubs API Tracker authentication variables from
+- **PI-01/CLI-01** — `run` scrubs Tethra authentication variables from
   injected children by deny-by-default over the whole `API_TRACKER_` prefix
   (previously an enumerated list that missed `API_TRACKER_NEW_PASSWORD`).
 - **IPC-01/FS-09** — `env_example_write` is reauthenticated in core and

@@ -66,7 +66,7 @@ fn env_limit(name: &str, default: u64) -> u64 {
 impl GitLimits {
     /// Limits for ordinary short git commands (rev-parse, diff --name-only,
     /// cat-file, show, config). Generous but finite: a hung git (dead
-    /// network mount, wedged lock) must not hang API Tracker forever.
+    /// network mount, wedged lock) must not hang Tethra forever.
     pub fn command() -> Self {
         GitLimits {
             timeout: Duration::from_millis(env_limit("API_TRACKER_GIT_TIMEOUT_MS", 30_000)),

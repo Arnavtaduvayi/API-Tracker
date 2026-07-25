@@ -29,7 +29,7 @@ export function VaultSetup(props: { dataDir: string; onCreated: () => void }) {
     <div>
       <h1>Create your vault</h1>
       <p>
-        API Tracker stores all data encrypted on this computer at{" "}
+        Tethra stores all data encrypted on this computer at{" "}
         <span className="mono">{props.dataDir}</span>. No account, no cloud.
       </p>
       <form className="stack" onSubmit={(e) => void submit(e)}>

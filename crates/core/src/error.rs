@@ -3,7 +3,7 @@ use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, CoreError>;
 
-/// Typed errors for the API Tracker core.
+/// Typed errors for the Tethra core.
 ///
 /// Error messages must never contain secret material. Variants carry
 /// identifiers, names, and paths only; cryptographic failures carry a static
@@ -55,7 +55,7 @@ pub enum CoreError {
     #[error("decryption failed for {context}: wrong key/password, corrupted data, or tampering")]
     Crypto { context: &'static str },
 
-    #[error("another API Tracker process is writing to the vault; try again")]
+    #[error("another Tethra process is writing to the vault; try again")]
     Busy,
 
     #[error("backup file is not valid: {0}")]
@@ -66,7 +66,7 @@ pub enum CoreError {
 
     #[error(
         "this vault uses database schema v{found}, but this build supports up to v{supported} — \
-         it was created or upgraded by a newer version of API Tracker; upgrade this installation \
+         it was created or upgraded by a newer version of Tethra; upgrade this installation \
          instead of opening the vault with an older build"
     )]
     SchemaTooNew { found: i64, supported: i64 },
