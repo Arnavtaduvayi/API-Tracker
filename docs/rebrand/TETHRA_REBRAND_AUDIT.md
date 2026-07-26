@@ -113,6 +113,11 @@ on **every** build, which the repository rules forbid leaving in place.
 `run_cli` returns normally rather than calling `exit(0)`, preserving the
 original `fn main` semantics (notably stdout flushing).
 
+Measured after the refactor: the two release binaries are now the same size
+(10,488,976 B) but still have different SHA-256s — separate link units embed
+their own name — so "the identical program, each naming itself" is the
+accurate claim, and "byte-identical" would still be wrong.
+
 ### F3 — `TETHRA_REBRAND_PLAN.md` described help behavior incorrectly (Low; fixed)
 
 The plan said the clap name "becomes `tethra` (help/usage shows the preferred
