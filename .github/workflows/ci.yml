@@ -66,9 +66,15 @@ jobs:
         env:
           API_TRACKER_INSECURE_FAST_KDF: "1"
         # api-tracker-gateway is included so the gateway's Windows build
-        # (Unix-only control channel cfg-gated out, foreground-only v1 —
-        # ADR 0019 D8) is compiled and tested on a real Windows runner.
+        # (Unix-only control channel cfg-gated out — ADR 0019 D8) is
+        # compiled and tested on a real Windows runner.
         run: cargo test -p api-tracker-core -p api-tracker-gateway
+      - name: Build the CLI (compile-validates the Windows service lifecycle)
+        # Phase 3 requirement: the full CLI — including the HKCU Run-key
+        # lifecycle and gateway command family — must COMPILE on real
+        # Windows. Behavioral Windows validation has never been performed
+        # and is not claimed (KNOWN_CONFLICTS C13).
+        run: cargo build -p api-tracker-cli
 
   frontend:
     name: Desktop frontend
