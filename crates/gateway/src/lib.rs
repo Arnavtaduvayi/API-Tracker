@@ -28,12 +28,15 @@
 #![forbid(unsafe_code)]
 
 pub mod attribution;
+pub mod control;
 pub mod forward;
 pub mod head;
 pub mod record;
 pub mod routes;
 pub mod server;
+pub mod service;
 pub mod store;
 pub mod stream;
 pub mod upstream;
 pub mod usage;
+pub mod writer;
