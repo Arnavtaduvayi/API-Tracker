@@ -95,23 +95,54 @@ fn expiry_from_now(ttl_minutes: u32) -> Option<String> {
     }
 }
 
+/// A sibling temp path in the same directory as `path` (so a rename to `path`
+/// is atomic — same filesystem). A random suffix avoids collisions between
+/// concurrent writers.
+fn temp_sibling(path: &std::path::Path) -> std::path::PathBuf {
+    let suffix = hex::encode(crypto::random_bytes(6));
+    let mut name = path
+        .file_name()
+        .map(|f| f.to_os_string())
+        .unwrap_or_default();
+    name.push(format!(".tmp-{suffix}"));
+    path.with_file_name(name)
+}
+
+/// Write the session file ATOMICALLY: write a private temp sibling, then rename
+/// it over the destination. `std::fs::rename` replaces the target atomically on
+/// both POSIX and Windows, so a concurrent reader (e.g. the observed-run lock
+/// watch calling [`peek_state`]) never observes a truncated or half-written
+/// file — which previously could look like a deleted session and spuriously
+/// interrupt an active run.
 #[cfg(unix)]
 fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
+    let tmp = temp_sibling(path);
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(path)?;
+        .open(&tmp)?;
     file.write_all(contents.as_bytes())?;
+    let _ = file.sync_all();
+    drop(file);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
 #[cfg(not(unix))]
 fn write_private(path: &std::path::Path, contents: &str) -> Result<()> {
-    std::fs::write(path, contents)?;
+    let tmp = temp_sibling(path);
+    std::fs::write(&tmp, contents)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -239,4 +270,131 @@ pub fn status(paths: &VaultPaths) -> Result<Option<SessionStatus>> {
         created_at: file.created_at,
         expires_at: file.expires_at,
     }))
+}
+
+/// The lifecycle state of a session file, for a long-running observed run to
+/// watch so that a manual `lock` (which deletes the file) or an auto-lock
+/// timeout (the file's recorded `expires_at`) can interrupt it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionFileState {
+    /// The file is present and not past its expiry — the session is unlocked.
+    Active,
+    /// The file is gone (or unreadable/corrupt) — treated as a MANUAL lock.
+    Missing,
+    /// The file is present but past its recorded expiry — an AUTO-lock (idle).
+    Expired,
+}
+
+/// Read-only, non-mutating check of a session file's lifecycle at `path`.
+///
+/// Unlike [`load_and_refresh`], this NEVER slides the expiry forward and NEVER
+/// deletes an expired file — it only reports state, so an observed-run lock
+/// watch can poll it cheaply without disturbing the session another process
+/// owns.
+///
+/// Only a GENUINELY ABSENT file (`NotFound`) is `Missing` — that is the
+/// unambiguous signal of a manual `lock` (which `destroy` deletes the file). A
+/// transient read error, or an unparseable/partly-written file, is reported as
+/// `Active` (NOT `Missing`): reporting it as missing would spuriously interrupt
+/// a still-active run. (Session writes are atomic — see [`write_private`] — so a
+/// mid-write partial read should not occur; this is defense in depth.)
+pub fn peek_state(path: &std::path::Path) -> SessionFileState {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SessionFileState::Missing,
+        // A transient read error (permissions, EINTR, a momentary rename) is not
+        // a lock — do not interrupt the run over it.
+        Err(_) => return SessionFileState::Active,
+    };
+    let file: SessionFile = match serde_json::from_str(&raw) {
+        Ok(f) => f,
+        // Present but unparseable: not a deletion. Treat as active rather than
+        // spuriously interrupting; a real lock deletes the file (NotFound).
+        Err(_) => return SessionFileState::Active,
+    };
+    match &file.expires_at {
+        None => SessionFileState::Active, // auto-lock disabled: present == active
+        Some(exp) => match clock::parse_rfc3339(exp) {
+            Ok(t) if clock::now() >= t => SessionFileState::Expired,
+            Ok(_) => SessionFileState::Active,
+            // A corrupt expiry on an otherwise-present file: do not spuriously
+            // interrupt (a real lock deletes the file).
+            Err(_) => SessionFileState::Active,
+        },
+    }
+}
+
+#[cfg(test)]
+mod peek_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_session(dir: &std::path::Path, expires_at: Option<&str>) -> std::path::PathBuf {
+        let path = dir.join("session.json");
+        let exp = match expires_at {
+            Some(e) => format!("\"{e}\""),
+            None => "null".to_string(),
+        };
+        let json = format!(
+            "{{\"session_id\":\"s1\",\"created_at\":\"2020-01-01T00:00:00Z\",\
+              \"expires_at\":{exp},\"ttl_minutes\":15,\"payload_b64\":\"AA==\"}}"
+        );
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(json.as_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn peek_missing_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            peek_state(&dir.path().join("nope.json")),
+            SessionFileState::Missing
+        );
+    }
+
+    #[test]
+    fn peek_future_expiry_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let future = clock::to_rfc3339(clock::now() + time::Duration::hours(1));
+        let path = write_session(dir.path(), Some(&future));
+        assert_eq!(peek_state(&path), SessionFileState::Active);
+    }
+
+    #[test]
+    fn peek_past_expiry_is_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let past = clock::to_rfc3339(clock::now() - time::Duration::hours(1));
+        let path = write_session(dir.path(), Some(&past));
+        assert_eq!(peek_state(&path), SessionFileState::Expired);
+    }
+
+    #[test]
+    fn peek_no_expiry_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_session(dir.path(), None);
+        assert_eq!(peek_state(&path), SessionFileState::Active);
+    }
+
+    #[test]
+    fn peek_corrupt_or_partial_file_is_active_not_missing() {
+        // A present-but-unparseable file (e.g. a momentary partial read, though
+        // writes are atomic) must NOT be reported as Missing — that would
+        // spuriously interrupt an active run. Only a genuinely deleted file
+        // (a real manual lock) is Missing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(peek_state(&path), SessionFileState::Active);
+    }
+
+    #[test]
+    fn peek_deleted_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let future = clock::to_rfc3339(clock::now() + time::Duration::hours(1));
+        let path = write_session(dir.path(), Some(&future));
+        assert_eq!(peek_state(&path), SessionFileState::Active);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(peek_state(&path), SessionFileState::Missing);
+    }
 }

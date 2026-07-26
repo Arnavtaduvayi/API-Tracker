@@ -12,6 +12,7 @@ mod ctx;
 mod destination_cmd;
 mod env_cmd;
 mod key_cmd;
+mod observe_cmd;
 mod pricing_cmd;
 mod project_cmd;
 mod provider_cmd;
@@ -113,6 +114,9 @@ enum Commands {
     Mapping(usage_cmd::MappingCmd),
     /// Run a command with credentials injected into its environment.
     Run(run_cmd::RunArgs),
+    /// Inspect and manage runtime API observability (metadata-only).
+    #[command(subcommand)]
+    Observe(observe_cmd::ObserveCmd),
     /// .env governance: discover, preview, import, drift, export, cleanup.
     #[command(subcommand)]
     Env(env_cmd::EnvCmd),
@@ -171,6 +175,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Activity(cmd) => usage_cmd::activity(&ctx, cmd),
         Commands::Mapping(cmd) => usage_cmd::mapping(&ctx, cmd),
         Commands::Run(args) => run_cmd::run(&ctx, args),
+        Commands::Observe(cmd) => observe_cmd::run(&ctx, cmd),
         Commands::Env(cmd) => env_cmd::run(&ctx, cmd),
         Commands::Destination(cmd) => destination_cmd::run(&ctx, cmd),
         Commands::Sync(cmd) => sync_cmd::run(&ctx, cmd),

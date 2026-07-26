@@ -42,14 +42,18 @@ integrations land.
   findings, alerts, and suppressions store no secret values (findings keep a
   redacted preview and a non-secret suppression key; the raw value lives only
   in a `#[serde(skip)]` in-memory buffer used for vault matching). ADR 0008.
-- Outbound network use is limited to two things, both direct from the device:
+- Outbound network use is limited to three things, all direct from the device:
   the **documentation watcher** (explicit user-selected official URLs,
   conditional GETs, 8 MiB body cap, stores only validators/hash/timestamps,
-  no crawling); and **provider connectors** (validation, metadata, permission
+  no crawling); **provider connectors** (validation, metadata, permission
   reads, and usage/cost sync) that send the credential only in a request
-  header to the provider's own official API endpoint. No secret is ever sent
-  to a Tethra-operated server. Connectors are built to the documented
-  API shapes and tested offline against fixtures.
+  header to the provider's own official API endpoint; and, when the user
+  explicitly opts in, the **loopback observation proxy** (`observe` /
+  `run --observe`), which relays the user's own application traffic onward
+  to the API hosts that application was already contacting — it originates
+  no requests of its own. No secret is ever sent to a Tethra-operated
+  server. Connectors are built to the documented API shapes and tested
+  offline against fixtures.
 - The **OpenAI administrative connection** stores an Admin API key encrypted
   under the vault key (AAD binds it to this vault + provider). It is
   write-only after storage (replace/remove, never reveal); replacing,
@@ -115,6 +119,21 @@ integrations land.
   overwriting freed pages — best-effort secure deletion, not a guarantee
   against forensic recovery of previously-checkpointed WAL frames.
 
+- **Runtime API observation** (ADR 0017;
+  `docs/observability/RUNTIME_OBSERVABILITY_THREAT_MODEL.md`) is a strictly
+  LOCAL, opt-in observation proxy: it binds to loopback only, requires a
+  per-session token on every proxied connection, and records **metadata
+  only** — never request/response bodies, headers, cookies, authorization
+  values, or query strings. It introduces one new high-value asset: the
+  **per-vault CA private key** (ECDSA P-256) used to mint short-lived
+  interception certificates. That key is encrypted under the vault key like
+  credential values, its sensitive operations are reauthentication-gated,
+  and it is never written to disk in plaintext. Outbound relaying enforces
+  an SSRF policy both before *and* after DNS resolution (no loopback,
+  link-local, private-range, or metadata-endpoint targets unless explicitly
+  allowlisted), and upstream TLS is always verified against the bundled
+  root store — verification is never disabled, and the tool never
+  recommends disabling it in observed applications either.
 - **Webhook notification channels** are user-configured outbound requests
   (https-only). The URL may embed a token the user chose to put there, so
   it is encrypted under the vault key and masked everywhere; payloads carry
@@ -217,6 +236,21 @@ integrations land.
   files locally (values in `.env` files never leave the redacting parser),
   its learned confirm/dismiss history is plain local data the user can
   delete entirely, and pricing/account records are non-secret metadata.
+- **Runtime observation carries accepted residual risks** (ADR 0017;
+  detailed in `docs/observability/RUNTIME_OBSERVABILITY_THREAT_MODEL.md`).
+  While the vault is unlocked and an observation session is active, the
+  per-vault CA private key is decrypted in this process's memory — malware
+  running as the user can read it, consistent with the "malware as the
+  user" exclusion above. Observation coverage is honest but incomplete:
+  QUIC/HTTP-3 traffic bypasses the proxy entirely, and descendant
+  processes that clear or ignore the injected trust/proxy environment
+  variables go direct and unobserved — absence of recorded traffic is
+  therefore not evidence of absence. Mode C (system trust store, separate
+  opt-in) has a larger blast radius than the default per-run modes: until
+  the certificate is removed, any process on the machine that trusts the
+  system store would accept certificates minted by the vault's CA, so
+  install/removal is reauth-gated and tracked in
+  `observe_certificate_state` for cleanup.
 - **Crash residue is swept**: expired temporary exports are cleaned on
   unlock *and* session resume, orphaned atomic-write temp files (older
   than an hour, only in recorded export directories) are removed, and the
