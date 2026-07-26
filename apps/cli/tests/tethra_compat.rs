@@ -305,8 +305,13 @@ fn version_line_matches_the_invoked_binary_name() {
     }
 }
 
+// Unix-only: the spoofed name deliberately has no `.exe` extension and
+// carries a control character, neither of which Windows will execute.
+#[cfg(unix)]
 #[test]
 fn an_unrecognized_argv0_falls_back_to_the_product_name() {
+    use std::os::unix::fs::PermissionsExt;
+
     // argv[0] is caller-controlled (a symlink, or `exec -a`), and it reaches
     // rendered help/version text. Only the two shipped names are honored;
     // anything else — including a name carrying terminal escapes — must fall
@@ -315,11 +320,7 @@ fn an_unrecognized_argv0_falls_back_to_the_product_name() {
     let dir = TempDir::new().unwrap();
     let copy = dir.path().join("\u{1b}[31mspoofed");
     std::fs::copy(&src, &copy).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut cmd = Command::new(&copy);
     cmd.env_clear();
