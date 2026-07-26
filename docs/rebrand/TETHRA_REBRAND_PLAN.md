@@ -27,8 +27,8 @@ and listed below.
 | Window title | `API Tracker` | `Tethra` | `tauri.conf.json` window `title`, `index.html <title>` |
 | Native notification titles | `API Tracker` | `Tethra` | `App.tsx`, `AlertsView.tsx` |
 | UI prose / dialogs / errors | `API Tracker` | `Tethra` | desktop components, core error hints, CLI messages |
-| CLI help header (clap `name`) | `api-tracker` | `tethra` | `apps/cli/src/main.rs` (both binaries print `tethra` usage) |
-| Preferred CLI binary | — | `tethra` (new `[[bin]]`, same `src/main.rs`) | `apps/cli/Cargo.toml` |
+| CLI help/version branding | `api-tracker` | argv0-derived: `tethra` or `api-tracker` | `apps/cli/src/lib.rs` (`invoked_name`); each binary names itself, unknown argv[0] falls back to `tethra` |
+| Preferred CLI binary | — | `tethra` (new `[[bin]]`; `src/main.rs` wraps `run_cli()` in `src/lib.rs`) | `apps/cli/Cargo.toml` |
 | Documented command in docs/help text | `api-tracker …` | `tethra …` | README, docs, in-app command hints |
 | npm package name | `api-tracker-desktop-ui` | `tethra-desktop-ui` | private package; lockfile root regenerated with the lockfile-preserving flow |
 | HTTP User-Agents | `api-tracker/0.1 (+local)` etc. | `tethra/0.1 (+local)` etc. | `http.rs`, `docwatch.rs`, `connectors.rs`, `destinations.rs` (cosmetic request header) |
@@ -119,8 +119,11 @@ there is no migration. Verified by the compatibility test matrix in
 
 ## Historical documents
 
-Audit reports, remediation ledgers, evidence logs, and the 2026-07-19 manual
-test run keep their original "API Tracker" naming. Living docs that carry a
+Audit reports, remediation ledgers, evidence logs, architecture decision
+records (`docs/decisions/`), and the 2026-07-19 manual test run keep their
+original "API Tracker" naming. An ADR records a decision as it was made; the
+commands it names still work under the legacy alias, so rewriting one would
+falsify the record without helping a reader. Living docs that carry a
 verified-baseline stamp (`docs/UI_MAP.md`, `docs/MANUAL_UI_TEST_PLAN.md`,
 `docs/MANUAL_TEST_DATA.md`) receive a banner: "API Tracker was renamed
 Tethra after this report was produced." — their baseline content is not

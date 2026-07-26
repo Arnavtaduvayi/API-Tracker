@@ -38,7 +38,7 @@ for user-facing behavior.
 | CI (`ci.yml`) | unchanged | unchanged | crate names and legacy env var still valid; exercises the legacy path continuously |
 | Release workflow | `api-tracker-<target>` archives, "API Tracker …" release name | `tethra-<target>` archives containing **both** binaries, "Tethra …" | not triggered by this release (no tag pushed) |
 | GitHub repo / remotes | `Arnavtaduvayi/API-Tracker` | **unchanged (out of scope)** | all links remain valid |
-| Docs | API Tracker | living docs rebranded; historical reports/ADRs preserved with banner where stamped | see plan §Historical documents |
+| Docs | API Tracker | living docs rebranded; historical reports and ADRs keep their original naming (living docs carrying a verified-baseline stamp get a correcting banner) | see plan §Historical documents |
 | Packaged app behavior | — | verified in `docs/release/TETHRA_MACOS_PACKAGING_RESULTS.md` | fresh vault, legacy vault, backup/restore, reauth, CSP, links |
 
 ## Test coverage for this matrix
