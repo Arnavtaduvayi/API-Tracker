@@ -637,16 +637,21 @@ fn head_and_204_responses_carry_no_body() {
 
 #[test]
 fn a_client_that_disconnects_mid_response_is_recorded_and_tears_down_the_upstream() {
-    let up = MockUpstream::start(|sock, requests| {
+    // The upstream reports back how its write loop ended, so the teardown is
+    // asserted rather than assumed.
+    let torn_down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = torn_down.clone();
+    let up = MockUpstream::start(move |sock, requests| {
         let head = read_head(sock);
         requests.lock().unwrap().push(head);
-        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n");
+        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4000000\r\n\r\n");
         let _ = sock.flush();
-        // Push a large body; the client vanishes partway.
         let chunk = vec![b'x'; 8192];
-        for _ in 0..125 {
+        for _ in 0..500 {
             if sock.write_all(&chunk).is_err() {
-                break;
+                // The gateway closed this socket because its client vanished.
+                flag.store(true, Ordering::Relaxed);
+                return;
             }
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -671,10 +676,28 @@ fn a_client_that_disconnects_mid_response_is_recorded_and_tears_down_the_upstrea
             r.completion,
             Completion::ClientDisconnected | Completion::Truncated
         ),
-        "client disconnect must be recorded honestly, got {:?}",
+        "a client disconnect must be recorded honestly, got {:?}",
         r.completion
     );
-    assert!(!r.completion.is_complete_coverage());
+    assert!(
+        !r.completion.is_complete_coverage(),
+        "a partial exchange must never claim complete coverage"
+    );
+    assert_eq!(
+        r.status_code,
+        Some(200),
+        "the head was seen before the break"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !torn_down.load(Ordering::Relaxed) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        torn_down.load(Ordering::Relaxed),
+        "the upstream socket must be torn down when the client disconnects, \
+         not left draining the provider's response into nothing"
+    );
 }
 
 #[test]
@@ -758,9 +781,12 @@ fn smuggling_and_malformed_heads_are_rejected_with_400_and_nothing_forwarded() {
 }
 
 #[test]
-fn lf_only_chunk_framing_is_rejected_toward_the_upstream() {
-    // The relay parses chunk framing; an LF-only chunk terminator must not be
-    // rewritten into a valid CRLF one for the upstream.
+fn lf_only_chunk_framing_is_rejected_and_nothing_reaches_the_upstream() {
+    // SI-15: bare-LF chunk framing is the classic smuggling primitive. The
+    // gateway REJECTS it with a 400; it does not normalize it into CRLF and
+    // it does not forward it verbatim. `observe::relay` tolerates bare LF
+    // (safe for the observation proxy), which is exactly why the gateway
+    // carries its own strict chunked relay.
     let up = MockUpstream::start(|sock, requests| {
         let mut got = Vec::new();
         let mut buf = [0u8; 4096];
@@ -781,16 +807,53 @@ fn lf_only_chunk_framing_is_rejected_toward_the_upstream() {
     let mut c = gw.connect();
     send(
         &mut c,
-        &format!("POST /openai/x HTTP/1.1\r\nHost: {}\r\nTransfer-Encoding: chunked\r\n\r\n5\nhello\n0\n\n", gw.authority()),
+        &format!(
+            "POST /openai/x HTTP/1.1\r\nHost: {}\r\nTransfer-Encoding: chunked\r\n\r\n5\nhello\n0\n\n",
+            gw.authority()
+        ),
     );
-    let _ = read_to_close(&mut c);
-    // Whatever the upstream saw, it must not be a well-formed CRLF-framed
-    // body that the gateway synthesized from LF-only input.
+    let resp = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(
+        resp.starts_with("HTTP/1.1 400"),
+        "bare-LF chunk framing must be REJECTED, got: {resp:?}"
+    );
     let seen = up.first_request();
     assert!(
-        !seen.contains("5\r\nhello\r\n"),
-        "LF chunk framing must never be normalized into CRLF framing: {seen:?}"
+        !seen.contains("hello"),
+        "no chunk data may reach the upstream after a framing rejection: {seen:?}"
     );
+    assert!(
+        !seen.contains("5\r\nhello\r\n"),
+        "and it must never be normalized into valid CRLF framing"
+    );
+}
+
+#[test]
+fn chunk_extensions_and_malformed_terminators_are_rejected() {
+    let up = MockUpstream::start(canned(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        0,
+    ));
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    for body in [
+        "5;ext=1\r\nhello\r\n0\r\n\r\n",
+        "0x5\r\nhello\r\n0\r\n\r\n",
+        "5\r\nhelloXX0\r\n\r\n",
+    ] {
+        let mut c = gw.connect();
+        send(
+            &mut c,
+            &format!(
+                "POST /openai/x HTTP/1.1\r\nHost: {}\r\nTransfer-Encoding: chunked\r\n\r\n{body}",
+                gw.authority()
+            ),
+        );
+        let resp = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+        assert!(
+            resp.starts_with("HTTP/1.1 400"),
+            "chunked body {body:?} must be rejected, got {resp:?}"
+        );
+    }
 }
 
 #[test]
@@ -1092,4 +1155,360 @@ fn a_slowloris_head_is_dropped_at_the_deadline() {
     assert!(ended, "a dribbling head must be dropped at the deadline");
     assert!(start.elapsed() < Duration::from_secs(35));
     assert_eq!(up.request_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Named TEST_PLAN items the adversarial re-review found had no shipped test
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_non_100_interim_is_relayed_not_mistaken_for_the_final_response() {
+    // 103 Early Hints during the Expect window. Treating it as final would
+    // silently drop the request body and hand the client an informational
+    // status as its answer.
+    let up = MockUpstream::start(|sock, requests| {
+        let head = read_head(sock);
+        requests.lock().unwrap().push(head);
+        let _ = sock.write_all(b"HTTP/1.1 103 Early Hints\r\nLink: </s.css>; rel=preload\r\n\r\n");
+        let _ = sock.flush();
+        std::thread::sleep(Duration::from_millis(30));
+        let _ = sock.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+        let _ = sock.flush();
+        let mut body = vec![0u8; 5];
+        let _ = sock.read_exact(&mut body);
+        requests.lock().unwrap().push(body);
+        let _ = sock
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndone");
+        let _ = sock.flush();
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "POST /openai/v1/files HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    // The 103 arrives first and is relayed as an interim.
+    let early = read_n(&mut c, 26);
+    assert!(
+        early.starts_with(b"HTTP/1.1 103"),
+        "the 103 must be relayed to the client: {:?}",
+        String::from_utf8_lossy(&early)
+    );
+    c.write_all(b"hello").unwrap();
+    c.flush().unwrap();
+    let rest = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(
+        rest.contains("HTTP/1.1 200 OK") && rest.ends_with("done"),
+        "the real final response must follow, got {rest:?}"
+    );
+    let seen = up.requests.lock().unwrap().clone();
+    assert_eq!(seen[1], b"hello", "the request body must still be sent");
+    let r = &gw.wait_records(1)[0];
+    assert_eq!(
+        r.status_code,
+        Some(200),
+        "103 must not be recorded as the answer"
+    );
+    assert_eq!(r.request_bytes, Some(5));
+}
+
+#[test]
+fn an_upstream_close_between_requests_is_redialed_without_disturbing_the_client() {
+    // Upstream teardown mismatch (TEST_PLAN §1): the provider hangs up
+    // between two keep-alive requests. The client connection must survive
+    // and the second request must reach a freshly dialed socket.
+    let connections = Arc::new(Mutex::new(0usize));
+    let counter = connections.clone();
+    let up = MockUpstream::start(move |sock, requests| {
+        *counter.lock().unwrap() += 1;
+        let head = read_head(sock);
+        if head.is_empty() {
+            return;
+        }
+        requests.lock().unwrap().push(head);
+        // Answer once, then hang up WITHOUT saying Connection: close, so the
+        // gateway believes the socket is reusable and must discover it is not.
+        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = sock.flush();
+        std::thread::sleep(Duration::from_millis(50));
+        let _ = sock.shutdown(std::net::Shutdown::Both);
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/a HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    assert!(read_response(&mut c).ends_with("ok"));
+    // Let the upstream's close land before the second request.
+    std::thread::sleep(Duration::from_millis(200));
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/b HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let second = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(
+        second.starts_with("HTTP/1.1 200 OK"),
+        "an upstream close must never tear down a kept-alive client: {second:?}"
+    );
+    assert_eq!(
+        *connections.lock().unwrap(),
+        2,
+        "the dead upstream must be redialed, not reused"
+    );
+    assert_eq!(gw.wait_records(2).len(), 2);
+}
+
+#[test]
+fn a_mid_chunk_upstream_eof_is_terminal_and_recorded_as_truncated() {
+    let up = MockUpstream::start(|sock, requests| {
+        let head = read_head(sock);
+        requests.lock().unwrap().push(head);
+        // Declares a 100-byte chunk, sends 4 bytes, then vanishes.
+        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n64\r\nshor");
+        let _ = sock.flush();
+        let _ = sock.shutdown(std::net::Shutdown::Both);
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/x HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let resp = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(resp.starts_with("HTTP/1.1 200 OK"));
+    assert!(
+        !resp.contains("tethra-gateway:"),
+        "no synthetic body may be injected into a started provider stream"
+    );
+    let r = &gw.wait_records(1)[0];
+    assert_eq!(r.completion, Completion::Truncated);
+}
+
+#[test]
+fn a_304_response_carries_no_body_and_keeps_the_connection_usable() {
+    let up = MockUpstream::start(|sock, requests| loop {
+        let head = read_head(sock);
+        if head.is_empty() {
+            return;
+        }
+        requests.lock().unwrap().push(head);
+        let _ = sock
+            .write_all(b"HTTP/1.1 304 Not Modified\r\nETag: \"abc\"\r\nContent-Length: 99\r\n\r\n");
+        let _ = sock.flush();
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/x HTTP/1.1\r\nHost: {}\r\nIf-None-Match: \"abc\"\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let resp = read_response(&mut c);
+    assert!(resp.starts_with("HTTP/1.1 304"), "got: {resp:?}");
+    assert!(resp.contains("ETag: \"abc\""));
+    assert!(resp.ends_with("\r\n\r\n"), "a 304 has no body: {resp:?}");
+    assert!(resp.contains("Connection: keep-alive"));
+    // The connection really is still usable.
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/y HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let second = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(second.starts_with("HTTP/1.1 304"));
+}
+
+#[test]
+fn the_reserved_prefix_namespace_is_never_routable() {
+    // `p` and `_tethra` are reserved (the link form and the probe path), so
+    // a route can never shadow them and a request for them 404s.
+    let up = MockUpstream::start(canned(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 0));
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    for path in ["/_tethra/nonce", "/_tethra", "/p/x/y"] {
+        let mut c = gw.connect();
+        send(
+            &mut c,
+            &format!("GET {path} HTTP/1.1\r\nHost: {}\r\n\r\n", gw.authority()),
+        );
+        let resp = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+        assert!(resp.starts_with("HTTP/1.1 404"), "{path} => {resp:?}");
+    }
+    assert_eq!(up.request_count(), 0);
+}
+
+#[test]
+fn an_unknown_route_performs_no_dns_and_opens_no_socket() {
+    // A gateway with a route whose "origin" is an unroutable port: if an
+    // unknown prefix caused any connection attempt, this test would see it.
+    let up = MockUpstream::start(canned(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 0));
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let before = up.request_count();
+    for path in [
+        "/unknown/v1/x",
+        "/openai2/x",
+        "/p/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/openai/x",
+    ] {
+        let mut c = gw.connect();
+        send(
+            &mut c,
+            &format!("GET {path} HTTP/1.1\r\nHost: {}\r\n\r\n", gw.authority()),
+        );
+        let resp = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+        assert!(resp.starts_with("HTTP/1.1 404"));
+    }
+    assert_eq!(
+        up.request_count(),
+        before,
+        "nothing may be dialed for a 404"
+    );
+    assert!(
+        gw.sink.records().is_empty(),
+        "a 404 writes no observation row"
+    );
+}
+
+#[test]
+fn a_query_containing_a_url_is_forwarded_not_refused_as_absolute_form() {
+    // Absolute-form detection must look at the PATH, not the whole target:
+    // `?callback=https://...` is an ordinary origin-form request.
+    let up = MockUpstream::start(|sock, requests| {
+        let head = read_head(sock);
+        requests.lock().unwrap().push(head);
+        let _ =
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let _ = sock.flush();
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/x?callback=https://example.com/cb HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let resp = read_response(&mut c);
+    assert!(resp.starts_with("HTTP/1.1 200"), "got: {resp:?}");
+    assert!(up
+        .first_request()
+        .starts_with("GET /v1/x?callback=https://example.com/cb HTTP/1.1"));
+    // And the query is still absent from the stored template.
+    let r = &gw.wait_records(1)[0];
+    assert_eq!(r.path_template, "/v1/x");
+}
+
+#[test]
+fn an_idle_keep_alive_connection_closes_silently_without_a_spurious_400() {
+    // A client that opens a connection, sends one request, then goes quiet
+    // must not be answered with a 400 for a request it never made.
+    let up = MockUpstream::start(|sock, requests| loop {
+        let head = read_head(sock);
+        if head.is_empty() {
+            return;
+        }
+        requests.lock().unwrap().push(head);
+        let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        let _ = sock.flush();
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/x HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    assert!(read_response(&mut c).ends_with("ok"));
+    // Now go quiet and close from our side; the gateway must not have queued
+    // a 400 for us.
+    c.set_read_timeout(Some(Duration::from_millis(400)))
+        .unwrap();
+    let mut buf = [0u8; 256];
+    let extra = match c.read(&mut buf) {
+        Ok(0) => Vec::new(),
+        Ok(n) => buf[..n].to_vec(),
+        Err(_) => Vec::new(),
+    };
+    assert!(
+        extra.is_empty(),
+        "an idle connection must receive nothing, got {:?}",
+        String::from_utf8_lossy(&extra)
+    );
+}
+
+#[test]
+fn slow_streams_do_not_accumulate_and_a_multi_megabyte_body_relays_intact() {
+    // Backpressure: the blocking copy loop is the bound. A 8 MiB body must
+    // arrive intact through a fixed 16 KiB relay buffer.
+    const SIZE: usize = 8 * 1024 * 1024;
+    let up = MockUpstream::start(|sock, requests| {
+        let head = read_head(sock);
+        requests.lock().unwrap().push(head);
+        let _ = sock.write_all(
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {SIZE}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        );
+        let chunk = vec![b'z'; 64 * 1024];
+        let mut sent = 0;
+        while sent < SIZE {
+            if sock.write_all(&chunk).is_err() {
+                return;
+            }
+            sent += chunk.len();
+        }
+        let _ = sock.flush();
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/big HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    // Read slowly, in small reads, to exercise backpressure.
+    let mut total = 0usize;
+    let mut buf = [0u8; 4096];
+    let mut head_done = false;
+    loop {
+        match c.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if !head_done {
+                    head_done = true;
+                    // Subtract the head from the first read.
+                    let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Some(i) = text.find("\r\n\r\n") {
+                        total += n - (i + 4);
+                        continue;
+                    }
+                }
+                total += n;
+            }
+            Err(_) => break,
+        }
+    }
+    assert_eq!(total, SIZE, "the whole body must relay intact");
+    let r = &gw.wait_records(1)[0];
+    assert_eq!(r.response_bytes, Some(SIZE as i64));
+    assert_eq!(r.completion, Completion::Completed);
 }

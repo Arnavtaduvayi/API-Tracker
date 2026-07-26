@@ -11,20 +11,19 @@
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use api_tracker_core::error::CoreError;
 use api_tracker_core::runtime::model::{ContentKind, HttpMethod, TransportError};
 use api_tracker_core::runtime::sanitize;
+use api_tracker_core::secret::SecretBytes;
 use api_tracker_core::{clock, providers};
-use api_tracker_observe::relay;
 use zeroize::Zeroizing;
 
+use crate::attribution;
 use crate::head::{self, Carryover, Framing, HeadRead, HttpVersion, RequestHead};
-use crate::record::{
-    counters, AttributionInput, Completion, ExchangeRecord, ObservationSink, UsageObservation,
-};
+use crate::record::{counters, Completion, ExchangeRecord, ObservationSink, UsageObservation};
 use crate::routes::{LinkInfo, Route, RouteState, RouteTarget, Unforwardable};
 use crate::upstream::{
     TlsConnector, UpstreamConnector, UpstreamPool, INTERIM_READ_TIMEOUT, UPSTREAM_IDLE_TIMEOUT,
@@ -39,6 +38,9 @@ pub const CLIENT_HEAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub const CLIENT_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Idle budget on a kept-alive connection between requests.
 pub const CLIENT_KEEPALIVE_IDLE: Duration = Duration::from_secs(120);
+/// Budget for one blocking write toward the client. Bounds a client that
+/// stops reading mid-response.
+pub const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Concurrent client connections; further connections get 503 immediately
 /// rather than queueing without bound.
 pub const MAX_CONNECTIONS: usize = 128;
@@ -57,25 +59,6 @@ pub trait BodyTap {
 pub struct NoTap;
 impl BodyTap for NoTap {
     fn feed(&mut self, _bytes: &[u8]) {}
-}
-
-/// A `Write` that forwards to `inner` and mirrors every written byte into a
-/// tap. Only bytes actually written downstream are tapped, so the tap can
-/// never observe more than the client did.
-struct TeeWriter<'a, W: Write> {
-    inner: W,
-    tap: &'a mut dyn BodyTap,
-}
-
-impl<W: Write> Write for TeeWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.tap.feed(&buf[..n]);
-        Ok(n)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 /// Everything a connection handler needs. Cheap to clone (all `Arc`).
@@ -98,6 +81,11 @@ pub struct Gateway {
     /// the exchange engine is transport-generic and testable against local
     /// synthetic providers.
     pub connector: Arc<dyn UpstreamConnector>,
+    /// The matching-only keyed-fingerprint key, present ONLY when an
+    /// unlocked-vault session pushed it over the authenticated control
+    /// channel (SI-21). Absent here means attribution degrades honestly to
+    /// `unavailable_vault_locked` — it never blocks or fails forwarding.
+    pub matching_key: Arc<RwLock<Option<SecretBytes>>>,
 }
 
 impl Gateway {
@@ -112,7 +100,21 @@ impl Gateway {
             max_connections: MAX_CONNECTIONS,
             extraction_enabled: true,
             connector: Arc::new(TlsConnector),
+            matching_key: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Install or clear the matching-only fingerprint key. Clearing drops the
+    /// old key, which zeroizes it (`SecretBytes` is `ZeroizeOnDrop`).
+    pub fn set_matching_key(&self, key: Option<SecretBytes>) {
+        *self.matching_key.write().expect("matching key lock") = key;
+    }
+
+    pub fn has_matching_key(&self) -> bool {
+        self.matching_key
+            .read()
+            .expect("matching key lock")
+            .is_some()
     }
 
     fn emit(&self, record: ExchangeRecord) {
@@ -296,7 +298,7 @@ enum Next {
 pub fn serve_connection(
     gw: &Gateway,
     mut client: TcpStream,
-    tap_factory: &dyn Fn(&str) -> Box<dyn BodyTap>,
+    tap_factory: &dyn Fn(&str, bool, bool) -> Box<dyn BodyTap>,
 ) {
     // Loopback-only: refuse any peer that is not on the loopback interface,
     // belt-and-braces over the loopback bind (SI-1/D11).
@@ -305,6 +307,12 @@ pub fn serve_connection(
         _ => return,
     }
     let _ = client.set_nodelay(true);
+    // A client that opens a connection and then stops READING would
+    // otherwise block a worker thread, an upstream socket, and a
+    // connection-cap slot indefinitely: a blocking write has no other bound.
+    // The budget is generous enough for a slow but real consumer of a
+    // streamed response.
+    let _ = client.set_write_timeout(Some(CLIENT_WRITE_TIMEOUT));
     let mut pool = UpstreamPool::new();
     let mut carry: Carryover = Zeroizing::new(Vec::new());
     let mut first = true;
@@ -313,16 +321,18 @@ pub fn serve_connection(
         if gw.shutdown.load(Ordering::Relaxed) {
             break;
         }
-        let idle = if first {
-            CLIENT_HEAD_READ_TIMEOUT
+        // The per-read timeout is short so the loop wakes to observe the
+        // absolute deadline. A FIRST request must complete its head within
+        // CLIENT_HEAD_DEADLINE (that bound is what stops a Slowloris); a
+        // kept-alive connection may sit idle longer between requests, but
+        // once any byte of a head arrives the same head deadline applies.
+        let _ = client.set_read_timeout(Some(CLIENT_HEAD_READ_TIMEOUT));
+        let idle_budget = if first {
+            CLIENT_HEAD_DEADLINE
         } else {
-            // A kept-alive connection may legitimately sit idle between
-            // requests; the absolute head deadline still bounds a partial
-            // head once bytes start arriving.
             CLIENT_KEEPALIVE_IDLE
         };
-        let _ = client.set_read_timeout(Some(idle));
-        let deadline = Instant::now() + CLIENT_HEAD_DEADLINE + idle;
+        let deadline = Instant::now() + idle_budget;
         let read = head::read_request_head(&mut client, std::mem::take(&mut carry), Some(deadline));
         first = false;
         let (head, body_carry) = match read {
@@ -360,7 +370,7 @@ fn handle_request(
     pool: &mut UpstreamPool,
     head: RequestHead,
     body_carry: Carryover,
-    tap_factory: &dyn Fn(&str) -> Box<dyn BodyTap>,
+    tap_factory: &dyn Fn(&str, bool, bool) -> Box<dyn BodyTap>,
 ) -> Next {
     // --- request gate (order is security-relevant; see module docs) ---
 
@@ -386,7 +396,10 @@ fn handle_request(
         gw.sink.count("", counters::REJECTED_LOCALLY);
         return Next::Close;
     }
-    if head.target.contains("://") || !head.target.starts_with('/') {
+    // Absolute-form is `scheme://host/...` in the TARGET, before any `?`. A
+    // query value that merely CONTAINS a URL (`?callback=https://...`) is an
+    // ordinary origin-form request and must not be refused.
+    if !head.target.starts_with('/') || head.path_only().contains("://") {
         // Absolute-form and authority-form targets are how a forward proxy
         // is asked to reach an arbitrary host. This is not one (SI-2).
         local_response(
@@ -478,7 +491,17 @@ fn handle_request(
 
     let at = clock::now_rfc3339();
     let started = Instant::now();
+    // `sanitize_path` is the ONLY wire-to-stored-string transformation, and
+    // it runs over the route-stripped path with query and fragment already
+    // severed by `path_only()` (SI-10).
     let (path_template, template_confidence) = sanitize::sanitize_path(&res.upstream_path);
+    // The credential value is read ONLY here, only from a recognized header,
+    // hashed under the vault's keyed-fingerprint key into a digest, and
+    // dropped. The table lookup happens on the writer thread.
+    let (attribution_input, digest) = {
+        let key = gw.matching_key.read().expect("matching key lock");
+        attribution::digest_request(key.as_ref(), &head)
+    };
     let mut record = ExchangeRecord {
         at,
         route_prefix: res.route.prefix.clone(),
@@ -499,8 +522,8 @@ fn handle_request(
         response_bytes: None,
         transport_error: TransportError::None,
         completion: Completion::Completed,
-        attribution_input: AttributionInput::NoCredentialPresent,
-        digest: None,
+        attribution_input,
+        digest,
         usage: None,
     };
     if res.link.is_none() {
@@ -517,11 +540,6 @@ fn handle_request(
 
     let shape = res.route.usage_shape.clone();
     let extraction_on = gw.extraction_enabled && !shape.is_empty();
-    let mut tap = if extraction_on {
-        tap_factory(&shape)
-    } else {
-        Box::new(NoTap) as Box<dyn BodyTap>
-    };
 
     let outcome = forward_exchange(
         gw,
@@ -533,12 +551,12 @@ fn handle_request(
         &origin,
         &upstream_target,
         extraction_on,
-        tap.as_mut(),
+        &shape,
+        tap_factory,
         &mut record,
     );
 
     record.latency_ms = Some(started.elapsed().as_millis() as i64);
-    record.usage = tap.finish();
     if let Some(usage) = &record.usage {
         if usage.dropped_events > 0 {
             gw.sink
@@ -565,7 +583,8 @@ fn forward_exchange(
     origin: &crate::routes::UpstreamOrigin,
     upstream_target: &str,
     force_identity: bool,
-    tap: &mut dyn BodyTap,
+    usage_shape: &str,
+    tap_factory: &dyn Fn(&str, bool, bool) -> Box<dyn BodyTap>,
     record: &mut ExchangeRecord,
 ) -> Next {
     // 1. Upstream socket for THIS route (never shared across routes).
@@ -593,16 +612,12 @@ fn forward_exchange(
     // 2. Upstream head, rebuilt canonically from parsed fields.
     let out_head =
         head::build_upstream_head(head, upstream_target, &origin.host, true, force_identity);
-    if upstream
-        .write_all(&out_head)
-        .and_then(|_| upstream.flush())
-        .is_err()
-    {
+    if let Err(e) = upstream.write_all(&out_head).and_then(|_| upstream.flush()) {
+        record.transport_error = classify_io_error(&e);
         // A cached socket may have died between the liveness probe and the
         // write. Redial once — nothing of the body has been sent yet, so
         // this is not a retry of a non-idempotent request.
         if !was_cached {
-            record.transport_error = TransportError::Reset;
             record.completion = Completion::UpstreamFailed;
             local_response(
                 client,
@@ -621,12 +636,8 @@ fn forward_exchange(
                 return Next::Close;
             }
         };
-        if upstream
-            .write_all(&out_head)
-            .and_then(|_| upstream.flush())
-            .is_err()
-        {
-            record.transport_error = TransportError::Reset;
+        if let Err(e) = upstream.write_all(&out_head).and_then(|_| upstream.flush()) {
+            record.transport_error = classify_io_error(&e);
             record.completion = Completion::UpstreamFailed;
             local_response(
                 client,
@@ -659,7 +670,12 @@ fn forward_exchange(
         match read {
             Ok(HeadRead::Complete(h, carry)) => {
                 resp_carry = carry;
-                if h.status == 100 {
+                // ANY 1xx is informational, not an answer: a 103 Early
+                // Hints (emitted by several CDN-fronted origins) reaching
+                // the else branch as a "final response" would silently drop
+                // the request body and hand the client an informational
+                // status as its answer.
+                if (100..200).contains(&h.status) {
                     let interim = head::build_client_interim_head(&h);
                     if client
                         .write_all(&interim)
@@ -703,19 +719,64 @@ fn forward_exchange(
     //    for the next request on a kept-alive connection.
     let mut client_carry: Vec<u8> = Vec::new();
     if !skip_body {
-        match relay::relay_body(
-            client,
-            &mut upstream,
-            head.framing.to_relay(),
-            body_carry.to_vec(),
-        ) {
+        let relayed = match head.framing {
+            Framing::None => Ok((0u64, body_carry.to_vec())),
+            // Strict CRLF chunk framing toward the upstream: a bare-LF chunk
+            // body is REJECTED, never forwarded (SI-15). `observe::relay`
+            // deliberately tolerates bare LF — safe for the observation
+            // proxy, a smuggling primitive for a gateway.
+            Framing::Chunked => crate::stream::relay_chunked_strict(
+                client,
+                &mut upstream,
+                body_carry.to_vec(),
+                None,
+            ),
+            Framing::ContentLength(n) => crate::stream::relay_plain(
+                client,
+                &mut upstream,
+                Some(n),
+                body_carry.to_vec(),
+                None,
+            ),
+            Framing::UntilClose => {
+                crate::stream::relay_plain(client, &mut upstream, None, body_carry.to_vec(), None)
+            }
+        };
+        match relayed {
             Ok((bytes, carry)) => {
                 record.request_bytes = Some(bytes as i64);
                 client_carry = carry;
+                // A client that declared N bytes and sent fewer leaves the
+                // upstream waiting for a body that will never arrive: the
+                // exchange is over, not merely slow.
+                if let Framing::ContentLength(declared) = head.framing {
+                    if bytes < declared {
+                        record.completion = Completion::ClientDisconnected;
+                        record.transport_error = TransportError::Reset;
+                        return Next::Close;
+                    }
+                }
             }
-            Err(_) => {
-                record.completion = Completion::ClientDisconnected;
+            Err(e) => {
+                let malformed = matches!(e, CoreError::InvalidInput(_));
+                record.completion = if malformed {
+                    Completion::RejectedLocally
+                } else {
+                    Completion::ClientDisconnected
+                };
                 record.transport_error = TransportError::Reset;
+                if malformed {
+                    // Nothing has been written to the client yet, so a local
+                    // diagnostic is safe here.
+                    gw.sink.count(route_prefix, counters::REJECTED_LOCALLY);
+                    local_response(
+                        client,
+                        400,
+                        "Bad Request",
+                        "the chunked request body used ambiguous framing (bare LF, a \
+                         chunk extension, or a malformed terminator) and was not forwarded.",
+                    );
+                }
                 return Next::Close;
             }
         }
@@ -782,28 +843,61 @@ fn forward_exchange(
         return Next::Close;
     }
 
-    // 6. Stream the response body through the bounded tap.
-    let mut tee = TeeWriter {
-        inner: &mut *client,
-        tap,
-    };
-    let relayed = relay::relay_body(
-        &mut upstream,
-        &mut tee,
-        framing.to_relay(),
-        std::mem::take(&mut resp_carry).to_vec(),
+    // 6. Stream the response body through the bounded tap. The extraction
+    //    mode is decided from the response's OWN declared headers: a
+    //    compressed body is counted `unsupported_shape` rather than scanned,
+    //    because the relay never decompresses (zip-bomb surface).
+    let (streaming, compressed) = crate::usage::mode_for_response(
+        resp.header_str("content-type"),
+        resp.header_str("content-encoding"),
     );
+    let mut tap: Box<dyn BodyTap> = if force_identity {
+        tap_factory(usage_shape, streaming, compressed)
+    } else {
+        Box::new(NoTap)
+    };
+    // For a chunked response the tap must see DECODED bytes: feeding it the
+    // raw framing would splice chunk-size lines into the middle of SSE events
+    // and break extraction on exactly the streaming responses it exists for.
+    let carry_in = std::mem::take(&mut resp_carry).to_vec();
+    let relayed = match framing {
+        Framing::Chunked => crate::stream::relay_chunked_strict(
+            &mut upstream,
+            &mut *client,
+            carry_in,
+            Some(tap.as_mut()),
+        ),
+        Framing::ContentLength(n) => crate::stream::relay_plain(
+            &mut upstream,
+            &mut *client,
+            Some(n),
+            carry_in,
+            Some(tap.as_mut()),
+        ),
+        Framing::UntilClose => crate::stream::relay_plain(
+            &mut upstream,
+            &mut *client,
+            None,
+            carry_in,
+            Some(tap.as_mut()),
+        ),
+        Framing::None => Ok((0, carry_in)),
+    };
     let (body_bytes, upstream_leftover) = match relayed {
         Ok(v) => v,
         Err(_) => {
             // Mid-stream failure: the provider's response has already begun,
             // so NO synthetic body is injected. The connection is torn down
-            // and the truncation is recorded honestly.
+            // and the truncation is recorded honestly. Whatever the tap saw
+            // before the break is still reported, labeled partial by the
+            // completion state.
+            record.usage = tap.finish();
             record.completion = Completion::Truncated;
             record.transport_error = TransportError::Reset;
             return Next::Close;
         }
     };
+    record.usage = tap.finish();
     record.response_bytes = Some(body_bytes as i64);
     upstream.set_pending(Zeroizing::new(upstream_leftover));
 
@@ -839,9 +933,36 @@ fn forward_exchange(
 fn classify_connect_error(e: &CoreError) -> TransportError {
     match e {
         CoreError::Network(msg) if msg.contains("resolve") => TransportError::Dns,
+        // A certificate the gateway refused to trust is NOT a generic reset:
+        // conflating them would hide the one failure a user must act on.
+        CoreError::Network(msg) if msg.contains("TLS") || msg.contains("certificate") => {
+            TransportError::UpstreamCertInvalid
+        }
         CoreError::Network(_) => TransportError::Refused,
         CoreError::InvalidInput(_) => TransportError::ProxyError,
         _ => TransportError::Refused,
+    }
+}
+
+/// Classify a failure on an already-connected upstream. rustls surfaces
+/// certificate and handshake failures on the first read/write rather than at
+/// construction, so this is where most of them actually land.
+pub(crate) fn classify_io_error(e: &std::io::Error) -> TransportError {
+    let text = e.to_string();
+    if text.contains("certificate")
+        || text.contains("CertNotValid")
+        || text.contains("UnknownIssuer")
+        || text.contains("BadCertificate")
+        || text.contains("CertExpired")
+    {
+        TransportError::UpstreamCertInvalid
+    } else if matches!(
+        e.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) {
+        TransportError::Timeout
+    } else {
+        TransportError::Reset
     }
 }
 

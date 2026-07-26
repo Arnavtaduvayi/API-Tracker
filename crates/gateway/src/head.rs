@@ -268,9 +268,19 @@ pub fn read_request_head<R: Read>(
         }
         if let Some(d) = deadline {
             if Instant::now() >= d {
-                return Err(CoreError::InvalidInput(
-                    "request head not completed before deadline".into(),
-                ));
+                return if buf.is_empty() {
+                    // The peer sent nothing at all: an idle kept-alive
+                    // connection timing out, indistinguishable from a clean
+                    // close. Answering a 400 to a request nobody made would
+                    // be noise, so this reports "no request" instead.
+                    Ok(None)
+                } else {
+                    // A PARTIAL head past the deadline is the Slowloris case
+                    // and is a hard error.
+                    Err(CoreError::InvalidInput(
+                        "request head not completed before deadline".into(),
+                    ))
+                };
             }
         }
         let want = std::cmp::min(tmp.len(), MAX_HEAD - buf.len());

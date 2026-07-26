@@ -130,3 +130,64 @@ fn the_test_only_plain_connector_is_never_used_by_production_code() {
         "Gateway::new must default to the verified-TLS connector"
     );
 }
+
+#[test]
+fn the_crate_never_links_the_certificate_authority_or_server_tls_modules() {
+    // SI-6: the gateway terminates NO TLS toward clients and holds no CA
+    // key. The structural guarantee is that it never references observe's
+    // CA / MITM surface — this guard is what keeps that true.
+    const FORBIDDEN: &[&str] = &[
+        "observe::ca",
+        "observe::clienthello",
+        "observe::systemtrust",
+        "observe::proxy",
+        "observe::session",
+        "server_config_for",
+        "CertAuthority",
+        "ResolvesServerCert",
+        "ServerConfig",
+        "rcgen",
+    ];
+    for file in src_files() {
+        let code = code_only(&fs::read_to_string(&file).unwrap());
+        for pat in FORBIDDEN {
+            assert!(
+                !code.contains(pat),
+                "`{pat}` found in {} — the gateway must never link the \
+                 certificate-authority or server-side TLS surface (SI-6)",
+                file.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn no_gateway_debug_impl_can_print_a_request_target_with_query_material() {
+    // The wire.rs redaction pattern: any Debug that touches a target must
+    // sever the query first. Pin that the two types carrying wire strings
+    // redact, and that no Debug derive was added to them.
+    let head =
+        fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/head.rs"))
+            .unwrap();
+    for ty in ["RequestHead", "HeaderField"] {
+        assert!(
+            head.contains(&format!("impl std::fmt::Debug for {ty}")),
+            "{ty} must carry a hand-written redacting Debug, not a derive"
+        );
+        assert!(
+            !head.contains(&format!("#[derive(Debug)]\npub struct {ty}")),
+            "{ty} must not derive Debug"
+        );
+    }
+    assert!(
+        head.contains("&\"<redacted>\""),
+        "header values must print as <redacted>"
+    );
+    let record =
+        fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/record.rs"))
+            .unwrap();
+    assert!(
+        record.contains("impl std::fmt::Debug for CredentialDigest"),
+        "the credential digest must carry a redacting Debug"
+    );
+}

@@ -196,6 +196,8 @@ pub mod counters {
     pub const MODEL_REJECTED: &str = "model_rejected";
     /// Oversized streaming events discarded by the bounded extractor.
     pub const USAGE_EVENTS_DROPPED: &str = "usage_events_dropped";
+    /// Connections still running when a clean stop hit its drain deadline.
+    pub const SHUTDOWN_ABANDONED_CONNECTIONS: &str = "shutdown_abandoned_connections";
 }
 
 /// Where observations go. Implementations MUST NOT block the forwarding

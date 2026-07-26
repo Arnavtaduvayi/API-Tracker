@@ -9,18 +9,37 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use api_tracker_core::error::{CoreError, Result};
 
 use crate::forward::{self, BodyTap, Gateway, NoTap};
 use crate::record::counters;
 
-/// Builds the bounded usage tap for a provider's declared response shape.
-pub type TapFactory = Arc<dyn Fn(&str) -> Box<dyn BodyTap> + Send + Sync>;
+/// Builds the bounded usage tap for a provider's declared response shape,
+/// given whether the response is a stream and whether it is compressed.
+pub type TapFactory = Arc<dyn Fn(&str, bool, bool) -> Box<dyn BodyTap> + Send + Sync>;
+
+/// The production tap factory: a bounded extractor for a provider shape the
+/// manifest declares, and nothing at all for any other shape.
+pub fn usage_tap_factory() -> TapFactory {
+    Arc::new(|shape: &str, streaming: bool, compressed: bool| {
+        match crate::usage::Shape::parse(shape) {
+            Some(shape) => Box::new(crate::usage::UsageExtractor::new(
+                shape, streaming, compressed,
+            )) as Box<dyn BodyTap>,
+            None => Box::new(NoTap) as Box<dyn BodyTap>,
+        }
+    })
+}
 
 /// How often the accept loop wakes to observe the shutdown flag.
 const ACCEPT_POLL: Duration = Duration::from_millis(50);
+
+/// How long a clean stop waits for in-flight exchanges before abandoning
+/// them. Long enough that a normal streamed response completes; short enough
+/// that one stuck peer cannot hold the process open.
+pub const SHUTDOWN_DRAIN: Duration = Duration::from_secs(30);
 
 /// The ONLY address this gateway ever binds. Not configurable, by design.
 pub const BIND_IP: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -63,7 +82,9 @@ pub fn serve(gateway: Gateway, listener: Listener) {
     serve_with_taps(
         gateway,
         listener,
-        Arc::new(|_shape: &str| Box::new(NoTap) as Box<dyn BodyTap>),
+        Arc::new(|_shape: &str, _streaming: bool, _compressed: bool| {
+            Box::new(NoTap) as Box<dyn BodyTap>
+        }),
     )
 }
 
@@ -112,10 +133,32 @@ pub fn serve_with_taps(gateway: Gateway, listener: Listener, tap_factory: TapFac
             Err(_) => thread::sleep(ACCEPT_POLL),
         }
     }
-    // Graceful shutdown: stop accepting, then let in-flight exchanges finish.
-    // Streaming responses are not severed mid-body by a clean stop.
+    // Graceful shutdown: stop accepting, then let in-flight exchanges finish
+    // so a clean stop never severs a streaming response mid-body. The drain
+    // is BOUNDED: every connection already carries read and write timeouts,
+    // so a well-behaved exchange finishes quickly, and a stuck one must not
+    // hold the process open forever. Threads still running at the deadline
+    // are abandoned (their sockets close when the process exits) and the
+    // count is reported rather than hidden.
+    let deadline = Instant::now() + SHUTDOWN_DRAIN;
+    let mut abandoned = 0usize;
     for h in handles {
-        let _ = h.join();
+        loop {
+            if h.is_finished() {
+                let _ = h.join();
+                break;
+            }
+            if Instant::now() >= deadline {
+                abandoned += 1;
+                break;
+            }
+            thread::sleep(ACCEPT_POLL);
+        }
+    }
+    if abandoned > 0 {
+        gateway
+            .sink
+            .count("", counters::SHUTDOWN_ABANDONED_CONNECTIONS);
     }
 }
 

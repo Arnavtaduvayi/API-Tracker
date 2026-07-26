@@ -126,7 +126,9 @@ impl RunningGateway {
     pub fn start(routes: Arc<RouteState>) -> Self {
         Self::start_with_taps(
             routes,
-            Arc::new(|_: &str| Box::new(api_tracker_gateway::forward::NoTap) as Box<dyn BodyTap>),
+            Arc::new(|_: &str, _: bool, _: bool| {
+                Box::new(api_tracker_gateway::forward::NoTap) as Box<dyn BodyTap>
+            }),
         )
     }
 

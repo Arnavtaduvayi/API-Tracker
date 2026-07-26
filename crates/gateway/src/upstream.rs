@@ -44,17 +44,41 @@ pub const MAX_UPSTREAMS_PER_CONNECTION: usize = 4;
 /// Resolve a host to policy-validated addresses. Phase one is the literal
 /// authority check; phase two filters every resolved address.
 pub fn resolve_validated(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    resolve_validated_with(host, port, system_resolver)
+}
+
+/// The system resolver used in production.
+fn system_resolver(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+    (host, port).to_socket_addrs().map(|it| it.collect())
+}
+
+/// [`resolve_validated`] with an injectable resolver.
+///
+/// The seam exists because phase two is otherwise UNTESTABLE: every literal
+/// that phase one already denies (IP literals, single-label names, metadata
+/// names) never reaches the resolved-address filter, so a test built from
+/// literals proves nothing about the post-DNS check — which is the entire
+/// point of SI-3 (a split-horizon internal FQDN with a public certificate
+/// resolves to a private address and must be refused AFTER DNS). Tests pass
+/// a stub resolver; production passes the system one.
+pub fn resolve_validated_with(
+    host: &str,
+    port: u16,
+    resolve: impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>>,
+) -> Result<Vec<SocketAddr>> {
     let allow = policy::AllowList::new();
+    // Phase one: the literal authority.
     if !policy::check_authority(host, port, &allow).is_allowed() {
         return Err(CoreError::InvalidInput(format!(
             "destination '{host}' is not routable"
         )));
     }
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    let resolved: Vec<SocketAddr> = (bare, port)
-        .to_socket_addrs()
-        .map_err(|_| CoreError::Network(format!("could not resolve '{host}'")))?
-        .collect();
+    // Resolve ONCE. Everything after this dials an address from THIS list;
+    // re-resolving between check and connect is what DNS rebinding exploits.
+    let resolved = resolve(bare, port)
+        .map_err(|_| CoreError::Network(format!("could not resolve '{host}'")))?;
+    // Phase two: every resolved address, independently.
     let validated: Vec<SocketAddr> = resolved
         .into_iter()
         .filter(|addr| policy::check_resolved(addr.ip(), false).is_allowed())
@@ -130,10 +154,17 @@ impl UpstreamConnector for TlsConnector {
             .map_err(CoreError::Io)?;
         tcp.set_write_timeout(Some(UPSTREAM_IDLE_TIMEOUT))
             .map_err(CoreError::Io)?;
-        let server_name =
-            rustls_pki_types::ServerName::try_from(origin.host.clone()).map_err(|_| {
-                CoreError::InvalidInput(format!("invalid server name '{}'", origin.host))
-            })?;
+        // An IPv6 literal origin is stored bracketed (`[2606:...]`) because
+        // that is its authority form, but `ServerName` wants the bare
+        // address; passing the brackets through fails every such connection.
+        let sni_host = origin
+            .host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let server_name = rustls_pki_types::ServerName::try_from(sni_host).map_err(|_| {
+            CoreError::InvalidInput(format!("invalid server name '{}'", origin.host))
+        })?;
         let config = api_tracker_observe::tls::upstream_client_config();
         let conn = ClientConnection::new(config, server_name)
             .map_err(|e| CoreError::Network(format!("TLS setup failed: {e}")))?;
@@ -321,9 +352,18 @@ impl Drop for UpstreamPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn stub(addrs: Vec<IpAddr>) -> impl Fn(&str, u16) -> std::io::Result<Vec<SocketAddr>> {
+        move |_host, port| Ok(addrs.iter().map(|ip| SocketAddr::new(*ip, port)).collect())
+    }
 
     #[test]
-    fn resolve_validated_refuses_private_and_metadata_targets() {
+    fn phase_one_refuses_literals_and_bad_ports_before_any_dns() {
+        // These never reach the resolver: a stub that PANICS proves it.
+        let never = |_: &str, _: u16| -> std::io::Result<Vec<SocketAddr>> {
+            panic!("phase one must reject before resolving")
+        };
         for (host, port) in [
             ("127.0.0.1", 443u16),
             ("localhost", 443),
@@ -333,16 +373,76 @@ mod tests {
             ("api.openai.com", 8443), // policy allows only 80/443
         ] {
             assert!(
-                resolve_validated(host, port).is_err(),
-                "{host}:{port} must be refused"
+                resolve_validated_with(host, port, never).is_err(),
+                "{host}:{port} must be refused in phase one"
             );
         }
     }
 
     #[test]
-    fn a_name_that_resolves_to_loopback_is_refused_after_dns() {
-        // The post-DNS gap: `localhost` passes no literal-IP check but every
-        // resolved address is loopback. Phase two must reject it.
+    fn phase_two_refuses_a_public_name_that_resolves_into_the_private_network() {
+        // The real SI-3 case: a multi-label, public-LOOKING name that phase
+        // one cannot classify, whose DNS answer is internal. This is the
+        // split-horizon / rebinding attack, and only the post-DNS filter
+        // catches it.
+        for private in [
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)),
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254)),
+            IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1)),
+            // IPv4-mapped IPv6 loopback: the classifier must unwrap it.
+            IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 0x0001)),
+        ] {
+            let err = resolve_validated_with("internal.corp.example.com", 443, stub(vec![private]))
+                .unwrap_err();
+            assert!(
+                format!("{err}").contains("denied by the destination policy"),
+                "{private} must be refused AFTER dns, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase_two_filters_rather_than_merely_rejecting() {
+        // A dual-stack answer mixing a private and a public address must
+        // yield ONLY the public one — proving the filter runs per address,
+        // not just an all-or-nothing check.
+        let public = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let addrs = resolve_validated_with(
+            "api.example.com",
+            443,
+            stub(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), public]),
+        )
+        .unwrap();
+        assert_eq!(addrs.len(), 1, "the private address must be filtered out");
+        assert_eq!(addrs[0].ip(), public);
+        assert_eq!(addrs[0].port(), 443);
+    }
+
+    #[test]
+    fn a_public_answer_passes_and_preserves_resolution_order() {
+        let a = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let b = IpAddr::V6(Ipv6Addr::new(0x2606, 0x2800, 0x220, 1, 0, 0, 0, 0x1));
+        let addrs = resolve_validated_with("api.example.com", 443, stub(vec![a, b])).unwrap();
+        assert_eq!(addrs.iter().map(|s| s.ip()).collect::<Vec<_>>(), vec![a, b]);
+    }
+
+    #[test]
+    fn an_empty_or_failing_resolution_is_an_error_not_an_empty_dial_list() {
+        assert!(resolve_validated_with("api.example.com", 443, stub(vec![])).is_err());
+        assert!(resolve_validated_with("api.example.com", 443, |_, _| {
+            Err(std::io::Error::other("dns down"))
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn the_system_resolver_path_still_refuses_loopback_names() {
+        // End-to-end through the real resolver (no network needed).
         assert!(resolve_validated("localhost", 443).is_err());
+        assert!(resolve_validated("127.0.0.1", 443).is_err());
     }
 }
