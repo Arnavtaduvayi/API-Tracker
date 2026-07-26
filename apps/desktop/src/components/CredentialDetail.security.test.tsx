@@ -16,6 +16,14 @@ vi.mock("../api", async () => {
       credentialReveal: vi.fn(),
       credentialCopy: vi.fn(),
       credentialDelete: vi.fn(),
+      credentialActivitySources: vi.fn().mockResolvedValue({
+        last_gateway_observed: null,
+        last_proxy_observed: null,
+        last_provider_reported: null,
+        last_marked_used: null,
+        last_validated: null,
+        most_recent: null,
+      }),
     },
   };
 });

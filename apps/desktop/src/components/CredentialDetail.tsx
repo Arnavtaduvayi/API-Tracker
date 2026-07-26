@@ -84,8 +84,12 @@ export function CredentialDetail(props: {
       setError(isApiError(e) ? e.message : String(e));
     }
     // Source-labeled activity is supplementary; its absence never blocks
-    // the detail view.
-    api.credentialActivitySources(props.id).then(setActivity, () => setActivity(null));
+    // the detail view. Wrapped in Promise.resolve so even a synchronous
+    // throw (e.g. an older backend without the command) becomes a handled
+    // rejection rather than an unhandled one.
+    void Promise.resolve()
+      .then(() => api.credentialActivitySources(props.id))
+      .then(setActivity, () => setActivity(null));
   }, [props.id]);
 
   useEffect(() => {
