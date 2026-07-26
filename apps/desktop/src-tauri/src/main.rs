@@ -2747,7 +2747,11 @@ fn gateway_link_apply(
         }
         envlink::apply_link(vault.connection(), &req, &plan)?;
         Ok(())
-    })
+    })?;
+    // The running gateway must resolve the new link slug immediately, not
+    // after its 5s poll — otherwise the just-linked SDK gets a 404.
+    gateway_nudge(&state.data_dir);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2756,7 +2760,7 @@ fn gateway_unlink(
     project: String,
     route: String,
 ) -> CmdResult<envlink::UnlinkReport> {
-    with_vault(&state, |vault| {
+    let report = with_vault(&state, |vault| {
         let proj = vault.get_project(&project)?;
         let link = gw_routes::find_project_link(vault.connection(), &proj.id, &route)?;
         match link {
@@ -2777,7 +2781,10 @@ fn gateway_unlink(
                 ident: format!("{project}:{route}"),
             }),
         }
-    })
+    });
+    // Drop the removed link slug from a running gateway's snapshot now.
+    gateway_nudge(&state.data_dir);
+    report
 }
 
 #[tauri::command]

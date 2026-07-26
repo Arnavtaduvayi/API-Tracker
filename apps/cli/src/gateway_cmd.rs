@@ -1088,6 +1088,9 @@ fn link(
         // already in the desired state.
         envlink::apply_link(vault.connection(), &req, &plan)?;
         ctx.persist_session(&vault, &token)?;
+        // A running gateway must see the (possibly new) link slug NOW, not
+        // after the 5s poll — otherwise the just-linked SDK gets a 404.
+        nudge_running_gateway(ctx);
         println!("link is up to date");
         return Ok(());
     }
@@ -1102,6 +1105,9 @@ fn link(
     }
     envlink::apply_link(vault.connection(), &req, &plan)?;
     ctx.persist_session(&vault, &token)?;
+    // Push the new link slug into the running gateway's snapshot before the
+    // probe below runs — the slug must resolve immediately.
+    nudge_running_gateway(ctx);
     println!("linked. The gateway line(s) above are exactly what was written.");
 
     probe_after_link(ctx, &plan);
@@ -1223,6 +1229,8 @@ fn unlink(ctx: &Ctx, project: &str, route: &str, yes: bool) -> Result<()> {
         routes::remove_project_link(vault.connection(), &proj.id, route)?;
     }
     ctx.persist_session(&vault, &token)?;
+    // Drop the removed link slug from a running gateway's snapshot now.
+    nudge_running_gateway(ctx);
     println!("unlinked project '{project}' from route '{route}'");
     Ok(())
 }
