@@ -73,11 +73,11 @@ One dedicated writer thread, bounded `sync_channel`, `try_send` with drop-and-co
 
 `tethra gateway enable` (CLI) or a one-action desktop consent screen installs a per-user service. Corrections from the review:
 
-- **macOS:** copy the binary by a FRESH byte-write (not `fs::copy`, which propagates `com.apple.quarantine`) + explicit `xattr -d` + an exec probe BEFORE writing the plist; if the probe is Gatekeeper-killed, `enable` fails honestly and points to foreground `tethra gateway run`. LaunchAgent with `KeepAlive={Crashed:true}` (crash-only, so a clean exit is terminal), stop/uninstall via `launchctl bootout gui/$UID/<label>`, restart via `kickstart -k`, never `launchctl disable`; detect absence of a GUI session. Disclose the Background-Task-Management / Login-Items entry on the consent screen.
+- **macOS:** copy the binary by a FRESH byte-write (not `fs::copy`, which propagates `com.apple.quarantine`) + explicit `xattr -d` + an exec probe BEFORE writing the plist; if the probe is Gatekeeper-killed, `enable` fails honestly and points to foreground `tethra gateway serve` (alias: `run`). LaunchAgent with `KeepAlive={Crashed:true}` (crash-only, so a clean exit is terminal), stop/uninstall via `launchctl bootout gui/$UID/<label>`, restart via `kickstart -k`, never `launchctl disable`; detect absence of a GUI session. Disclose the Background-Task-Management / Login-Items entry on the consent screen.
 - **The service gets `--data-dir <resolved>` in its argv**, resolved at enable time — launchd/systemd/Task Scheduler inherit no shell env, so `TETHRA_DIR` would otherwise silently drift the vault.
 - **Never exit on bind failure:** the process retries bind with capped backoff and reports "degraded: port held" via status — KeepAlive respawn of a fast-exiting process is a crash loop on macOS and a permanent-fail on systemd's start-rate limit. Default the port to a random persisted high port (not fixed 8787, which is pre-squattable and collides with RStudio Server).
 - **Linux:** systemd user unit (`WantedBy=default.target`); status reports linger state honestly (the unit stops at logout without `enable-linger`, which is not auto-run).
-- **Windows:** foreground `tethra gateway run` ONLY in v1; `enable` prints "not yet supported on Windows" (the platform has never been executed — KNOWN_CONFLICTS C13). A later scheduled-task implementation uses `Register-ScheduledTask`/COM (not `schtasks.exe`), a windowless launcher shim, and `%LOCALAPPDATA%` (not roaming), with `SO_EXCLUSIVEADDRUSE` on the listener (std sets neither reuse option on Windows, so a live loopback listener is hijackable).
+- **Windows:** foreground `tethra gateway serve` (alias: `run`) ONLY in v1; `enable` prints "not yet supported on Windows" (the platform has never been executed — KNOWN_CONFLICTS C13). A later scheduled-task implementation uses `Register-ScheduledTask`/COM (not `schtasks.exe`), a windowless launcher shim, and `%LOCALAPPDATA%` (not roaming), with `SO_EXCLUSIVEADDRUSE` on the listener (std sets neither reuse option on Windows, so a live loopback listener is hijackable).
 - **Upgrade:** a version handshake on every desktop/CLI start; on mismatch, re-copy + rewrite the service definition + kickstart + prune old versioned copies — otherwise the old binary runs forever in silent `SchemaTooNew`-degraded persistence.
 - **Disable/uninstall** is a single ordered manifest: stop/bootout/unregister → remove plist/unit(+wants symlink+daemon-reload)/task → **restore every linked project's `.env`** (default on; `--keep-env` escape) → delete `<data-dir>/bin` (all versions) + logs → keep DB rows. *(Disabling must not brick linked apps — that would resurrect ADR 0014's exact objection.)*
 
@@ -119,3 +119,54 @@ The gateway sees only traffic whose base URL was repointed at it, from processes
 ## Reversal and migration
 
 The feature is additive and reversible. Migration v13 adds tables only; existing migrations are immutable. Backup v2 restore rebuilds the new tables structurally. Disabling restores every rewritten `.env`; uninstall removes all service artifacts and (optionally) the gateway data, leaving the vault and every other feature untouched. Because no feature depends on the gateway, it can be removed entirely by reverting the additive crate/CLI/desktop changes and dropping the v13 tables in a future migration without affecting the rest of the product. **Production implementation has NOT begun** and is gated on this ADR plus the staged plan in `IMPLEMENTATION_PLAN.md`; Stage 2 (the forwarding core) must be adversarially re-reviewed before any persistence or attribution surface is built.
+
+## Phase 3 amendments (productization)
+
+Recorded 2026-07-26 at the end of the productization phase. The sentence
+"Production implementation has NOT begun" above is retained as the Phase 1
+record and is superseded: Phase 2 shipped the core (see
+`docs/gateway/HANDOFF_PHASE_2.md`, including its deviations D1–D7) and
+Phase 3 shipped the productization (`docs/gateway/IMPLEMENTATION_STATUS.md`).
+Deviations this phase, each preserving the underlying product goal:
+
+- **O5 (Windows) — mechanism code ships, platform stays unvalidated.** The
+  per-user HKCU `Run`-value lifecycle is implemented via `reg.exe`
+  (no new dependencies, no elevation, visible in Task Manager → Startup),
+  compiled and unit-tested on Windows CI — but the platform has still never
+  executed a gateway, every status surface reports
+  `RegisteredButNeverValidated`, and foreground `tethra gateway serve`
+  remains the supported Windows mode. This ships the mechanism O5 deferred
+  while keeping O5's honesty: no Windows behavior is claimed validated.
+- **No `.env` backup file.** D9's restore guarantee is implemented from the
+  recorded prior state in `gateway_project_links.prior_env_json`
+  (versioned JSON, captured before any write) plus the atomic
+  same-directory temp-file write — deliberately NOT a `.env.bak` sibling: a
+  copy of a secrets file under a name no `.gitignore` covers is a leak
+  primitive. Restore honors user edits (a value changed after linking is
+  left alone and reported), and a failed file keeps the link row for retry.
+- **D11 realized as challenge–response.** The reserved probe path is
+  `GET /_tethra/probe?c=<hex>`, answered with
+  `keyed_hash(derive_key("tethra gateway listener probe v1", nonce), challenge)`.
+  The caller (who can read the 0600 nonce file) verifies the proof, so
+  listener identity is provable without the nonce — a live control
+  capability — ever crossing the unauthenticated TCP socket. Status,
+  doctor, link-time probes, and the Windows stop path all verify identity
+  this way before trusting the port.
+- **`ACCEPT_POLL` 50 ms → 5 ms, on measurement.** The non-blocking accept
+  loop's 50 ms shutdown-flag wake added ~25 ms average (up to 50 ms) to
+  every fresh connection: measured churn overhead was +47 ms/connection
+  and concurrent p99 55 ms. At 5 ms, churn overhead fell to
+  +1.7 ms/connection and throughput tripled, with no measurable idle cost
+  (`docs/gateway/PERFORMANCE_RESULTS.md`).
+- **Custom-only `[gateway]` manifests (C11).** `supabase.toml` declares
+  `origins = []` with `env_vars = ["SUPABASE_URL"]`: the `.env` metadata is
+  declarative while route registration for such providers is refused by
+  `add_manifest_route` and pointed at the MAC'd custom-origin flow. The
+  manifest validator accepts empty origins only when env metadata exists.
+- **Foreign-install refusal.** `install` refuses to replace a service
+  definition whose `--data-dir` names a DIFFERENT data directory unless
+  `--force`: the per-user login slot is a shared resource between vaults,
+  and silently stealing it would break the other vault's gateway at the
+  next login.
+- **D4 resolved.** The shipped verb is `serve`; `run` is a full clap alias
+  of the same command, so both documented names mean the same thing.
