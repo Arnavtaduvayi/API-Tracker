@@ -494,6 +494,11 @@ fn run_as_service_exits_cleanly_when_the_vault_disappears() {
         .any(|l| l.contains("exiting cleanly")));
 }
 
+// The graceful control-plane stop rides the Unix control socket (SI-21:
+// absent on Windows), so this end-to-end serve→stop path is Unix-only.
+// Windows keeps the vanished-vault clean-exit test above, which needs no
+// control channel.
+#[cfg(unix)]
 #[test]
 fn run_as_service_serves_then_honors_a_control_shutdown() {
     let dir = tempfile::tempdir().unwrap();

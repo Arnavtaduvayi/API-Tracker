@@ -7,7 +7,9 @@ use std::path::Path;
 use api_tracker_core::db;
 use api_tracker_gateway::doctor::{self, Severity};
 use api_tracker_gateway::lifecycle::{OsWillRun, ServiceStatus};
-use api_tracker_gateway::{control, routes, service::Service, store};
+#[cfg(unix)]
+use api_tracker_gateway::service::Service;
+use api_tracker_gateway::{control, routes, store};
 use rusqlite::Connection;
 
 fn uninstalled_service() -> ServiceStatus {
@@ -122,6 +124,11 @@ fn installed_but_stopped_and_linked_projects_at_risk_are_diagnosed() {
     assert!(report.overall >= Severity::Warn);
 }
 
+// The control channel is Unix-only (SI-21: Windows refuses rather than
+// TCP-fallback), so a diagnosis of a LIVE gateway can only be exercised on
+// Unix. Windows coverage is the compile of this file plus the injected-state
+// tests above.
+#[cfg(unix)]
 #[test]
 fn a_live_gateway_reports_running_forwarding_and_recording() {
     let dir = vault_dir();
@@ -181,6 +188,7 @@ fn a_port_squatter_is_a_port_collision_error() {
     assert!(f.repair.is_some(), "collisions must carry a repair action");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_stale_nonce_diagnoses_control_auth_failure_and_stale_paths_are_reported() {
     let dir = vault_dir();

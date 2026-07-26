@@ -105,9 +105,11 @@ Stage-7 honesty amendments (`THREAT_MODEL.md`, `docs/RUNTIME_OBSERVABILITY.md`,
 - **`cargo fmt --all --check`**: clean.
 - **`cargo +1.97.0 clippy --workspace --all-targets -- -D warnings`**: clean.
 - **`cargo test --workspace --all-targets`** (`API_TRACKER_INSECURE_FAST_KDF=1`):
-  **875 passed, 0 failed, 9 ignored** (the 8 perf measurements + 1
-  pre-existing bench). Gateway crate: 206 (was 171 in Phase 2; +35 for
-  probe/disabled-count, envlink (14), lifecycle (12), doctor (5), activity).
+  **874 passed, 0 failed, 9 ignored** on unix (the 8 perf measurements + 1
+  pre-existing bench). Gateway crate: 205 (was 171 in Phase 2). Windows CI
+  runs 3 fewer gateway tests — the control-channel is Unix-only (SI-21), so
+  the live-gateway doctor tests and the graceful-stop lifecycle test are
+  `#[cfg(unix)]`; Windows keeps their injected-state and clean-exit siblings.
 - **`cargo build --workspace --release`**: succeeds.
 - **`bash scripts/smoke.sh`**: 126 passed, 0 failed (production Argon2id).
 - **Desktop CI-equivalent** (`apps/desktop`): `npm ci`, `format:check`,
