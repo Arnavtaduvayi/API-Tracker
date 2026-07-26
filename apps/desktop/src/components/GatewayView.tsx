@@ -90,23 +90,23 @@ export function GatewayView() {
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-        {(["overview", "routes", "projects", "activity", "diagnostics", "privacy"] as Tab[]).map(
-          (t) => (
-            <button key={t} className={tab === t ? undefined : "link"} onClick={() => setTab(t)}>
-              {t === "overview"
-                ? "Status"
-                : t === "routes"
-                  ? "Routes"
-                  : t === "projects"
-                    ? "Projects"
-                    : t === "activity"
-                      ? "Activity"
-                      : t === "diagnostics"
-                        ? "Diagnostics"
-                        : "Privacy"}
-            </button>
-          ),
-        )}
+        {(
+          ["overview", "routes", "projects", "activity", "diagnostics", "privacy"] as Tab[]
+        ).map((t) => (
+          <button key={t} className={tab === t ? undefined : "link"} onClick={() => setTab(t)}>
+            {t === "overview"
+              ? "Status"
+              : t === "routes"
+                ? "Routes"
+                : t === "projects"
+                  ? "Projects"
+                  : t === "activity"
+                    ? "Activity"
+                    : t === "diagnostics"
+                      ? "Diagnostics"
+                      : "Privacy"}
+          </button>
+        ))}
       </div>
       {report === null && !error && <p>Loading…</p>}
       {report && tab === "overview" && (
@@ -1035,7 +1035,6 @@ function ProjectsTab(props: {
   );
 }
 
-
 // ---------------------------------------------------------------------------
 // Activity: gateway-only metrics, honestly labeled.
 // ---------------------------------------------------------------------------
@@ -1055,10 +1054,10 @@ function ActivityTab({ onError }: { onError: (msg: string) => void }) {
   return (
     <div>
       <p className="muted">
-        Locally observed by the gateway only — traffic whose base URL points at it.
-        Never summed with provider-reported usage, and an empty view is not evidence of
-        zero provider usage. (Proxy double counting is prevented by the NO_PROXY entry
-        every link writes: each exchange is recorded under exactly one source.)
+        Locally observed by the gateway only — traffic whose base URL points at it. Never summed
+        with provider-reported usage, and an empty view is not evidence of zero provider usage.
+        (Proxy double counting is prevented by the NO_PROXY entry every link writes: each
+        exchange is recorded under exactly one source.)
       </p>
       <label className="field" style={{ maxWidth: "12rem" }}>
         Window (days)

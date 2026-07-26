@@ -18,7 +18,6 @@ import { formatTimestamp, safeExternalUrl, statusLabel, statusSeverity } from ".
 import { ReauthDialog } from "./ReauthDialog";
 import { ConfirmDialog, PromptDialog } from "./ConfirmDialog";
 
-
 function activitySourceLabel(source: string): string {
   switch (source) {
     case "local_gateway":
@@ -278,8 +277,8 @@ export function CredentialDetail(props: {
               Manually marked used: {formatTimestamp(c.last_used_at)}
             </span>
             <span className="muted">
-              Local observation covers only traffic routed through Tethra; absence here
-              is not evidence the key is unused.
+              Local observation covers only traffic routed through Tethra; absence here is not
+              evidence the key is unused.
             </span>
           </div>
         </dd>

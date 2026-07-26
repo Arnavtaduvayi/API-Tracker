@@ -202,8 +202,8 @@ function Overview({ onError }: { onError: (s: string) => void }) {
   if (services.length === 0) {
     return (
       <p className="muted">
-        No API traffic observed yet (from the proxy or the local gateway). Launch a monitored run:{" "}
-        <span className="mono">tethra run --observe -- &lt;command&gt;</span>
+        No API traffic observed yet (from the proxy or the local gateway). Launch a monitored
+        run: <span className="mono">tethra run --observe -- &lt;command&gt;</span>
       </p>
     );
   }
