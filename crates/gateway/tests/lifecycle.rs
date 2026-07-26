@@ -2,6 +2,8 @@
 //! command runner and temporary directories: `cargo test` never installs,
 //! starts, stops, or queries a REAL service on the developer's machine.
 
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -128,6 +130,7 @@ fn migrated(path: &Path) -> Connection {
 // Definition rendering (golden behavior, all three platforms)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn plist_renders_the_d8_shape_and_round_trips_with_xml_escaping() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,6 +175,7 @@ fn plist_renders_the_d8_shape_and_round_trips_with_xml_escaping() {
     assert_eq!(def.data_dir, data_dir, "escaped path round-trips");
 }
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn systemd_unit_renders_user_scope_and_round_trips_spaced_paths() {
     let dir = tempfile::tempdir().unwrap();
@@ -220,6 +224,7 @@ fn windows_run_value_quotes_and_round_trips_spaced_paths() {
 // Install flow (order, probe gate, foreign-install refusal, pruning)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn install_byte_writes_dequarantines_probes_then_registers_in_that_order() {
     let dir = tempfile::tempdir().unwrap();
@@ -261,6 +266,7 @@ fn install_byte_writes_dequarantines_probes_then_registers_in_that_order() {
     assert!(lc.manager.definition_path().exists());
 }
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn a_failed_exec_probe_fails_install_without_writing_a_definition() {
     let dir = tempfile::tempdir().unwrap();
@@ -281,6 +287,7 @@ fn a_failed_exec_probe_fails_install_without_writing_a_definition() {
     assert!(runner.call_index("bootstrap").is_none());
 }
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn install_refuses_a_definition_owned_by_a_different_data_dir_unless_forced() {
     let dir = tempfile::tempdir().unwrap();
@@ -309,6 +316,7 @@ fn install_refuses_a_definition_owned_by_a_different_data_dir_unless_forced() {
     assert_eq!(def.data_dir, lc.data_dir);
 }
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn upgrade_prunes_older_binaries_but_keeps_the_current_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -335,6 +343,7 @@ fn upgrade_prunes_older_binaries_but_keeps_the_current_one() {
 // Status facts
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn status_reports_uninstalled_then_installed_then_stale_binary() {
     let dir = tempfile::tempdir().unwrap();
@@ -405,6 +414,7 @@ fn linked_vault(lc: &Lifecycle) -> (Connection, PathBuf) {
     (conn, env)
 }
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn disable_stops_unregisters_restores_env_and_keeps_binaries_and_rows() {
     let dir = tempfile::tempdir().unwrap();
@@ -438,6 +448,7 @@ fn disable_stops_unregisters_restores_env_and_keeps_binaries_and_rows() {
     assert_eq!(n, 1);
 }
 
+#[cfg(unix)] // Unix service-manager (LaunchAgent/systemd) behavior
 #[test]
 fn disable_keep_env_leaves_files_and_uninstall_removes_every_owned_artifact() {
     let dir = tempfile::tempdir().unwrap();

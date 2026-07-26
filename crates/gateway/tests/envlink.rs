@@ -260,6 +260,11 @@ fn crlf_duplicates_quoting_and_comments_survive_the_rewrite() {
     assert!(written.contains("\r\n"), "CRLF endings preserved");
 }
 
+// Runs git and creates a symlink-free repo; the git-tracked/proxy warning
+// wiring is platform-independent logic, exercised on macOS + Linux. Skipped
+// on Windows, where git config/behavior differs and Windows is compile-only
+// for this surface.
+#[cfg(unix)]
 #[test]
 fn warnings_cover_git_tracked_templates_ci_paths_scope_and_proxies() {
     let dir = tempfile::tempdir().unwrap();
@@ -330,6 +335,7 @@ fn warnings_cover_git_tracked_templates_ci_paths_scope_and_proxies() {
         .any(|w| matches!(w, LinkWarning::OutsideProject { .. })));
 }
 
+#[cfg(unix)]
 #[test]
 fn symlinked_env_files_are_refused_outright() {
     let dir = tempfile::tempdir().unwrap();
@@ -337,12 +343,9 @@ fn symlinked_env_files_are_refused_outright() {
     let target = dir.path().join("real.env");
     std::fs::write(&target, "").unwrap();
     let link = dir.path().join(".env");
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        let e = envlink::plan_link(&conn, &request(&link, None)).unwrap_err();
-        assert!(e.to_string().contains("symlink"), "{e}");
-    }
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let e = envlink::plan_link(&conn, &request(&link, None)).unwrap_err();
+    assert!(e.to_string().contains("symlink"), "{e}");
 }
 
 #[test]
