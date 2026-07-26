@@ -42,6 +42,7 @@ import { SyncView } from "./components/SyncView";
 import { RotationView } from "./components/RotationView";
 import { AccessView } from "./components/AccessView";
 import { NotifyView } from "./components/NotifyView";
+import { ApiActivityView } from "./components/ApiActivityView";
 import { Gate } from "./components/visuals/Gate";
 import { WireGlobe } from "./components/visuals/WireGlobe";
 import { NavIcon } from "./components/visuals/NavIcons";
@@ -65,6 +66,7 @@ export type View =
   | { name: "alerts" }
   | { name: "notify" }
   | { name: "usage" }
+  | { name: "api-activity" }
   | { name: "pricing" }
   | { name: "templates" }
   | { name: "settings" }
@@ -73,7 +75,7 @@ export type View =
 type VaultState = "loading" | "missing" | "locked" | "unlocked";
 
 /**
- * Sidebar navigation. These are the same 15 destinations the old top bar had,
+ * Sidebar navigation. These are the same 16 destinations the old top bar had,
  * with identical labels — only grouped for scanability.
  */
 const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
@@ -106,6 +108,7 @@ const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
       ["alerts", "Alerts"],
       ["notify", "Notifications"],
       ["usage", "Usage"],
+      ["api-activity", "API activity"],
       ["pricing", "Pricing"],
     ],
   },
@@ -139,6 +142,7 @@ const SECTION_OF: Record<View["name"], View["name"]> = {
   alerts: "alerts",
   notify: "notify",
   usage: "usage",
+  "api-activity": "api-activity",
   pricing: "pricing",
   templates: "templates",
   backup: "backup",
@@ -429,6 +433,7 @@ export default function App() {
           {view.name === "alerts" && <AlertsView />}
           {view.name === "notify" && <NotifyView />}
           {view.name === "usage" && <UsageView />}
+          {view.name === "api-activity" && <ApiActivityView />}
           {view.name === "pricing" && <PricingView />}
           {view.name === "templates" && <TemplatesView />}
           {view.name === "settings" && (

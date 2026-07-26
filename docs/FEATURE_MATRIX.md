@@ -3,7 +3,13 @@
 A definitive audit of product requirements against the **actual code**, not
 prior session reports. Every claim below was verified by inspecting the
 modules and tests named. Last audited: **2026-07-19, gap-closure branch**
-(migrations v1–v10, backup format v2).
+(migrations v1–v10, backup format v2). Runtime-observability addendum
+audited: **2026-07-24, feat/runtime-api-observability branch** (migrations
+v1–v12; v12 adds the observation tables — `observation_sessions`,
+`observed_api_services`, `observed_endpoints`, `runtime_request_events`,
+`runtime_metric_buckets`, `credential_traffic_attributions`,
+`observation_compatibility_results`, `observe_certificate_state`,
+`observe_internal_allowlist`).
 
 Classifications:
 
@@ -25,7 +31,7 @@ Classifications:
 | 3 | Offline access | Fully implemented |
 | 4 | Token-based cost estimation | Fully implemented (versioned effective-dated pricing; unknown models never estimated) |
 | 5 | Permission visibility and changes | Provider-limited (visibility complete where possible; changes route through rotation/dashboard by design) |
-| 6 | Request/activity tracking + suspicious-activity alerts | Provider-limited (official aggregates + local sessions; 20 explainable rules) |
+| 6 | Request/activity tracking + suspicious-activity alerts | Provider-limited (official aggregates + local sessions; 20 explainable rules) + Local-only by design opt-in metadata-only observation proxy (ADR 0017; 12 `runtime_*` rules) |
 | 7 | Duplicate credentials across projects | Fully implemented |
 | 8 | `.env` governance | Fully implemented |
 | 9 | Provider/API catalog | Fully implemented |
@@ -139,7 +145,7 @@ scope edit; the product links the dashboard or routes through rotation.
 Anthropic has no per-key permission concept (`unsupported`); fine-grained
 GitHub token permissions are not enumerable (stated, not guessed).
 
-## 6. Request/activity tracking + suspicious-activity alerts — Provider-limited
+## 6. Request/activity tracking + suspicious-activity alerts — Provider-limited + Local-only by design (observation proxy)
 
 Official aggregates where they exist (OpenAI/Anthropic per-key daily usage,
 GitHub billing quantities, Stripe Events) + local injection-session records.
@@ -167,8 +173,39 @@ re-scan — `api-tracker scan <repo> --reverify` (or the desktop
 `scan_reverify` command), which resolves the alerts only when a full
 history + working-tree scan finds nothing.
 
-**The honest ceiling.** No per-request log exists in any official API; no
-local gateway/SDK shim is built (deliberate — ADR 0014).
+**Added at runtime observability (ADR 0017).** A LOCAL, opt-in,
+metadata-only HTTPS observation proxy (new `api-tracker-observe` crate)
+now provides real per-request visibility — metadata only, never bodies,
+never authorization values — for processes the user explicitly launches
+through it. Surfaces: CLI `observe` group + `run
+--observe=off|connection|metadata` (mode A connection-level, mode B
+metadata — the default, mode C system-trust — opt-in), and the desktop
+"API activity" view (`ApiActivityView`). A per-vault ECDSA P-256 CA signs
+observation certificates, with the CA key encrypted under the vault key.
+Credential attribution is injection-based — the proxy correlates
+credentials it injected itself and **never reads authorization header
+values**. Migration v12 adds the ten observation tables (listed in the
+header). **12 explainable `runtime_*` rules** join the existing 20, same
+evidence/window/confidence shape: runtime_auth_failures,
+runtime_forbidden, runtime_rate_limited, runtime_server_errors,
+runtime_transport_failures, runtime_tls_failures, runtime_api_inactive,
+runtime_new_api, runtime_unknown_api, runtime_old_credential_version,
+runtime_revoked_credential_in_use, runtime_shared_credential
+(`crates/core/src/runtime/alerts.rs`). Retention is bounded: 7-day raw
+events, 90-day aggregates. Tests:
+`crates/observe/tests/proxy_integration.rs`,
+`apps/cli/tests/observe_run_cli.rs`, and the runtime module tests under
+`crates/core/src/runtime/`.
+
+**The honest ceiling.** No per-request log exists in any official API.
+The 2026-07-19 audit's note that no local gateway/SDK shim was built
+(deliberate — ADR 0014) is **superseded by ADR 0017**: a local, opt-in,
+metadata-only observation proxy IS now built (above). Its own honest
+limits: it only sees traffic from processes launched under it; QUIC/HTTP-3
+bypasses it; certificate-pinned clients and runtimes that ignore trust
+environment variables are not observable (mode C system trust is a
+separate explicit opt-in); HTTP/2 is downgraded to HTTP/1.1 through the
+proxy; and it never recommends disabling TLS verification.
 
 ## 7. Duplicate credentials across projects — Fully implemented
 

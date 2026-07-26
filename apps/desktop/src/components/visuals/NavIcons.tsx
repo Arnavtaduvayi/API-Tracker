@@ -73,6 +73,11 @@ const PATHS: Record<string, JSX.Element> = {
       <path d="M4.6 13.4V8.2M8 13.4V3.6M11.4 13.4v-3.6" />
     </>
   ),
+  "api-activity": (
+    <>
+      <path d="M2.2 8h2.4l1.7-4.4L9.6 12l1.5-4h2.7" />
+    </>
+  ),
   pricing: (
     <>
       <path d="M8 2.4v11.2" />
