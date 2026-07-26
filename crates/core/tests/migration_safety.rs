@@ -318,6 +318,27 @@ fn backup_captures_every_table_and_restore_preserves_all_rows() {
     .unwrap(); // usage_snapshots
     v.run_monitor().unwrap(); // alerts (+ activity)
 
+    // v13 gateway tables (no public write API in core — the gateway crate
+    // owns them; raw rows are enough to prove backup coverage, since backup
+    // v2 enumerates sqlite_master generically).
+    v.connection()
+        .execute_batch(&format!(
+            "INSERT INTO gateway_config (id, enabled, port, created_at, updated_at)
+             VALUES ('gateway', 1, 49723, '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+             INSERT INTO gateway_routes (route_prefix, provider_id, created_at, updated_at)
+             VALUES ('openai', 'openai', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+             INSERT INTO gateway_project_links (link_slug, project_id, route_prefix, created_at)
+             VALUES ('b7e2a91c4d6f80513a2b9c8d7e6f5a40', '{pid}', 'openai', '2026-07-26T00:00:00Z');
+             INSERT INTO gateway_usage_events (id, at, route_prefix, provider_id, usage_state)
+             VALUES ('gu1', '2026-07-26T00:00:01Z', 'openai', 'openai', 'absent');
+             INSERT INTO gateway_usage_daily (day, provider_id, updated_at)
+             VALUES ('2026-07-26', 'openai', '2026-07-26T00:00:02Z');
+             INSERT INTO gateway_route_counters (route_prefix, day, counter, count)
+             VALUES ('openai', '2026-07-26', 'unlinked_requests', 2);",
+            pid = project.id
+        ))
+        .unwrap();
+
     // Every user table in the source must exist in the restored copy with
     // the same row count.
     let table_counts = |conn: &Connection| -> Vec<(String, i64)> {
@@ -404,5 +425,92 @@ fn backup_captures_every_table_and_restore_preserves_all_rows() {
     assert!(
         !versions.is_empty(),
         "retained versions must survive restore"
+    );
+}
+
+#[test]
+fn populated_v12_runtime_tables_survive_the_v13_gateway_upgrade() {
+    // Follows the populated_v5_and_v6_tables pattern: populate a REAL v12
+    // database (runtime observability rows included), migrate to head, and
+    // assert nothing was lost and the additive v13 gateway schema behaves.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v12.db");
+    {
+        let conn = db_at_version(&path, 12);
+        populate_v1(&conn);
+        conn.execute_batch(
+            "INSERT INTO observation_sessions (id, project_id, mode, started_at)
+             VALUES ('s1', 'p1', 'metadata', '2026-07-01T00:00:00Z');
+             INSERT INTO observed_api_services (id, host, first_seen_at, last_seen_at)
+             VALUES ('svc1', 'api.openai.com',
+                 '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
+             INSERT INTO observed_endpoints (id, service_id, method, path_template,
+                 first_seen_at, last_seen_at)
+             VALUES ('ep1', 'svc1', 'POST', '/v1/chat/completions',
+                 '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z');
+             INSERT INTO runtime_request_events (id, session_id, project_id,
+                 service_id, endpoint_id, at, host, port, method, path_template,
+                 outcome, protocol, observation_source)
+             VALUES ('e1', 's1', 'p1', 'svc1', 'ep1', '2026-07-01T00:00:01Z',
+                 'api.openai.com', 443, 'POST', '/v1/chat/completions',
+                 'success', 'http1.1', 'intercept');",
+        )
+        .unwrap();
+    }
+    let mut conn = db::open(&path).unwrap();
+    db::migrate(&mut conn).unwrap();
+    assert_v1_data_survived(&conn);
+    for (table, expected) in [
+        ("observation_sessions", 1i64),
+        ("observed_api_services", 1),
+        ("observed_endpoints", 1),
+        ("runtime_request_events", 1),
+    ] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, expected, "{table} rows must survive the upgrade");
+    }
+
+    // The additive attribution_method column exists and is honestly NULL on
+    // pre-v13 rows (never backfilled with an invented provenance).
+    let method: Option<String> = conn
+        .query_row(
+            "SELECT attribution_method FROM runtime_request_events WHERE id='e1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(method, None);
+
+    // Every v13 gateway table exists and accepts a minimal row.
+    conn.execute_batch(
+        "INSERT INTO gateway_config (id, enabled, created_at, updated_at)
+         VALUES ('gateway', 0, '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+         INSERT INTO gateway_routes (route_prefix, provider_id, created_at, updated_at)
+         VALUES ('openai', 'openai', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z');
+         INSERT INTO gateway_project_links (link_slug, project_id, route_prefix, created_at)
+         VALUES ('a3f9c2d18e07b6541f2e9d0c8b7a6f50', 'p1', 'openai', '2026-07-26T00:00:00Z');
+         INSERT INTO gateway_usage_events (id, at, route_prefix, provider_id, usage_state)
+         VALUES ('u1', '2026-07-26T00:00:01Z', 'openai', 'openai', 'absent');
+         INSERT INTO gateway_usage_daily (day, provider_id, updated_at)
+         VALUES ('2026-07-26', 'openai', '2026-07-26T00:00:02Z');
+         INSERT INTO gateway_route_counters (route_prefix, day, counter, count)
+         VALUES ('openai', '2026-07-26', 'unlinked_requests', 1);",
+    )
+    .unwrap();
+
+    // The custom-origin CHECK constraints hold: a custom origin without its
+    // MAC (the tamper-relevant shape) is unrepresentable.
+    let err = conn.execute(
+        "INSERT INTO gateway_routes (route_prefix, provider_id, custom_origin,
+             created_at, updated_at)
+         VALUES ('supa', 'supabase', 'myref.supabase.co',
+             '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')",
+        [],
+    );
+    assert!(
+        err.is_err(),
+        "a custom origin without a MAC must violate the CHECK constraint"
     );
 }

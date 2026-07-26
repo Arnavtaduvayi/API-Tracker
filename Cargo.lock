@@ -181,6 +181,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "api-tracker-gateway"
+version = "0.1.0"
+dependencies = [
+ "api-tracker-core",
+ "api-tracker-observe",
+ "blake3",
+ "httparse",
+ "rusqlite",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "socket2",
+ "subtle",
+ "tempfile",
+ "time",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "api-tracker-observe"
 version = "0.1.0"
 dependencies = [

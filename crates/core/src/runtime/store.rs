@@ -673,7 +673,10 @@ pub fn upsert_attribution(
 }
 
 /// Backfill the credential attribution onto a session's events (so per-event
-/// queries can show attribution) for one service.
+/// queries can show attribution) for one service. This is the
+/// injection-derived path, so `attribution_method` is stamped `'injected'` —
+/// distinguishable from the gateway's value-derived `'observed_fingerprint'`
+/// rows (ADR 0019 D5).
 pub fn set_event_attribution_for_session_service(
     conn: &Connection,
     session_id: &str,
@@ -686,13 +689,46 @@ pub fn set_event_attribution_for_session_service(
     Ok(conn.execute(
         "UPDATE runtime_request_events
          SET credential_id = ?3, attribution_confidence = ?4,
-             credential_version = ?5, used_current_version = ?6
+             credential_version = ?5, used_current_version = ?6,
+             attribution_method = 'injected'
          WHERE session_id = ?1 AND service_id = ?2",
         params![
             session_id,
             service_id,
             credential_id,
             confidence.as_str(),
+            credential_version,
+            used_current_version.map(|b| b as i64),
+        ],
+    )?)
+}
+
+/// Set the attribution columns of ONE event row. Used by the gateway writer,
+/// which resolves a keyed-fingerprint match per event (never per session);
+/// `method` is `'observed_fingerprint'` for value-derived matches. Only
+/// attribution METADATA is stored — never a header or credential value
+/// (SECURITY_INVARIANTS SI-8).
+#[allow(clippy::too_many_arguments)]
+pub fn set_event_attribution(
+    conn: &Connection,
+    event_id: &str,
+    credential_id: Option<&str>,
+    confidence: AttributionConfidence,
+    method: &str,
+    credential_version: Option<i64>,
+    used_current_version: Option<bool>,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE runtime_request_events
+         SET credential_id = ?2, attribution_confidence = ?3,
+             attribution_method = ?4, credential_version = ?5,
+             used_current_version = ?6
+         WHERE id = ?1",
+        params![
+            event_id,
+            credential_id,
+            confidence.as_str(),
+            method,
             credential_version,
             used_current_version.map(|b| b as i64),
         ],

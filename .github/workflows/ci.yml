@@ -41,14 +41,17 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -p api-tracker-core -p api-tracker-cli -p api-tracker-observe --all-targets -- -D warnings
+        run: cargo clippy -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway --all-targets -- -D warnings
       - name: Tests
         env:
           API_TRACKER_INSECURE_FAST_KDF: "1"
         # api-tracker-observe is included so the runtime-observability proxy,
         # sanitizer, and (security-critical) vault-lock lifecycle tests run in
         # CI — previously observe's own test targets were never executed by CI.
-        run: cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe
+        # api-tracker-gateway is added in the same commit that creates the
+        # crate (KNOWN_CONFLICTS C9: the explicit -p lists give a new crate
+        # zero coverage unless it is listed here).
+        run: cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway
 
   rust-windows:
     name: Rust core (Windows)
@@ -62,7 +65,10 @@ jobs:
       - name: Tests (compiles the Credential Manager adapter on real Windows)
         env:
           API_TRACKER_INSECURE_FAST_KDF: "1"
-        run: cargo test -p api-tracker-core
+        # api-tracker-gateway is included so the gateway's Windows build
+        # (Unix-only control channel cfg-gated out, foreground-only v1 —
+        # ADR 0019 D8) is compiled and tested on a real Windows runner.
+        run: cargo test -p api-tracker-core -p api-tracker-gateway
 
   frontend:
     name: Desktop frontend
