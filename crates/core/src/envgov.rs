@@ -262,11 +262,18 @@ impl DriftKind {
 /// Generate or update a `.env.example` document from a values document:
 /// names and comments only, never values. Existing example entries are
 /// preserved verbatim; missing keys are appended with empty values.
+/// Keys under a `tethra-gateway` marker comment are skipped — a gateway base
+/// URL is machine-local wiring (port and link slug are specific to one
+/// machine), not a variable collaborators should copy (TEST_PLAN §10).
 pub fn generate_example(values: &EnvDocument, existing_example: Option<&EnvDocument>) -> String {
     let mut example = existing_example.cloned().unwrap_or_else(|| {
         EnvDocument::parse("# Environment variables for this project.\n# Copy to .env and fill in values, or use `tethra run`.\n")
     });
+    let gateway_owned = values.keys_with_gateway_marker();
     for entry in values.entries() {
+        if gateway_owned.contains(&entry.key) {
+            continue;
+        }
         if example.get(&entry.key).is_none() {
             example.set(&entry.key, SecretString::new(String::new()));
         }
@@ -725,6 +732,27 @@ mod tests {
         let fresh = generate_example(&values, None);
         assert!(!fresh.contains("supersecret"));
         assert!(fresh.contains("DB_URL=\n") || fresh.contains("DB_URL="));
+    }
+
+    #[test]
+    fn example_generation_skips_gateway_marked_lines() {
+        // A gateway base URL is machine-local wiring (port + link slug are
+        // specific to one machine); .env.example must not propagate it
+        // (TEST_PLAN §10).
+        let values = EnvDocument::parse(
+            "API_KEY=sk-test-FAKE-1234567890abcdef\n\
+             # tethra-gateway route: openai (project: app) — remove this line if 127.0.0.1 refuses connections\n\
+             OPENAI_BASE_URL=http://127.0.0.1:49723/p/0123abcd/openai/v1\n",
+        );
+        let out = generate_example(&values, None);
+        assert!(out.contains("API_KEY="));
+        assert!(!out.contains("OPENAI_BASE_URL"), "{out}");
+        assert!(!out.contains("tethra-gateway"), "{out}");
+
+        // ...but a base URL the USER wrote (no marker) still propagates.
+        let user_values = EnvDocument::parse("OPENAI_BASE_URL=https://corp.example/v1\n");
+        let out = generate_example(&user_values, None);
+        assert!(out.contains("OPENAI_BASE_URL="));
     }
 
     #[test]
