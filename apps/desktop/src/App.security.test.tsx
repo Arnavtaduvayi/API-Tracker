@@ -20,6 +20,9 @@ vi.mock("./api", async () => {
       projectList: vi.fn().mockResolvedValue([]),
       vaultLock: vi.fn().mockResolvedValue(undefined),
       monitorRunFull: vi.fn().mockResolvedValue({}),
+      // The lock screen renders the gateway status strip (lock-free on the
+      // backend); rejecting here exercises its "stay silent" fallback.
+      gatewayDoctor: vi.fn().mockRejectedValue({ code: "unavailable", message: "n/a" }),
     },
   };
 });

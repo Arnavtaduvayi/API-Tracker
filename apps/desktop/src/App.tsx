@@ -43,6 +43,7 @@ import { RotationView } from "./components/RotationView";
 import { AccessView } from "./components/AccessView";
 import { NotifyView } from "./components/NotifyView";
 import { ApiActivityView } from "./components/ApiActivityView";
+import { GatewayView, GatewayLockStrip } from "./components/GatewayView";
 
 export type View =
   | { name: "projects" }
@@ -64,6 +65,7 @@ export type View =
   | { name: "notify" }
   | { name: "usage" }
   | { name: "api-activity" }
+  | { name: "gateway" }
   | { name: "pricing" }
   | { name: "templates" }
   | { name: "settings" }
@@ -181,7 +183,14 @@ export default function App() {
     return <VaultSetup dataDir={dataDir} onCreated={() => void refreshStatus()} />;
   }
   if (vaultState === "locked") {
-    return <VaultUnlock dataDir={dataDir} onUnlocked={() => void refreshStatus()} />;
+    // The gateway keeps forwarding while the vault is locked; the strip
+    // keeps that visible (its backend commands are lock-free).
+    return (
+      <div>
+        <VaultUnlock dataDir={dataDir} onUnlocked={() => void refreshStatus()} />
+        <GatewayLockStrip />
+      </div>
+    );
   }
 
   return (
@@ -223,6 +232,9 @@ export default function App() {
         </button>
         <button className="link" onClick={() => setView({ name: "api-activity" })}>
           API activity
+        </button>
+        <button className="link" onClick={() => setView({ name: "gateway" })}>
+          Gateway
         </button>
         <button className="link" onClick={() => setView({ name: "pricing" })}>
           Pricing
@@ -306,6 +318,7 @@ export default function App() {
       {view.name === "notify" && <NotifyView />}
       {view.name === "usage" && <UsageView />}
       {view.name === "api-activity" && <ApiActivityView />}
+      {view.name === "gateway" && <GatewayView />}
       {view.name === "pricing" && <PricingView />}
       {view.name === "templates" && <TemplatesView />}
       {view.name === "settings" && (

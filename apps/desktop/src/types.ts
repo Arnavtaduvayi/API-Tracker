@@ -184,7 +184,18 @@ export interface ProviderManifest {
   billing_url: string;
   watch_docs: string[];
   detection: DetectionPattern[];
+  /** Local Gateway routing declaration; absent for providers without one. */
+  gateway: GatewayManifestSection | null;
   capabilities: Capabilities;
+}
+
+/** providers::GatewaySection — the compiled-in gateway declaration. */
+export interface GatewayManifestSection {
+  /** Upstream origins; EMPTY means custom-only (per-project hosts). */
+  origins: string[];
+  base_path: string;
+  env_vars: string[];
+  usage_shape: string;
 }
 
 export interface VaultMatch {
