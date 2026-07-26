@@ -39,7 +39,7 @@ for user-facing behavior.
 | Release workflow | `api-tracker-<target>` archives, "API Tracker …" release name | `tethra-<target>` archives containing **both** binaries, "Tethra …" | not triggered by this release (no tag pushed) |
 | GitHub repo / remotes | `Arnavtaduvayi/API-Tracker` | **unchanged (out of scope)** | all links remain valid |
 | Docs | API Tracker | living docs rebranded; historical reports and ADRs keep their original naming (living docs carrying a verified-baseline stamp get a correcting banner) | see plan §Historical documents |
-| Packaged app behavior | — | verified in `docs/release/TETHRA_MACOS_PACKAGING_RESULTS.md` | fresh vault, legacy vault, backup/restore, reauth, CSP, links |
+| Packaged app behavior | — | verified in `docs/release/TETHRA_MACOS_PACKAGING_RESULTS.md` **for commit `0972f20`** (superseded — re-package required, see that document's banner) | fresh vault, legacy vault, backup/restore, reauth, CSP, links |
 
 ## Test coverage for this matrix
 
