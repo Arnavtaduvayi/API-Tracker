@@ -765,6 +765,91 @@ pub fn session_attributions(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// A credential's last-known activity, per SOURCE — never a single
+/// ambiguous "last used". Each field names exactly one evidence class
+/// (SI-19: locally observed data is never conflated with provider-reported
+/// data), and `most_recent` carries its source label so a UI can show
+/// "most recent known activity" without hiding where it came from.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CredentialActivitySources {
+    /// Last exchange the LOCAL GATEWAY attributed to this credential.
+    pub last_gateway_observed: Option<String>,
+    /// Last exchange the interception proxy (or connection-only fallback)
+    /// attributed to this credential.
+    pub last_proxy_observed: Option<String>,
+    /// End of the newest provider-reported usage window synced for this
+    /// exact credential (absent when the provider only reports coarser
+    /// granularity — never divided among keys).
+    pub last_provider_reported: Option<String>,
+    /// The manually-maintained `credentials.last_used_at` mark.
+    pub last_marked_used: Option<String>,
+    /// Last successful validation against the provider.
+    pub last_validated: Option<String>,
+    /// The newest of the above with its source label.
+    pub most_recent: Option<ActivitySample>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivitySample {
+    pub at: String,
+    /// `local_gateway` | `interception_proxy` | `provider_reported` |
+    /// `manually_marked` | `validated`.
+    pub source: String,
+}
+
+pub fn credential_activity_sources(
+    conn: &Connection,
+    credential_id: &str,
+) -> Result<CredentialActivitySources> {
+    let last_gateway_observed: Option<String> = conn.query_row(
+        "SELECT MAX(at) FROM runtime_request_events
+         WHERE credential_id = ?1 AND observation_source = 'gateway'",
+        params![credential_id],
+        |r| r.get(0),
+    )?;
+    let last_proxy_observed: Option<String> = conn.query_row(
+        "SELECT MAX(at) FROM runtime_request_events
+         WHERE credential_id = ?1 AND observation_source != 'gateway'",
+        params![credential_id],
+        |r| r.get(0),
+    )?;
+    let last_provider_reported: Option<String> = conn.query_row(
+        "SELECT MAX(window_end) FROM usage_snapshots WHERE credential_id = ?1",
+        params![credential_id],
+        |r| r.get(0),
+    )?;
+    let (last_marked_used, last_validated): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT last_used_at, last_validated_at FROM credentials WHERE id = ?1",
+        params![credential_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut out = CredentialActivitySources {
+        last_gateway_observed,
+        last_proxy_observed,
+        last_provider_reported,
+        last_marked_used,
+        last_validated,
+        most_recent: None,
+    };
+
+    let candidates = [
+        (&out.last_gateway_observed, "local_gateway"),
+        (&out.last_proxy_observed, "interception_proxy"),
+        (&out.last_provider_reported, "provider_reported"),
+        (&out.last_marked_used, "manually_marked"),
+        (&out.last_validated, "validated"),
+    ];
+    out.most_recent = candidates
+        .iter()
+        .filter_map(|(at, source)| at.as_ref().map(|a| (a.clone(), *source)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(at, source)| ActivitySample {
+            at,
+            source: source.to_string(),
+        });
+    Ok(out)
+}
+
 pub fn credential_attributions(
     conn: &Connection,
     credential_id: &str,

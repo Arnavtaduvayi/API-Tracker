@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, isApiError } from "../api";
 import type {
+  GatewayActivitySummary,
   GatewayDoctor,
   GatewayFinding,
   GatewayLinkPlan,
@@ -21,7 +22,7 @@ import type {
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ReauthDialog } from "./ReauthDialog";
 
-type Tab = "overview" | "routes" | "projects" | "diagnostics" | "privacy";
+type Tab = "overview" | "routes" | "projects" | "activity" | "diagnostics" | "privacy";
 
 function errText(e: unknown): string {
   return isApiError(e) ? e.message : String(e);
@@ -89,19 +90,23 @@ export function GatewayView() {
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-        {(["overview", "routes", "projects", "diagnostics", "privacy"] as Tab[]).map((t) => (
-          <button key={t} className={tab === t ? undefined : "link"} onClick={() => setTab(t)}>
-            {t === "overview"
-              ? "Status"
-              : t === "routes"
-                ? "Routes"
-                : t === "projects"
-                  ? "Projects"
-                  : t === "diagnostics"
-                    ? "Diagnostics"
-                    : "Privacy"}
-          </button>
-        ))}
+        {(["overview", "routes", "projects", "activity", "diagnostics", "privacy"] as Tab[]).map(
+          (t) => (
+            <button key={t} className={tab === t ? undefined : "link"} onClick={() => setTab(t)}>
+              {t === "overview"
+                ? "Status"
+                : t === "routes"
+                  ? "Routes"
+                  : t === "projects"
+                    ? "Projects"
+                    : t === "activity"
+                      ? "Activity"
+                      : t === "diagnostics"
+                        ? "Diagnostics"
+                        : "Privacy"}
+            </button>
+          ),
+        )}
       </div>
       {report === null && !error && <p>Loading…</p>}
       {report && tab === "overview" && (
@@ -130,6 +135,7 @@ export function GatewayView() {
           }}
         />
       )}
+      {report && tab === "activity" && <ActivityTab onError={setError} />}
       {report && tab === "diagnostics" && <DiagnosticsTab report={report} />}
       {tab === "privacy" && <PrivacyTab />}
     </div>
@@ -1024,6 +1030,130 @@ function ProjectsTab(props: {
           }}
           onCancel={() => setUnlinking(null)}
         />
+      )}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Activity: gateway-only metrics, honestly labeled.
+// ---------------------------------------------------------------------------
+
+function ActivityTab({ onError }: { onError: (msg: string) => void }) {
+  const [summary, setSummary] = useState<GatewayActivitySummary | null>(null);
+  const [days, setDays] = useState(7);
+
+  useEffect(() => {
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    api.gatewayActivity(since).then(setSummary, (e) => onError(errText(e)));
+  }, [days, onError]);
+
+  if (!summary) return <p>Loading…</p>;
+  const rate = (n: number) =>
+    summary.total_requests > 0 ? `${((n / summary.total_requests) * 100).toFixed(1)}%` : "—";
+  return (
+    <div>
+      <p className="muted">
+        Locally observed by the gateway only — traffic whose base URL points at it.
+        Never summed with provider-reported usage, and an empty view is not evidence of
+        zero provider usage. (Proxy double counting is prevented by the NO_PROXY entry
+        every link writes: each exchange is recorded under exactly one source.)
+      </p>
+      <label className="field" style={{ maxWidth: "12rem" }}>
+        Window (days)
+        <input
+          type="number"
+          min={1}
+          max={90}
+          value={days}
+          onChange={(e) => setDays(Number(e.target.value) || 7)}
+        />
+      </label>
+      <dl className="detail-grid">
+        <dt>Requests</dt>
+        <dd>{summary.total_requests}</dd>
+        <dt>Success rate</dt>
+        <dd>
+          {rate(summary.success_count)} ({summary.success_count} of {summary.total_requests})
+        </dd>
+        <dt>Error rate</dt>
+        <dd>
+          {rate(summary.error_count)} HTTP errors, {summary.transport_error_count} transport
+          failures
+        </dd>
+        <dt>Latency</dt>
+        <dd>
+          p50 {summary.p50_latency_ms ?? "—"} ms / p95 {summary.p95_latency_ms ?? "—"} ms / p99{" "}
+          {summary.p99_latency_ms ?? "—"} ms (through-gateway, includes provider time)
+        </dd>
+        <dt>Bytes</dt>
+        <dd>
+          {summary.request_bytes} sent / {summary.response_bytes} received
+        </dd>
+        <dt>Tokens</dt>
+        <dd>
+          {summary.usage_event_count > 0
+            ? `${summary.input_tokens} in / ${summary.output_tokens} out (from ${summary.usage_event_count} response(s) that carried usage — absent usage is never counted as zero)`
+            : "none extracted (providers report usage only on some responses)"}
+        </dd>
+        <dt>Estimated cost</dt>
+        <dd>
+          {summary.usage_event_count > 0
+            ? `$${(summary.estimated_cost_micros / 1_000_000).toFixed(4)} (LOWER-bound estimate from local pricing; cache-read tokens excluded; never provider-billed truth)`
+            : "—"}
+        </dd>
+        <dt>Freshness</dt>
+        <dd>
+          {summary.last_event_at
+            ? `last event ${summary.last_event_at}`
+            : "no events in this window"}
+        </dd>
+      </dl>
+      {summary.top_endpoints.length > 0 && (
+        <div>
+          <h2>Top endpoints (sanitized templates)</h2>
+          <table>
+            <tbody>
+              {summary.top_endpoints.map(([path, n]) => (
+                <tr key={path}>
+                  <td className="mono">{path}</td>
+                  <td>{n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {summary.top_models.length > 0 && (
+        <div>
+          <h2>Models (as parsed from responses)</h2>
+          <table>
+            <tbody>
+              {summary.top_models.map(([model, n]) => (
+                <tr key={model}>
+                  <td className="mono">{model}</td>
+                  <td>{n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {summary.attribution.length > 0 && (
+        <div>
+          <h2>Attribution states</h2>
+          <table>
+            <tbody>
+              {summary.attribution.map(([state, n]) => (
+                <tr key={state}>
+                  <td className="mono">{state}</td>
+                  <td>{n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

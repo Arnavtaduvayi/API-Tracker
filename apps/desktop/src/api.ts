@@ -57,6 +57,8 @@ import type {
   Project,
   ProviderConnection,
   ProviderKeyListing,
+  CredentialActivitySources,
+  GatewayActivitySummary,
   GatewayDisableReport,
   GatewayDoctor,
   GatewayInstallReport,
@@ -586,4 +588,8 @@ export const api = {
   gatewayPushKey: (password: string) => call<void>("gateway_push_key", { password }),
   gatewayRevokeKey: () => call<void>("gateway_revoke_key"),
   gatewayRecording: (pause: boolean) => call<void>("gateway_recording", { pause }),
+  gatewayActivity: (since: string | null) =>
+    call<GatewayActivitySummary>("gateway_activity", { since }),
+  credentialActivitySources: (selector: string) =>
+    call<CredentialActivitySources>("credential_activity_sources", { selector }),
 };

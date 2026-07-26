@@ -1292,3 +1292,47 @@ export interface GatewayLinkPlan {
   warnings: GatewayLinkWarning[];
   digest: string;
 }
+
+/** runtime::store::ActivitySample — a timestamp with its evidence source. */
+export interface ActivitySample {
+  at: string;
+  source:
+    | "local_gateway"
+    | "interception_proxy"
+    | "provider_reported"
+    | "manually_marked"
+    | "validated";
+}
+
+/** runtime::store::CredentialActivitySources — last activity, per source. */
+export interface CredentialActivitySources {
+  last_gateway_observed: string | null;
+  last_proxy_observed: string | null;
+  last_provider_reported: string | null;
+  last_marked_used: string | null;
+  last_validated: string | null;
+  most_recent: ActivitySample | null;
+}
+
+/** gateway store::GatewayActivitySummary — locally observed only. */
+export interface GatewayActivitySummary {
+  since: string | null;
+  total_requests: number;
+  success_count: number;
+  error_count: number;
+  transport_error_count: number;
+  p50_latency_ms: number | null;
+  p95_latency_ms: number | null;
+  p99_latency_ms: number | null;
+  request_bytes: number;
+  response_bytes: number;
+  top_endpoints: [string, number][];
+  attribution: [string, number][];
+  input_tokens: number;
+  output_tokens: number;
+  usage_event_count: number;
+  top_models: [string, number][];
+  estimated_cost_micros: number;
+  first_event_at: string | null;
+  last_event_at: string | null;
+}

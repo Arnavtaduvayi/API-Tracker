@@ -2832,6 +2832,32 @@ fn gateway_revoke_key(state: State<'_, AppState>) -> CmdResult<()> {
 }
 
 #[tauri::command]
+fn gateway_activity(
+    state: State<'_, AppState>,
+    since: Option<String>,
+) -> CmdResult<gw_store::GatewayActivitySummary> {
+    // Lock-free: gateway activity is non-secret metadata, and the panel
+    // must render while the vault is locked.
+    let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .map_err(ErrDto::from)?;
+    gw_store::gateway_activity_summary(&conn, since.as_deref()).map_err(ErrDto::from)
+}
+
+#[tauri::command]
+fn credential_activity_sources(
+    state: State<'_, AppState>,
+    selector: String,
+) -> CmdResult<api_tracker_core::runtime::store::CredentialActivitySources> {
+    with_vault(&state, |vault| {
+        let credential = vault.get_credential(&selector)?;
+        api_tracker_core::runtime::store::credential_activity_sources(
+            vault.connection(),
+            &credential.id,
+        )
+    })
+}
+
+#[tauri::command]
 fn gateway_recording(state: State<'_, AppState>, pause: bool) -> CmdResult<()> {
     let nonce = gw_control::read_nonce(&state.data_dir).map_err(ErrDto::from)?;
     let request = if pause {
@@ -3048,6 +3074,8 @@ fn main() {
             gateway_push_key,
             gateway_revoke_key,
             gateway_recording,
+            gateway_activity,
+            credential_activity_sources,
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Tethra desktop app");

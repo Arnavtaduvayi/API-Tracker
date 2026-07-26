@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, isApiError } from "../api";
 import type {
   Credential,
+  CredentialActivitySources,
   CredentialVersionInfo,
   PermissionsPreview,
   ProviderManifest,
@@ -16,6 +17,24 @@ import type {
 import { formatTimestamp, safeExternalUrl, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
 import { ConfirmDialog, PromptDialog } from "./ConfirmDialog";
+
+
+function activitySourceLabel(source: string): string {
+  switch (source) {
+    case "local_gateway":
+      return "locally observed by gateway";
+    case "interception_proxy":
+      return "locally observed by proxy";
+    case "provider_reported":
+      return "provider-reported";
+    case "manually_marked":
+      return "manually marked";
+    case "validated":
+      return "validated against the provider";
+    default:
+      return source;
+  }
+}
 
 type SensitiveAction =
   "reveal" | "copy" | "delete" | "versions" | "provider-revoke" | "test-key";
@@ -45,6 +64,7 @@ export function CredentialDetail(props: {
   const [tkName, setTkName] = useState("");
   const [tkTtl, setTkTtl] = useState("60");
   const [testKeyNotes, setTestKeyNotes] = useState<string[] | null>(null);
+  const [activity, setActivity] = useState<CredentialActivitySources | null>(null);
   const revealTimer = useRef<number | null>(null);
 
   // A small async wrapper that surfaces errors and a success notice.
@@ -64,6 +84,9 @@ export function CredentialDetail(props: {
     } catch (e) {
       setError(isApiError(e) ? e.message : String(e));
     }
+    // Source-labeled activity is supplementary; its absence never blocks
+    // the detail view.
+    api.credentialActivitySources(props.id).then(setActivity, () => setActivity(null));
   }, [props.id]);
 
   useEffect(() => {
@@ -228,8 +251,38 @@ export function CredentialDetail(props: {
         </dd>
         <dt>Last validated</dt>
         <dd>{formatTimestamp(c.last_validated_at)}</dd>
-        <dt>Last used</dt>
-        <dd>{formatTimestamp(c.last_used_at)}</dd>
+        <dt>Activity</dt>
+        <dd>
+          {/* Source-labeled, never a single ambiguous "last used" (SI-19):
+              each line names its evidence class, and none of them is
+              summed or substituted for another. */}
+          <div className="stack" style={{ gap: "0.15rem" }}>
+            <span>
+              Most recent known:{" "}
+              {activity?.most_recent
+                ? `${formatTimestamp(activity.most_recent.at)} (${activitySourceLabel(
+                    activity.most_recent.source,
+                  )})`
+                : "none recorded"}
+            </span>
+            <span className="muted">
+              Locally observed by gateway: {formatTimestamp(activity?.last_gateway_observed)}
+            </span>
+            <span className="muted">
+              Locally observed by proxy: {formatTimestamp(activity?.last_proxy_observed)}
+            </span>
+            <span className="muted">
+              Provider-reported (synced): {formatTimestamp(activity?.last_provider_reported)}
+            </span>
+            <span className="muted">
+              Manually marked used: {formatTimestamp(c.last_used_at)}
+            </span>
+            <span className="muted">
+              Local observation covers only traffic routed through Tethra; absence here
+              is not evidence the key is unused.
+            </span>
+          </div>
+        </dd>
         <dt>Documentation</dt>
         <dd>
           {(() => {
