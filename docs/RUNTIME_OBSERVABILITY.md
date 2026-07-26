@@ -17,7 +17,7 @@ bodies, headers, query strings, or credential values.
 From the CLI, launch your program through the observer:
 
 ```sh
-api-tracker run --observe=metadata -- npm run dev
+tethra run --observe=metadata -- npm run dev
 ```
 
 - `--observe=metadata` (Mode B) is the default when `--observe` is given; you
@@ -393,7 +393,7 @@ tables directly.)
 
 **Locking the vault during a run**
 
-- Locking the vault (`api-tracker lock`) or an auto-lock timeout **stops** an
+- Locking the vault (`tethra lock`) or an auto-lock timeout **stops** an
   active `run --observe`: within a moment the observation proxy is shut down
   (no further HTTPS is decrypted, the per-session token is invalidated, the
   leaf-certificate cache and CA signing key are cleared), the monitored process
@@ -401,7 +401,7 @@ tables directly.)
   recorded as **interrupted** (reason `vault_locked` for a manual lock,
   `auto_lock` for a timeout) — never silently completed.
 - A run started under a session token (`API_TRACKER_SESSION`) follows exactly
-  the lock behavior of that session: `api-tracker lock` (which deletes the
+  the lock behavior of that session: `tethra lock` (which deletes the
   session file) ends it, and the vault's auto-lock timeout ends it. A run
   started with an inline password (no session) is bounded by the vault's
   auto-lock interval from when the run started.

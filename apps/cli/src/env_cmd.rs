@@ -1,4 +1,4 @@
-//! `api-tracker env` — .env governance: discover, preview, import, example
+//! `tethra env` — .env governance: discover, preview, import, example
 //! generation, drift detection, explicit export, and cleanup.
 //!
 //! No command here ever prints a secret value. Export requires master
@@ -434,7 +434,7 @@ fn migrate(ctx: &Ctx, args: MigrateArgs) -> Result<()> {
     // 5. Apply after confirmation.
     if !ctx::confirm(
         "Step 5/5 — remove these plaintext values from the file? (Rollback: \
-         `api-tracker env export` re-creates them from the vault.)",
+         `tethra env export` re-creates them from the vault.)",
         args.yes,
     )? {
         bail!("cancelled — nothing was changed");
@@ -442,7 +442,7 @@ fn migrate(ctx: &Ctx, args: MigrateArgs) -> Result<()> {
     envgov::atomic_write(&args.file, &proposed)?;
     ctx.persist_session(&vault, &token)?;
     println!(
-        "Done. Run the project with:\n  api-tracker run --project {} -- <command>\n\
+        "Done. Run the project with:\n  tethra run --project {} -- <command>\n\
          The variables are injected at run time; no plaintext file is needed.",
         args.project
     );
@@ -458,9 +458,7 @@ fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
         args.vars.clone()
     };
     if names.is_empty() {
-        bail!(
-            "no mapped variables to export; configure mappings first (`api-tracker mapping set`)"
-        );
+        bail!("no mapped variables to export; configure mappings first (`tethra mapping set`)");
     }
     println!("About to write a PLAINTEXT .env file:");
     println!("  Target:    {}", args.to.display());
@@ -470,7 +468,7 @@ fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
     } else {
         println!("  Temporary: no — the file persists until you delete it");
     }
-    println!("Prefer `api-tracker run`, which injects credentials without a file.");
+    println!("Prefer `tethra run`, which injects credentials without a file.");
     if !ctx::confirm("Export?", args.yes)? {
         bail!("cancelled");
     }
@@ -499,7 +497,7 @@ fn export(ctx: &Ctx, args: ExportArgs) -> Result<()> {
             println!("WARNING: {warning}");
         }
         if let Some(expires) = &report.expires_at {
-            println!("Expires: {expires} (run `api-tracker env cleanup` to enforce)");
+            println!("Expires: {expires} (run `tethra env cleanup` to enforce)");
         }
     });
     Ok(())

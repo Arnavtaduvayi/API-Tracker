@@ -21,27 +21,40 @@ pub struct EnvMapping {
     pub env_var: String,
 }
 
-/// The environment-variable prefix owned by Tethra.
+/// The legacy environment-variable prefix owned by the app (pre-rename).
 pub const ENV_PREFIX: &str = "API_TRACKER_";
 
-/// The only `API_TRACKER_*` variables a spawned child may inherit. Every
-/// other variable under the prefix is treated as authentication, password,
+/// The preferred environment-variable prefix after the Tethra rename. Both
+/// prefixes are owned by the app: the vault reads `TETHRA_*` first and falls
+/// back to `API_TRACKER_*`, so BOTH must be scrubbed from injected children.
+pub const ENV_PREFIX_PREFERRED: &str = "TETHRA_";
+
+/// Every prefix the scrub owns.
+const ENV_PREFIXES: &[&str] = &[ENV_PREFIX, ENV_PREFIX_PREFERRED];
+
+/// The only app-owned variables a spawned child may inherit. Every other
+/// variable under either prefix is treated as authentication, password,
 /// session, or internal control material and scrubbed by default, so a
 /// variable added in the future is protected without anyone remembering to
 /// enumerate it here.
 ///
-/// - `API_TRACKER_DIR` — data-directory override: a plain path, required so
-///   a child that itself invokes `api-tracker` talks to the same vault.
-/// - `API_TRACKER_INSECURE_FAST_KDF` — debug-build-only KDF weakening used
-///   by test harnesses; secretless, ignored by release builds.
+/// - `TETHRA_DIR` / `API_TRACKER_DIR` — data-directory override: a plain
+///   path, required so a child that itself invokes `tethra` (or the legacy
+///   `api-tracker` binary) talks to the same vault.
+/// - `TETHRA_INSECURE_FAST_KDF` / `API_TRACKER_INSECURE_FAST_KDF` —
+///   debug-build-only KDF weakening used by test harnesses; secretless,
+///   ignored by release builds.
 ///
-/// Everything else currently in use is sensitive: `API_TRACKER_PASSWORD`,
-/// `API_TRACKER_NEW_PASSWORD`, `API_TRACKER_PROJECT_PASSWORD`,
-/// `API_TRACKER_BACKUP_PASSWORD` (password material),
-/// `API_TRACKER_SESSION` (session material), and
-/// `API_TRACKER_PROVIDER_ADMIN_KEY` / `API_TRACKER_DESTINATION_AUTH`
-/// (authentication material).
-pub const CHILD_SAFE_ENV: &[&str] = &["API_TRACKER_DIR", "API_TRACKER_INSECURE_FAST_KDF"];
+/// Everything else currently in use is sensitive: `*_PASSWORD`,
+/// `*_NEW_PASSWORD`, `*_PROJECT_PASSWORD`, `*_BACKUP_PASSWORD` (password
+/// material), `*_SESSION` (session material), and `*_PROVIDER_ADMIN_KEY` /
+/// `*_DESTINATION_AUTH` (authentication material) — under both prefixes.
+pub const CHILD_SAFE_ENV: &[&str] = &[
+    "API_TRACKER_DIR",
+    "API_TRACKER_INSECURE_FAST_KDF",
+    "TETHRA_DIR",
+    "TETHRA_INSECURE_FAST_KDF",
+];
 
 /// ASCII case-insensitive byte-slice equality (non-ASCII bytes compared
 /// verbatim). Used for the Windows scrub, where env names are matched
@@ -55,20 +68,24 @@ fn ascii_ci_starts_with(bytes: &[u8], prefix: &[u8]) -> bool {
 }
 
 /// Whether an environment variable name must be scrubbed from an injected
-/// child. `case_insensitive` selects the platform's env-name semantics:
-/// Windows env lookups are case-insensitive, so ANY casing of the
-/// `API_TRACKER_` prefix (e.g. `Api_Tracker_Password`) is an alias the app
-/// could still read and must be scrubbed (RA-4); Unix env names are
-/// case-sensitive, so only the exact-case prefix is Tethra's and a
-/// differently-cased name is an unrelated variable left untouched. The
-/// child-safe allowlist is matched with the same case sensitivity.
+/// child. Both the preferred `TETHRA_` and the legacy `API_TRACKER_` prefix
+/// are owned by the app and scrubbed. `case_insensitive` selects the
+/// platform's env-name semantics: Windows env lookups are case-insensitive,
+/// so ANY casing of an owned prefix (e.g. `Api_Tracker_Password`,
+/// `tethra_password`) is an alias the app could still read and must be
+/// scrubbed (RA-4); Unix env names are case-sensitive, so only the
+/// exact-case prefixes are the app's and a differently-cased name is an
+/// unrelated variable left untouched. The child-safe allowlist is matched
+/// with the same case sensitivity.
 pub fn env_name_is_scrubbed(name: &[u8], case_insensitive: bool) -> bool {
-    let prefix = ENV_PREFIX.as_bytes();
-    let prefix_match = if case_insensitive {
-        ascii_ci_starts_with(name, prefix)
-    } else {
-        name.starts_with(prefix)
-    };
+    let prefix_match = ENV_PREFIXES.iter().any(|prefix| {
+        let prefix = prefix.as_bytes();
+        if case_insensitive {
+            ascii_ci_starts_with(name, prefix)
+        } else {
+            name.starts_with(prefix)
+        }
+    });
     if !prefix_match {
         return false;
     }
@@ -83,11 +100,12 @@ pub fn env_name_is_scrubbed(name: &[u8], case_insensitive: bool) -> bool {
     !child_safe
 }
 
-/// Remove every Tethra environment variable that is not explicitly
-/// child-safe from a command about to be spawned. An injected child must
-/// receive only the credentials mapped for it — never the master password,
-/// session token, or other Tethra authentication material that may sit
-/// in the parent's environment for scripting (PI-01). Byte-level prefix
+/// Remove every app-owned environment variable (`TETHRA_*` and legacy
+/// `API_TRACKER_*`) that is not explicitly child-safe from a command about
+/// to be spawned. An injected child must receive only the credentials
+/// mapped for it — never the master password, session token, or other
+/// authentication material that may sit in the parent's environment for
+/// scripting (PI-01). Byte-level prefix
 /// matching so a non-UTF-8 name cannot dodge the scrub. On Windows the match
 /// is case-insensitive so an unusual-casing alias cannot leak (RA-4); on
 /// Unix it stays case-sensitive, preserving normal env semantics.
@@ -649,25 +667,56 @@ mod tests {
     }
 
     #[test]
+    fn windows_scrub_covers_the_tethra_prefix() {
+        // The preferred TETHRA_ prefix is owned too: any casing scrubbed,
+        // the two child-safe names survive in any casing.
+        let ci = true;
+        for name in [
+            "TETHRA_SESSION",
+            "tethra_session",
+            "Tethra_New_Password",
+            "TETHRA_PASSWORD",
+            "tEtHrA_backup_password",
+        ] {
+            assert!(
+                env_name_is_scrubbed(name.as_bytes(), ci),
+                "Windows scrub must remove {name}"
+            );
+        }
+        for safe in ["TETHRA_DIR", "tethra_dir", "Tethra_Insecure_Fast_Kdf"] {
+            assert!(
+                !env_name_is_scrubbed(safe.as_bytes(), ci),
+                "child-safe var {safe} must survive on Windows"
+            );
+        }
+        assert!(!env_name_is_scrubbed(b"TETHRAX_Y", ci));
+    }
+
+    #[test]
     fn unix_scrub_preserves_case_sensitive_semantics() {
         // On Unix, env names are case-sensitive and the app reads exact-case
-        // names, so only the exact-case prefix is Tethra's. A
+        // names, so only the exact-case prefixes are the app's. A
         // differently-cased name is an unrelated variable, left untouched.
         let ci = false;
         assert!(env_name_is_scrubbed(b"API_TRACKER_SESSION", ci));
         assert!(env_name_is_scrubbed(b"API_TRACKER_NEW_PASSWORD", ci));
+        assert!(env_name_is_scrubbed(b"TETHRA_SESSION", ci));
+        assert!(env_name_is_scrubbed(b"TETHRA_PASSWORD", ci));
         // Lowercase / mixed case are DIFFERENT variables on Unix — not ours.
         assert!(!env_name_is_scrubbed(b"api_tracker_session", ci));
         assert!(!env_name_is_scrubbed(b"Api_Tracker_New_Password", ci));
+        assert!(!env_name_is_scrubbed(b"tethra_session", ci));
+        assert!(!env_name_is_scrubbed(b"Tethra_Password", ci));
         // Exact-case child-safe survives; a differently-cased "dir" is
         // unrelated and simply not prefixed-matched anyway.
         assert!(!env_name_is_scrubbed(b"API_TRACKER_DIR", ci));
+        assert!(!env_name_is_scrubbed(b"TETHRA_DIR", ci));
     }
 
     #[test]
     fn terminate_pid_refuses_non_positive_pids() {
         // PI-06: 0 and negative PIDs must be refused BEFORE any signal — on
-        // Unix `kill 0` would signal Tethra's own process group. These
+        // Unix `kill 0` would signal the app's own process group. These
         // return false without ever spawning `kill`/`taskkill`. (A positive
         // PID is not exercised here: it would send a real signal.)
         assert!(!terminate_pid(0));

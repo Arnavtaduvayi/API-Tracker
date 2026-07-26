@@ -1,6 +1,14 @@
 # Desktop UI Map
 
-An exact, button-by-button inventory of the Tethra desktop application,
+> **Naming note (2026-07-24):** API Tracker was renamed **Tethra** after this
+> report was produced. This map remains the verified record of the
+> **pre-rename baseline `7d81090`**: the window/app title is now "Tethra",
+> native notifications are titled "Tethra", the preferred CLI command is
+> `tethra` (legacy `api-tracker` still works), and preferred env vars are
+> `TETHRA_*` (legacy `API_TRACKER_*` still honored). Baseline content below
+> is intentionally unchanged; see docs/rebrand/TETHRA_REBRAND_PLAN.md.
+
+An exact, button-by-button inventory of the API Tracker desktop application,
 verified against the source on `main` (commit `7d81090`, 2026-07-18; this is
 the current `main`, six commits ahead of the `v0.3.0-alpha-rc1` tag — the
 gap-closure merge added the Pricing and Templates screens and three
@@ -14,7 +22,7 @@ Companion documents:
 
 Every label in this document is quoted verbatim from the component source
 files listed per screen. The desktop app is a Tauri v2 shell
-(`apps/desktop/src-tauri/src/main.rs`, window title **"Tethra"**,
+(`apps/desktop/src-tauri/src/main.rs`, window title **"API Tracker"**,
 1050×760) over a React UI (`apps/desktop/src/`); every command is a thin
 wrapper over the same `api-tracker-core` crate the CLI uses, against the
 same SQLite vault in the same data directory.
@@ -25,7 +33,7 @@ There is no URL router; navigation is a view enum in `App.tsx`. Top-level
 destinations are the 16 nav buttons plus the two vault gate screens.
 
 ```text
-Tethra (window)
+API Tracker (window)
 ├── Create your vault            (first run only — no vault exists yet)
 ├── Unlock vault                 (vault exists, locked; also after auto-lock)
 └── Main navigation (vault unlocked) — top bar, left to right:
@@ -81,7 +89,7 @@ project/credential/provider forms and detail pages.
   errors from `apps/desktop/src-tauri/src/main.rs` (`ErrDto {code,message}`).
 - **Vault state machine:** no vault → *Create your vault*; locked →
   *Unlock vault*; unlocked → main navigation. State polls every 30 s.
-- **Top bar** (only while unlocked): brand text **Tethra**, then
+- **Top bar** (only while unlocked): brand text **API Tracker**, then
   link-style buttons, exact labels: **Projects · Providers · Scan ·
   Env files · Destinations · Sync plans · Rotation · Temporary access ·
   Alerts · Notifications · Usage · API activity · Pricing · Templates ·
@@ -96,9 +104,9 @@ project/credential/provider forms and detail pages.
   monitor cycle (local rules + due documentation checks + webhook
   delivery). It does **not** count as activity (auto-lock still fires).
   New alerts of medium+ severity raise one native notification: title
-  **"Tethra"**, body `N new alert(s) — top severity: {sev}. Open
+  **"API Tracker"**, body `N new alert(s) — top severity: {sev}. Open
   Alerts for details.` (asks for OS notification permission on first use).
-- **Startup failure:** `Startup error: {message}` under an `Tethra`
+- **Startup failure:** `Startup error: {message}` under an `API Tracker`
   heading.
 - **Dialogs:** native `window.confirm`/`prompt` do not work under the macOS
   WKWebView, so every confirmation is an in-app `<dialog>`
@@ -126,7 +134,7 @@ project/credential/provider forms and detail pages.
 | Prerequisites | none (this *is* first run) |
 | CLI equivalent | `api-tracker init` |
 
-- Intro text: "Tethra stores all data encrypted on this computer at
+- Intro text: "API Tracker stores all data encrypted on this computer at
   `{data dir}`. No account, no cloud."
 - Fields: **Master password (at least 12 characters; a long multi-word
   passphrase is best)** — password input, required, autofocus;
@@ -510,7 +518,7 @@ project/credential/provider forms and detail pages.
   `production value in dev file`, `unmapped secret` (high); `value differs
   from vault`, `same value in multiple files` (medium); `missing expected
   variable` (low); `mapping not in files` (info).
-- **Exports**: "Plaintext .env files previously written by Tethra…";
+- **Exports**: "Plaintext .env files previously written by API Tracker…";
   empty "No live exports."; table **Path · Variables · Created · Expires**
   (`never (persistent)`). Buttons: **Clean up expired…** · **Clean up
   all…** (red) · checkbox **force: also delete files whose content changed

@@ -1,4 +1,4 @@
-//! `api-tracker template` — project templates and local stack detection.
+//! `tethra template` — project templates and local stack detection.
 //!
 //! Detection is deterministic rules over static repository files plus a
 //! locally stored confirm/dismiss history — not machine learning, and it is

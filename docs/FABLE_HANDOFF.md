@@ -1,5 +1,9 @@
 # Fable Session Handoff
 
+> **Naming note (2026-07-24):** API Tracker was renamed **Tethra** after this
+> handoff was written. This document is a historical session record and is
+> intentionally unchanged.
+
 This document hands the repository off to a fresh session. **"Verified"**
 means exercised by a passing test or a manual end-to-end run this session;
 **"planned"** means designed/labeled but not yet implemented.

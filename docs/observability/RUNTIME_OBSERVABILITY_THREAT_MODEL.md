@@ -240,7 +240,7 @@ no `/proc`, no pidfd). Concretely, `run_monitored` replaces its blocking
 checks whether the child exited **and** whether the vault should be considered
 locked:
 
-- under a session token, it watches the session file — deleted (`api-tracker
+- under a session token, it watches the session file — deleted (`tethra
   lock`) → `vault_locked`; past its recorded expiry → `auto_lock`;
 - with an inline password, it enforces the vault's auto-lock TTL as a hard
   wall-clock cap from run start → `auto_lock`.

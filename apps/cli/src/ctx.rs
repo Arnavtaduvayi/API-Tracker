@@ -1,19 +1,26 @@
 //! Command context: data-directory resolution, session handling, and
 //! password acquisition. All secret input goes through `SecretString` and is
 //! never echoed or logged.
+//!
+//! Environment variables resolve through `envcompat`: the preferred
+//! `TETHRA_*` name wins whenever present; the legacy `API_TRACKER_*` name
+//! keeps working as a fallback (see docs/rebrand/TETHRA_COMPATIBILITY_MATRIX.md).
 
 use anyhow::{bail, Context, Result};
+use api_tracker_core::envcompat;
 use api_tracker_core::secret::SecretString;
 use api_tracker_core::session::SessionToken;
 use api_tracker_core::vault::{self, UnlockedVault, VaultPaths};
 use std::io::{IsTerminal, Read, Write};
 use std::path::PathBuf;
 
-pub const ENV_SESSION: &str = "API_TRACKER_SESSION";
-pub const ENV_PASSWORD: &str = "API_TRACKER_PASSWORD";
-pub const ENV_PROJECT_PASSWORD: &str = "API_TRACKER_PROJECT_PASSWORD";
-pub const ENV_BACKUP_PASSWORD: &str = "API_TRACKER_BACKUP_PASSWORD";
-pub const ENV_PROVIDER_ADMIN_KEY: &str = "API_TRACKER_PROVIDER_ADMIN_KEY";
+/// Variable-name suffixes; the full names are `TETHRA_<suffix>` and
+/// `API_TRACKER_<suffix>`.
+pub const ENV_SESSION: &str = "SESSION";
+pub const ENV_PASSWORD: &str = "PASSWORD";
+pub const ENV_PROJECT_PASSWORD: &str = "PROJECT_PASSWORD";
+pub const ENV_BACKUP_PASSWORD: &str = "BACKUP_PASSWORD";
+pub const ENV_PROVIDER_ADMIN_KEY: &str = "PROVIDER_ADMIN_KEY";
 
 pub struct Ctx {
     pub paths: VaultPaths,
@@ -33,38 +40,70 @@ impl Ctx {
     }
 
     /// Obtain an unlocked vault: from the session token if one is present,
-    /// otherwise via `API_TRACKER_PASSWORD` (scripting), otherwise fail with
-    /// instructions. Returns the token when a session was used, so mutations
-    /// to session state (project unlock/lock) can be persisted.
+    /// otherwise via `TETHRA_PASSWORD` / legacy `API_TRACKER_PASSWORD`
+    /// (scripting), otherwise fail with instructions. Returns the token when
+    /// a session was used, so mutations to session state (project
+    /// unlock/lock) can be persisted.
+    ///
+    /// A session variable holding a stale or invalid token does NOT wedge
+    /// scripting: if the session path fails and a password variable is set,
+    /// the password is tried before giving up. (After the rename, an eval'd
+    /// `unlock --print-export` sets BOTH session variables; an older script
+    /// that unsets only `API_TRACKER_SESSION` after `lock` would otherwise
+    /// strand a revoked token in `TETHRA_SESSION` and fail every following
+    /// password-driven command.)
     pub fn unlocked(&self) -> Result<(UnlockedVault, Option<SessionToken>)> {
-        if let Ok(raw) = std::env::var(ENV_SESSION) {
-            // An empty variable means "no session", not an invalid token.
-            if !raw.trim().is_empty() {
-                let token = SessionToken::decode(&raw)
-                    .context("API_TRACKER_SESSION is not a valid session token")?;
-                let vault = vault::resume_session(&self.paths, &token)?;
-                return Ok((vault, Some(token)));
-            }
-        }
-        if std::env::var_os(ENV_PASSWORD).is_some() {
+        let session_err = match self.session_unlocked() {
+            Ok(Some(ok)) => return Ok(ok),
+            Ok(None) => None,
+            Err(err) => Some(err),
+        };
+        if envcompat::is_set(ENV_PASSWORD) {
             let password = env_secret(ENV_PASSWORD)?;
             let vault = vault::unlock_vault(&self.paths, &password)?;
             return Ok((vault, None));
         }
+        if let Some(err) = session_err {
+            return Err(err);
+        }
         bail!(
-            "the vault is locked. Run `api-tracker unlock` and export {ENV_SESSION}, \
-             or set {ENV_PASSWORD} for non-interactive use"
+            "the vault is locked. Run `tethra unlock` and export {}, \
+             or set {} for non-interactive use",
+            envcompat::preferred_name(ENV_SESSION),
+            envcompat::hint(ENV_PASSWORD)
         );
+    }
+
+    /// The session path alone: `Ok(None)` when no session variable is set
+    /// (or it is empty, which means "no session"), `Err` when one is set but
+    /// does not produce a live session.
+    fn session_unlocked(&self) -> Result<Option<(UnlockedVault, Option<SessionToken>)>> {
+        let Some(Ok(raw)) = envcompat::var(ENV_SESSION) else {
+            return Ok(None);
+        };
+        if raw.trim().is_empty() {
+            return Ok(None);
+        }
+        let token = SessionToken::decode(&raw).with_context(|| {
+            format!(
+                "{} is not a valid session token",
+                envcompat::active_name(ENV_SESSION)
+                    .unwrap_or_else(|| envcompat::preferred_name(ENV_SESSION))
+            )
+        })?;
+        let vault = vault::resume_session(&self.paths, &token)?;
+        Ok(Some((vault, Some(token))))
     }
 
     /// Try to obtain an unlocked vault without ever prompting: only if a
     /// session token or password is already present in the environment.
     /// Used by scanning, which is useful even against a locked vault.
     pub fn try_unlocked(&self) -> Option<UnlockedVault> {
-        let has_creds = std::env::var(ENV_SESSION)
+        let has_creds = envcompat::var(ENV_SESSION)
+            .and_then(|v| v.ok())
             .map(|v| !v.trim().is_empty())
             .unwrap_or(false)
-            || std::env::var_os(ENV_PASSWORD).is_some();
+            || envcompat::is_set(ENV_PASSWORD);
         if has_creds {
             self.unlocked().ok().map(|(v, _)| v)
         } else {
@@ -101,10 +140,11 @@ impl Ctx {
     }
 }
 
-fn env_secret(var: &str) -> Result<SecretString> {
-    match std::env::var(var) {
-        Ok(value) => Ok(SecretString::new(value)),
-        Err(_) => bail!("{var} is not set or not valid UTF-8"),
+fn env_secret(suffix: &str) -> Result<SecretString> {
+    match envcompat::var(suffix) {
+        Some(Ok(value)) => Ok(SecretString::new(value)),
+        Some(Err(name)) => bail!("{name} is not valid UTF-8"),
+        None => bail!("{} is not set", envcompat::hint(suffix)),
     }
 }
 
@@ -112,7 +152,7 @@ fn prompt_hidden(label: &str) -> Result<SecretString> {
     if !std::io::stdin().is_terminal() {
         bail!(
             "cannot prompt for '{label}' without a terminal; \
-             set the matching API_TRACKER_* environment variable"
+             set the matching TETHRA_* (or legacy API_TRACKER_*) environment variable"
         );
     }
     eprint!("{label}: ");
@@ -128,16 +168,17 @@ pub fn prompt_secret(label: &str) -> Result<SecretString> {
 
 /// The master password, for unlock and reauthentication.
 pub fn master_password() -> Result<SecretString> {
-    if std::env::var_os(ENV_PASSWORD).is_some() {
+    if envcompat::is_set(ENV_PASSWORD) {
         return env_secret(ENV_PASSWORD);
     }
     prompt_hidden("Master password")
 }
 
 /// A newly chosen password, confirmed twice when prompted interactively.
-pub fn new_password(what: &str, env_var: &str) -> Result<SecretString> {
-    if std::env::var_os(env_var).is_some() {
-        return env_secret(env_var);
+/// `env_suffix` names the `TETHRA_*`/`API_TRACKER_*` pair consulted first.
+pub fn new_password(what: &str, env_suffix: &str) -> Result<SecretString> {
+    if envcompat::is_set(env_suffix) {
+        return env_secret(env_suffix);
     }
     let first = prompt_hidden(&format!("New {what}"))?;
     let second = prompt_hidden(&format!("Confirm {what}"))?;
@@ -148,14 +189,14 @@ pub fn new_password(what: &str, env_var: &str) -> Result<SecretString> {
 }
 
 pub fn project_password() -> Result<SecretString> {
-    if std::env::var_os(ENV_PROJECT_PASSWORD).is_some() {
+    if envcompat::is_set(ENV_PROJECT_PASSWORD) {
         return env_secret(ENV_PROJECT_PASSWORD);
     }
     prompt_hidden("Project password")
 }
 
 pub fn backup_password(new: bool) -> Result<SecretString> {
-    if std::env::var_os(ENV_BACKUP_PASSWORD).is_some() {
+    if envcompat::is_set(ENV_BACKUP_PASSWORD) {
         return env_secret(ENV_BACKUP_PASSWORD);
     }
     if new {
@@ -184,9 +225,9 @@ pub fn credential_value(value_stdin: bool) -> Result<SecretString> {
 }
 
 /// A provider administrative key: `--key-stdin` for scripts, the
-/// `API_TRACKER_PROVIDER_ADMIN_KEY` variable, or a hidden prompt. Never
-/// accepted as a command-line argument (it would leak via `ps` and shell
-/// history) and never echoed.
+/// `TETHRA_PROVIDER_ADMIN_KEY` (or legacy `API_TRACKER_PROVIDER_ADMIN_KEY`)
+/// variable, or a hidden prompt. Never accepted as a command-line argument
+/// (it would leak via `ps` and shell history) and never echoed.
 pub fn provider_admin_key(key_stdin: bool) -> Result<SecretString> {
     if key_stdin {
         let mut buf = String::new();
@@ -199,7 +240,7 @@ pub fn provider_admin_key(key_stdin: bool) -> Result<SecretString> {
         }
         return Ok(value);
     }
-    if std::env::var_os(ENV_PROVIDER_ADMIN_KEY).is_some() {
+    if envcompat::is_set(ENV_PROVIDER_ADMIN_KEY) {
         return env_secret(ENV_PROVIDER_ADMIN_KEY);
     }
     prompt_hidden("Administrative key (hidden)")

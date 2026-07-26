@@ -1,6 +1,6 @@
 //! Local Git pre-commit hook management.
 //!
-//! Installs a small shell hook that runs `api-tracker scan --staged --hook`
+//! Installs a small shell hook that runs `tethra scan --staged --hook`
 //! before each commit — into the directory GIT WILL ACTUALLY USE: the
 //! effective `core.hooksPath` (local, global, or system scope; the same
 //! merged value git resolves) or the default `.git/hooks`. The hook is
@@ -29,15 +29,22 @@ use std::path::{Path, PathBuf};
 const SENTINEL: &str = "# >>> api-tracker pre-commit hook >>>";
 const SENTINEL_END: &str = "# <<< api-tracker pre-commit hook <<<";
 
+// The sentinel lines keep the pre-rename `api-tracker` wording on purpose:
+// they are the ONLY markers by which hooks installed by older builds are
+// recognized for status/upgrade/removal. The body prefers the `tethra`
+// binary and falls back to the legacy `api-tracker` binary, so a hook works
+// no matter which one is on PATH.
 fn hook_body() -> String {
     format!(
         "{SENTINEL}\n\
 # Managed by Tethra. Blocks commits containing high-confidence secrets.\n\
-# Remove with: api-tracker hooks remove <path>\n\
-if command -v api-tracker >/dev/null 2>&1; then\n\
+# Remove with: tethra hooks remove <path>\n\
+if command -v tethra >/dev/null 2>&1; then\n\
+  tethra scan --staged --hook \"$(git rev-parse --show-toplevel)\" || exit 1\n\
+elif command -v api-tracker >/dev/null 2>&1; then\n\
   api-tracker scan --staged --hook \"$(git rev-parse --show-toplevel)\" || exit 1\n\
 else\n\
-  echo 'api-tracker not found on PATH; skipping secret pre-commit scan' >&2\n\
+  echo 'tethra not found on PATH; skipping secret pre-commit scan' >&2\n\
 fi\n\
 {SENTINEL_END}\n"
     )
@@ -75,7 +82,7 @@ pub enum HookState {
     Absent,
     /// Our managed hook is installed where git looks.
     Installed,
-    /// A foreign (non-Tethra) hook exists where git looks.
+    /// A foreign (non-API-Tracker) hook exists where git looks.
     Foreign,
     /// The hook where git looks contains our chained block plus foreign
     /// content; ours runs first.
@@ -224,8 +231,8 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
                     HookState::Overridden,
                     false,
                     format!(
-                        "core.hooksPath = {:?} points git at a different hook; the API \
-                         Tracker hook at {} never runs. Protection is NOT active.",
+                        "core.hooksPath = {:?} points git at a different hook; the \
+                         Tethra hook at {} never runs. Protection is NOT active.",
                         hooks_path_override.as_deref().unwrap_or_default(),
                         default_path.display()
                     ),
@@ -234,7 +241,7 @@ pub fn status(repo: &Path) -> Result<HookStatus> {
                 (
                     HookState::Foreign,
                     false,
-                    "a non-Tethra pre-commit hook exists; install with force to \
+                    "a non-API-Tracker pre-commit hook exists; install with force to \
                      chain the scan in front of it"
                         .to_string(),
                 )
@@ -490,6 +497,8 @@ mod tests {
         assert_eq!(install(dir.path(), false).unwrap(), HookState::Installed);
         assert_eq!(status(dir.path()).unwrap().state, HookState::Installed);
         let content = std::fs::read_to_string(default_hook_path(dir.path())).unwrap();
+        assert!(content.contains("tethra scan --staged --hook"));
+        // The legacy fallback stays in the body for older installs' PATHs.
         assert!(content.contains("api-tracker scan --staged --hook"));
 
         // Re-install is idempotent.

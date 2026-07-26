@@ -14,7 +14,10 @@ set -u
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$REPO_ROOT/$TARGET_DIR" ;; esac
-BIN="$TARGET_DIR/release/api-tracker"
+# The preferred `tethra` binary is exercised; the legacy API_TRACKER_* env
+# vars below stay on purpose — the smoke suite doubles as the rebrand
+# compatibility check (new binary + legacy variables).
+BIN="$TARGET_DIR/release/tethra"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/api-tracker-smoke.XXXXXX")" \
   || { echo "smoke: failed to create a temp dir under ${TMPDIR:-/tmp}" >&2; exit 1; }
 trap 'rm -rf "$WORK"' EXIT
@@ -69,7 +72,8 @@ check $? "session works without the master password"
 "$BIN" lock >/dev/null 2>&1; check $? "lock succeeds"
 env -u API_TRACKER_PASSWORD API_TRACKER_SESSION="${API_TRACKER_SESSION:-}" "$BIN" project list >/dev/null 2>&1; [ $? -ne 0 ]
 check $? "the revoked session is rejected after lock"
-unset API_TRACKER_SESSION
+# eval of --print-export sets BOTH session variable generations; clear both.
+unset API_TRACKER_SESSION TETHRA_SESSION
 
 echo "-- projects and credentials --"
 "$BIN" project create smoke-dev  --env development >/dev/null 2>&1; check $? "project creation (development)"

@@ -11,7 +11,7 @@ parity throughout.
 ```text
 ┌─────────────────────────┐   ┌──────────────────────────────┐
 │ apps/cli                │   │ apps/desktop                 │
-│ binary: api-tracker     │   │ src/        React + TS UI    │
+│ binary: tethra          │   │ src/        React + TS UI    │
 │ clap commands, prompts, │   │ src-tauri/  Tauri v2 backend │
 │ session handling        │   │ (commands, auto-lock state,  │
 │                         │   │  clipboard)                  │
@@ -49,9 +49,9 @@ parity throughout.
         (shared by CLI and desktop; WAL mode)
 ```
 
-Both frontends resolve the same data directory (`API_TRACKER_DIR` override,
-platform default otherwise), so they operate on the same vault concurrently
-(SQLite WAL + busy timeout).
+Both frontends resolve the same data directory (`TETHRA_DIR` override — the
+legacy `API_TRACKER_DIR` name still works — platform default otherwise), so
+they operate on the same vault concurrently (SQLite WAL + busy timeout).
 
 ## Data model (schema v5)
 

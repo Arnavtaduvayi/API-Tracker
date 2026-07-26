@@ -1,18 +1,21 @@
-//! `api-tracker destination` — configure and inspect secret destinations.
+//! `tethra destination` — configure and inspect secret destinations.
 //!
 //! Destination administrative credentials are read from stdin, a hidden
-//! prompt, or `API_TRACKER_DESTINATION_AUTH`; they are stored encrypted and
-//! are write-only afterwards. Nothing here prints a secret.
+//! prompt, or `TETHRA_DESTINATION_AUTH` (legacy `API_TRACKER_DESTINATION_AUTH`);
+//! they are stored encrypted and are write-only afterwards. Nothing here
+//! prints a secret.
 
 use crate::ctx::{self, Ctx};
 use crate::render;
 use anyhow::{bail, Context, Result};
 use api_tracker_core::destinations;
+use api_tracker_core::envcompat;
 use api_tracker_core::secret::SecretString;
 use clap::{Args, Subcommand};
 use std::io::Read;
 
-pub const ENV_DESTINATION_AUTH: &str = "API_TRACKER_DESTINATION_AUTH";
+/// Suffix of the `TETHRA_*`/`API_TRACKER_*` destination-credential pair.
+pub const ENV_DESTINATION_AUTH: &str = "DESTINATION_AUTH";
 
 #[derive(Subcommand)]
 pub enum DestinationCmd {
@@ -147,11 +150,11 @@ fn destination_auth(auth_stdin: bool) -> Result<SecretString> {
         }
         return Ok(value);
     }
-    if std::env::var_os(ENV_DESTINATION_AUTH).is_some() {
-        return Ok(SecretString::new(
-            std::env::var(ENV_DESTINATION_AUTH)
-                .context("API_TRACKER_DESTINATION_AUTH is not valid UTF-8")?,
-        ));
+    if let Some(resolved) = envcompat::var(ENV_DESTINATION_AUTH) {
+        return match resolved {
+            Ok(value) => Ok(SecretString::new(value)),
+            Err(name) => bail!("{name} is not valid UTF-8"),
+        };
     }
     ctx::prompt_secret("Destination credential (hidden)")
 }

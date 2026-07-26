@@ -2,14 +2,16 @@
 
 Tethra never fabricates provider capabilities and never claims more
 attribution precision than a provider exposes. This matrix reflects what is
-**actually implemented** today; run `api-tracker provider capabilities <id>`
+**actually implemented** today; run `tethra provider capabilities <id>`
 for the live, per-capability status (with notes) generated from the provider
-manifests.
+manifests. The legacy `api-tracker` command remains available as a
+compatibility alias for the same program — see
+[rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md).
 
 Legend:
 - **implemented** — Tethra performs this via the provider's official API.
-- **supported (not impl.)** — the provider offers it officially, but API
-  Tracker does not implement it yet.
+- **supported (not impl.)** — the provider offers it officially, but Tethra
+  does not implement it yet.
 - **manual** — only possible through the provider's dashboard; Tethra
   links to it and never pretends the action happened.
 - **unsupported** — the provider does not offer it.
@@ -37,7 +39,7 @@ Usage attribution **varies by provider** and is always labeled:
   Costs APIs (admin key) grouped by provider project × API-key id (× model /
   line item). A row is attributed `exact_credential` **only** when you have
   explicitly linked that provider-side key id to a vault credential
-  (`api-tracker provider link openai <key-id> --credential <c>`); otherwise
+  (`tethra provider link openai <key-id> --credential <c>`); otherwise
   it stays at `provider_key`, `provider_project`, or `provider_account`
   level — never divided among local keys. See
   [OPENAI_SYNC.md](OPENAI_SYNC.md).
@@ -57,13 +59,13 @@ Usage attribution **varies by provider** and is always labeled:
   Per-key request logs are dashboard-only; Stripe offers no API for them.
 - **Per-credential / per-project budgets** count usage attributed to that
   credential/project: linked provider-synced rows and manual entries
-  (`api-tracker usage record --credential <c> --model <m> --input-tokens N
+  (`tethra usage record --credential <c> --model <m> --input-tokens N
   --output-tokens N`).
 - **Provider-reported cost vs. estimates:** OpenAI costs are stored exactly
   as reported (amount + currency + line item). Everything else is a local
   estimate from a versioned pricing table (source URL + retrieval date),
   labeled "estimated" and flagged stale after 45 days. Budgets consume one
-  configurable source (`api-tracker budget source`) — never the sum of both.
+  configurable source (`tethra budget source`) — never the sum of both.
 
 ## Notes per capability
 
@@ -78,7 +80,7 @@ Usage attribution **varies by provider** and is always labeled:
   action manual — or routes the change through the rotation workflow
   (create a replacement with the desired scope, deploy, verify, revoke the
   old). It never reports a change it did not make.
-- **Rotation** (`api-tracker rotation`): OpenAI and Supabase rotate fully
+- **Rotation** (`tethra rotation`): OpenAI and Supabase rotate fully
   via official APIs (create → deploy → verify → grace → delete old);
   Anthropic is guided-manual creation plus API disable/archive (archive is
   a SOFT revoke — no hard delete exists and the output says so); GitHub and
@@ -91,7 +93,7 @@ Usage attribution **varies by provider** and is always labeled:
 
 ## Provider-account identity (official endpoints only)
 
-`api-tracker provider account <id> [--sync]` (and the desktop connection
+`tethra provider account <id> [--sync]` (and the desktop connection
 panel) stores only what an official endpoint reports, with its source and
 sync time — never anything derived from a credential's appearance:
 

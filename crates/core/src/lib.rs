@@ -1,5 +1,6 @@
 //! api-tracker-core: shared security-sensitive core for the Tethra
-//! desktop application and CLI.
+//! desktop application and CLI. (The product was renamed from API Tracker
+//! to Tethra; crate names keep the legacy identifier for compatibility.)
 //!
 //! This crate owns the encrypted vault, the SQLite database and migrations,
 //! the project and credential models, credential status evaluation, reuse
@@ -33,6 +34,7 @@ pub mod crypto;
 pub mod db;
 pub mod destinations;
 pub mod docwatch;
+pub mod envcompat;
 pub mod envfile;
 pub mod envgov;
 pub mod error;

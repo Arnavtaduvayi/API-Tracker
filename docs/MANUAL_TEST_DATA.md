@@ -1,5 +1,10 @@
 # Manual UI Test Data
 
+> **Naming note (2026-07-24):** API Tracker was renamed **Tethra** after this
+> data pack was produced. All identifiers below (env vars, secret names,
+> workspace paths) remain valid: legacy `API_TRACKER_*` variables still work,
+> with `TETHRA_*` now preferred. Content is intentionally unchanged.
+
 Synthetic data for [docs/MANUAL_UI_TEST_PLAN.md](MANUAL_UI_TEST_PLAN.md).
 Every value below is **fake and non-functional by construction** (note the
 `MANUAL`/`FAKE`/`NOT-A-REAL-KEY` markers and the all-zero bodies). None of

@@ -9,13 +9,16 @@ v1–v12; v12 adds the observation tables — `observation_sessions`,
 `observed_api_services`, `observed_endpoints`, `runtime_request_events`,
 `runtime_metric_buckets`, `credential_traffic_attributions`,
 `observation_compatibility_results`, `observe_certificate_state`,
-`observe_internal_allowlist`).
+`observe_internal_allowlist`). CLI examples use the `tethra` command; the
+legacy `api-tracker` command remains available as a compatibility alias for
+the same program — see
+[rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md).
 
 Classifications:
 
 - **Fully implemented** — the workflow works end to end, with tests.
-- **Provider-limited** — bounded by what providers officially expose; API
-  Tracker implements the most precise supported level and labels it.
+- **Provider-limited** — bounded by what providers officially expose; Tethra
+  implements the most precise supported level and labels it.
 - **Local-only by design** — implemented with local data; no provider
   round-trip is possible or claimed.
 - **Advisory-only** — informs and warns but cannot enforce; labeled as such
@@ -169,7 +172,7 @@ possible-secret-exposure signal never clears just because a later
 incremental scan stopped re-emitting it (unchanged / unavailable / failed /
 skipped repo, or the secret left the working tree but remains in history).
 It stays open until an explicit resolution or a qualifying clean full
-re-scan — `api-tracker scan <repo> --reverify` (or the desktop
+re-scan — `tethra scan <repo> --reverify` (or the desktop
 `scan_reverify` command), which resolves the alerts only when a full
 history + working-tree scan finds nothing.
 

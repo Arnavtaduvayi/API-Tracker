@@ -8,9 +8,13 @@ artifacts to a **draft** GitHub Release when a `v*` tag is pushed.
 
 | Platform | Desktop | CLI |
 | --- | --- | --- |
-| macOS (arm64 + x64) | `.dmg`, `.app` | `api-tracker-<target>.tar.gz` |
-| Windows (x64) | `.msi` / `.exe` (NSIS) | `api-tracker-x86_64-pc-windows-msvc.zip` |
-| Linux (x64) | `.AppImage`, `.deb` | `api-tracker-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS (arm64 + x64) | `.dmg`, `.app` | `tethra-<target>.tar.gz` |
+| Windows (x64) | `.msi` / `.exe` (NSIS) | `tethra-x86_64-pc-windows-msvc.zip` |
+| Linux (x64) | `.AppImage`, `.deb` | `tethra-x86_64-unknown-linux-gnu.tar.gz` |
+
+Each CLI archive contains both the `tethra` binary and the legacy
+`api-tracker` compatibility alias (the same program); see
+`docs/rebrand/TETHRA_MIGRATION_GUIDE.md`.
 
 Every artifact is accompanied by a SHA-256 checksum; the CLI job also produces
 a combined `SHA256SUMS.txt`. Users should verify checksums before running (see

@@ -1,6 +1,6 @@
 //! Temporary LOCAL access grants for secure process injection.
 //!
-//! A grant bounds what `api-tracker run` will inject: which credentials,
+//! A grant bounds what `tethra run` will inject: which credentials,
 //! until when, how many launches, and (optionally) how long each launched
 //! process may live. These are **local controls enforced by Tethra on
 //! this machine** — they never constrain the provider-side credential, and

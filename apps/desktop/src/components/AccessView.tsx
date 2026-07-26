@@ -1,4 +1,4 @@
-// Temporary LOCAL access grants for `api-tracker run`. A grant bounds what
+// Temporary LOCAL access grants for `tethra run`. A grant bounds what
 // this machine injects (time window, launch count, per-process duration,
 // credential subset). These are local controls only: they never constrain
 // the provider-side credential, and local expiry is not provider revocation.
@@ -133,7 +133,7 @@ export function AccessView() {
           (grant.max_launches === 0
             ? "unlimited launches within the window."
             : `${grant.max_launches} launch(es) max.`) +
-          ` Run with it: api-tracker run --grant ${grant.id} -- <command>`,
+          ` Run with it: tethra run --grant ${grant.id} -- <command>`,
       );
     });
 
@@ -149,7 +149,7 @@ export function AccessView() {
     <div>
       <h1>Temporary access</h1>
       <p className="muted">
-        A grant bounds what <code>api-tracker run</code> will inject on this machine: which
+        A grant bounds what <code>tethra run</code> will inject on this machine: which
         credentials, until when, how many launches, and (optionally) how long each launched
         process may live. These are LOCAL controls enforced by Tethra on this device — they
         never constrain the provider-side credential, and local expiry is not provider
@@ -326,8 +326,8 @@ export function AccessView() {
               </ul>
               <p>
                 Use the Sessions list below (or the CLI&apos;s{" "}
-                <code>api-tracker access end {endResult.grant.id} --kill</code>) to send SIGTERM
-                to these processes.
+                <code>tethra access end {endResult.grant.id} --kill</code>) to send SIGTERM to
+                these processes.
               </p>
             </>
           )}

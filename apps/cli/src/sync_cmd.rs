@@ -1,4 +1,4 @@
-//! `api-tracker sync` — synchronization plans for credential value changes.
+//! `tethra sync` — synchronization plans for credential value changes.
 //!
 //! Plans are dry runs by default: `sync plan` writes nothing anywhere.
 //! `sync run` executes after explicit confirmation and master-password

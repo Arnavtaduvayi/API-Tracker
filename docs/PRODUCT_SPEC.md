@@ -1,4 +1,4 @@
-You are Claude Code working as the lead engineer for an open-source, local-first desktop application currently called **Tethra**.
+You are Claude Code working as the lead engineer for an open-source, local-first desktop application named **Tethra**.
 
 Your job in this session is to inspect the repository, design the architecture, and implement as much of the first shippable product as possible. Do not stop after creating a plan or scaffolding. Build the product, run it, test it, document it, and commit working milestones.
 
@@ -496,53 +496,55 @@ Require reauthentication before:
 
 ## 11. CLI requirements
 
-Create a CLI named `api-tracker`.
+Create a CLI named `tethra` (after the rename from API Tracker, the legacy
+`api-tracker` command name is kept as a compatibility alias for the same
+binary, so every example below also works under that name).
 
 The CLI must use the same core crates and local database as the desktop application.
 
 Support commands similar to:
 
 ```bash
-api-tracker init
-api-tracker unlock
-api-tracker lock
-api-tracker doctor
+tethra init
+tethra unlock
+tethra lock
+tethra doctor
 
-api-tracker project create
-api-tracker project list
-api-tracker project show <project>
-api-tracker project lock <project>
-api-tracker project unlock <project>
-api-tracker project archive <project>
+tethra project create
+tethra project list
+tethra project show <project>
+tethra project lock <project>
+tethra project unlock <project>
+tethra project archive <project>
 
-api-tracker key add --project <project>
-api-tracker key list --project <project>
-api-tracker key show <credential>
-api-tracker key validate <credential>
-api-tracker key status <credential>
-api-tracker key reveal <credential>
-api-tracker key remove <credential>
+tethra key add --project <project>
+tethra key list --project <project>
+tethra key show <credential>
+tethra key validate <credential>
+tethra key status <credential>
+tethra key reveal <credential>
+tethra key remove <credential>
 
-api-tracker provider list
-api-tracker provider show <provider>
-api-tracker provider docs <provider>
-api-tracker provider check-docs <provider>
-api-tracker provider sync <provider>
+tethra provider list
+tethra provider show <provider>
+tethra provider docs <provider>
+tethra provider check-docs <provider>
+tethra provider sync <provider>
 
-api-tracker usage sync
-api-tracker usage report
-api-tracker alerts list
+tethra usage sync
+tethra usage report
+tethra alerts list
 
-api-tracker scan <path>
-api-tracker scan --history <path>
-api-tracker hooks install <path>
-api-tracker hooks remove <path>
+tethra scan <path>
+tethra scan --history <path>
+tethra hooks install <path>
+tethra hooks remove <path>
 ```
 
 Add a secure process-injection command if the core architecture allows it safely:
 
 ```bash
-api-tracker run --project <project> -- <command>
+tethra run --project <project> -- <command>
 ```
 
 This command should:
@@ -990,7 +992,7 @@ Write documentation that makes it possible for another developer to:
 * Run tests.
 * Report a vulnerability safely.
 
-Avoid branding work. Use “Tethra” as the working name throughout the codebase.
+Avoid branding work. The product is named “Tethra”; use that name throughout the codebase.
 
 ## 24. Git and GitHub workflow
 

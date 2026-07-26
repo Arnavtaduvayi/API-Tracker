@@ -26,20 +26,23 @@ from 2026-09-01) is simply two dated records. Usage older than every known
 record is priced with the earliest record and the estimate's note says so.
 
 ```bash
-api-tracker pricing list                      # currently effective records
-api-tracker pricing list --all                # full version history
-api-tracker pricing show anthropic claude-sonnet-5 --as-of 2026-09-02
+tethra pricing list                      # currently effective records
+tethra pricing list --all                # full version history
+tethra pricing show anthropic claude-sonnet-5 --as-of 2026-09-02
 ```
+
+The legacy `api-tracker` command remains available as a compatibility
+alias for the same program; see `docs/rebrand/TETHRA_MIGRATION_GUIDE.md`.
 
 ## Updating prices (reviewable by design)
 
 Nothing is scraped and nothing changes silently:
 
 ```bash
-api-tracker pricing propose openai --out openai-pricing.json
+tethra pricing propose openai --out openai-pricing.json
 # 1. open the provider's published pricing page (provider docs → pricing)
 # 2. review/edit the JSON (prices are human-readable dollar strings)
-api-tracker pricing import openai-pricing.json
+tethra pricing import openai-pricing.json
 ```
 
 Imports are validated strictly — negative, non-finite, overflowing, or
@@ -62,7 +65,7 @@ for models with recent estimated usage; stale records keep estimating
   estimate. Cached/batch rates are still carried on records for display
   and imports.
 - Budgets consume exactly one configurable cost source
-  (`api-tracker budget source`): provider-reported, estimated, or
+  (`tethra budget source`): provider-reported, estimated, or
   best-available — never the sum of both.
 - Request-unit pricing is supported (per-request records via override or
   import); no bundled per-request entries exist because none of the

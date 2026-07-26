@@ -7,6 +7,10 @@ server: the only network traffic is direct, from your device to endpoints you
 explicitly configure (provider APIs, deployment destinations, watched docs
 pages, and webhook URLs).
 
+The CLI command is `tethra`; the legacy `api-tracker` command remains
+available as a compatibility alias for the same program (see
+[docs/rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md)).
+
 > **This is alpha software and the builds are UNSIGNED.** Evaluate it carefully
 > before storing highly sensitive production credentials. Local-first reduces
 > exposure but does **not** eliminate local-device risk (malware, an unlocked

@@ -1,9 +1,61 @@
 # Changelog
 
-All notable changes to Tethra are documented here. The project is in
-**public alpha**; expect breaking changes before 1.0. Dates are UTC.
+All notable changes to Tethra (formerly API Tracker) are documented here.
+The project is in **public alpha**; expect breaking changes before 1.0.
+Dates are UTC.
 
 ## [Unreleased]
+
+### Changed — product renamed to Tethra
+API Tracker is now **Tethra**. The rename is compatibility-safe: no data
+migration occurs and nothing existing breaks. Details in
+`docs/rebrand/TETHRA_MIGRATION_GUIDE.md` and
+`docs/rebrand/TETHRA_COMPATIBILITY_MATRIX.md`.
+- App display name, window title, Finder bundle (`Tethra.app`), DMG, and
+  native notification titles now say Tethra; the macOS bundle identifier is
+  unchanged so macOS treats this as an upgrade of the same app.
+- New preferred CLI command `tethra`; `api-tracker` remains installed as a
+  compatibility binary running the identical program (both entry points wrap
+  the same library) with unchanged machine-readable output. Each command
+  names itself in `--help` / `--version`, so parsers keyed on either name
+  keep matching.
+- New preferred `TETHRA_*` environment variables for the whole set
+  (`TETHRA_DIR`, `TETHRA_PASSWORD`, `TETHRA_SESSION`, …); legacy
+  `API_TRACKER_*` names keep working. When both are set the `TETHRA_*`
+  name wins; conflicting `*_DIR` values produce a warning and are never
+  combined. `run` scrubs **both** prefixes from injected children.
+- `unlock --print-export` now prints the legacy export line first and a
+  `TETHRA_SESSION` line second; `eval` sets both.
+- Newly installed git hooks prefer `tethra` and fall back to
+  `api-tracker`; hooks installed by older builds remain recognized,
+  upgradable, and removable.
+- Preserved on purpose: vault data directory (`api-tracker`), database and
+  session filenames, encryption AAD labels, backup format marker, keychain
+  service/account defaults, webhook `source` field, and hook sentinels —
+  existing vaults, backups, hooks, and scripts work unchanged.
+
+### Added — runtime API observability (opt-in, metadata only)
+`tethra run --observe -- <command>` observes one launched process's API
+traffic through a loopback-only, per-session-token-authenticated proxy and
+stores **sanitized metadata only** — never bodies, header values, cookies,
+authorization values, or query strings. Full documentation in
+`docs/RUNTIME_OBSERVABILITY.md` and ADR `docs/decisions/0017-runtime-observability.md`.
+- Two modes: `--observe=connection` (records connections, never decrypts
+  HTTPS) and `--observe=metadata` (terminates TLS for that child only, using
+  a per-vault local CA whose private key is encrypted under the vault key).
+  Upstream provider certificates are always fully verified; no code path can
+  disable verification, and a source-level test enforces that.
+- `tethra observe` — automatic API inventory, per-session metrics, sanitized
+  recent events, credential attribution, compatibility notes, local CA
+  management (`cert status|rotate|remove|install|uninstall`), retention
+  settings, internal-destination allowlist, and diagnostics. The desktop
+  **API activity** screen inspects the same data.
+- Locking the vault (`tethra lock`) or an auto-lock timeout stops an active
+  observed run: the proxy shuts down before anything else, the monitored
+  child is terminated through the identity-verified path, and the session is
+  recorded `interrupted` with an honest reason (exit code 125).
+- Schema migrations v11–v12 add the observation tables. Existing vaults
+  upgrade in place; no data-format change to credentials or backups.
 
 ### Security — release-blocker remediation
 Fixes for the confirmed release blockers from the deep technical audit
@@ -21,7 +73,7 @@ schema migration or data-format change.
 - **OBS-003** — malformed provider usage buckets (missing/blank/inverted
   time ranges) are skipped before any replace-range deletion, so a
   malformed provider response can no longer wipe stored usage history.
-- **PI-01/CLI-01** — `run` scrubs Tethra authentication variables from
+- **PI-01/CLI-01** — `run` scrubs API Tracker authentication variables from
   injected children by deny-by-default over the whole `API_TRACKER_` prefix
   (previously an enumerated list that missed `API_TRACKER_NEW_PASSWORD`).
 - **IPC-01/FS-09** — `env_example_write` is reauthenticated in core and

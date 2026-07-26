@@ -27,7 +27,7 @@ pub fn alerts(ctx: &Ctx, cmd: AlertsCmd) -> Result<()> {
             let list = alerts::list(vault.connection(), all)?;
             render::emit(ctx.json, &list, || {
                 if list.is_empty() {
-                    println!("No alerts. Run `api-tracker monitor run` to check now.");
+                    println!("No alerts. Run `tethra monitor run` to check now.");
                 } else {
                     let rows: Vec<Vec<String>> = list
                         .iter()

@@ -16,7 +16,7 @@ pub enum CoreError {
     #[error("a vault already exists at {0}")]
     VaultExists(PathBuf),
 
-    #[error("no vault found at {0} (create one with `api-tracker init` or the desktop app)")]
+    #[error("no vault found at {0} (create one with `tethra init` or the desktop app)")]
     VaultNotFound(PathBuf),
 
     #[error("the vault is locked; unlock it first")]
@@ -25,10 +25,10 @@ pub enum CoreError {
     #[error("project '{0}' is password-locked; unlock it first")]
     ProjectLocked(String),
 
-    #[error("no active session; run `api-tracker unlock` first")]
+    #[error("no active session; run `tethra unlock` first")]
     SessionMissing,
 
-    #[error("the session has expired (auto-lock); run `api-tracker unlock` again")]
+    #[error("the session has expired (auto-lock); run `tethra unlock` again")]
     SessionExpired,
 
     #[error("the session token is not valid for the current session")]

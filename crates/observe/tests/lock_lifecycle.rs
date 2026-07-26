@@ -125,7 +125,7 @@ fn deleting_the_session_file_mid_run_interrupts_as_manual_lock() {
         .unwrap();
 
     // Start with a present, non-expiring session file, then delete it from
-    // another thread mid-run — exactly what `api-tracker lock` does.
+    // another thread mid-run — exactly what `tethra lock` does.
     let session_path = dir.path().join("session.json");
     std::fs::write(
         &session_path,

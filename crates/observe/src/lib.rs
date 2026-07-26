@@ -36,7 +36,9 @@ pub mod tls;
 pub mod trust;
 pub mod wire;
 
-/// Product-neutral user-agent-style identity for any diagnostic self-probe this
-/// crate makes. Kept in the `api-tracker` namespace for data/format
-/// compatibility with the (separate) rebrand work.
-pub const OBSERVE_CLIENT_TAG: &str = "api-tracker-observe/0.1 (+local)";
+/// User-agent-style identity for any diagnostic self-probe this crate makes.
+/// A request header, not a persisted identifier, so it follows the product
+/// name (matching `tethra/0.1 (+local)` in the core HTTP client) rather than
+/// the preserved `api-tracker` data namespace — see
+/// `docs/rebrand/TETHRA_COMPATIBILITY_MATRIX.md`.
+pub const OBSERVE_CLIENT_TAG: &str = "tethra-observe/0.1 (+local)";

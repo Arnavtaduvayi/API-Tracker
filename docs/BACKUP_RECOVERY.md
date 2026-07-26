@@ -6,7 +6,7 @@ no backup, the data is gone — so back up regularly.
 ## Create a backup
 
 ```bash
-api-tracker backup create ~/api-tracker-backup.json
+tethra backup create ~/tethra-backup.json
 ```
 Or use the desktop **Backup** screen. You choose a **backup password** (it can
 differ from the master password). The file is a single AEAD-encrypted document;
@@ -23,15 +23,15 @@ audit trail; they still restore, preserving what they contain.
 ## Verify a backup
 
 ```bash
-api-tracker backup verify ~/api-tracker-backup.json
+tethra backup verify ~/tethra-backup.json
 ```
 Verification decrypts and validates the file without changing anything.
 
 ## Restore
 
 ```bash
-api-tracker backup restore ~/api-tracker-backup.json        # into an empty vault
-api-tracker backup restore --force ~/api-tracker-backup.json  # replace an existing vault
+tethra backup restore ~/tethra-backup.json        # into an empty vault
+tethra backup restore --force ~/tethra-backup.json  # replace an existing vault
 ```
 `--force` renames the current database aside (`vault.db.replaced-<ts>`) rather
 than deleting it. On Windows, close the desktop app (and any CLI session)

@@ -167,7 +167,7 @@ integrations land.
 - The fingerprint key is per-vault and wrapped, so reuse detection cannot be
   turned into an offline oracle.
 - Sessions expire on a sliding inactivity window and can be revoked by
-  deleting the session file (`api-tracker lock`).
+  deleting the session file (`tethra lock`).
 
 ## Known trade-offs and open items
 

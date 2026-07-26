@@ -23,7 +23,7 @@ This is **not** an ordinary workload API key:
 - replacing, removing, or live-testing it requires re-entering your master
   password.
 
-Disconnecting (`api-tracker provider disconnect openai`) deletes the
+Disconnecting (`tethra provider disconnect openai`) deletes the
 encrypted key from the vault (SQLite `secure_delete` overwrites the row).
 Previously synchronized usage remains viewable offline. To fully revoke
 access, also delete the admin key in the OpenAI dashboard.
@@ -31,16 +31,21 @@ access, also delete the admin key in the OpenAI dashboard.
 ## Connecting
 
 ```bash
-api-tracker provider connect openai            # hidden prompt for the key
-api-tracker provider connect openai --org "my-org"     # optional label
-api-tracker provider connect openai --no-verify        # offline: store unvalidated
-api-tracker provider connection-status openai
-api-tracker provider test openai               # live test (reauthentication)
+tethra provider connect openai            # hidden prompt for the key
+tethra provider connect openai --org "my-org"     # optional label
+tethra provider connect openai --no-verify        # offline: store unvalidated
+tethra provider connection-status openai
+tethra provider test openai               # live test (reauthentication)
 ```
+
+The legacy `api-tracker` command remains available as a compatibility alias
+for the same program — see
+[rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md).
 
 The key is validated against `GET /v1/organization/projects` before it is
 stored (unless `--no-verify`). For scripts, the key can be supplied via the
-`API_TRACKER_PROVIDER_ADMIN_KEY` environment variable or `--key-stdin` — it
+`TETHRA_PROVIDER_ADMIN_KEY` environment variable (the legacy
+`API_TRACKER_PROVIDER_ADMIN_KEY` name still works) or `--key-stdin` — it
 is never accepted as a command-line argument.
 
 One OpenAI organization can be connected per vault. Supporting several
@@ -67,9 +72,9 @@ is still complete, because the costs endpoint covers every product as line
 items.
 
 ```bash
-api-tracker provider sync openai                 # incremental (default)
-api-tracker provider sync openai --days 90       # explicit look-back
-api-tracker provider sync openai --from 2026-06-01 --to 2026-07-01
+tethra provider sync openai                 # incremental (default)
+tethra provider sync openai --days 90       # explicit look-back
+tethra provider sync openai --from 2026-06-01 --to 2026-07-01
 ```
 
 The first sync covers a conservative 30 days. Later default syncs continue
@@ -125,8 +130,8 @@ Budgets consume **one** configurable source — never the sum of both, which
 would double-count the same consumption:
 
 ```bash
-api-tracker budget source                       # show (default best_available)
-api-tracker budget source provider_reported    # or: estimated / best_available
+tethra budget source                       # show (default best_available)
+tethra budget source provider_reported    # or: estimated / best_available
 ```
 
 `best_available` uses provider-reported cost when any exists for the period,
@@ -170,7 +175,7 @@ the OpenAI dashboard afterwards if it was created just for the test.
   with associated data binding it to this vault and provider.
 - It is never logged, never printed, never included in errors or alerts, and
   is stripped from the environment of processes started via
-  `api-tracker run`.
+  `tethra run`.
 - Threats that local encryption cannot defend against (malware running as
   you, memory inspection) apply to the admin key exactly as to other vault
   secrets — see `THREAT_MODEL.md`.

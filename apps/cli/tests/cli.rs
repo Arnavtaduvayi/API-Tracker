@@ -388,12 +388,20 @@ fn session_unlock_use_lock_cycle() {
         .assert()
         .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    // --print-export emits the legacy line first (parsed by old scripts),
+    // then the preferred TETHRA_SESSION line; both carry the same token.
     let token = out
-        .trim()
-        .strip_prefix("export API_TRACKER_SESSION=\"")
+        .lines()
+        .find_map(|l| l.strip_prefix("export API_TRACKER_SESSION=\""))
         .and_then(|s| s.strip_suffix('"'))
-        .expect("export line")
+        .expect("legacy export line")
         .to_owned();
+    let preferred = out
+        .lines()
+        .find_map(|l| l.strip_prefix("export TETHRA_SESSION=\""))
+        .and_then(|s| s.strip_suffix('"'))
+        .expect("preferred export line");
+    assert_eq!(preferred, token);
     assert!(!token.is_empty());
 
     // The session works without any password in the environment.
@@ -508,8 +516,8 @@ fn project_password_lock_via_session() {
         .success();
     let out = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let token = out
-        .trim()
-        .strip_prefix("export API_TRACKER_SESSION=\"")
+        .lines()
+        .find_map(|l| l.strip_prefix("export API_TRACKER_SESSION=\""))
         .and_then(|s| s.strip_suffix('"'))
         .unwrap()
         .to_owned();

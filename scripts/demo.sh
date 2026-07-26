@@ -8,7 +8,7 @@
 #
 # Safety properties:
 #   - Everything lives under an isolated temporary directory (a fresh mktemp
-#     dir by default; set API_TRACKER_DEMO_DIR for a fixed location); your
+#     dir by default; set TETHRA_DEMO_DIR for a fixed location); your
 #     real vault (default platform data dir) is never touched.
 #   - Every credential value is generated at runtime, unmistakably fake, and
 #     never sent to any provider. No network request is made.
@@ -25,7 +25,7 @@ set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 case "$TARGET_DIR" in /*) ;; *) TARGET_DIR="$REPO_ROOT/$TARGET_DIR" ;; esac
-BIN="$TARGET_DIR/release/api-tracker"
+BIN="$TARGET_DIR/release/tethra"
 
 KEEP=0
 FRESH=0
@@ -72,13 +72,13 @@ fi
 # owned by the current user (nothing can pre-plant it). A fixed location via
 # API_TRACKER_DEMO_DIR is reused only if it carries our marker file, and an
 # existing kept demo is never deleted without --fresh or a confirmation.
-if [ -n "${API_TRACKER_DEMO_DIR:-}" ]; then
-  DEMO_DIR="$API_TRACKER_DEMO_DIR"
+if [ -n "${TETHRA_DEMO_DIR:-}" ] || [ -n "${API_TRACKER_DEMO_DIR:-}" ]; then
+  DEMO_DIR="${TETHRA_DEMO_DIR:-$API_TRACKER_DEMO_DIR}"
   MARKER="$DEMO_DIR/.api-tracker-demo"
   if [ -e "$DEMO_DIR" ]; then
     if [ ! -f "$MARKER" ]; then
       echo "error: $DEMO_DIR exists but was not created by this demo; refusing to delete it." >&2
-      echo "Set API_TRACKER_DEMO_DIR to an unused path and re-run." >&2
+      echo "Set TETHRA_DEMO_DIR to an unused path and re-run." >&2
       exit 1
     elif [ "$FRESH" -eq 1 ]; then
       rm -rf "$DEMO_DIR"
@@ -194,7 +194,7 @@ Explore from the CLI:
 
 Open in the desktop app (uses the same vault through the same core):
   cd "$REPO_ROOT/apps/desktop"
-  API_TRACKER_DIR="$DEMO_DIR/vault" npm run tauri dev
+  TETHRA_DIR="$DEMO_DIR/vault" npm run tauri dev
   # then unlock with the master password above
 
 Delete the demo when finished:

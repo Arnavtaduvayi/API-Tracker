@@ -344,7 +344,7 @@ Prefer the architecture described in `PRODUCT_SPEC.md`, including:
 * React and TypeScript for a minimal desktop interface
 * SQLite for local structured storage
 * Versioned database migrations
-* A Rust CLI named `api-tracker`
+* A Rust CLI named `tethra` (the legacy `api-tracker` command remains as a compatibility alias for the same program; see `docs/rebrand/TETHRA_MIGRATION_GUIDE.md`)
 * Shared Rust crates between the desktop app and CLI
 
 The desktop app and CLI must share the same:

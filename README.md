@@ -100,7 +100,7 @@ Implemented and tested today:
   view; read-only GitHub scope sync.
 - **Suspicious-activity rules** — over-budget, cost-spike, and
   usage-after-disabled, each with evidence and a comparison period.
-- **Secure process injection** — `api-tracker run --project P [--credential C
+- **Secure process injection** — `tethra run --project P [--credential C
   --env VAR] -- cmd` injects only that project's chosen credentials into the
   child's environment; it never writes a `.env` or prints values, refuses
   unrelated credentials, and records a process session (names only).
@@ -165,6 +165,16 @@ Implemented and tested today:
   HTTP (ETag/Last-Modified) + content hashing detect changes and raise an
   alert. Requests go directly from your device; only validators, a hash, and
   timestamps are stored — never the page content.
+- **Runtime API observability (opt-in, metadata only)** — `tethra run
+  --observe -- <command>` monitors one launched process through a
+  loopback-only, token-authenticated proxy and records **sanitized metadata
+  only**: host, templated path, method, status, latency, and byte counts.
+  Request/response bodies, header values, cookies, authorization values, and
+  query strings are never stored. `tethra observe` shows the automatic API
+  inventory, per-session detail, and credential attribution; the desktop
+  **API activity** screen inspects the same data. Locking the vault stops an
+  active run. See
+  [docs/RUNTIME_OBSERVABILITY.md](docs/RUNTIME_OBSERVABILITY.md).
 - **Desktop app and CLI share one vault** — both are thin frontends over the
   same Rust core crate and the same SQLite database.
 - **Auto-lock** — configurable inactivity lock for the desktop app and CLI
@@ -200,7 +210,7 @@ cd API-Tracker
 
 # CLI
 cargo build --release -p api-tracker-cli
-# binary at target/release/api-tracker
+# binary at target/release/tethra
 
 # Desktop app
 cd apps/desktop
@@ -226,119 +236,125 @@ the CLI and desktop app. Your real vault is never touched. See
 
 ## CLI quick start
 
-```bash
-api-tracker init                     # create the encrypted vault
-api-tracker unlock                   # prints an export API_TRACKER_SESSION=... line
-export API_TRACKER_SESSION="..."     # paste it (or: eval "$(api-tracker unlock --print-export)")
+> The legacy `api-tracker` command remains available as a compatibility alias
+> for `tethra` (same program), and the legacy `API_TRACKER_*` environment
+> variable names still work — see
+> [docs/rebrand/TETHRA_MIGRATION_GUIDE.md](docs/rebrand/TETHRA_MIGRATION_GUIDE.md).
 
-api-tracker project create my-app --env development --env production \
+```bash
+tethra init                     # create the encrypted vault
+tethra unlock                   # prints an export TETHRA_SESSION=... line
+export TETHRA_SESSION="..."     # paste it (or: eval "$(tethra unlock --print-export)")
+
+tethra project create my-app --env development --env production \
     --repo ~/code/my-app
-api-tracker key add --project my-app --name openai-main --provider openai \
+tethra key add --project my-app --name openai-main --provider openai \
     --environment production --expires 2027-01-01
 # (the secret is prompted, hidden; it is never a command-line argument)
 
-api-tracker key list                 # masked values only
-api-tracker key status my-app/openai-main   # explainable status report
-api-tracker key reveal my-app/openai-main   # asks for the master password again
+tethra key list                 # masked values only
+tethra key status my-app/openai-main   # explainable status report
+tethra key reveal my-app/openai-main   # asks for the master password again
 
-api-tracker backup create ~/api-tracker-backup.json
-api-tracker backup verify ~/api-tracker-backup.json
+tethra backup create ~/tethra-backup.json
+tethra backup verify ~/tethra-backup.json
 
 # Provider catalog
-api-tracker provider list
-api-tracker provider capabilities openai       # honest support matrix
-api-tracker provider docs anthropic
+tethra provider list
+tethra provider capabilities openai       # honest support matrix
+tethra provider docs anthropic
 
 # Scan a repository and install the pre-commit hook
-api-tracker scan --staged ~/code/my-app        # or --history N, or a dir
-api-tracker hooks install ~/code/my-app        # blocks high-confidence secrets
-api-tracker suppress add <suppression-key> --reason "test fixture"
+tethra scan --staged ~/code/my-app        # or --history N, or a dir
+tethra hooks install ~/code/my-app        # blocks high-confidence secrets
+tethra suppress add <suppression-key> --reason "test fixture"
 
 # Monitoring, alerts, and documentation watches
-api-tracker monitor                            # evaluate and raise alerts
-api-tracker alerts list
-api-tracker alerts acknowledge <id> && api-tracker alerts resolve <id>
-api-tracker provider watch-docs openai         # watch official docs pages
-api-tracker provider check-docs openai         # conditional request, direct
+tethra monitor                            # evaluate and raise alerts
+tethra alerts list
+tethra alerts acknowledge <id> && tethra alerts resolve <id>
+tethra provider watch-docs openai         # watch official docs pages
+tethra provider check-docs openai         # conditional request, direct
 
 # Validate, sync usage, budget, and inspect permissions
-api-tracker key validate my-app/openai-main    # direct provider request
-api-tracker key permissions my-app/gh --sync   # e.g. GitHub scopes
-api-tracker provider connect openai            # prompts for an Admin key
-api-tracker provider connection-status openai  # status, freshness, last error
-api-tracker provider sync openai               # usage + provider-reported costs
-api-tracker provider sync openai --from 2026-07-01 --to 2026-07-15
-api-tracker provider keys openai               # provider-side keys + link state
-api-tracker provider link openai key_abc123 --credential my-app/openai-main
-api-tracker usage report --provider openai --source provider
-api-tracker usage report --project my-app      # usage + estimated cost
-api-tracker budget set --project my-app --amount 50.00
-api-tracker budget source provider_reported    # which cost source budgets use
-api-tracker provider disconnect openai         # remove local admin access
-api-tracker activity list
+tethra key validate my-app/openai-main    # direct provider request
+tethra key permissions my-app/gh --sync   # e.g. GitHub scopes
+tethra provider connect openai            # prompts for an Admin key
+tethra provider connection-status openai  # status, freshness, last error
+tethra provider sync openai               # usage + provider-reported costs
+tethra provider sync openai --from 2026-07-01 --to 2026-07-15
+tethra provider keys openai               # provider-side keys + link state
+tethra provider link openai key_abc123 --credential my-app/openai-main
+tethra usage report --provider openai --source provider
+tethra usage report --project my-app      # usage + estimated cost
+tethra budget set --project my-app --amount 50.00
+tethra budget source provider_reported    # which cost source budgets use
+tethra provider disconnect openai         # remove local admin access
+tethra activity list
 
 # Govern .env files: discover, import into the vault, migrate off plaintext
-api-tracker env discover --project my-app
-api-tracker env import --project my-app .env          # preview + confirm
-api-tracker env migrate --project my-app .env         # guided plaintext removal
-api-tracker env drift --project my-app
-api-tracker env export --project my-app --to .env --ttl 60   # reauth-gated escape hatch
+tethra env discover --project my-app
+tethra env import --project my-app .env          # preview + confirm
+tethra env migrate --project my-app .env         # guided plaintext removal
+tethra env drift --project my-app
+tethra env export --project my-app --to .env --ttl 60   # reauth-gated escape hatch
 
 # Deploy destinations and synchronization plans
-api-tracker destination kinds
-api-tracker destination add github_actions --name ci --owner me --repo app --auth-stdin
-api-tracker destination attach my-app/openai-main ci --secret-name OPENAI_API_KEY
-api-tracker sync plan my-app/openai-main              # dry run
-api-tracker sync run <plan-id>                        # confirm + reauth
-api-tracker key versions my-app/openai-main
+tethra destination kinds
+tethra destination add github_actions --name ci --owner me --repo app --auth-stdin
+tethra destination attach my-app/openai-main ci --secret-name OPENAI_API_KEY
+tethra sync plan my-app/openai-main              # dry run
+tethra sync run <plan-id>                        # confirm + reauth
+tethra key versions my-app/openai-main
 
 # Rotate a credential safely (dry run first, everything confirmed + reauthed)
-api-tracker rotation plan my-app/openai-main --grace-minutes 60
-api-tracker rotation approve <rotation-id>
-api-tracker rotation advance <rotation-id>      # repeat until completed
-api-tracker rotation schedule set my-app/openai-main --every-days 90
+tethra rotation plan my-app/openai-main --grace-minutes 60
+tethra rotation approve <rotation-id>
+tethra rotation advance <rotation-id>      # repeat until completed
+tethra rotation schedule set my-app/openai-main --every-days 90
 
 # Pricing, templates, and stack detection
-api-tracker pricing list                       # versioned, effective-dated records
-api-tracker pricing propose openai --out p.json   # review against the official page
-api-tracker pricing import p.json              # validated; history preserved
-api-tracker template list
-api-tracker template apply openai-app --project my-app --write-example ~/code/my-app
-api-tracker template detect --repo ~/code/my-app   # evidence + confidence; local only
-api-tracker provider account github --sync     # provider-reported identity only
+tethra pricing list                       # versioned, effective-dated records
+tethra pricing propose openai --out p.json   # review against the official page
+tethra pricing import p.json              # validated; history preserved
+tethra template list
+tethra template apply openai-app --project my-app --write-example ~/code/my-app
+tethra template detect --repo ~/code/my-app   # evidence + confidence; local only
+tethra provider account github --sync     # provider-reported identity only
 
 # Temporary local access (bounds what THIS machine injects; not provider-side)
-api-tracker access grant --project my-app --one-time --ttl-minutes 30
-api-tracker run --grant <grant-id> -- npm test
-api-tracker access end <grant-id> --kill
+tethra access grant --project my-app --one-time --ttl-minutes 30
+tethra run --grant <grant-id> -- npm test
+tethra access end <grant-id> --kill
 
 # Lifecycle, permissions, test keys
-api-tracker key history my-app/openai-main
-api-tracker key permissions-diff my-app/gh-token
-api-tracker key test-create --project my-app --provider openai     --provider-project proj_abc --name probe --ttl-minutes 240
+tethra key history my-app/openai-main
+tethra key permissions-diff my-app/gh-token
+tethra key test-create --project my-app --provider openai     --provider-project proj_abc --name probe --ttl-minutes 240
 
 # Run a command with exactly one credential injected (never written to disk)
-api-tracker run --project my-app --credential my-app/openai-main \
+tethra run --project my-app --credential my-app/openai-main \
     --env OPENAI_API_KEY -- npm run dev
 
-api-tracker lock
+tethra lock
 ```
 
 Useful details:
 
 - The vault lives in the platform data directory (macOS:
-  `~/Library/Application Support/api-tracker`); `--data-dir` or
-  `API_TRACKER_DIR` override it. The desktop app uses the same location, so
+  `~/Library/Application Support/api-tracker` — the directory keeps its
+  historical name so existing vaults are found); `--data-dir` or
+  `TETHRA_DIR` override it. The desktop app uses the same location, so
   both frontends see the same data.
-- For scripts/CI, `API_TRACKER_PASSWORD`, `API_TRACKER_PROJECT_PASSWORD`,
-  and `API_TRACKER_BACKUP_PASSWORD` replace interactive prompts, and
+- For scripts/CI, `TETHRA_PASSWORD`, `TETHRA_PROJECT_PASSWORD`,
+  and `TETHRA_BACKUP_PASSWORD` replace interactive prompts, and
   `--value-stdin` feeds secrets on stdin. Prefer sessions interactively:
   environment variables are visible to other processes you run.
 - `--json` makes the inspection commands (`doctor`, `settings show`,
   `provider list`, `project list`/`show`, `key list`/`show`/`status`, and the
   `key add`/`project create` results) emit machine-readable output. Purely
   action commands (`lock`, `archive`, `remove`, …) print a plain status line.
-- `api-tracker doctor` checks vault health without unlocking anything (it
+- `tethra doctor` checks vault health without unlocking anything (it
   reads only unencrypted metadata: counts, schema version, integrity).
 
 ## Security in one paragraph
@@ -361,7 +377,7 @@ cannot be recovered.** Make encrypted backups.
 # it only works in debug builds)
 cargo fmt --all
 cargo clippy --workspace --all-targets
-API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli
+TETHRA_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli
 
 # Frontend
 cd apps/desktop

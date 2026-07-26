@@ -1,4 +1,4 @@
-//! `api-tracker access` — temporary LOCAL access grants for `run`.
+//! `tethra access` — temporary LOCAL access grants for `run`.
 //!
 //! Grants bound what `run` will inject on this machine (time window, launch
 //! count, per-process duration, credential subset). They are local controls:
@@ -179,7 +179,7 @@ fn grant(ctx: &Ctx, args: GrantArgs) -> Result<()> {
             println!("  Each process is terminated after {secs}s.");
         }
         println!(
-            "\nRun with it:\n  api-tracker run --grant {} -- <command>",
+            "\nRun with it:\n  tethra run --grant {} -- <command>",
             grant.id
         );
         println!(

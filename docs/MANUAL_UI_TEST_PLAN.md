@@ -1,6 +1,17 @@
 # Manual UI Test Plan
 
-A button-by-button manual test plan for the Tethra desktop app (with
+> **Naming note (2026-07-24):** API Tracker was renamed **Tethra** after this
+> plan's baseline (`7d81090`) was verified. When executing against a
+> post-rename build: the window/bundle is **Tethra** / `Tethra.app` /
+> `Tethra.dmg` (inner binary path under `Tethra.app/Contents/MacOS/`), macOS
+> notifications are titled "Tethra", `tethra` is the preferred CLI command
+> (legacy `api-tracker` still works), and `TETHRA_*` env vars are preferred
+> (legacy `API_TRACKER_*` still honored — every procedure below works
+> unchanged). The vault data directory is intentionally still named
+> `api-tracker`. Baseline steps below are intentionally unchanged; see
+> docs/rebrand/TETHRA_MIGRATION_GUIDE.md.
+
+A button-by-button manual test plan for the API Tracker desktop app (with
 the CLI used where a workflow is CLI-only), written for a tester who has
 never seen the code. Verified against `main` commit `7d81090`.
 
@@ -91,14 +102,14 @@ npm run tauri dev          # equivalently: npx tauri dev
 ```
 
 First compile of the Rust backend takes a few minutes; the window titled
-**Tethra** opens when ready.
+**API Tracker** opens when ready.
 
 ### 1.3 Build and run the packaged macOS app
 
 ```bash
 cd apps/desktop
-npx tauri build            # bundles target/release/bundle/macos/Tethra.app + .dmg
-open "../../target/release/bundle/macos/Tethra.app"
+npx tauri build            # bundles target/release/bundle/macos/API Tracker.app + .dmg
+open "../../target/release/bundle/macos/API Tracker.app"
 ```
 
 The alpha bundle is **unsigned**: on a fresh download macOS Gatekeeper will
@@ -106,7 +117,7 @@ warn; right-click → *Open* → *Open* (locally built bundles usually launch
 without the warning). **Note:** the packaged app resolves the vault
 directory from its own environment — launching via `open` uses the default
 data directory (1.5), not your shell's `API_TRACKER_DIR`. Use
-`API_TRACKER_DIR=… "…/Tethra.app/Contents/MacOS/api-tracker-desktop"`
+`API_TRACKER_DIR=… "…/API Tracker.app/Contents/MacOS/api-tracker-desktop"`
 to run a packaged build against an isolated vault.
 
 ### 1.4 Start with a completely clean, isolated test vault
@@ -204,7 +215,7 @@ Exact navigation: —
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values: commands from Part 1.1, 1.2, 1.4
-Expected visible result: a window titled "Tethra" showing the
+Expected visible result: a window titled "API Tracker" showing the
   "Create your vault" screen with the data dir ~/at-manual-test/vault
 Expected persisted result: —
 Expected audit/alert result: —
@@ -1249,7 +1260,7 @@ Exact buttons to click: Run checks now (grant the OS notification
   permission when asked)
 Expected visible result: the muted line "Checks last ran … · last success
   …" updates; if NEW alerts were created this run, a macOS notification
-  titled "Tethra" appears ("… new high-priority alert(s)" from this
+  titled "API Tracker" appears ("… new high-priority alert(s)" from this
   screen; the background timer's variant reads "N new alert(s) — top
   severity: …")
 Expected persisted result: `api-tracker monitor --status` shows the same
@@ -1497,7 +1508,7 @@ Exact navigation: Scan → Check hook status
 Exact buttons to click: Check hook status; Install; Install (force /
   chain); Remove
 Expected visible result: state reports a foreign hook; plain Install
-  REFUSES to overwrite it; Install (force / chain) appends the Tethra
+  REFUSES to overwrite it; Install (force / chain) appends the API Tracker
   block while keeping the custom hook (a clean `git commit --allow-empty
   -m t` prints CUSTOM-HOOK-RAN and succeeds); Remove deletes only the API
   Tracker block — the custom hook file remains and still prints
@@ -2103,7 +2114,7 @@ Expected persisted result: Temporary access → Grants (Include expired,
   Injection sessions (Show sessions, include ended) records the session
   with command + PID, no values
 Expected security behavior: the child received only the mapped variable;
-  Tethra's own env vars are scrubbed from the child
+  API Tracker's own env vars are scrubbed from the child
 Cleanup: —
 Pass/fail: ☐
 ```
