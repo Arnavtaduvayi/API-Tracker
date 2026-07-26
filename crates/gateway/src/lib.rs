@@ -32,6 +32,7 @@ pub mod control;
 pub mod envlink;
 pub mod forward;
 pub mod head;
+pub mod lifecycle;
 pub mod record;
 pub mod routes;
 pub mod server;

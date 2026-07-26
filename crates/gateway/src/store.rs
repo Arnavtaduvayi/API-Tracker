@@ -34,6 +34,14 @@ pub struct GatewayConfig {
 pub const DEFAULT_USAGE_EVENT_RETENTION_DAYS: u32 = 7;
 pub const DEFAULT_USAGE_DAILY_RETENTION_DAYS: u32 = 90;
 
+/// The persisted gateway port, read without a vault through the
+/// schema-checked open. `None` when the database, schema, or config row is
+/// unavailable — callers treat that as "no stable port exists yet".
+pub fn port_hint(data_dir: &std::path::Path) -> Option<u16> {
+    let conn = api_tracker_core::db::open_at_current_version(&data_dir.join("vault.db")).ok()?;
+    load_config(&conn).ok().and_then(|c| c.port)
+}
+
 pub fn load_config(conn: &Connection) -> Result<GatewayConfig> {
     let row = conn
         .query_row(

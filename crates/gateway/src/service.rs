@@ -260,6 +260,25 @@ impl Service {
         self.stop();
     }
 
+    /// Like [`Service::run_until_stopped`], but also returns when
+    /// `extra_stop` fires (checked ~1/s). Reports WHY the loop ended so the
+    /// service wrapper can exit with the right semantics.
+    pub fn run_until_stopped_or(mut self, mut extra_stop: impl FnMut() -> bool) -> ServiceExit {
+        let mut ticks: u32 = 0;
+        loop {
+            if self.is_stopping() {
+                self.stop();
+                return ServiceExit::StopRequested;
+            }
+            ticks = ticks.wrapping_add(1);
+            if ticks % 10 == 0 && extra_stop() {
+                self.stop();
+                return ServiceExit::ExternalCondition;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Stop everything in the order that loses the least: stop accepting,
     /// let in-flight exchanges finish, drain the writer, then remove the
     /// control artifacts.
@@ -289,6 +308,75 @@ impl Drop for Service {
     fn drop(&mut self) {
         if self.writer.is_some() || self.listener_handle.is_some() {
             self.stop();
+        }
+    }
+}
+
+/// Why a service-mode run ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceExit {
+    /// A control-channel shutdown (or signal-equivalent) was requested.
+    StopRequested,
+    /// The external condition fired (service mode: the data directory or
+    /// vault database disappeared — the install was removed underneath us).
+    ExternalCondition,
+}
+
+/// The `--service` wrapper around [`Service::start`] (ADR 0019 D8).
+///
+/// Two behaviors distinguish service mode from a foreground `serve`:
+///
+/// 1. **A bind failure never exits.** Under launchd `KeepAlive` a
+///    fast-exiting process is a crash loop, and under systemd it trips the
+///    start-rate limiter into a permanent failure — so a held port retries
+///    here, in-process, with capped backoff, logging "degraded: port held"
+///    through `log` each round.
+/// 2. **A vanished install exits CLEANLY.** When the data directory or its
+///    `vault.db` disappears (uninstalled underneath the service), the
+///    service exits 0: `KeepAlive={Crashed:true}` and `Restart=on-failure`
+///    both treat a clean exit as terminal, so nothing respawns against a
+///    deleted vault.
+///
+/// `log` receives every lifecycle event line (no secrets ever); the caller
+/// decides where it goes (stdout under launchd redirection, plus the
+/// service log file).
+pub fn run_as_service(data_dir: &Path, port: u16, mut log: impl FnMut(&str)) -> ServiceExit {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        if !data_dir.join("vault.db").exists() {
+            log("data directory or vault.db is gone; exiting cleanly (self-unload)");
+            return ServiceExit::ExternalCondition;
+        }
+        match Service::start(data_dir, port) {
+            Ok(service) => {
+                let bound = service.port();
+                log(&format!("gateway listening on 127.0.0.1:{bound}"));
+                if let Some(why) = service.control_unavailable() {
+                    log(&format!("control channel unavailable: {why}"));
+                }
+                let dir = data_dir.to_path_buf();
+                let exit = service.run_until_stopped_or(move || !dir.join("vault.db").exists());
+                match exit {
+                    ServiceExit::StopRequested => {
+                        log("stop requested; exiting cleanly");
+                        return ServiceExit::StopRequested;
+                    }
+                    ServiceExit::ExternalCondition => {
+                        log("vault.db disappeared; exiting cleanly (self-unload)");
+                        return ServiceExit::ExternalCondition;
+                    }
+                }
+            }
+            Err(e) => {
+                // Most likely the port is held (or another instance is
+                // live). Degrade visibly and retry — never exit (D8).
+                log(&format!(
+                    "degraded: could not start ({e}); retrying in {}s",
+                    backoff.as_secs()
+                ));
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
         }
     }
 }
