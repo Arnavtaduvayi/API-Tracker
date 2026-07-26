@@ -381,7 +381,16 @@ impl WriterThread {
             Ok(conn) => {
                 let day = clock::now_rfc3339();
                 for (route, counter) in counters_batch {
-                    let _ = store::bump_counter(&conn, &route, store::day_of(&day), &counter, 1);
+                    // A per-counter write can still fail after the connection
+                    // opened (a transient SQLite lock — more common on
+                    // Windows, whose file locking is stricter than WAL on
+                    // Unix). Account the loss so "every bump is applied or
+                    // counted as dropped" holds on every platform, not just
+                    // where the write happens never to fail (SI-12).
+                    if store::bump_counter(&conn, &route, store::day_of(&day), &counter, 1).is_err()
+                    {
+                        self.state.dropped_counters.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 for record in records {
                     self.persist_one(&conn, *record);
