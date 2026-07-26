@@ -9,8 +9,10 @@ measurement, or a validation run in this document demonstrates it.
 
 - **Starting commit:** `0e76eed` (end of Phase 2 — "CORE LOCAL GATEWAY
   READY FOR PRODUCTIZATION: YES").
-- **Ending commit:** `c75f574` (this branch tip). Phase 3 range is
-  `0e76eed..c75f574` on `feat/local-gateway`, 15 commits.
+- **Ending commit:** the `feat/local-gateway` tip. Phase 3 range is
+  `0e76eed..HEAD`, 17 commits (15 feature/doc + 2 CI-hygiene: the
+  link/unlink reload fix and the removal of a stray Phase-2 debug probe
+  plus Unix-gating of the control-channel tests).
 - **PR #13 dependency:** merged into `origin/main` (`5efec9b`) before
   Phase 1; `git merge-base HEAD origin/main == origin/main`, so no rebase
   was required and none was performed. No force-push, no history rewrite.
