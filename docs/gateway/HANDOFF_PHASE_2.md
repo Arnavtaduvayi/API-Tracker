@@ -8,8 +8,8 @@ demonstrates it.
 ## Commits
 
 - **Starting commit:** `927cadf` (Phase 1: architecture, ADR 0019, spike).
-- **Ending commit:** see `git rev-parse feat/local-gateway`; the Phase 2
-  range is `927cadf..HEAD` on `feat/local-gateway`.
+- **Ending commit:** `00ec2b9` (`00ec2b9c87a4beb51e413e860e0df0b2a0617a25`). The Phase 2 range is
+  `927cadf..00ec2b9` on `feat/local-gateway`.
 
 | Commit | Stage |
 |---|---|
@@ -19,7 +19,9 @@ demonstrates it.
 | `af46f3b` | Stage C — forwarding engine |
 | `d2d1bbe` | Stages D+E — attribution, usage extraction, adversarial-review fixes |
 | `93c00eb` | Stages F+G — writer, locked-vault operation, control plane |
-| (final) | CLI `gateway` family, honest-degradation fixes, this handoff |
+| `2d25f1b` | CLI `gateway` family, honest-degradation fixes |
+| `00ec2b9` | Final adversarial sweep — all 12 confirmed findings fixed |
+| (this commit) | Handoff commit hashes and final counts |
 
 **PR #13 was already merged into `origin/main` before Phase 1** (main is at
 `5efec9b`, which is the merge of PR #12 and contains PR #13's work). The
