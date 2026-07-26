@@ -101,3 +101,32 @@ fn gateway_src_never_binds_a_non_loopback_listener() {
         }
     }
 }
+
+#[test]
+fn the_test_only_plain_connector_is_never_used_by_production_code() {
+    // `InsecurePlainConnectorForTests` exists so the exchange engine can be
+    // exercised against synthetic loopback upstreams. Production forwarding
+    // must always go through `TlsConnector` (two-phase SSRF + verified TLS),
+    // so no module other than its own definition may name it.
+    for file in src_files() {
+        let name = file.file_name().unwrap().to_string_lossy().to_string();
+        if name == "upstream.rs" {
+            continue; // the definition itself
+        }
+        let code = code_only(&fs::read_to_string(&file).unwrap());
+        assert!(
+            !code.contains("InsecurePlainConnectorForTests"),
+            "the test-only plain connector must never be referenced by {} \
+             — production upstreams are always TLS (SI-5)",
+            file.display()
+        );
+    }
+    // And the default a running gateway gets is the TLS connector.
+    let forward =
+        fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/forward.rs"))
+            .unwrap();
+    assert!(
+        forward.contains("connector: Arc::new(TlsConnector)"),
+        "Gateway::new must default to the verified-TLS connector"
+    );
+}

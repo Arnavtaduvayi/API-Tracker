@@ -405,6 +405,22 @@ impl RouteTable {
     pub fn iter_routes(&self) -> impl Iterator<Item = &Route> {
         self.routes.values()
     }
+
+    /// Insert a pre-built route. Exposed for tests ONLY so integration tests
+    /// can point routes at synthetic loopback upstreams: `load_route_table`
+    /// refuses loopback origins (SSRF policy), which is exactly the behavior
+    /// the production path must keep, so tests construct the snapshot
+    /// directly rather than weakening the policy for everyone.
+    #[doc(hidden)]
+    pub fn insert_for_test(&mut self, route: Route) {
+        self.routes.insert(route.prefix.clone(), route);
+    }
+
+    /// Insert a pre-built project link. Tests only, same rationale.
+    #[doc(hidden)]
+    pub fn insert_link_for_test(&mut self, link: LinkInfo) {
+        self.links.insert(link.link_slug.clone(), link);
+    }
 }
 
 /// Load and validate a route snapshot. `mac_key` is the vault-derived route
@@ -598,6 +614,20 @@ pub struct RouteState {
 }
 
 impl RouteState {
+    /// A state holding a fixed snapshot with no database behind it. Tests
+    /// only: production always loads through `db::open_at_current_version`.
+    #[doc(hidden)]
+    pub fn from_table_for_test(table: RouteTable) -> Self {
+        Self {
+            db_path: PathBuf::from("/nonexistent/tethra-test-vault.db"),
+            mac_key: Mutex::new(None),
+            table: RwLock::new(Arc::new(table)),
+            poll_conn: Mutex::new(None),
+            last_data_version: AtomicI64::new(-1),
+            degraded: AtomicBool::new(false),
+        }
+    }
+
     /// Create the state and attempt an initial load. A failed initial load
     /// (no DB yet, locked vault, schema drift) yields an EMPTY last-known-
     /// good table and the degraded flag — the listener still serves (404s).

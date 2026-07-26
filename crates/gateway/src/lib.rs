@@ -27,5 +27,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod forward;
+pub mod head;
+pub mod record;
 pub mod routes;
+pub mod server;
 pub mod store;
+pub mod upstream;
