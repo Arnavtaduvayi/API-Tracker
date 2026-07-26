@@ -80,7 +80,7 @@ const CHILD_REAP_TRIES: usize = 8;
 /// Why an active observed run is being torn down by the lock watch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockSignal {
-    /// The session file was deleted — `api-tracker lock` (manual lock).
+    /// The session file was deleted — `tethra lock` (manual lock).
     Manual,
     /// The auto-lock deadline / session-file expiry passed (auto-lock / idle).
     Auto,

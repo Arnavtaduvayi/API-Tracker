@@ -269,7 +269,7 @@ fn inactive_apis(
 ) -> Result<()> {
     // Only declare individual hosts inactive if observation was actually
     // running during the quiet window: if NO traffic to ANY host was recorded in
-    // the window, the user simply was not running `api-tracker run --observe`,
+    // the window, the user simply was not running `tethra run --observe`,
     // and flagging every established host as "now quiet" is noise, not signal.
     let observed_recently: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM runtime_request_events WHERE at >= ?1)",

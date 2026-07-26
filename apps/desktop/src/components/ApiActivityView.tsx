@@ -1,7 +1,7 @@
 // API activity — the runtime observability experience. Metadata only: this
 // screen never shows request/response bodies, headers, cookies, query strings,
 // or secrets, because none are ever stored. Monitored runs are launched from
-// the CLI (`api-tracker run --observe -- <command>`); this screen inspects the
+// the CLI (`tethra run --observe -- <command>`); this screen inspects the
 // resulting data and manages the local certificate + settings.
 
 import { useCallback, useEffect, useState } from "react";
@@ -203,7 +203,7 @@ function Overview({ onError }: { onError: (s: string) => void }) {
     return (
       <p className="muted">
         No API traffic observed yet. Launch a monitored run:{" "}
-        <span className="mono">api-tracker run --observe -- &lt;command&gt;</span>
+        <span className="mono">tethra run --observe -- &lt;command&gt;</span>
       </p>
     );
   }
@@ -518,7 +518,7 @@ function Settings({
         </select>
         <small>
           Note: this preference is stored but not yet consumed automatically. The desktop app
-          does not launch monitored runs, and <code>api-tracker run</code> observes only when{" "}
+          does not launch monitored runs, and <code>tethra run</code> observes only when{" "}
           <code>--observe</code> is passed explicitly. Pass{" "}
           <code>--observe=connection|metadata</code> per run.
         </small>

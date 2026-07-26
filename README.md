@@ -165,6 +165,16 @@ Implemented and tested today:
   HTTP (ETag/Last-Modified) + content hashing detect changes and raise an
   alert. Requests go directly from your device; only validators, a hash, and
   timestamps are stored — never the page content.
+- **Runtime API observability (opt-in, metadata only)** — `tethra run
+  --observe -- <command>` monitors one launched process through a
+  loopback-only, token-authenticated proxy and records **sanitized metadata
+  only**: host, templated path, method, status, latency, and byte counts.
+  Request/response bodies, header values, cookies, authorization values, and
+  query strings are never stored. `tethra observe` shows the automatic API
+  inventory, per-session detail, and credential attribution; the desktop
+  **API activity** screen inspects the same data. Locking the vault stops an
+  active run. See
+  [docs/RUNTIME_OBSERVABILITY.md](docs/RUNTIME_OBSERVABILITY.md).
 - **Desktop app and CLI share one vault** — both are thin frontends over the
   same Rust core crate and the same SQLite database.
 - **Auto-lock** — configurable inactivity lock for the desktop app and CLI

@@ -31,6 +31,29 @@ migration occurs and nothing existing breaks. Details in
   service/account defaults, webhook `source` field, and hook sentinels —
   existing vaults, backups, hooks, and scripts work unchanged.
 
+### Added — runtime API observability (opt-in, metadata only)
+`tethra run --observe -- <command>` observes one launched process's API
+traffic through a loopback-only, per-session-token-authenticated proxy and
+stores **sanitized metadata only** — never bodies, header values, cookies,
+authorization values, or query strings. Full documentation in
+`docs/RUNTIME_OBSERVABILITY.md` and ADR `docs/decisions/0017-runtime-observability.md`.
+- Two modes: `--observe=connection` (records connections, never decrypts
+  HTTPS) and `--observe=metadata` (terminates TLS for that child only, using
+  a per-vault local CA whose private key is encrypted under the vault key).
+  Upstream provider certificates are always fully verified; no code path can
+  disable verification, and a source-level test enforces that.
+- `tethra observe` — automatic API inventory, per-session metrics, sanitized
+  recent events, credential attribution, compatibility notes, local CA
+  management (`cert status|rotate|remove|install|uninstall`), retention
+  settings, internal-destination allowlist, and diagnostics. The desktop
+  **API activity** screen inspects the same data.
+- Locking the vault (`tethra lock`) or an auto-lock timeout stops an active
+  observed run: the proxy shuts down before anything else, the monitored
+  child is terminated through the identity-verified path, and the session is
+  recorded `interrupted` with an honest reason (exit code 125).
+- Schema migrations v11–v12 add the observation tables. Existing vaults
+  upgrade in place; no data-format change to credentials or backups.
+
 ### Security — release-blocker remediation
 Fixes for the confirmed release blockers from the deep technical audit
 (baseline `7d81090`). Each ships with a regression test that fails at

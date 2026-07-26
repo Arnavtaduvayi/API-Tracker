@@ -498,53 +498,53 @@ Require reauthentication before:
 
 Create a CLI named `tethra` (after the rename from API Tracker, the legacy
 `api-tracker` command name is kept as a compatibility alias for the same
-binary; the examples below predate the rename and work under either name).
+binary, so every example below also works under that name).
 
 The CLI must use the same core crates and local database as the desktop application.
 
 Support commands similar to:
 
 ```bash
-api-tracker init
-api-tracker unlock
-api-tracker lock
-api-tracker doctor
+tethra init
+tethra unlock
+tethra lock
+tethra doctor
 
-api-tracker project create
-api-tracker project list
-api-tracker project show <project>
-api-tracker project lock <project>
-api-tracker project unlock <project>
-api-tracker project archive <project>
+tethra project create
+tethra project list
+tethra project show <project>
+tethra project lock <project>
+tethra project unlock <project>
+tethra project archive <project>
 
-api-tracker key add --project <project>
-api-tracker key list --project <project>
-api-tracker key show <credential>
-api-tracker key validate <credential>
-api-tracker key status <credential>
-api-tracker key reveal <credential>
-api-tracker key remove <credential>
+tethra key add --project <project>
+tethra key list --project <project>
+tethra key show <credential>
+tethra key validate <credential>
+tethra key status <credential>
+tethra key reveal <credential>
+tethra key remove <credential>
 
-api-tracker provider list
-api-tracker provider show <provider>
-api-tracker provider docs <provider>
-api-tracker provider check-docs <provider>
-api-tracker provider sync <provider>
+tethra provider list
+tethra provider show <provider>
+tethra provider docs <provider>
+tethra provider check-docs <provider>
+tethra provider sync <provider>
 
-api-tracker usage sync
-api-tracker usage report
-api-tracker alerts list
+tethra usage sync
+tethra usage report
+tethra alerts list
 
-api-tracker scan <path>
-api-tracker scan --history <path>
-api-tracker hooks install <path>
-api-tracker hooks remove <path>
+tethra scan <path>
+tethra scan --history <path>
+tethra hooks install <path>
+tethra hooks remove <path>
 ```
 
 Add a secure process-injection command if the core architecture allows it safely:
 
 ```bash
-api-tracker run --project <project> -- <command>
+tethra run --project <project> -- <command>
 ```
 
 This command should:

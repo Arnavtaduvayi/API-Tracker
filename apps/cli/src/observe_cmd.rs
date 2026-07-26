@@ -1,4 +1,4 @@
-//! `api-tracker observe` — inspect and manage runtime API observability.
+//! `tethra observe` — inspect and manage runtime API observability.
 
 use crate::ctx::Ctx;
 use crate::render;
@@ -178,7 +178,7 @@ fn overview(ctx: &Ctx, vault: &UnlockedVault) -> Result<()> {
     }
     render::emit(ctx.json, &services, || {
         if services.is_empty() {
-            println!("No API traffic observed yet. Run `api-tracker run --observe -- <command>`.");
+            println!("No API traffic observed yet. Run `tethra run --observe -- <command>`.");
         } else {
             render::table(&["API", "PROVIDER", "REQUESTS", "ERROR RATE", "p95"], &rows);
             println!("\nMetadata only — endpoint paths are sanitized; no bodies, headers, or query strings are stored.");
