@@ -14,8 +14,8 @@ for user-facing behavior.
 | Native notification title | API Tracker | **Tethra** | — |
 | DMG / volume name | API Tracker | **Tethra** | tauri `productName` drives both |
 | Bundle identifier | `dev.api-tracker.desktop` | **preserved** | keeps notification permission, saved state, upgrade-in-place |
-| CLI commands | `api-tracker` | **`tethra` preferred; `api-tracker` kept** | two `[[bin]]` targets, same source; identical behavior and machine output; clap usage line follows the invoked name |
-| CLI help/version branding | api-tracker | `tethra` (preferred binary) / `api-tracker` (legacy binary, argv0-derived) | old parsers of `api-tracker --version` unaffected |
+| CLI commands | `api-tracker` | **`tethra` preferred; `api-tracker` kept** | two `[[bin]]` targets over one `run_cli()` library; identical behavior and machine output; help usage line follows the invoked name |
+| CLI help/version branding | api-tracker | argv0-derived: `tethra` from the preferred binary, `api-tracker` from the legacy one (help **and** version) | `api-tracker --version` still prints `api-tracker <version>`, so old parsers are unaffected; an unrecognized argv[0] falls back to `tethra` and is never echoed |
 | Env vars | `API_TRACKER_*` | **`TETHRA_*` preferred; legacy honored** | preferred wins when both set; DIR conflict warns on stderr and uses `TETHRA_DIR`; both prefixes scrubbed from `run` children (allowlist: `*_DIR`, `*_INSECURE_FAST_KDF`) |
 | `unlock --print-export` | one legacy line | **two lines: legacy first, then `TETHRA_SESSION`** | old line-parsers and `eval` both keep working; a stale session var falls back to a set password var instead of wedging |
 | Data directory | `…/api-tracker/` | **preserved** | existing vaults found unchanged; no migration, no new dir |
@@ -43,12 +43,14 @@ for user-facing behavior.
 
 ## Test coverage for this matrix
 
-- `apps/cli/tests/tethra_compat.rs` — 13 tests: both binaries on one vault
+- `apps/cli/tests/tethra_compat.rs` — 15 tests: both binaries on one vault
   (both directions), wrong password under both flavors, env precedence
   (preferred wins, legacy fallback, empty-preferred authoritative), DIR
   conflict warning + no-warning case, dual export lines + both session vars,
-  argv0 help naming, dual-prefix child scrub, stale-session password
-  fallback (with wrong-password and no-password negative cases).
+  argv0 help naming, argv0 **version** naming (each command reports its own
+  name) plus the unrecognized-argv0 fallback, dual-prefix child scrub,
+  stale-session password fallback (with wrong-password and no-password
+  negative cases).
 - `crates/core/src/inject.rs` unit tests — dual-prefix scrub semantics on
   Unix (case-sensitive) and Windows (case-insensitive), allowlists.
 - `crates/core/src/envcompat.rs` unit tests — pair resolution rules.

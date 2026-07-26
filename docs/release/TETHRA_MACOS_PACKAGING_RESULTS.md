@@ -1,5 +1,12 @@
 # Tethra macOS Packaging Results — Private Alpha
 
+> **Superseded build (2026-07-25):** these results record commit
+> `0972f20`. The branch has since integrated `main` (PR #13, runtime API
+> observability) and extended the rebrand over it, so the artifacts, sizes,
+> and SHA-256 values below no longer correspond to the branch head. They
+> remain the accurate record of what was built and verified on `0972f20`;
+> **regenerate the package and re-run this verification before releasing.**
+
 ## Build provenance
 
 - **Source commit (packaged):** `0972f20cc76d9682c3473538c23e875564830ffb`

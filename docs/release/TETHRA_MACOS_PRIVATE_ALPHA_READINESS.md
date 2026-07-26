@@ -5,6 +5,12 @@
 > test document referenced below predates the rename and uses the historical
 > name; those documents are accurate for the baselines they describe and are
 > deliberately not rewritten. See `docs/rebrand/TETHRA_REBRAND_PLAN.md`.
+>
+> **Scope update (2026-07-25):** this inventory was compiled before the
+> branch integrated `main` (PR #13, runtime API observability). That feature
+> is now part of the branch and is NOT covered by the readiness evidence
+> below; it carries its own audit trail in `docs/observability/audit/`.
+> Re-package and re-verify before releasing.
 
 - **Date:** 2026-07-24
 - **Branch:** `release/tethra-macos-private-alpha`

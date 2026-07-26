@@ -25,9 +25,13 @@ working unchanged.
   bit-compatible in both directions.
 - **Backups:** old backups restore in Tethra; backups created by Tethra
   restore in old API Tracker builds (same format marker and version rules).
-- **The `api-tracker` command:** still installed, byte-for-byte the same
-  program as `tethra`. Existing scripts and automation keep working with no
-  deprecation banner and unchanged machine-readable output.
+- **The `api-tracker` command:** still installed, running the exact same
+  program as `tethra` (both entry points are one-line wrappers over the same
+  library). Existing scripts and automation keep working with no deprecation
+  banner and unchanged machine-readable output. The one difference you can
+  observe is that each command names itself: `api-tracker --version` prints
+  `api-tracker 0.1.0` and its usage line says `api-tracker`, while `tethra`
+  reports `tethra` — so version/usage parsers on either name keep matching.
 - **Installed git hooks:** hooks installed by old builds keep running and
   are still recognized by `tethra hooks status` / `remove`. Newly installed
   hooks prefer `tethra` and fall back to `api-tracker` automatically.

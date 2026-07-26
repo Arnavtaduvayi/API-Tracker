@@ -26,9 +26,9 @@ tempfile = "3.27.0"
 name = "tethra"
 path = "src/main.rs"
 
-# Legacy compatibility entry point: byte-for-byte the same program, kept so
-# existing scripts, git hooks, and automation keep working. See
-# docs/rebrand/TETHRA_MIGRATION_GUIDE.md.
+# Legacy compatibility entry point: built from the same sources (see
+# src/legacy_bin.rs), kept so existing scripts, git hooks, and automation
+# keep working. See docs/rebrand/TETHRA_MIGRATION_GUIDE.md.
 [[bin]]
 name = "api-tracker"
-path = "src/main.rs"
+path = "src/legacy_bin.rs"

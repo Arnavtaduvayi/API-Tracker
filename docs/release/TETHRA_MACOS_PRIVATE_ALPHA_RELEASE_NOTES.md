@@ -8,6 +8,10 @@
 - Platform: macOS, Apple Silicon (arm64) only in this build.
 - Exact source commit, checksums, and verification results:
   `docs/release/TETHRA_MACOS_PACKAGING_RESULTS.md`.
+- **Not yet re-packaged (2026-07-25):** the branch has since gained runtime
+  API observability (PR #13) and the rebrand extension over it. These notes
+  and the referenced checksums describe the earlier `0972f20` build; a new
+  package and a fresh verification run are required before release.
 
 ## What this release is
 

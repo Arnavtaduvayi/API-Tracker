@@ -15,7 +15,10 @@ migration occurs and nothing existing breaks. Details in
   native notification titles now say Tethra; the macOS bundle identifier is
   unchanged so macOS treats this as an upgrade of the same app.
 - New preferred CLI command `tethra`; `api-tracker` remains installed as a
-  byte-identical compatibility binary with unchanged output.
+  compatibility binary running the identical program (both entry points wrap
+  the same library) with unchanged machine-readable output. Each command
+  names itself in `--help` / `--version`, so parsers keyed on either name
+  keep matching.
 - New preferred `TETHRA_*` environment variables for the whole set
   (`TETHRA_DIR`, `TETHRA_PASSWORD`, `TETHRA_SESSION`, …); legacy
   `API_TRACKER_*` names keep working. When both are set the `TETHRA_*`

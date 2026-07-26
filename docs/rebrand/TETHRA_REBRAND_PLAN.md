@@ -79,10 +79,15 @@ Tethra. Revisit alongside a future signed release.
 
 ## CLI strategy (§7.3)
 
-`apps/cli/Cargo.toml` gains a second `[[bin]] name = "tethra"` built from the
-same `src/main.rs`, so `tethra` and `api-tracker` are byte-for-byte the same
-program. The clap command name becomes `tethra` (help/usage shows the
-preferred name from either binary). No per-invocation deprecation banner is
+`apps/cli/Cargo.toml` gains a second `[[bin]] name = "tethra"`. The program
+itself moved to `apps/cli/src/lib.rs`; both entry points (`src/main.rs` for
+`tethra`, `src/legacy_bin.rs` for `api-tracker`) are one-line wrappers over
+`run_cli()`, so the two commands run identical code and cannot drift apart.
+(Pointing two `[[bin]]` targets at one source file also works but makes cargo
+warn on every build.) Help and version branding is derived from argv[0]
+against a fixed allowlist of the two shipped names — each command reports
+itself, and an unrecognized argv[0] falls back to `tethra` rather than being
+echoed into rendered output. No per-invocation deprecation banner is
 emitted — machine-readable output (`--json`, `--print-export`) is unchanged
 except that `--print-export` additionally prints the `TETHRA_SESSION` export
 line after the legacy line. Docs and in-app hints reference `tethra`;

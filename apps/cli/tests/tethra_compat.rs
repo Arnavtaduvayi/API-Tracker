@@ -288,6 +288,49 @@ fn help_usage_matches_the_invoked_binary_name() {
 }
 
 #[test]
+fn version_line_matches_the_invoked_binary_name() {
+    // Regression: the version line comes from clap's command NAME, not the
+    // argv[0]-derived bin_name, so a single hardcoded name made
+    // `api-tracker --version` print "tethra 0.1.0" — silently breaking any
+    // script that matches the product name, while the compatibility matrix
+    // promised such parsers were unaffected. Each entry point must report
+    // itself.
+    for bin in ["tethra", "api-tracker"] {
+        let mut cmd = Command::cargo_bin(bin).unwrap();
+        cmd.env_clear();
+        cmd.arg("--version")
+            .assert()
+            .success()
+            .stdout(predicate::str::starts_with(format!("{bin} ")));
+    }
+}
+
+#[test]
+fn an_unrecognized_argv0_falls_back_to_the_product_name() {
+    // argv[0] is caller-controlled (a symlink, or `exec -a`), and it reaches
+    // rendered help/version text. Only the two shipped names are honored;
+    // anything else — including a name carrying terminal escapes — must fall
+    // back to "tethra" rather than being echoed back.
+    let src = assert_cmd::cargo::cargo_bin("tethra");
+    let dir = TempDir::new().unwrap();
+    let copy = dir.path().join("\u{1b}[31mspoofed");
+    std::fs::copy(&src, &copy).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut cmd = Command::new(&copy);
+    cmd.env_clear();
+    cmd.arg("--version")
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("tethra "))
+        .stdout(predicate::str::contains("\u{1b}[").not());
+}
+
+#[test]
 fn run_scrubs_both_prefixes_from_children() {
     // `tethra run` must scrub TETHRA_* and API_TRACKER_* secrets from the
     // child while keeping the child-safe *_DIR / *_INSECURE_FAST_KDF pairs.
