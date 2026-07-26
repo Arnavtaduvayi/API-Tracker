@@ -339,16 +339,26 @@ fn route_state_polls_changes_and_keeps_last_known_good() {
 
     // Database vanishes (vault deleted / replaced): forwarding must keep the
     // last-known-good snapshot and flag degraded.
-    drop(conn);
-    std::fs::remove_file(&db_path).unwrap();
-    std::fs::remove_file(dir.path().join("vault.db-wal")).ok();
-    std::fs::remove_file(dir.path().join("vault.db-shm")).ok();
-    state.reload();
-    assert!(state.degraded());
-    assert!(
-        state.table().route("openai").is_some(),
-        "last-known-good table must survive DB loss"
-    );
+    //
+    // Unix-only: `RouteState` holds a live poll connection to the DB, and
+    // only Unix lets you unlink a file another handle still has open (the
+    // inode survives for that handle). Windows refuses to delete an open
+    // file (error 32), so the "vault deleted underneath a running gateway"
+    // scenario cannot even be constructed there — a different, benign OS
+    // behavior, not a gap in the last-known-good logic.
+    #[cfg(unix)]
+    {
+        drop(conn);
+        std::fs::remove_file(&db_path).unwrap();
+        std::fs::remove_file(dir.path().join("vault.db-wal")).ok();
+        std::fs::remove_file(dir.path().join("vault.db-shm")).ok();
+        state.reload();
+        assert!(state.degraded());
+        assert!(
+            state.table().route("openai").is_some(),
+            "last-known-good table must survive DB loss"
+        );
+    }
 }
 
 #[test]
