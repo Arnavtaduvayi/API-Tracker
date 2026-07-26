@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = "1.0.103"
 api-tracker-core = { version = "0.1.0", path = "../../crates/core" }
+api-tracker-gateway = { version = "0.1.0", path = "../../crates/gateway" }
 api-tracker-observe = { version = "0.1.0", path = "../../crates/observe" }
 clap = { version = "4.6.2", features = ["derive"] }
 rpassword = "7.5.4"

@@ -381,12 +381,28 @@ mod unix_impl {
 
     impl ControlServer {
         /// Bind the control socket 0600 inside the data directory.
+        /// The platform limit on a Unix-socket path (`sun_path`): 104 bytes
+        /// on macOS/BSD, 108 on Linux. Exceeding it fails deep inside bind
+        /// with an opaque message, so it is checked up front.
+        const MAX_SOCKET_PATH: usize = 100;
+
         pub fn start(
             data_dir: &Path,
             nonce: String,
             target: Arc<dyn ControlTarget>,
         ) -> Result<Self> {
             let path = data_dir.join(SOCKET_NAME);
+            if path.as_os_str().len() > Self::MAX_SOCKET_PATH {
+                return Err(CoreError::InvalidInput(format!(
+                    "the control socket path is {} bytes, past this platform's ~{}-byte \
+                     limit for Unix sockets ({}). Use a shorter data directory (TETHRA_DIR) \
+                     to enable credential attribution and status; forwarding and recording \
+                     work without it.",
+                    path.as_os_str().len(),
+                    Self::MAX_SOCKET_PATH,
+                    path.display()
+                )));
+            }
             // Refuse to bind over a symlink: a same-uid attacker who plants
             // one could otherwise redirect the socket somewhere world-
             // reachable.

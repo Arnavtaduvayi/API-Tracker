@@ -21,6 +21,9 @@ use crate::writer::{Writer, WriterState};
 
 /// How often the running gateway re-checks the route table for changes.
 pub const ROUTE_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often background loops check whether a stop was requested. Small
+/// enough that `tethra gateway stop` feels immediate.
+const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
 /// A fully assembled, running gateway.
 pub struct Service {
@@ -31,6 +34,7 @@ pub struct Service {
     control: Option<ControlServer>,
     data_dir: PathBuf,
     started: Instant,
+    control_error: Option<String>,
     listener_handle: Option<std::thread::JoinHandle<()>>,
     poller_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -142,12 +146,17 @@ impl Service {
             db_path: db_path.clone(),
             started: Instant::now(),
         };
-        let control = ControlServer::start(
+        // A control channel that cannot start is a REAL degradation (no
+        // status, no attribution, no graceful stop), so the reason is kept
+        // and surfaced rather than swallowed.
+        let (control, control_error) = match ControlServer::start(
             data_dir,
             boot_id.to_string(),
             Arc::new(control_target) as Arc<dyn ControlTarget>,
-        )
-        .ok();
+        ) {
+            Ok(server) => (Some(server), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
 
         let serve_gw = gateway.clone();
         let taps = server::usage_tap_factory();
@@ -165,7 +174,14 @@ impl Service {
             .spawn(move || {
                 while !poll_gw.shutdown.load(Ordering::Relaxed) {
                     poll_routes.reload_if_changed();
-                    std::thread::sleep(ROUTE_POLL_INTERVAL);
+                    // Sleep in small slices so a stop is observed promptly:
+                    // sleeping the whole poll interval would make shutdown
+                    // wait up to ROUTE_POLL_INTERVAL for no reason.
+                    let mut slept = Duration::ZERO;
+                    while slept < ROUTE_POLL_INTERVAL && !poll_gw.shutdown.load(Ordering::Relaxed) {
+                        std::thread::sleep(SHUTDOWN_CHECK_INTERVAL);
+                        slept += SHUTDOWN_CHECK_INTERVAL;
+                    }
                 }
             })
             .ok();
@@ -178,6 +194,7 @@ impl Service {
             control,
             data_dir: data_dir.to_path_buf(),
             started: Instant::now(),
+            control_error,
             listener_handle,
             poller_handle,
         })
@@ -197,6 +214,13 @@ impl Service {
 
     pub fn writer_state(&self) -> &Arc<WriterState> {
         &self.writer_state
+    }
+
+    /// Why the control channel is unavailable, when it is. `None` means it
+    /// is running. Callers MUST surface this: without it there is no status,
+    /// no attribution, and no graceful stop.
+    pub fn control_unavailable(&self) -> Option<&str> {
+        self.control_error.as_deref()
     }
 
     /// How long this gateway has been up.

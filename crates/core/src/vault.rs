@@ -536,6 +536,23 @@ impl UnlockedVault {
         Ok(())
     }
 
+    /// The credential-matching fingerprint key, for the Local Gateway's
+    /// keyed-fingerprint attribution (ADR 0019 D5).
+    ///
+    /// This is the ADR 0005 matching key: it can produce and compare
+    /// fingerprints and can NEVER decrypt anything. Handing it out is still
+    /// a consented, disclosed weakening — while it is resident in a
+    /// long-lived process, an attacker with both memory and database access
+    /// gains an offline guess-confirmation oracle over in-scope
+    /// fingerprints — so it is reauth-gated and audited, exactly like
+    /// revealing a credential. The caller pushes it over the authenticated
+    /// local control channel and nowhere else (SI-21).
+    pub fn gateway_matching_key(&self, master_password: &SecretString) -> Result<SecretBytes> {
+        self.verify_master_password(master_password)?;
+        audit::record(&self.conn, "gateway_matching_key_pushed", None, None, "")?;
+        Ok(SecretBytes::new(self.fingerprint_key.expose().to_vec()))
+    }
+
     /// The gateway route-MAC key (ADR 0019 D3), created on first use and
     /// stored vault-key-wrapped in `vault_meta` — the exact fingerprint-key
     /// pattern. It authenticates custom-origin gateway routes (a keyed MAC
