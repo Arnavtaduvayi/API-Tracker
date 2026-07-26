@@ -57,6 +57,13 @@ import type {
   Project,
   ProviderConnection,
   ProviderKeyListing,
+  GatewayDisableReport,
+  GatewayDoctor,
+  GatewayInstallReport,
+  GatewayLinkPlan,
+  GatewayRouteList,
+  GatewayUninstallReport,
+  GatewayUnlinkReport,
   ProviderKeyOverview,
   ProviderManifest,
   ProviderProjectOverview,
@@ -536,4 +543,47 @@ export const api = {
     call<void>("observe_allowlist_add", { project, host, port, note }),
   observeAllowlistRemove: (project: string, host: string, port: number) =>
     call<boolean>("observe_allowlist_remove", { project, host, port }),
+
+  // --- Local Gateway (ADR 0019, Phase 3) ---
+  // Doctor/status/start/stop/restart are lock-free on the backend so the
+  // lock screen's status strip keeps working; route/link mutations and
+  // install/disable/uninstall require the unlocked vault.
+  gatewayDoctor: () => call<GatewayDoctor>("gateway_doctor"),
+  gatewayLocateCli: () => call<string | null>("gateway_locate_cli"),
+  gatewayInstall: (force: boolean) => call<GatewayInstallReport>("gateway_install", { force }),
+  gatewayDisable: (keepEnv: boolean) =>
+    call<GatewayDisableReport>("gateway_disable", { keepEnv }),
+  gatewayUninstall: (keepEnv: boolean) =>
+    call<GatewayUninstallReport>("gateway_uninstall", { keepEnv }),
+  gatewayStart: () => call<void>("gateway_start"),
+  gatewayStop: () => call<void>("gateway_stop"),
+  gatewayRestart: () => call<void>("gateway_restart"),
+  gatewayRepair: () => call<GatewayInstallReport>("gateway_repair"),
+  gatewayRouteList: () => call<GatewayRouteList>("gateway_route_list"),
+  gatewayRouteAdd: (provider: string, prefix: string | null, origin: string | null) =>
+    call<void>("gateway_route_add", { provider, prefix, origin }),
+  gatewayRouteRemove: (prefix: string) => call<boolean>("gateway_route_remove", { prefix }),
+  gatewayRouteSetEnabled: (prefix: string, enabled: boolean) =>
+    call<boolean>("gateway_route_set_enabled", { prefix, enabled }),
+  gatewayLinkPlan: (args: {
+    project: string;
+    route: string;
+    envFiles: string[];
+    dir: string | null;
+    var: string | null;
+  }) => call<GatewayLinkPlan>("gateway_link_plan", { ...args }),
+  gatewayLinkApply: (args: {
+    project: string;
+    route: string;
+    envFiles: string[];
+    dir: string | null;
+    var: string | null;
+    slug: string;
+    digest: string;
+  }) => call<void>("gateway_link_apply", { ...args }),
+  gatewayUnlink: (project: string, route: string) =>
+    call<GatewayUnlinkReport>("gateway_unlink", { project, route }),
+  gatewayPushKey: (password: string) => call<void>("gateway_push_key", { password }),
+  gatewayRevokeKey: () => call<void>("gateway_revoke_key"),
+  gatewayRecording: (pause: boolean) => call<void>("gateway_recording", { pause }),
 };

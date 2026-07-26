@@ -171,6 +171,7 @@ name = "api-tracker-desktop"
 version = "0.1.0"
 dependencies = [
  "api-tracker-core",
+ "api-tracker-gateway",
  "api-tracker-observe",
  "arboard",
  "serde",
