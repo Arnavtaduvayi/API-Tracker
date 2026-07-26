@@ -1,4 +1,4 @@
-//! `api-tracker pricing` — inspect and maintain the versioned pricing
+//! `tethra pricing` — inspect and maintain the versioned pricing
 //! dataset used for local cost ESTIMATES (always labeled, always separate
 //! from provider-reported cost).
 //!
@@ -336,7 +336,7 @@ fn propose(ctx: &Ctx, a: ProposeArgs) -> Result<()> {
             println!(
                 "Wrote a proposed-update template to {path}.\nReview each price against \
                  the provider's published pricing page, edit the file, then run:\n  \
-                 api-tracker pricing import {path}\nNothing changes until you import it.",
+                 tethra pricing import {path}\nNothing changes until you import it.",
             );
         }
     }

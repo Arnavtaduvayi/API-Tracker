@@ -1,11 +1,13 @@
 # Destination Support Matrix
 
-A **destination** is a place API Tracker can *deploy* a credential value to,
+A **destination** is a place Tethra can *deploy* a credential value to,
 separate from the provider that *issues* it (see ADR 0012). Each kind reports
-an honest capability matrix; run `api-tracker destination kinds` for the live,
+an honest capability matrix; run `tethra destination kinds` for the live,
 per-kind status generated from the code — including, per kind, the
 verification method, required plan, possible charges, and testing status.
-Nothing is claimed that is not implemented.
+Nothing is claimed that is not implemented. The legacy `api-tracker` command
+remains available as a compatibility alias for the same program — see
+[rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md).
 
 Legend:
 - **yes** — implemented and covered by fixture tests.
@@ -48,7 +50,7 @@ return the value, e.g. AWS and the OS stores).
 
 ## Deleting a secret at a destination
 
-`api-tracker destination delete-secret <destination> <name>` (also in the
+`tethra destination delete-secret <destination> <name>` (also in the
 desktop Destinations screen) deletes the secret **at the destination**
 after confirmation and master-password reauthentication. The value in the
 local vault is never touched. AWS deletions are scheduled (see above);

@@ -1,5 +1,16 @@
 # Manual UI Test Plan
 
+> **Naming note (2026-07-24):** API Tracker was renamed **Tethra** after this
+> plan's baseline (`7d81090`) was verified. When executing against a
+> post-rename build: the window/bundle is **Tethra** / `Tethra.app` /
+> `Tethra.dmg` (inner binary path under `Tethra.app/Contents/MacOS/`), macOS
+> notifications are titled "Tethra", `tethra` is the preferred CLI command
+> (legacy `api-tracker` still works), and `TETHRA_*` env vars are preferred
+> (legacy `API_TRACKER_*` still honored — every procedure below works
+> unchanged). The vault data directory is intentionally still named
+> `api-tracker`. Baseline steps below are intentionally unchanged; see
+> docs/rebrand/TETHRA_MIGRATION_GUIDE.md.
+
 A button-by-button manual test plan for the API Tracker desktop app (with
 the CLI used where a workflow is CLI-only), written for a tester who has
 never seen the code. Verified against `main` commit `7d81090`.

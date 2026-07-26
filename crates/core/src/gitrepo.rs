@@ -51,10 +51,11 @@ pub struct GitLimits {
 }
 
 /// Debug-build-only numeric override so deterministic tests can drive the
-/// limits down without waiting minutes; ignored by release builds.
-fn env_limit(name: &str, default: u64) -> u64 {
+/// limits down without waiting minutes; ignored by release builds. `suffix`
+/// resolves through the `TETHRA_*`/`API_TRACKER_*` pair.
+fn env_limit(suffix: &str, default: u64) -> u64 {
     if cfg!(debug_assertions) {
-        if let Ok(v) = std::env::var(name) {
+        if let Some(Ok(v)) = crate::envcompat::var(suffix) {
             if let Ok(n) = v.parse() {
                 return n;
             }
@@ -66,11 +67,11 @@ fn env_limit(name: &str, default: u64) -> u64 {
 impl GitLimits {
     /// Limits for ordinary short git commands (rev-parse, diff --name-only,
     /// cat-file, show, config). Generous but finite: a hung git (dead
-    /// network mount, wedged lock) must not hang API Tracker forever.
+    /// network mount, wedged lock) must not hang Tethra forever.
     pub fn command() -> Self {
         GitLimits {
-            timeout: Duration::from_millis(env_limit("API_TRACKER_GIT_TIMEOUT_MS", 30_000)),
-            max_output_bytes: env_limit("API_TRACKER_GIT_MAX_OUTPUT_BYTES", 32 * 1024 * 1024),
+            timeout: Duration::from_millis(env_limit("GIT_TIMEOUT_MS", 30_000)),
+            max_output_bytes: env_limit("GIT_MAX_OUTPUT_BYTES", 32 * 1024 * 1024),
             max_line_bytes: 1024 * 1024,
             max_unit_bytes: MAX_FILE_BYTES as usize,
             max_retained_bytes: 64 * 1024 * 1024,
@@ -82,20 +83,11 @@ impl GitLimits {
     /// full-history scan of a big repository is legitimately slow.
     pub fn history() -> Self {
         GitLimits {
-            timeout: Duration::from_millis(env_limit(
-                "API_TRACKER_GIT_HISTORY_TIMEOUT_MS",
-                180_000,
-            )),
-            max_output_bytes: env_limit(
-                "API_TRACKER_GIT_HISTORY_MAX_STREAM_BYTES",
-                1024 * 1024 * 1024,
-            ),
+            timeout: Duration::from_millis(env_limit("GIT_HISTORY_TIMEOUT_MS", 180_000)),
+            max_output_bytes: env_limit("GIT_HISTORY_MAX_STREAM_BYTES", 1024 * 1024 * 1024),
             max_line_bytes: 64 * 1024,
             max_unit_bytes: MAX_FILE_BYTES as usize,
-            max_retained_bytes: env_limit(
-                "API_TRACKER_GIT_HISTORY_MAX_RETAINED_BYTES",
-                64 * 1024 * 1024,
-            ),
+            max_retained_bytes: env_limit("GIT_HISTORY_MAX_RETAINED_BYTES", 64 * 1024 * 1024),
         }
     }
 }
@@ -112,12 +104,13 @@ impl Drop for ChildGuard {
     }
 }
 
-/// The git binary to spawn. Debug builds honour `API_TRACKER_GIT_BINARY`
-/// so tests can substitute a deterministic fake (hung/slow/flooding git);
-/// release builds always use `git` from PATH.
+/// The git binary to spawn. Debug builds honour `TETHRA_GIT_BINARY` (or
+/// the legacy `API_TRACKER_GIT_BINARY`) so tests can substitute a
+/// deterministic fake (hung/slow/flooding git); release builds always use
+/// `git` from PATH.
 fn git_program() -> String {
     if cfg!(debug_assertions) {
-        if let Ok(p) = std::env::var("API_TRACKER_GIT_BINARY") {
+        if let Some(Ok(p)) = crate::envcompat::var("GIT_BINARY") {
             if !p.is_empty() {
                 return p;
             }

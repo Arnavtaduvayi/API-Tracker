@@ -8,16 +8,17 @@ docs = []
 destinations = ["env_mapping", "env_export", "github_actions"]
 credential_separation = """
 Give every external service its own variable and its own per-environment
-credential. Prefer `api-tracker run` (runtime injection) over a .env file in
+credential. Prefer `tethra run` (runtime injection) over a .env file in
 development — nothing lands on disk. Keep DATABASE_URL's password distinct
-per environment."""
+per environment. The legacy `api-tracker` command remains a compatibility
+alias for `tethra` (see docs/rebrand/TETHRA_MIGRATION_GUIDE.md)."""
 permission_guidance = """
 Scope each service credential to the least privilege the server needs;
 database users should not be superusers, and third-party keys should be
 restricted where the provider supports it."""
 rotation_guidance = """
-Attach production credentials to their deployment destination in API
-Tracker so a rotation deploys and verifies in one reviewed plan."""
+Attach production credentials to their deployment destination in Tethra
+so a rotation deploys and verifies in one reviewed plan."""
 
 [[env]]
 name = "DATABASE_URL"

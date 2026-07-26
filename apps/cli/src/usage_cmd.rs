@@ -164,7 +164,7 @@ fn print_usage_report(
         );
         if c.stale {
             println!(
-                "  WARNING: synced data is STALE — run `api-tracker provider sync {}`.",
+                "  WARNING: synced data is STALE — run `tethra provider sync {}`.",
                 c.provider
             );
         }

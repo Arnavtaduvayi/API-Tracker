@@ -1,4 +1,4 @@
-//! API Tracker desktop backend: thin Tauri commands over `api-tracker-core`.
+//! Tethra desktop backend: thin Tauri commands over `api-tracker-core`.
 //!
 //! All business logic and cryptography live in the shared core crate. This
 //! layer only manages the unlocked-vault state (with inactivity auto-lock),
@@ -2550,5 +2550,5 @@ fn main() {
             observe_allowlist_remove,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running the API Tracker desktop app");
+        .expect("error while running the Tethra desktop app");
 }

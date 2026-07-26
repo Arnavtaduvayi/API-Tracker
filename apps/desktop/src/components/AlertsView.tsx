@@ -27,7 +27,7 @@ async function notify(count: number) {
     }
     if (granted) {
       sendNotification({
-        title: "API Tracker",
+        title: "Tethra",
         body: `${count} new high-priority alert(s)`,
       });
     }

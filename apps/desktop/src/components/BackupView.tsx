@@ -112,7 +112,7 @@ export function BackupView(props: { onRestored: () => void }) {
           Backup file path
           <input
             className="mono"
-            placeholder="/path/to/api-tracker-backup.json"
+            placeholder="/path/to/tethra-backup.json"
             value={path}
             onChange={(e) => setPath(e.target.value)}
             required

@@ -64,7 +64,7 @@ so both plans can run on the same machine.
 | --- | --- | --- |
 | Synthetic API server (plain HTTP) | `http://127.0.0.1:8484` — `python3 ~/at-obs-test/obs_api_server.py` | deterministic status codes per path (§6); prints each received request so leak-proof tests can confirm the payload really arrived |
 | Synthetic HTTPS server (self-signed) | `https://127.0.0.1:8445` — `python3 ~/at-obs-test/obs_tls_server.py` | serves the §7 self-signed cert; used for connection-only observation and the upstream-verification honesty test |
-| Allowlist entries (both required — loopback is refused by default) | `api-tracker observe allow add obs-app 127.0.0.1 8484 --note "manual obs test"` and `… allow add obs-app 127.0.0.1 8445 --note "manual obs test"` | without them, every request to the local servers is refused by destination policy |
+| Allowlist entries (both required — loopback is refused by default) | `tethra observe allow add obs-app 127.0.0.1 8484 --note "manual obs test"` and `… allow add obs-app 127.0.0.1 8445 --note "manual obs test"` | without them, every request to the local servers is refused by destination policy |
 | Stop servers | Ctrl-C in each terminal | — |
 
 ### `obs_api_server.py` (port 8484, plain HTTP)
@@ -172,7 +172,7 @@ temp file — present only in the synthetic server's own terminal. (There is no
 
 Request these paths against `http://127.0.0.1:8484` in an observed run; the
 **API activity → Overview → (service) → Endpoints** table and
-`api-tracker observe api 127.0.0.1` must show exactly the templated form,
+`tethra observe api 127.0.0.1` must show exactly the templated form,
 never the raw path. (Expected templates match the worked examples asserted in
 `crates/core/src/runtime/sanitize.rs`.)
 
@@ -208,7 +208,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
 ## 8. Observed-client recipes (the canary senders)
 
 Run each **inside** an observed run
-(`api-tracker run --project obs-app --observe=metadata -- <command>`).
+(`tethra run --project obs-app --observe=metadata -- <command>`).
 Every recipe sends the full §5 canary set to the 8484 server.
 
 curl (one shot, all §5 canaries — quote exactly):

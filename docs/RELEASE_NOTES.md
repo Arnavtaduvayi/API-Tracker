@@ -1,11 +1,15 @@
-# API Tracker — Alpha Release Notes
+# Tethra — Alpha Release Notes
 
-API Tracker is a **local-first** desktop app + CLI for individual developers to
+Tethra is a **local-first** desktop app + CLI for individual developers to
 organize, secure, monitor, and manage the API credentials scattered across
-their projects. There is no account, no cloud service, and no API-Tracker
+their projects. There is no account, no cloud service, and no Tethra
 server: the only network traffic is direct, from your device to endpoints you
 explicitly configure (provider APIs, deployment destinations, watched docs
 pages, and webhook URLs).
+
+The CLI command is `tethra`; the legacy `api-tracker` command remains
+available as a compatibility alias for the same program (see
+[docs/rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md)).
 
 > **This is alpha software and the builds are UNSIGNED.** Evaluate it carefully
 > before storing highly sensitive production credentials. Local-first reduces

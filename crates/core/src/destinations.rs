@@ -24,7 +24,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum DestSupport {
     Implemented,
-    /// The destination offers it, API Tracker does not implement it yet.
+    /// The destination offers it, Tethra does not implement it yet.
     SupportedNotImplemented,
     /// The destination itself cannot do this.
     Unsupported,
@@ -81,7 +81,7 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
     static CATALOG: &[DestinationKindInfo] = &[
         DestinationKindInfo {
             kind: "vault",
-            name: "API Tracker local vault",
+            name: "Tethra local vault",
             description: "The encrypted local vault itself — the source of truth every plan starts from.",
             auth: "master password (already required)",
             platforms: "all",
@@ -103,7 +103,7 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
         DestinationKindInfo {
             kind: "env_mapping",
             name: "Local environment mappings",
-            description: "Injection mappings used by `api-tracker run`. They reference the vault at run time, so a value change needs no write here.",
+            description: "Injection mappings used by `tethra run`. They reference the vault at run time, so a value change needs no write here.",
             auth: "none (local)",
             platforms: "all",
             status: "implemented; value changes propagate automatically at injection time",
@@ -119,12 +119,12 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
             required_plan: "none",
             charges: "none",
             testing: "covered by injection tests",
-            config_help: "none — managed via `api-tracker mapping`",
+            config_help: "none — managed via `tethra mapping`",
         },
         DestinationKindInfo {
             kind: "env_export",
             name: "Exported .env file",
-            description: "A plaintext .env file previously written by `api-tracker env export`. Value changes require an explicit re-export.",
+            description: "A plaintext .env file previously written by `tethra env export`. Value changes require an explicit re-export.",
             auth: "master password reauthentication per export",
             platforms: "all",
             status: "implemented; tracked per exported file with drift detection",
@@ -140,7 +140,7 @@ pub fn catalog() -> &'static [DestinationKindInfo] {
             required_plan: "none",
             charges: "none",
             testing: "covered by env-governance tests",
-            config_help: "none — created by `api-tracker env export`",
+            config_help: "none — created by `tethra env export`",
         },
         DestinationKindInfo {
             kind: "macos_keychain",
@@ -1538,7 +1538,7 @@ impl GithubActionsDestination<'_> {
         .header("authorization", format!("Bearer {}", self.token.expose()))
         .header("accept", "application/vnd.github+json")
         .header("x-github-api-version", "2022-11-28")
-        .header("user-agent", "api-tracker")
+        .header("user-agent", "tethra")
     }
 
     /// Encrypt `value` to the repository public key with a libsodium sealed

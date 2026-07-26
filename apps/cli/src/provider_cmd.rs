@@ -226,10 +226,7 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 vault.provider_admin_connect(&m.id, &key, org.as_deref(), Some(&http))?
             };
             println!("Connected {}: {detail}", m.name);
-            println!(
-                "Run `api-tracker provider sync {}` to synchronize usage.",
-                m.id
-            );
+            println!("Run `tethra provider sync {}` to synchronize usage.", m.id);
         }
         ProviderCmd::Disconnect { provider, yes } => {
             let m = find(&provider)?;
@@ -356,7 +353,7 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 }
                 if status.stale {
                     println!(
-                        "WARNING: synced data is STALE — run `api-tracker provider sync {}`.",
+                        "WARNING: synced data is STALE — run `tethra provider sync {}`.",
                         m.id
                     );
                 }
@@ -568,7 +565,7 @@ pub fn run(ctx: &Ctx, cmd: ProviderCmd) -> Result<()> {
                 println!("Watching {u}");
             }
             println!(
-                "Run `api-tracker provider check-docs {}` to check them (respects conditional \
+                "Run `tethra provider check-docs {}` to check them (respects conditional \
                  requests and conservative intervals).",
                 m.id
             );

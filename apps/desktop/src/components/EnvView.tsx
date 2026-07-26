@@ -229,7 +229,7 @@ export function EnvView() {
           <ConfirmDialog
             title="Remove every recorded export"
             body={
-              "Delete EVERY exported .env file recorded by API Tracker, expired or not?" +
+              "Delete EVERY exported .env file recorded by Tethra, expired or not?" +
               (cleanupForce
                 ? " Force is set: files changed since export are deleted too."
                 : " Files changed since export are kept unless force is checked.")
@@ -513,7 +513,7 @@ export function EnvView() {
 
       <h2 style={{ marginTop: "1.5rem" }}>Exports</h2>
       <p className="muted">
-        Plaintext .env files previously written by API Tracker. Prefer running projects through
+        Plaintext .env files previously written by Tethra. Prefer running projects through
         injection (no file); when a file is unavoidable, export it with a lifetime and clean it
         up here.
       </p>

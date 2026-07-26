@@ -68,8 +68,8 @@ Notes that apply everywhere:
   `incorrect password`, Cancel always aborts with no effect).
 - The desktop screen under test is the top-bar destination **API activity**
   with tabs **Overview · Sessions · Certificate · Settings · Diagnostics ·
-  Privacy**. The CLI verb under test is `api-tracker observe …` plus
-  `api-tracker run --observe=off|connection|metadata`.
+  Privacy**. The CLI verb under test is `tethra observe …` plus
+  `tethra run --observe=off|connection|metadata`.
 - Run this entire plan against the isolated vault
   (`API_TRACKER_DIR=~/at-obs-test/vault`). Never run it against a real vault,
   and never install system trust (OBS-10) on a machine you do not own.
@@ -133,7 +133,7 @@ rm -f /tmp/obs-canary-file.txt
 ```
 
 If OBS-10 installed system trust and you skipped OBS-18, remove it before
-deleting anything: `api-tracker observe cert uninstall` (macOS: verify with
+deleting anything: `tethra observe cert uninstall` (macOS: verify with
 `security find-certificate -c "Tethra Local Observation CA"` → not found).
 
 ---
@@ -157,9 +157,9 @@ Exact buttons to click: New project; Create project; Add credential
 Exact fields to fill: Name; Provider; Environment; Secret value
 Exact test values: project obs-app (environment development); credentials O1
   and O2 exactly as OD §3; then CLI:
-    api-tracker observe allow add obs-app 127.0.0.1 8484 --note "manual obs test"
-    api-tracker observe allow add obs-app 127.0.0.1 8445 --note "manual obs test"
-    api-tracker observe allow list obs-app
+    tethra observe allow add obs-app 127.0.0.1 8484 --note "manual obs test"
+    tethra observe allow add obs-app 127.0.0.1 8445 --note "manual obs test"
+    tethra observe allow list obs-app
 Expected visible result: obs-app shows 2 credentials (values masked); allow
   list prints both (host, port, note) entries
 Expected persisted result: entries survive relaunch (observe_internal_allowlist)
@@ -205,14 +205,14 @@ Exact navigation: —
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values:
-  api-tracker run --project obs-app -- sh -c \
+  tethra run --project obs-app -- sh -c \
     'env | grep -iE "proxy|ca_bundle|extra_ca|ssl_cert" ; \
      curl -s http://127.0.0.1:8484/v1/plain ; echo'
 Expected visible result: the env grep prints NOTHING (no HTTP(S)_PROXY, no
   NODE_EXTRA_CA_CERTS/REQUESTS_CA_BUNDLE/SSL_CERT_FILE/CURL_CA_BUNDLE added);
   curl reaches the server DIRECTLY ({"ok":true}); server terminal shows the
   request (it did not pass through any proxy)
-Expected persisted result: `api-tracker observe sessions --project obs-app`
+Expected persisted result: `tethra observe sessions --project obs-app`
   lists NO session for this run; API activity → Sessions is empty
 Expected audit/alert result: no runtime_* alert
 Expected security behavior: observation is strictly opt-in per run; nothing
@@ -238,7 +238,7 @@ Exact navigation: API activity → Sessions (after the run); API activity →
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values:
-  api-tracker run --project obs-app --observe=connection -- \
+  tethra run --project obs-app --observe=connection -- \
     curl -s --cacert ~/at-obs-test/tls/server-cert.pem \
     https://127.0.0.1:8445/v1/ping
 Expected visible result: curl prints {"ok":true,"tls":"self-signed"}; the run
@@ -270,7 +270,7 @@ Exact navigation: API activity → Overview; API activity → Sessions
 Exact buttons to click: (Overview) the api.openai.com service row
 Exact fields to fill: —
 Exact test values:
-  api-tracker run --project obs-app --credential obs-app/openai-obs \
+  tethra run --project obs-app --credential obs-app/openai-obs \
     --observe=metadata -- \
     sh -c 'curl -s https://api.openai.com/v1/models \
              -H "Authorization: Bearer $OPENAI_API_KEY" >/dev/null; echo done'
@@ -304,7 +304,7 @@ Exact navigation: API activity → Overview → 127.0.0.1 (the :8484 service)
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values:
-  api-tracker run --project obs-app --observe=metadata -- \
+  tethra run --project obs-app --observe=metadata -- \
     node ~/at-obs-test/canary_node.mjs
 Expected visible result: script prints "node canary status: 200"; server
   terminal A shows the raw canary request (proof it arrived intact); the
@@ -333,7 +333,7 @@ Exact navigation: API activity → Overview → 127.0.0.1
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values:
-  api-tracker run --project obs-app --observe=metadata -- \
+  tethra run --project obs-app --observe=metadata -- \
     python3 ~/at-obs-test/canary_requests.py
 Expected visible result: script prints "python canary status: 200"; the
   service gains endpoint POST /v1/files/:uuid; the raw UUID
@@ -361,7 +361,7 @@ Exact buttons to click: —
 Exact fields to fill: —
 Exact test values:
   security find-certificate -c "Tethra Local Observation CA"
-  api-tracker observe cert status
+  tethra observe cert status
 Expected visible result: `security find-certificate` FAILS (no such
   certificate in any keychain); `observe cert status` shows the CA present
   in the vault with system trust "absent"; Certificate tab System trust row
@@ -389,7 +389,7 @@ Exact buttons to click: (Settings) open the "Default observation mode for
   Tethra-launched runs" select — inspect only; Save settings NOT clicked
 Exact fields to fill: —
 Exact test values: run one more metadata run (repeat OBS-06's command);
-  then: api-tracker observe cert status ; api-tracker observe settings show
+  then: tethra observe cert status ; tethra observe settings show
 Expected visible result: the mode select offers only off / connection /
   metadata — there is NO "system trust" run mode and no pre-ticked install
   option anywhere; the default is "off (recommended — monitoring is opt-in
@@ -461,8 +461,8 @@ Exact fields to fill: —
 Exact test values: the OD §8 grep sweep, run twice — once with the vault
   unlocked, once after Lock vault; plus (there is no `observe export` command
   in this version — inspect the CLI/JSON surfaces directly instead):
-    api-tracker observe api 127.0.0.1
-    api-tracker observe show <session-id> --json > ~/at-obs-test/show.json
+    tethra observe api 127.0.0.1
+    tethra observe show <session-id> --json > ~/at-obs-test/show.json
     grep -c "OBS-.*CANARY\|canary@leak.test" ~/at-obs-test/show.json
 Expected visible result: every UI surface shows templated paths with NO query
   string (no "?" anywhere), no header values, no cookie, no body fragment;
@@ -494,7 +494,7 @@ Exact navigation: API activity → Overview → 127.0.0.1 → Endpoints
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values: one metadata run requesting every OD §6 path:
-  api-tracker run --project obs-app --observe=metadata -- sh -c '
+  tethra run --project obs-app --observe=metadata -- sh -c '
     for p in "/v1/users/123456/orders/98765" \
              "/v1/files/550e8400-e29b-41d4-a716-446655440000" \
              "/users/canary@leak.test/profile" \
@@ -529,7 +529,7 @@ Prerequisites: —
 Exact navigation: API activity → Overview; Alerts → Run checks now
 Exact buttons to click: Run checks now (on the Alerts screen)
 Exact fields to fill: —
-Exact test values: api-tracker observe apis ; api-tracker observe overview
+Exact test values: tethra observe apis ; tethra observe overview
 Expected visible result: the 127.0.0.1 service row shows request volume,
   error rate, and latency (percentiles labeled approximate) even though it is
   an unknown/unmapped host; `observe apis` lists it with first/last seen;
@@ -559,13 +559,13 @@ Exact navigation: Alerts → Run checks now
 Exact buttons to click: Run checks now; acknowledge; resolve
 Exact fields to fill: —
 Exact test values: force deterministic failures, then check:
-  api-tracker run --project obs-app --observe=metadata -- sh -c \
+  tethra run --project obs-app --observe=metadata -- sh -c \
     'for i in 1 2 3 4 5 6 7 8 9 10; do
        curl -s http://127.0.0.1:8484/v1/protected >/dev/null; done'
-  api-tracker run --project obs-app --observe=metadata -- sh -c \
+  tethra run --project obs-app --observe=metadata -- sh -c \
     'for i in 1 2 3 4 5 6 7 8 9 10; do
        curl -s http://127.0.0.1:8484/v1/broken >/dev/null; done'
-  api-tracker alerts list
+  tethra alerts list
 Expected visible result: after Run checks now, the Alerts screen shows a
   high-severity runtime_auth_failures alert and a high-severity
   runtime_server_errors alert for the 127.0.0.1 service; each card carries a
@@ -573,7 +573,7 @@ Expected visible result: after Run checks now, the Alerts screen shows a
   observed counts/window, and a "Recommended: …" action; running checks again
   without new traffic raises no duplicate (dedup, one open alert per
   condition)
-Expected persisted result: `api-tracker alerts list` shows the same kinds;
+Expected persisted result: `tethra alerts list` shows the same kinds;
   acknowledge/resolve lifecycle behaves as in the base plan (ALR-02)
 Expected audit/alert result: this IS the alert check
 Expected security behavior: alert text contains templated paths and counts
@@ -596,7 +596,7 @@ Exact navigation: API activity → Sessions → the failing session
 Exact buttons to click: —
 Exact fields to fill: —
 Exact test values:
-  api-tracker run --project obs-app --observe=metadata -- \
+  tethra run --project obs-app --observe=metadata -- \
     curl -s --cacert ~/at-obs-test/tls/server-cert.pem \
     https://127.0.0.1:8445/v1/ping ; echo "curl exit: $?"
 Expected visible result: the request FAILS (curl exits non-zero — the proxy
@@ -620,10 +620,10 @@ Pass/fail: ☐
 #### OBS-16 — locking the vault STOPS an already-running observed run
 
 > NOTE: observed runs are CLI-only (the desktop app does not launch them), so a
-> manual lock is exercised with `api-tracker lock` in a second terminal. The
+> manual lock is exercised with `tethra lock` in a second terminal. The
 > run must inherit the lock behavior of the session it was started under, so
-> start it under a session token (`api-tracker unlock` → export
-> `API_TRACKER_SESSION`). `api-tracker lock` deletes the session file, which the
+> start it under a session token (`tethra unlock` → export
+> `API_TRACKER_SESSION`). `tethra lock` deletes the session file, which the
 > run detects and tears itself down.
 
 ```text
@@ -632,27 +632,27 @@ Requirement: a manual lock during an active observed run tears interception
   down (proxy stops, token invalidated, CA/leaf cache cleared, child
   terminated) and marks the session interrupted with reason vault_locked;
   decryption does not continue past the lock.
-Starting state: vault unlocked via `api-tracker unlock`, API_TRACKER_SESSION
+Starting state: vault unlocked via `tethra unlock`, API_TRACKER_SESSION
   exported; a local synthetic HTTPS server running
 Prerequisites: two terminals sharing API_TRACKER_SESSION
 Exact test values: in terminal 1 start a long observed loop:
-  api-tracker run --project obs-app --observe=metadata -- sh -c \
+  tethra run --project obs-app --observe=metadata -- sh -c \
     'while true; do curl -s --max-time 5 https://127.0.0.1:8443/v1/tick \
        >/dev/null; sleep 1; done'
-  confirm metadata appears (`api-tracker observe sessions`), then in terminal 2:
-  api-tracker lock
-Expected visible result: within ~1 second of `api-tracker lock`, terminal 1
+  confirm metadata appears (`tethra observe sessions`), then in terminal 2:
+  tethra lock
+Expected visible result: within ~1 second of `tethra lock`, terminal 1
   prints "Monitored session <id> INTERRUPTED — the vault was locked: the
   observation proxy was shut down and the monitored process was terminated" and
   exits non-zero (125). The curl loop stops (its proxy is gone / it was killed).
-Expected persisted result: `api-tracker observe show <id>` shows status
+Expected persisted result: `tethra observe show <id>` shows status
   "interrupted", reason "vault_locked"; events recorded before the lock remain;
   the session is NOT relabeled "completed".
 Expected audit/alert result: —
 Expected security behavior: after the lock, no new request is decrypted or
   recorded (compare `observe show` request count before vs after). Unlock and
   confirm the OLD run does not resume and a fresh `run --observe` works
-  normally. (Auto-lock variant: instead of `api-tracker lock`, wait out the
+  normally. (Auto-lock variant: instead of `tethra lock`, wait out the
   vault's auto-lock interval; the run interrupts with reason "auto_lock".)
 Cleanup: unset API_TRACKER_SESSION; unlock as needed
 Screenshot checkpoint: the interrupted session with reason vault_locked
@@ -672,7 +672,7 @@ Exact buttons to click: —
 Exact fields to fill: —
 Exact test values: during an observed run, from a second terminal capture the
   child's proxy address and the temp CA files:
-    api-tracker run --project obs-app --observe=metadata -- sh -c \
+    tethra run --project obs-app --observe=metadata -- sh -c \
       'echo "PROXY=$HTTPS_PROXY"; echo "CA=$NODE_EXTRA_CA_CERTS"; sleep 15'
   while it sleeps: ls -l the CA= path (mode 0600, contains only a PUBLIC
   certificate — "BEGIN CERTIFICATE", never "PRIVATE KEY");
@@ -710,7 +710,7 @@ Exact buttons to click: Remove from system trust; then Rotate CA (dialog
 Exact fields to fill: Master password (Rotate and Remove dialogs)
 Exact test values: manual-master-passphrase-01; verification commands:
   security find-certificate -c "Tethra Local Observation CA"
-  api-tracker observe cert status
+  tethra observe cert status
 Expected visible result: after Remove from system trust: notice "Removed
   from the system trust store (if present)."; find-certificate FAILS again;
   System trust row "absent". After Rotate CA: notice "CA rotated." and a NEW
@@ -741,7 +741,7 @@ Exact buttons to click: Delete all observability data; in the dialog
   "Delete ALL observability data": Delete everything
 Exact fields to fill: Master password
 Exact test values: manual-master-passphrase-01; first delete one session:
-  api-tracker observe delete-session <session-id> --yes
+  tethra observe delete-session <session-id> --yes
 Expected visible result: the single session disappears from Sessions; after
   Delete everything: notice "All observability data deleted."; Overview and
   Sessions are empty; obs-app's credentials O1/O2 still exist untouched,

@@ -1,6 +1,6 @@
 //! CLI session mechanism (Bitwarden-style split token).
 //!
-//! `api-tracker unlock` creates a random 32-byte session token, encrypts the
+//! `tethra unlock` creates a random 32-byte session token, encrypts the
 //! vault key (and any unlocked project keys) under it, and writes only the
 //! ciphertext to `session.json` (mode 0600). The token itself is printed once
 //! for the user to export as `API_TRACKER_SESSION`; it is never written to
@@ -8,7 +8,7 @@
 //! anything.
 //!
 //! The session expires after the vault's configured auto-lock period of
-//! inactivity (sliding window, refreshed on each use). `api-tracker lock`
+//! inactivity (sliding window, refreshed on each use). `tethra lock`
 //! deletes the file. Limitations are documented in THREAT_MODEL.md: an
 //! attacker who can read both the session file *and* the process environment
 //! of the user's shell can reconstruct the vault key while a session is

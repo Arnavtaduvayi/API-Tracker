@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "API Tracker",
+  "productName": "Tethra",
   "version": "0.1.0",
   "identifier": "dev.api-tracker.desktop",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "API Tracker",
+        "title": "Tethra",
         "width": 1050,
         "height": 760
       }

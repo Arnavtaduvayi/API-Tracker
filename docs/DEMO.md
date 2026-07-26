@@ -19,10 +19,11 @@ bash scripts/demo.sh --fresh  # replace a previously kept demo without asking
 
 By default the demo creates an isolated vault in a fresh private `mktemp`
 directory (the exact path is printed at the start and end of the run). For
-the copy-pasteable commands below, give it a fixed location instead:
+the copy-pasteable commands below, give it a fixed location instead (the
+legacy `API_TRACKER_*` variable names still work):
 
 ```bash
-export API_TRACKER_DEMO_DIR="${TMPDIR:-/tmp}/api-tracker-demo"
+export TETHRA_DEMO_DIR="${TMPDIR:-/tmp}/tethra-demo"
 bash scripts/demo.sh --keep
 ```
 
@@ -69,11 +70,11 @@ Along the way the demo:
 
 ### Open the demo in the desktop app
 
-Run the demo with `--keep` (and `API_TRACKER_DEMO_DIR` set as above), then:
+Run the demo with `--keep` (and `TETHRA_DEMO_DIR` set as above), then:
 
 ```bash
 cd apps/desktop
-API_TRACKER_DIR="$API_TRACKER_DEMO_DIR/vault" npm run tauri dev
+TETHRA_DIR="$TETHRA_DEMO_DIR/vault" npm run tauri dev
 ```
 
 Unlock with the master password above. The desktop app reads the same vault
@@ -83,20 +84,20 @@ substitute the path the demo printed.)
 ### Inspect the demo with the CLI
 
 ```bash
-export API_TRACKER_DIR="$API_TRACKER_DEMO_DIR/vault"
-export API_TRACKER_PASSWORD='demo-master-password-12345'   # or: api-tracker unlock
-./target/release/api-tracker key list
-./target/release/api-tracker alerts list
-./target/release/api-tracker key status demo-dev/payments-legacy
-./target/release/api-tracker key reveal demo-dev/openai-main
-API_TRACKER_PROJECT_PASSWORD='demo-prod-project-password' \
-  ./target/release/api-tracker project unlock demo-prod
+export TETHRA_DIR="$TETHRA_DEMO_DIR/vault"
+export TETHRA_PASSWORD='demo-master-password-12345'   # or: tethra unlock
+./target/release/tethra key list
+./target/release/tethra alerts list
+./target/release/tethra key status demo-dev/payments-legacy
+./target/release/tethra key reveal demo-dev/openai-main
+TETHRA_PROJECT_PASSWORD='demo-prod-project-password' \
+  ./target/release/tethra project unlock demo-prod
 ```
 
 ### Delete the demo
 
 ```bash
-rm -rf "$API_TRACKER_DEMO_DIR"    # or the path the demo printed
+rm -rf "$TETHRA_DEMO_DIR"    # or the path the demo printed
 ```
 
 (Without `--keep`, the demo deletes itself when it finishes.)
@@ -134,7 +135,8 @@ against a throwaway vault under `mktemp -d` and verifies, end to end:
   `API_TRACKER_PASSWORD`, `API_TRACKER_SESSION`,
   `API_TRACKER_PROJECT_PASSWORD`, and `API_TRACKER_BACKUP_PASSWORD` — all
   deliberately live in the parent environment at that moment — are absent
-  from the child's environment
+  from the child's environment (the script exercises the legacy
+  `API_TRACKER_*` variable names, which remain supported)
 - no plaintext `.env` file is ever created
 - the OpenAI administrative connection lifecycle (offline, `--no-verify`):
   connect via environment, status labeled administrative with the key

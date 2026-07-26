@@ -58,7 +58,7 @@ pub enum Attribution {
     ProviderProject,
     /// Whole provider account (org).
     ProviderAccount,
-    /// Local API Tracker project only.
+    /// Local Tethra project only.
     LocalProject,
     /// A single local process-injection session.
     LocalProcess,

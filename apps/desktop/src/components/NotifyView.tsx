@@ -93,7 +93,7 @@ export function NotifyView() {
         Webhooks you configure receive open alerts at or above their severity floor whenever
         monitoring runs. The URL is stored encrypted (it may embed a token) and payloads are
         metadata-only — alert kind, severity, title, detail, and timestamps. Secret values are
-        never sent, and no API Tracker service is involved.
+        never sent, and no Tethra service is involved.
       </p>
       <p>
         <button onClick={() => setShowAdd((v) => !v)}>

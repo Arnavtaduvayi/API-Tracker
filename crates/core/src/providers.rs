@@ -18,13 +18,13 @@ use crate::error::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-/// How well API Tracker (and the provider) support a capability today.
+/// How well Tethra (and the provider) support a capability today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportLevel {
-    /// Supported by the provider and implemented in API Tracker.
+    /// Supported by the provider and implemented in Tethra.
     Implemented,
-    /// The provider offers this through an official API, but API Tracker does
+    /// The provider offers this through an official API, but Tethra does
     /// not implement it yet.
     SupportedNotImplemented,
     /// The provider does not offer this capability.

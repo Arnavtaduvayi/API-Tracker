@@ -54,7 +54,7 @@ pub enum HooksCmd {
         #[arg(long)]
         force: bool,
     },
-    /// Remove the API Tracker pre-commit hook.
+    /// Remove the Tethra pre-commit hook.
     Remove {
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -152,7 +152,7 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
             return Ok(());
         }
         eprintln!(
-            "api-tracker: blocking commit — {} high-confidence secret(s) found:",
+            "tethra: blocking commit — {} high-confidence secret(s) found:",
             high.len()
         );
         for f in &high {
@@ -169,12 +169,12 @@ pub fn scan(ctx: &Ctx, args: ScanArgs) -> Result<()> {
         eprintln!("Remove the secret(s), or suppress a false positive with a reason:");
         for f in &high {
             eprintln!(
-                "  api-tracker suppress add {} --reason \"...\"",
+                "  tethra suppress add {} --reason \"...\"",
                 f.suppression_key
             );
         }
         eprintln!("To bypass once (not recommended): git commit --no-verify");
-        bail!("commit blocked by api-tracker pre-commit hook");
+        bail!("commit blocked by the Tethra pre-commit hook");
     }
 
     // Rich path when unlocked: the vault scans, matches, and marks exposures.
@@ -266,7 +266,7 @@ fn report(ctx: &Ctx, findings: &[Finding], marked_exposed: usize) {
                 println!();
             }
             println!(
-                "    suppress: api-tracker suppress add {} --reason \"...\"",
+                "    suppress: tethra suppress add {} --reason \"...\"",
                 f.suppression_key
             );
         }
@@ -286,7 +286,7 @@ pub fn hooks(ctx: &Ctx, cmd: HooksCmd) -> Result<()> {
             let status = hooks::status(&path)?;
             render::emit(ctx.json, &status, || {
                 println!("Pre-commit hook installed ({state:?}).");
-                println!("It runs `api-tracker scan --staged` and blocks high-confidence secrets.");
+                println!("It runs `tethra scan --staged` and blocks high-confidence secrets.");
                 println!(
                     "Active: {} — {}",
                     if status.active { "yes" } else { "NO" },

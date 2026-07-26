@@ -19,7 +19,7 @@ Create restricted keys in the dashboard with the minimum permissions
 out of application code entirely where a restricted key suffices."""
 rotation_guidance = """
 Stripe keys are rolled in the dashboard (a roll issues a replacement with a
-grace period). API Tracker's rotation workflow guides the manual roll and
+grace period). Tethra's rotation workflow guides the manual roll and
 tracks the deployment of the new value."""
 
 [[env]]
