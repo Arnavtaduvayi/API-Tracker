@@ -284,9 +284,32 @@ pub fn generate_example(values: &EnvDocument, existing_example: Option<&EnvDocum
 /// A unified-style diff of two small text files, with values masked on
 /// changed lines that look like assignments carrying secrets. Safe to print.
 pub fn render_diff(label: &str, old: &str, new: &str) -> String {
+    render_diff_with_unmasked(label, old, new, &[])
+}
+
+/// [`render_diff`] with an allowlist of keys whose values print VERBATIM.
+/// The gateway `.env` writer must show its own lines unmasked (ADR 0019 D9:
+/// the user is approving an exact base URL — a masked loopback URL would
+/// hide the very thing being consented to); every other line keeps the
+/// masking treatment.
+pub fn render_diff_with_unmasked(
+    label: &str,
+    old: &str,
+    new: &str,
+    unmasked_keys: &[&str],
+) -> String {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut out = format!("--- {label} (current)\n+++ {label} (proposed)\n");
+    let mask_assignment = |line: &str| -> String {
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim().trim_start_matches("export ").trim();
+            if unmasked_keys.contains(&key) {
+                return line.to_string();
+            }
+        }
+        mask_assignment(line)
+    };
     // Simple LCS-free diff: show removed lines then added lines for each
     // hunk of consecutive difference. Fine for the small files involved.
     let common_prefix = old_lines

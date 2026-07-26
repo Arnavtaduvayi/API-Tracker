@@ -148,11 +148,13 @@ impl Confidence {
 
 /// The additive `[gateway]` manifest section (ADR 0019 D10): the fixed
 /// upstream origin(s) the Local Gateway may forward this provider's routes
-/// to, plus the client-side `.env` shape. Only providers with a truly fixed
-/// data-plane origin declare it (Supabase-style per-project origins use the
-/// validated custom-origin flow instead — KNOWN_CONFLICTS C11). Because
-/// manifests are compiled into the binary, this section — not any database
-/// row — is the trust root for where manifest routes forward (ADR 0019 D3).
+/// to, plus the client-side `.env` shape. Providers with a truly fixed
+/// data-plane origin declare it in `origins`; providers whose origins are
+/// per-project (Supabase) declare `origins = []` and register routes through
+/// the validated custom-origin flow instead (KNOWN_CONFLICTS C11) while
+/// still declaring their `.env` metadata here. Because manifests are
+/// compiled into the binary, this section — not any database row — is the
+/// trust root for where manifest routes forward (ADR 0019 D3).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySection {
     /// Upstream origins, `https://host` form (https and port 443 implied and
@@ -316,8 +318,16 @@ fn validate_manifest(manifest: &ProviderManifest) -> Result<()> {
 /// on the observe policy module).
 fn validate_gateway_section(id: &str, gateway: &GatewaySection) -> Result<()> {
     let err = |msg: String| Err(CoreError::InvalidInput(msg));
-    if gateway.origins.is_empty() {
-        return err(format!("provider '{id}' [gateway] declares no origins"));
+    // `origins = []` is the CUSTOM-ONLY declaration: the provider has no
+    // fixed data-plane origin (Supabase-style per-project hosts), but still
+    // declares its base-URL env metadata for the .env link writer. Routes
+    // for such providers can only be registered through the MAC'd
+    // custom-origin flow (KNOWN_CONFLICTS C11); `add_manifest_route`
+    // refuses them.
+    if gateway.origins.is_empty() && gateway.env_vars.is_empty() {
+        return err(format!(
+            "provider '{id}' [gateway] declares neither origins nor env_vars"
+        ));
     }
     for origin in &gateway.origins {
         let Some(rest) = origin.strip_prefix("https://") else {

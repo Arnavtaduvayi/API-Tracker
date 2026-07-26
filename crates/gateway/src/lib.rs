@@ -29,6 +29,7 @@
 
 pub mod attribution;
 pub mod control;
+pub mod envlink;
 pub mod forward;
 pub mod head;
 pub mod record;

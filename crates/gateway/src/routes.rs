@@ -167,6 +167,17 @@ pub fn add_manifest_route(conn: &Connection, prefix: &str, provider: &str) -> Re
                 .into(),
         });
     };
+    // A custom-only declaration (`origins = []`, e.g. Supabase's per-project
+    // hosts) carries .env metadata but no forwardable origin.
+    if gateway.origins.is_empty() {
+        return Err(CoreError::Unsupported {
+            provider: provider_id,
+            capability: "gateway_route",
+            hint: "this provider's origins are per-project; register the project's own \
+                   origin as a custom route (route add <provider> --origin https://<host>)"
+                .into(),
+        });
+    }
     // Belt and braces: the compiled-in origin must itself pass validation.
     for origin in &gateway.origins {
         validate_origin(origin)?;
@@ -275,7 +286,25 @@ pub fn set_route_enabled(conn: &Connection, prefix: &str, enabled: bool) -> Resu
 /// Create a project link: a fresh 128-bit CSPRNG slug (never name-derived,
 /// SI-4) scoping `/p/<slug>/<route>` traffic to the project.
 pub fn add_project_link(conn: &Connection, project_id: &str, prefix: &str) -> Result<String> {
-    let slug = hex_lower(&crypto::random_bytes(16));
+    let slug = new_link_slug();
+    add_project_link_with_slug(conn, project_id, prefix, &slug)?;
+    Ok(slug)
+}
+
+/// A fresh 128-bit CSPRNG link slug. Exposed so the `.env` link planner can
+/// generate the slug at PLAN time — the previewed diff and the applied write
+/// must contain the same URL.
+pub fn new_link_slug() -> String {
+    hex_lower(&crypto::random_bytes(16))
+}
+
+/// [`add_project_link`] with a caller-supplied slug (from [`new_link_slug`]).
+pub fn add_project_link_with_slug(
+    conn: &Connection,
+    project_id: &str,
+    prefix: &str,
+    slug: &str,
+) -> Result<()> {
     let n = conn.execute(
         "INSERT OR IGNORE INTO gateway_project_links
             (link_slug, project_id, route_prefix, created_at)
@@ -312,7 +341,75 @@ pub fn add_project_link(conn: &Connection, project_id: &str, prefix: &str) -> Re
         None,
         &format!("prefix={prefix}"),
     )?;
-    Ok(slug)
+    Ok(())
+}
+
+/// One `gateway_project_links` row, as stored. `prior_env_json` is the
+/// versioned record of exactly what the `.env` writer changed, kept so
+/// unlink/disable can restore the prior state (ADR 0019 D9).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ProjectLinkRow {
+    pub link_slug: String,
+    pub project_id: String,
+    pub route_prefix: String,
+    pub env_path: Option<String>,
+    pub prior_env_json: Option<String>,
+    pub created_at: String,
+}
+
+/// The link row for a (project, route) pair, if any.
+pub fn find_project_link(
+    conn: &Connection,
+    project_id: &str,
+    prefix: &str,
+) -> Result<Option<ProjectLinkRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT link_slug, project_id, route_prefix, env_path, prior_env_json, created_at
+             FROM gateway_project_links WHERE project_id = ?1 AND route_prefix = ?2",
+            params![project_id, prefix],
+            link_row,
+        )
+        .optional()?)
+}
+
+/// Every link row (status, doctor, and the disable/uninstall manifest).
+pub fn list_project_links(conn: &Connection) -> Result<Vec<ProjectLinkRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT link_slug, project_id, route_prefix, env_path, prior_env_json, created_at
+         FROM gateway_project_links ORDER BY created_at",
+    )?;
+    let rows = stmt
+        .query_map([], link_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+fn link_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectLinkRow> {
+    Ok(ProjectLinkRow {
+        link_slug: r.get(0)?,
+        project_id: r.get(1)?,
+        route_prefix: r.get(2)?,
+        env_path: r.get(3)?,
+        prior_env_json: r.get(4)?,
+        created_at: r.get(5)?,
+    })
+}
+
+/// Record (or clear) what the `.env` writer did for a link, so restore is
+/// possible without re-deriving anything from the files themselves.
+pub fn update_link_env(
+    conn: &Connection,
+    slug: &str,
+    env_path: Option<&str>,
+    prior_env_json: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE gateway_project_links SET env_path = ?2, prior_env_json = ?3
+         WHERE link_slug = ?1",
+        params![slug, env_path, prior_env_json],
+    )?;
+    Ok(())
 }
 
 pub fn remove_project_link(conn: &Connection, project_id: &str, prefix: &str) -> Result<bool> {
