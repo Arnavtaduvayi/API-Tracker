@@ -4,7 +4,7 @@
 - **Branch:** `release/tethra-macos-private-alpha` (PR #12)
 - **Base:** `origin/main` = `f605d8f` (merge of PR #13, runtime API
   observability)
-- **Audited head at completion:** `8a756f2`
+- **Audited head at completion:** `d6a0b7b`
 - **Scope:** the full rename from API Tracker to Tethra — is it actually
   complete, is it compatibility-safe, and are its own claims true?
 
@@ -119,7 +119,21 @@ The plan said the clap name "becomes `tethra` (help/usage shows the preferred
 name from either binary)" — contradicting both the matrix and the actual
 argv0-derived behavior. Rewritten to describe what the code does.
 
-### F4 — Release evidence superseded by the merge (Low; fixed by disclosure)
+### F4 — ADR naming policy was undocumented (Low; fixed)
+
+Architecture decision records in `docs/decisions/` keep the historical name
+(`api-tracker unlock`, etc.) — correctly, since an ADR records a decision as it
+was made and the commands it names still work under the legacy alias. But the
+rebrand plan's "Historical documents" section listed audit reports, remediation
+ledgers, and evidence logs without mentioning ADRs, so the largest category of
+deliberately-unrenamed docs looked like an oversight. Now stated explicitly in
+the plan and in the matrix's Docs row.
+
+Two rows of the plan's own identifier table also still described the pre-fix
+behavior ("both binaries print `tethra` usage", `src/main.rs` as the program);
+corrected to match the code.
+
+### F5 — Release evidence superseded by the merge (Low; fixed by disclosure)
 
 `TETHRA_MACOS_PACKAGING_RESULTS.md`, `TETHRA_MACOS_PRIVATE_ALPHA_READINESS.md`,
 and `TETHRA_MACOS_PRIVATE_ALPHA_RELEASE_NOTES.md` present verified artifacts,
@@ -136,13 +150,15 @@ macOS package must be rebuilt and re-verified.**
 ### Accepted, not defects
 
 - **Historical documents keep the old name.** `UI_MAP.md`,
-  `MANUAL_UI_TEST_PLAN.md`, `MANUAL_TEST_DATA.md`, `FABLE_HANDOFF.md`, and the
-  audit ledgers describe verified pre-rename baselines. Each living one carries
+  `MANUAL_UI_TEST_PLAN.md`, `MANUAL_TEST_DATA.md`, `FABLE_HANDOFF.md`, the ADRs,
+  and the audit ledgers describe verified pre-rename baselines. Each living one carries
   a banner that explicitly corrects the window title, CLI name, and env vars.
   Rewriting a verified baseline would falsify the record; the banner is the
   honest option.
 - **`api-tracker` in keychain/AAD/hook-sentinel/webhook strings.** Preserved by
-  design; every site says why.
+  design; every site says why. The same applies to an `api-tracker run` mention
+  inside an already-shipped migration's SQL comment: migration text is never
+  edited after release, and it is invisible to users.
 - **Cargo crate names** (`api-tracker-core`, `-cli`, `-observe`) are internal
   identifiers, deferred by the matrix. `cargo build -p api-tracker-cli` and the
   CI job names are unchanged.
@@ -163,7 +179,7 @@ macOS package must be rebuilt and re-verified.**
 | Data directory, DB/session filenames, AAD labels, backup marker unchanged | PASS |
 | Vault-lock interruption of observed runs still correct after the merge | PASS (observe lock-lifecycle suite) |
 
-## 6. Validation (this cycle, on `8a756f2`, macOS/aarch64)
+## 6. Validation (this cycle, on `d6a0b7b`, macOS/aarch64)
 
 | Command | Result |
 |---|---|
@@ -188,4 +204,4 @@ build and re-run the packaging verification, since the recorded artifacts
 predate the observability merge.
 
 **REBRAND AUDIT VERDICT: PASS WITH REQUIRED CHANGES — all required changes
-applied and verified on `8a756f2`.**
+applied and verified on `d6a0b7b`.**
