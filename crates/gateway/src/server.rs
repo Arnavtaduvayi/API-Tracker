@@ -34,7 +34,14 @@ pub fn usage_tap_factory() -> TapFactory {
 }
 
 /// How often the accept loop wakes to observe the shutdown flag.
-const ACCEPT_POLL: Duration = Duration::from_millis(50);
+///
+/// This is also the worst-case ACCEPT latency for a fresh connection (the
+/// listener is non-blocking so shutdown stays observable without a signal
+/// dependency). Phase 3 perf measurement showed the original 50ms adding
+/// ~25ms average connection-setup latency for non-pooled clients (curl,
+/// one-shot scripts); 5ms keeps the idle wake cost negligible while making
+/// connection setup imperceptible. Keep-alive SDK traffic never sees this.
+const ACCEPT_POLL: Duration = Duration::from_millis(5);
 
 /// How long a clean stop waits for in-flight exchanges before abandoning
 /// them. Long enough that a normal streamed response completes; short enough
