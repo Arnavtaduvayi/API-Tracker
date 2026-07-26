@@ -86,6 +86,11 @@ pub struct Gateway {
     /// channel (SI-21). Absent here means attribution degrades honestly to
     /// `unavailable_vault_locked` — it never blocks or fails forwarding.
     pub matching_key: Arc<RwLock<Option<SecretBytes>>>,
+    /// The listener-identity probe key, derived from the per-boot nonce
+    /// (`control::probe_key_from_nonce`, D11). Not a secret capability in
+    /// itself — it can only ANSWER challenges, never authorize anything —
+    /// but present only when the service wired it at boot.
+    pub probe_key: Arc<RwLock<Option<[u8; 32]>>>,
 }
 
 impl Gateway {
@@ -101,6 +106,7 @@ impl Gateway {
             extraction_enabled: true,
             connector: Arc::new(TlsConnector),
             matching_key: Arc::new(RwLock::new(None)),
+            probe_key: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -108,6 +114,11 @@ impl Gateway {
     /// old key, which zeroizes it (`SecretBytes` is `ZeroizeOnDrop`).
     pub fn set_matching_key(&self, key: Option<SecretBytes>) {
         *self.matching_key.write().expect("matching key lock") = key;
+    }
+
+    /// Install the listener-identity probe key for this boot.
+    pub fn set_probe_key(&self, key: Option<[u8; 32]>) {
+        *self.probe_key.write().expect("probe key lock") = key;
     }
 
     pub fn has_matching_key(&self) -> bool {
@@ -154,6 +165,71 @@ fn respond_unknown_route(client: &mut TcpStream) {
          List routes with `tethra gateway status`, or add one with \
          `tethra gateway route add <provider>`. Nothing was forwarded.",
     );
+}
+
+/// Answer the listener-identity probe (`GET /_tethra/probe?c=<hex>`, D11).
+///
+/// Challenge–response: the caller derives the expected proof from the 0600
+/// nonce file and compares. The nonce itself never crosses this socket, and
+/// the response carries nothing but the proof and the version — no routes,
+/// no projects, no configuration. Probe requests write NO observation row
+/// and bump NO counter: they are local diagnostics, not traffic.
+fn respond_probe(gw: &Gateway, client: &mut TcpStream, head: &RequestHead) {
+    if !head.method.eq_ignore_ascii_case("GET") {
+        local_response(
+            client,
+            405,
+            "Method Not Allowed",
+            "the probe endpoint accepts GET only.",
+        );
+        return;
+    }
+    // The challenge is the query's `c` parameter: 2..=64 hex characters.
+    let challenge_hex = head
+        .target
+        .split_once('?')
+        .map(|(_, q)| q)
+        .unwrap_or("")
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("c="))
+        .unwrap_or("");
+    let challenge: Option<Vec<u8>> =
+        if challenge_hex.is_empty() || challenge_hex.len() > 64 || challenge_hex.len() % 2 != 0 {
+            None
+        } else {
+            (0..challenge_hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&challenge_hex[i..i + 2], 16).ok())
+                .collect()
+        };
+    let Some(challenge) = challenge else {
+        local_response(
+            client,
+            400,
+            "Bad Request",
+            "the probe challenge must be `?c=<2..64 hex characters>`.",
+        );
+        return;
+    };
+    let proof = match *gw.probe_key.read().expect("probe key lock") {
+        Some(key) => crate::control::probe_proof(&key, &challenge),
+        None => "unavailable".to_string(),
+    };
+    let body = format!(
+        "tethra-gateway-probe\nversion: {}\nproof: {proof}\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    let head_out = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = client.write_all(head_out.as_bytes());
+    let _ = client.write_all(body.as_bytes());
+    let _ = client.flush();
 }
 
 fn method_of(m: &str) -> HttpMethod {
@@ -455,6 +531,20 @@ fn handle_request(
             "the request path contains traversal or encoded-traversal segments.",
         );
         gw.sink.count("", counters::REJECTED_LOCALLY);
+        return Next::Close;
+    }
+
+    // --- reserved local namespace (never forwarded, never recorded) ---
+
+    if head.path_only() == "/_tethra/probe" {
+        respond_probe(gw, client, &head);
+        return Next::Close;
+    }
+    if head.path_only().starts_with("/_tethra/") || head.path_only() == "/_tethra" {
+        // Byte-identical to an unknown route: the reserved namespace must
+        // not be enumerable beyond the one documented probe path.
+        gw.sink.count("", counters::UNKNOWN_ROUTE);
+        respond_unknown_route(client);
         return Next::Close;
     }
 

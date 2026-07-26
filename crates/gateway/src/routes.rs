@@ -387,6 +387,10 @@ pub struct RouteTable {
     /// without a `[gateway]` section, invalid origin). Surfaced via status;
     /// requests for them 404 like any unknown prefix.
     pub skipped: Vec<(String, String)>,
+    /// Routes present but switched off. They match nothing (404, exactly
+    /// like a removed route); the count exists so status can tell
+    /// "disabled" apart from "gone".
+    pub disabled: usize,
 }
 
 impl RouteTable {
@@ -470,6 +474,7 @@ pub fn load_route_table(conn: &Connection, mac_key: Option<&SecretBytes>) -> Res
             consent,
         } = row;
         if !enabled {
+            table.disabled += 1;
             continue; // disabled routes match nothing (404)
         }
         // A tampered prefix (e.g. rewritten to a reserved segment) must not

@@ -122,6 +122,22 @@ pub struct Status {
     pub matching_key_present: bool,
     pub last_observation_at: Option<String>,
     pub last_error: Option<String>,
+    // Fields below are `serde(default)` so a CLI/desktop from one build can
+    // still read the status of a service from another (version-handshake
+    // traffic must not fail to parse across the very mismatch it detects).
+    /// Routes present in the database but switched off — they 404 exactly
+    /// like removed routes, and only this count tells the difference.
+    #[serde(default)]
+    pub routes_disabled: usize,
+    /// Routes present but unloadable, with the reason (unknown provider,
+    /// invalid origin, tampered prefix). Surfaced so an invalid snapshot is
+    /// a visible diagnosis, not a silent 404.
+    #[serde(default)]
+    pub routes_skipped: Vec<(String, String)>,
+    /// The service process id (diagnostics only — identity is proven by the
+    /// nonce probe, never by a pid).
+    #[serde(default)]
+    pub pid: u32,
 }
 
 /// What the control plane is allowed to do to a running gateway.
@@ -165,6 +181,109 @@ pub fn write_nonce(data_dir: &Path) -> Result<Zeroizing<String>> {
 /// Distinct from the control nonce, which is a live capability.
 pub fn random_boot_id() -> String {
     hex_encode(&api_tracker_core::crypto::random_bytes(8))
+}
+
+/// Derive the listener-identity probe key from the per-boot nonce (ADR 0019
+/// D11). The probe is challenge–response over the FORWARDING port: the
+/// caller sends a random challenge to `GET /_tethra/probe?c=<hex>` and the
+/// listener answers `keyed_hash(probe_key, challenge)`. Only a process that
+/// wrote (or read) the 0600 nonce file can compute the same proof, so a
+/// caller can distinguish "this data directory's gateway" from a port
+/// squatter WITHOUT the nonce ever crossing the unauthenticated TCP socket —
+/// the nonce itself remains a control capability and is never disclosed.
+pub fn probe_key_from_nonce(nonce_hex: &str) -> [u8; 32] {
+    blake3::derive_key(
+        "tethra gateway listener probe v1",
+        nonce_hex.trim().as_bytes(),
+    )
+}
+
+/// The proof for one challenge, hex-encoded.
+pub fn probe_proof(probe_key: &[u8; 32], challenge: &[u8]) -> String {
+    hex_encode(blake3::keyed_hash(probe_key, challenge).as_bytes())
+}
+
+/// What a listener-identity probe of `127.0.0.1:<port>` established. Status,
+/// doctor, and every `.env` write re-verify identity through this before
+/// claiming the gateway is healthy (D11): a PID or binary-path check was
+/// rejected in Phase 1 as unimplementable-without-TOCTOU on macOS.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "verdict", rename_all = "snake_case")]
+pub enum ListenerIdentity {
+    /// The listener answered the challenge with the correct proof.
+    Verified { version: String },
+    /// Something is listening but could not prove knowledge of this data
+    /// directory's nonce — a foreign process on our persisted port, another
+    /// vault's gateway, or a gateway whose nonce file is stale.
+    NotOurs,
+    /// Nothing is accepting connections on the port.
+    NoListener,
+    /// No nonce file exists to verify against (the gateway is not running,
+    /// or it never managed to write one).
+    NoNonce,
+}
+
+/// Probe `127.0.0.1:<port>` and verify the listener's identity against this
+/// data directory's nonce file. Pure TCP — works on every platform,
+/// including Windows where the control socket does not exist.
+pub fn verify_listener(data_dir: &Path, port: u16) -> ListenerIdentity {
+    let Ok(nonce) = read_nonce(data_dir) else {
+        // Distinguish "no listener" from "listener we cannot verify" even
+        // without a nonce, so doctor can report a port squatter after a
+        // crash removed the nonce file.
+        return match std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            std::time::Duration::from_secs(2),
+        ) {
+            Ok(_) => ListenerIdentity::NoNonce,
+            Err(_) => ListenerIdentity::NoListener,
+        };
+    };
+    let key = probe_key_from_nonce(&nonce);
+    let challenge = api_tracker_core::crypto::random_bytes(16);
+    let challenge_hex = hex_encode(&challenge);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(2))
+    else {
+        return ListenerIdentity::NoListener;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(3)));
+    let request = format!(
+        "GET /_tethra/probe?c={challenge_hex} HTTP/1.1\r\n\
+         Host: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(request.as_bytes()).is_err() || stream.flush().is_err() {
+        return ListenerIdentity::NotOurs;
+    }
+    // Bounded read: the probe response is tiny; anything oversized is not it.
+    let mut response = String::new();
+    let mut limited = std::io::Read::take(&mut stream, 8 * 1024);
+    let _ = std::io::Read::read_to_string(&mut limited, &mut response);
+    let expected = probe_proof(&key, &challenge);
+    let mut proof = None;
+    let mut version = None;
+    for line in response.lines() {
+        if let Some(v) = line.strip_prefix("proof: ") {
+            proof = Some(v.trim().to_string());
+        }
+        if let Some(v) = line.strip_prefix("version: ") {
+            version = Some(v.trim().to_string());
+        }
+    }
+    // Constant-time comparison: the proof is derived from a capability.
+    let matches = proof.as_ref().is_some_and(|p| {
+        use subtle::ConstantTimeEq;
+        p.len() == expected.len() && p.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() == 1
+    });
+    if matches {
+        ListenerIdentity::Verified {
+            version: version.unwrap_or_default(),
+        }
+    } else {
+        ListenerIdentity::NotOurs
+    }
 }
 
 pub fn read_nonce(data_dir: &Path) -> Result<Zeroizing<String>> {

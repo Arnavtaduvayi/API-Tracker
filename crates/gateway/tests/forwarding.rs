@@ -1512,3 +1512,128 @@ fn slow_streams_do_not_accumulate_and_a_multi_megabyte_body_relays_intact() {
     assert_eq!(r.response_bytes, Some(SIZE as i64));
     assert_eq!(r.completion, Completion::Completed);
 }
+
+// ---------------------------------------------------------------------------
+// Listener-identity probe (`/_tethra/probe`, ADR 0019 D11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn probe_answers_a_challenge_only_this_data_dirs_nonce_can_verify() {
+    use api_tracker_gateway::control;
+
+    let dir = tempfile::tempdir().unwrap();
+    let nonce = control::write_nonce(dir.path()).unwrap();
+    let gw = RunningGateway::start(direct_route_state(vec![]));
+    gw.gateway
+        .set_probe_key(Some(control::probe_key_from_nonce(&nonce)));
+
+    // The high-level verifier: reads the 0600 nonce file, sends a random
+    // challenge, checks the proof.
+    match control::verify_listener(dir.path(), gw.port) {
+        control::ListenerIdentity::Verified { version } => {
+            assert_eq!(version, env!("CARGO_PKG_VERSION"));
+        }
+        other => panic!("expected Verified, got {other:?}"),
+    }
+
+    // A DIFFERENT data directory's nonce must not verify this listener —
+    // that is exactly the port-squatter/stale-port diagnosis.
+    let foreign = tempfile::tempdir().unwrap();
+    control::write_nonce(foreign.path()).unwrap();
+    assert_eq!(
+        control::verify_listener(foreign.path(), gw.port),
+        control::ListenerIdentity::NotOurs
+    );
+
+    // No listener at all is its own verdict.
+    let unused_port = {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        l.local_addr().unwrap().port()
+    };
+    assert_eq!(
+        control::verify_listener(dir.path(), unused_port),
+        control::ListenerIdentity::NoListener
+    );
+
+    // Probes are diagnostics, not traffic: no observation records.
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(gw.sink.records().is_empty(), "probes must not be recorded");
+}
+
+#[test]
+fn probe_rejects_bad_methods_and_hides_the_rest_of_the_reserved_namespace() {
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", 1, "")]));
+    gw.gateway.set_probe_key(Some([7u8; 32]));
+
+    // Non-GET is refused.
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "POST /_tethra/probe?c=aabb HTTP/1.1\r\nHost: {}\r\nContent-Length: 0\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    assert!(read_response(&mut c).starts_with("HTTP/1.1 405 "));
+
+    // A missing or malformed challenge is a 400.
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /_tethra/probe HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    assert!(read_response(&mut c).starts_with("HTTP/1.1 400 "));
+
+    // Every OTHER path under the reserved namespace answers byte-identically
+    // to an unknown route, so the namespace is not enumerable.
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /_tethra/other HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let reserved = read_response(&mut c);
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /no-such-route/x HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let unknown = read_response(&mut c);
+    assert_eq!(reserved, unknown);
+
+    // A browser-shaped probe is refused by the gate that runs FIRST: the
+    // reserved namespace grants no exception to the browser policy.
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /_tethra/probe?c=aabb HTTP/1.1\r\nHost: {}\r\nOrigin: http://evil.example\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    assert!(read_response(&mut c).starts_with("HTTP/1.1 403 "));
+}
+
+#[test]
+fn probe_without_a_wired_key_says_unavailable_rather_than_lying() {
+    let gw = RunningGateway::start(direct_route_state(vec![]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /_tethra/probe?c=aabbccdd HTTP/1.1\r\nHost: {}\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let resp = read_response(&mut c);
+    assert!(resp.starts_with("HTTP/1.1 200 "));
+    assert!(resp.contains("proof: unavailable"), "{resp}");
+}

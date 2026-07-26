@@ -268,16 +268,21 @@ fn duplicate_disabled_and_removed_routes_behave() {
         table.route("openai").is_none(),
         "disabled routes match nothing"
     );
+    assert_eq!(
+        table.disabled, 1,
+        "status must be able to tell 'disabled' apart from 'removed'"
+    );
 
     assert!(routes::set_route_enabled(&conn, "openai", true).unwrap());
-    assert!(routes::load_route_table(&conn, None)
-        .unwrap()
-        .route("openai")
-        .is_some());
+    let table = routes::load_route_table(&conn, None).unwrap();
+    assert!(table.route("openai").is_some());
+    assert_eq!(table.disabled, 0);
 
     assert!(routes::remove_route(&conn, "openai").unwrap());
     assert!(!routes::remove_route(&conn, "openai").unwrap());
-    assert!(routes::load_route_table(&conn, None).unwrap().is_empty());
+    let table = routes::load_route_table(&conn, None).unwrap();
+    assert!(table.is_empty());
+    assert_eq!(table.disabled, 0, "a removed route is not 'disabled'");
 }
 
 #[test]

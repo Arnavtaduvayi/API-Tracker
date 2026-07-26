@@ -75,6 +75,9 @@ impl ControlTarget for ServiceControl {
             matching_key_present: self.gateway.has_matching_key(),
             last_observation_at: self.writer_state.last_written_at(),
             last_error: self.writer_state.last_error(),
+            routes_disabled: table.disabled,
+            routes_skipped: table.skipped.clone(),
+            pid: std::process::id(),
         }
     }
 
@@ -147,6 +150,10 @@ impl Service {
 
         let routes = Arc::new(RouteState::new(&db_path));
         let gateway = Gateway::new(routes.clone(), sink.clone(), bound_port);
+        // The listener answers identity challenges derived from this boot's
+        // nonce (D11), so status/link/doctor can distinguish this gateway
+        // from a port squatter without the nonce crossing the TCP socket.
+        gateway.set_probe_key(Some(crate::control::probe_key_from_nonce(&nonce)));
         crate::control::write_pid_file(data_dir)?;
 
         let control_target = ServiceControl {
