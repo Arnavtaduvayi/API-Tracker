@@ -169,6 +169,13 @@ pub mod aad {
     pub fn fingerprint_key(vault_id: &str) -> String {
         format!("api-tracker:v1:fingerprint-key:{vault_id}")
     }
+    /// The gateway route-MAC key (ADR 0019 D3): a matching/MAC-only key that
+    /// authenticates custom-origin route rows so a same-uid `UPDATE` of the
+    /// plaintext gateway_routes table cannot redirect a live pass-through
+    /// credential. Like the fingerprint key it can never decrypt anything.
+    pub fn gateway_mac_key(vault_id: &str) -> String {
+        format!("api-tracker:v1:gateway-mac-key:{vault_id}")
+    }
     /// Outer wrap of a project key (under the vault key).
     pub fn project_key(vault_id: &str, project_id: &str) -> String {
         format!("api-tracker:v1:project-key:{vault_id}:{project_id}")

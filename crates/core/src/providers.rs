@@ -146,6 +146,37 @@ impl Confidence {
     }
 }
 
+/// The additive `[gateway]` manifest section (ADR 0019 D10): the fixed
+/// upstream origin(s) the Local Gateway may forward this provider's routes
+/// to, plus the client-side `.env` shape. Only providers with a truly fixed
+/// data-plane origin declare it (Supabase-style per-project origins use the
+/// validated custom-origin flow instead — KNOWN_CONFLICTS C11). Because
+/// manifests are compiled into the binary, this section — not any database
+/// row — is the trust root for where manifest routes forward (ADR 0019 D3).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatewaySection {
+    /// Upstream origins, `https://host` form (https and port 443 implied and
+    /// enforced). The first entry is the route's forwarding origin.
+    #[serde(default)]
+    pub origins: Vec<String>,
+    /// The base path the `.env` writer appends to the loopback route URL —
+    /// client-side ONLY. The `/v1` placement differs per provider because
+    /// SDKs join URLs differently (OPEN_DECISIONS O11); the forwarding path
+    /// itself is always plain prefix-stripping.
+    #[serde(default)]
+    pub base_path: String,
+    /// The base-URL environment variables to write at link time (the
+    /// provider-native name plus known aliases, e.g. `OPENAI_API_BASE`).
+    /// These are NON-secret variables, unlike the top-level `env_vars`.
+    #[serde(default)]
+    pub env_vars: Vec<String>,
+    /// Which bounded usage-extraction shape applies to this provider's
+    /// responses: `openai`, `anthropic`, or empty (no extraction; counts
+    /// only). Unknown shapes never parse anything.
+    #[serde(default)]
+    pub usage_shape: String,
+}
+
 /// A provider manifest (parsed from TOML).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderManifest {
@@ -183,6 +214,10 @@ pub struct ProviderManifest {
     pub watch_docs: Vec<String>,
     #[serde(default)]
     pub detection: Vec<DetectionPattern>,
+    /// Local Gateway routing declaration; absent for providers without a
+    /// fixed data-plane origin.
+    #[serde(default)]
+    pub gateway: Option<GatewaySection>,
     pub capabilities: Capabilities,
 }
 
@@ -268,6 +303,60 @@ fn validate_manifest(manifest: &ProviderManifest) -> Result<()> {
                 manifest.id, pattern.name
             ))
         })?;
+    }
+    if let Some(gateway) = &manifest.gateway {
+        validate_gateway_section(&manifest.id, gateway)?;
+    }
+    Ok(())
+}
+
+/// Syntactic validation of a `[gateway]` section. This is the compile-time
+/// gate; the gateway crate ALSO runs the full SSRF policy over these origins
+/// at route load and at connect time (defense in depth — core cannot depend
+/// on the observe policy module).
+fn validate_gateway_section(id: &str, gateway: &GatewaySection) -> Result<()> {
+    let err = |msg: String| Err(CoreError::InvalidInput(msg));
+    if gateway.origins.is_empty() {
+        return err(format!("provider '{id}' [gateway] declares no origins"));
+    }
+    for origin in &gateway.origins {
+        let Some(rest) = origin.strip_prefix("https://") else {
+            return err(format!(
+                "provider '{id}' gateway origin '{origin}' must be https"
+            ));
+        };
+        if rest.is_empty()
+            || rest.contains(['/', '?', '#', '@', ':'])
+            || rest != rest.to_lowercase()
+        {
+            return err(format!(
+                "provider '{id}' gateway origin '{origin}' must be a bare lowercase \
+                 https host: no path, query, fragment, userinfo, or port \
+                 (443 is implied and enforced)"
+            ));
+        }
+    }
+    if !gateway.base_path.is_empty()
+        && (!gateway.base_path.starts_with('/') || gateway.base_path.contains(['?', '#']))
+    {
+        return err(format!(
+            "provider '{id}' gateway base_path '{}' must be empty or start with '/' \
+             and carry no query/fragment",
+            gateway.base_path
+        ));
+    }
+    for var in &gateway.env_vars {
+        if var.trim().is_empty() || var.contains('=') {
+            return err(format!(
+                "provider '{id}' gateway env_vars entry '{var}' is not a variable name"
+            ));
+        }
+    }
+    if !matches!(gateway.usage_shape.as_str(), "" | "openai" | "anthropic") {
+        return err(format!(
+            "provider '{id}' gateway usage_shape '{}' is not a known extraction shape",
+            gateway.usage_shape
+        ));
     }
     Ok(())
 }

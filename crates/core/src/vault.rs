@@ -536,6 +536,40 @@ impl UnlockedVault {
         Ok(())
     }
 
+    /// The gateway route-MAC key (ADR 0019 D3), created on first use and
+    /// stored vault-key-wrapped in `vault_meta` — the exact fingerprint-key
+    /// pattern. It authenticates custom-origin gateway routes (a keyed MAC
+    /// over the route's identity fields) so the plaintext, same-uid-writable
+    /// `gateway_routes` table is never the trust root for where a live
+    /// pass-through credential is forwarded. Like the fingerprint key it can
+    /// verify/produce MACs only; it can never decrypt anything.
+    pub fn gateway_route_mac_key(&mut self) -> Result<SecretBytes> {
+        if let Some(wrapped_hex) = meta_get(&self.conn, "wrapped_gateway_mac_key")? {
+            let wrapped = hex::decode(wrapped_hex).map_err(|_| {
+                CoreError::VaultCorrupted("wrapped gateway MAC key is not valid hex")
+            })?;
+            return crypto::decrypt(
+                &self.vault_key,
+                &aad::gateway_mac_key(&self.vault_id),
+                &wrapped,
+                "gateway MAC key",
+            );
+        }
+        let key = crypto::new_key();
+        let wrapped = crypto::encrypt(
+            &self.vault_key,
+            &aad::gateway_mac_key(&self.vault_id),
+            key.expose(),
+        )?;
+        meta_set(
+            &self.conn,
+            "wrapped_gateway_mac_key",
+            &hex::encode(&wrapped),
+        )?;
+        audit::record(&self.conn, "gateway_mac_key_created", None, None, "")?;
+        Ok(key)
+    }
+
     /// Re-verify the master password (reauthentication for sensitive
     /// actions). Runs the full Argon2id derivation.
     pub fn verify_master_password(&self, master_password: &SecretString) -> Result<()> {
