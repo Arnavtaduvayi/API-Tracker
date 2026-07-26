@@ -146,14 +146,16 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
         .context("starting the gateway (is one already running for this data directory?)")?;
     let bound = service.port();
 
-    // Persist the port we actually got, so the next run reuses it.
-    if let Ok(conn) = api_tracker_core::db::open(&ctx.paths.db_path()) {
-        if let Ok(mut config) = store::load_config(&conn) {
-            if config.port != Some(bound) {
-                config.port = Some(bound);
-                let _ = store::save_config(&conn, &config);
-            }
-        }
+    // Persist the port we actually got, so the next run reuses it and the
+    // base URLs written into project .env files keep working. A failure here
+    // is NOT cosmetic — the next run would bind a different random port and
+    // every linked SDK would get connection-refused — so it is reported.
+    if let Err(why) = persist_port(ctx, bound) {
+        println!();
+        println!("WARNING: could not persist port {bound} ({why}).");
+        println!("The next `serve` may bind a different port, which would break any");
+        println!(".env base URL pointing at this one. Pass --port {bound} to pin it.");
+        println!();
     }
 
     if let Some(why) = service.control_unavailable() {
@@ -200,6 +202,18 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
     Ok(())
 }
 
+fn persist_port(ctx: &Ctx, port: u16) -> Result<()> {
+    let conn =
+        api_tracker_core::db::open(&ctx.paths.db_path()).context("opening the vault database")?;
+    let mut config = store::load_config(&conn).context("reading the gateway config")?;
+    if config.port == Some(port) {
+        return Ok(());
+    }
+    config.port = Some(port);
+    store::save_config(&conn, &config).context("saving the gateway port")?;
+    Ok(())
+}
+
 fn install_key(ctx: &Ctx, data_dir: &std::path::Path) -> Result<()> {
     let (vault, token) = ctx.unlocked()?;
     // Reauth: handing the matching key to a long-lived process is a
@@ -211,12 +225,20 @@ fn install_key(ctx: &Ctx, data_dir: &std::path::Path) -> Result<()> {
         .context("reading the credential-matching key")?;
     ctx.persist_session(&vault, &token)?;
     let nonce = control::read_nonce(data_dir).context("reading the gateway control nonce")?;
-    let hex: String = key.expose().iter().map(|b| format!("{b:02x}")).collect();
+    // The hex form of the key lives in a zeroizing buffer for the moments it
+    // exists; serde still builds one plain String inside `send`, which is a
+    // documented best-effort limit (SI-9).
+    let hex = zeroize::Zeroizing::new(
+        key.expose()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    );
     let response = control::send(
         data_dir,
         &control::Request::PushKey {
             nonce: nonce.to_string(),
-            key_hex: hex,
+            key_hex: hex.to_string(),
         },
     )?;
     match response {

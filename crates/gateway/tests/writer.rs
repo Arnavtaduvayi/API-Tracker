@@ -780,3 +780,156 @@ fn dropped_events_are_reported_not_hidden() {
         state.dropped_counters()
     );
 }
+
+#[test]
+fn a_matcher_install_reports_failure_instead_of_claiming_success() {
+    // The control plane must never report "key installed" when the writer
+    // did not get the matcher: that combination records every exchange as
+    // `unavailable_vault_locked` while status claims attribution is on.
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = test_db(dir.path());
+    let writer = Writer::start(&db_path, "boot-test".into());
+    let sink = writer.sink();
+    let matcher = api_tracker_gateway::attribution::Matcher::new(vec![]);
+    assert!(
+        sink.set_matcher(Some(matcher)),
+        "an install on a healthy writer must succeed and SAY so"
+    );
+    assert!(sink.flush(Duration::from_secs(10)));
+    assert!(sink.set_matcher(None), "clearing must report success too");
+}
+
+#[test]
+fn counter_bumps_lost_to_an_unavailable_database_are_accounted() {
+    // The "every bump is applied or accounted" property must hold when the
+    // DATABASE is what failed, not only when the queue was full.
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("no-such.db");
+    let writer = Writer::start(&missing, "boot-test".into());
+    let sink = writer.sink();
+    for _ in 0..25 {
+        sink.count("openai", "unlinked_requests");
+    }
+    sink.flush(Duration::from_secs(10));
+    let state = writer.state();
+    assert!(
+        state.dropped_counters() >= 25,
+        "counter bumps lost to an unavailable database must be counted, got {}",
+        state.dropped_counters()
+    );
+    assert!(state.is_degraded());
+}
+
+#[test]
+fn one_exchange_is_one_transaction() {
+    // A record whose usage row cannot be written must not leave a half-
+    // persisted exchange behind.
+    let up = MockUpstream::start(canned(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+data: {\"model\":\"gpt-4o\",\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":6}}\n\n",
+        0,
+    ));
+    let gw = Persisted::start(up.port, "openai", true);
+    assert!(gw.request("/v1/chat").starts_with("HTTP/1.1 200"));
+    assert!(gw.flush());
+    let conn = gw.conn();
+    // Both halves landed together.
+    let events = count(&conn, "SELECT COUNT(*) FROM runtime_request_events");
+    let usage = count(&conn, "SELECT COUNT(*) FROM gateway_usage_events");
+    assert_eq!(events, 1);
+    assert_eq!(usage, 1, "the usage row must accompany its event row");
+    // And the usage row references the event that produced it.
+    let linked: i64 = count(
+        &conn,
+        "SELECT COUNT(*) FROM gateway_usage_events u
+         JOIN runtime_request_events e ON e.id = u.event_id",
+    );
+    assert_eq!(linked, 1);
+}
+
+/// SI-9 / THREAT_MODEL GW-6: a password-locked project's credential must
+/// never become oracle-confirmable, INCLUDING through a reference row that
+/// lives in an unlocked, linked project and carries a copy of the root's
+/// fingerprint.
+#[test]
+fn a_password_locked_roots_fingerprint_never_enters_the_matcher() {
+    use api_tracker_gateway::attribution;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = test_db(dir.path());
+    let conn = open_db(&db_path);
+    let key = SecretBytes::new(vec![5u8; 32]);
+
+    let locked_value = "FAKE-TEST-NOT-A-REAL-KEY-LOCKED-ROOT";
+    let open_value = "FAKE-TEST-NOT-A-REAL-KEY-OPEN-CRED";
+    let locked_fp = attribution::core_fingerprint_for_test(&key, locked_value).unwrap();
+    let open_fp = attribution::core_fingerprint_for_test(&key, open_value).unwrap();
+
+    conn.execute(
+        "INSERT INTO projects (id, name, description, notes, environments, archived,
+             created_at, updated_at, wrapped_project_key, key_wrap_mode)
+         VALUES ('p-locked', 'secret-app', '', '', 'development', 0,
+             '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', x'00', 'vault+password')",
+        [],
+    )
+    .unwrap();
+    // Root in the LOCKED project.
+    conn.execute(
+        "INSERT INTO credentials (id, project_id, provider, name, environment,
+             credential_type, ciphertext, fingerprint, masked_value, created_at,
+             updated_at, docs_url, notes, manually_disabled, revoked, marked_invalid,
+             possibly_exposed, exposure_note, value_version)
+         VALUES ('root-cred','p-locked','openai','main','development','api_key', x'00', ?1,
+             'FAKE-...0001','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','','',0,0,0,0,'',1)",
+        rusqlite::params![locked_fp],
+    )
+    .unwrap();
+    // A REFERENCE to it in the unlocked, linked project — which carries a
+    // COPY of the root's fingerprint, exactly as add_credential_reference
+    // writes it.
+    conn.execute(
+        "INSERT INTO credentials (id, project_id, provider, name, environment,
+             credential_type, linked_credential_id, fingerprint, masked_value, created_at,
+             updated_at, docs_url, notes, manually_disabled, revoked, marked_invalid,
+             possibly_exposed, exposure_note, value_version)
+         VALUES ('ref-cred','p1','openai','shared','development','api_key','root-cred', ?1,
+             'FAKE-...0001','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z','','',0,0,0,0,'',1)",
+        rusqlite::params![locked_fp],
+    )
+    .unwrap();
+    // An ordinary credential in the same unlocked project, to prove the
+    // exclusion is targeted and not a blanket failure.
+    conn.execute(
+        "INSERT INTO credentials (id, project_id, provider, name, environment,
+             credential_type, ciphertext, fingerprint, masked_value, created_at,
+             updated_at, docs_url, notes, manually_disabled, revoked, marked_invalid,
+             possibly_exposed, exposure_note, value_version)
+         VALUES ('open-cred','p1','openai','own','development','api_key', x'00', ?1,
+             'FAKE-...0002','2026-01-02T00:00:00Z','2026-01-02T00:00:00Z','','',0,0,0,0,'',1)",
+        rusqlite::params![open_fp],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gateway_routes (route_prefix, provider_id, created_at, updated_at)
+         VALUES ('openai','openai','2026-07-26T00:00:00Z','2026-07-26T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gateway_project_links (link_slug, project_id, route_prefix, created_at)
+         VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','p1','openai','2026-07-26T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+
+    let table = attribution::load_matcher_table(&conn).unwrap();
+    assert!(
+        !table.iter().any(|e| e.fingerprint == locked_fp),
+        "a password-locked root's fingerprint must NEVER reach the matcher, \
+         even via a reference row in an unlocked linked project"
+    );
+    assert!(
+        table.iter().any(|e| e.fingerprint == open_fp),
+        "the exclusion must be targeted: ordinary credentials still match"
+    );
+}

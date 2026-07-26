@@ -195,15 +195,71 @@ on a full queue), and on BSD/macOS an accepted socket inherits the listener's
 non-blocking flag, which made the control channel intermittently drop
 connections.
 
+## Final adversarial sweep (after the core was complete)
+
+A second review — attribution/crypto, usage/writer, control/service lenses,
+each finding independently verified — raised 16 claims of which **12 were
+confirmed**. All confirmed findings were fixed before the final commit:
+
+- **Anthropic cache tokens were double-counted** (high). `message_delta`
+  repeats the *cumulative* input and cache counts, not just the output, so
+  the per-frame addition inflated every prompt-cached request's input tokens
+  (135 became 245 in the reproduction). Cache components are now tracked in
+  their own fields with the same idempotent `set_max` as everything else and
+  summed exactly once. OpenAI's cached tokens are a *subset* of
+  `prompt_tokens`, so they are not added there — the provider shape decides.
+- **Only the first recognized credential header was digested.** Clients that
+  send both `Authorization` and `x-api-key` (Anthropic with an auth token,
+  Azure-style clients) got a false `unmatched` for the credential that
+  actually served the request, and a leading `Basic` masked a following
+  supported header entirely. Every recognized header is now digested.
+- **A password-locked project's fingerprint could reach the matcher** through
+  a reference row in an unlocked, linked project, which carries a copy of the
+  root's fingerprint — a direct SI-9 / GW-6 violation. Roots in
+  password-locked projects are now excluded wherever their references live.
+  Traffic using such a shared value reports `unmatched` until the owning
+  project is unlocked; that is the honest degradation.
+- **A matcher install could be silently dropped** on a full queue, so
+  `push-key` returned success while every exchange was recorded
+  `unavailable_vault_locked` and status claimed attribution was on. Control-
+  plane installs now wait briefly for a slot and report failure.
+- **Counter bumps lost to an unavailable database were unaccounted**, breaking
+  the documented "every bump is applied or accounted" property.
+- **`persist_with` was not transactional**, so a mid-sequence failure could
+  leave an event row without its usage row. One exchange is now one
+  transaction.
+- **The control nonce was reused as the writer's boot id** and therefore
+  persisted into the plaintext `observation_sessions.command` column and shown
+  by `tethra observe sessions` — a live control capability written to disk.
+  The boot id is now its own random value.
+- **Cache-read tokens were priced at the full input rate.** They are billed at
+  roughly a tenth of it, and `estimate_token_cost_as_of` does not consult the
+  cached rate the pricing tables carry, so a cached workload's spend was
+  overstated several-fold. Cache reads are now excluded from the estimate,
+  which makes it a **lower** bound for cached traffic — recorded as a
+  limitation below, because overstating spend is the more harmful error for a
+  budgeting tool.
+- **A silent port-persist failure** would have made the next `serve` bind a
+  different random port and break every linked `.env` with no explanation. It
+  now prints a warning naming the port to pin.
+- The matching key transited plain heap `String`s on both ends of the push;
+  the buffers this crate controls are now `Zeroizing` (serde still builds one
+  plain `String` inside `send`, which is a documented best-effort limit).
+
+Two confirmed findings were **not** fixed and are recorded as limitations
+instead: the stale-socket replacement TOCTOU (below), and the
+`persist_with` failure-accounting subtlety that a rolled-back transaction is
+counted once as a persist failure rather than per statement.
+
 ## Tests
 
-**Workspace: 812 tests, all passing (`cargo test --workspace --all-targets`, exit 0). Gateway crate: 157 of them.**
+**Workspace: 826 tests, all passing (`cargo test --workspace --all-targets`, exit 0). Gateway crate: 171 of them.**
 
 | Suite | Count | Proves |
 |---|---|---|
-| `crates/gateway` unit | 64 | Head parsing/validation/regeneration, strict chunked relay, usage extraction, attribution states, SSRF phases, route/prefix validation, config+counters, listener bind |
+| `crates/gateway` unit | 71 | Head parsing/validation/regeneration, strict chunked relay, usage extraction, attribution states, SSRF phases, route/prefix validation, config+counters, listener bind |
 | `tests/forwarding.rs` | 38 | TEST_PLAN §1–§2 |
-| `tests/writer.rs` | 13 | TEST_PLAN §4, §8 |
+| `tests/writer.rs` | 17 | TEST_PLAN §4, §8 |
 | `tests/control.rs` | 13 | TEST_PLAN §3 control channel, §5 key lifecycle |
 | `tests/routes.rs` | 11 | TEST_PLAN §3 route table and SSRF |
 | `tests/privacy_canaries.rs` | 7 | TEST_PLAN §6 |
@@ -235,7 +291,7 @@ neither credential enters the other's connection),
 
 Validation run at completion, all green: `cargo fmt --all --check`;
 `cargo +1.97.0 clippy --workspace --all-targets -- -D warnings`;
-`cargo test --workspace --all-targets` (812 passed, 0 failed);
+`cargo test --workspace --all-targets` (826 passed, 0 failed);
 `cargo build --workspace --release`; `bash scripts/smoke.sh` (126 passed, 0 failed).
 
 ## Known limitations
@@ -260,6 +316,16 @@ Validation run at completion, all green: `cargo fmt --all --check`;
    rustls, so plaintext already buffered inside the TLS session is invisible
    to it. The redial-once path covers the case in practice; a future fix would
    consult the rustls connection state.
+6b. **Cost estimates exclude cache-read tokens**, so they are a LOWER bound
+   for prompt-cached workloads. `estimate_token_cost_as_of` knows only the
+   base input and output rates; the cached rate the pricing tables carry is
+   not consulted by any caller in the workspace. Wiring it through is a core
+   change a Phase 3 session should make.
+6c. **`ControlServer::start`'s stale-socket replacement is TOCTOU.** Two
+   simultaneous starts can both pass the liveness probe and the second can
+   unlink the first's live socket, leaving one gateway reachable and one
+   orphaned. The window is small and requires two concurrent starts against
+   one data directory; a lock-file protocol would close it.
 7. **Attribution is off unless a key is pushed.** Per OPEN_DECISIONS O2 the
    toggle defaults OFF; `serve --with-attribution` or `gateway push-key`
    enables it, reauth-gated and audited.

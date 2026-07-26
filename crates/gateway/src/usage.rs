@@ -71,10 +71,15 @@ pub fn sanitize_model(raw: &str) -> Option<String> {
 struct Acc {
     model: Option<String>,
     model_rejected: bool,
+    /// The provider's BASE input count, before any cache components are
+    /// folded in. Kept separate so a repeated frame cannot double-count.
     input: Option<u64>,
     output: Option<u64>,
     total: Option<u64>,
-    cached: Option<u64>,
+    /// Cache-read input tokens, tracked in their own field.
+    cache_read: Option<u64>,
+    /// Cache-creation input tokens, likewise.
+    cache_creation: Option<u64>,
     saw_usage: bool,
     malformed: bool,
 }
@@ -87,11 +92,6 @@ impl Acc {
         match sanitize_model(raw) {
             Some(m) => self.model = Some(m),
             None => self.model_rejected = true,
-        }
-    }
-    fn add(field: &mut Option<u64>, v: Option<u64>) {
-        if let Some(v) = v {
-            *field = Some(field.unwrap_or(0) + v);
         }
     }
     fn set_max(field: &mut Option<u64>, v: Option<u64>) {
@@ -132,7 +132,7 @@ fn absorb_json(acc: &mut Acc, shape: Shape, v: &serde_json::Value) {
                             .and_then(|d| d.get("cached_tokens"))
                             .and_then(u64_of)
                     });
-                Acc::set_max(&mut acc.cached, cached);
+                Acc::set_max(&mut acc.cache_read, cached);
             }
         }
         Shape::Anthropic => {
@@ -154,15 +154,22 @@ fn absorb_json(acc: &mut Acc, shape: Shape, v: &serde_json::Value) {
                 .filter(|u| !u.is_null());
             if let Some(u) = usage {
                 acc.saw_usage = true;
+                // EVERY field uses the idempotent set_max, cache components
+                // included: Anthropic's `message_delta` repeats the
+                // CUMULATIVE input and cache counts, not just the output, so
+                // adding them per frame double-counted every prompt-cached
+                // request. The components are summed ONCE, in
+                // `observation()`.
                 Acc::set_max(&mut acc.input, u.get("input_tokens").and_then(u64_of));
                 Acc::set_max(&mut acc.output, u.get("output_tokens").and_then(u64_of));
-                let cache_read = u.get("cache_read_input_tokens").and_then(u64_of);
-                let cache_creation = u.get("cache_creation_input_tokens").and_then(u64_of);
-                Acc::set_max(&mut acc.cached, cache_read);
-                // Cache reads and creations ARE input tokens the caller paid
-                // for; the provider reports them separately.
-                Acc::add(&mut acc.input, cache_read);
-                Acc::add(&mut acc.input, cache_creation);
+                Acc::set_max(
+                    &mut acc.cache_read,
+                    u.get("cache_read_input_tokens").and_then(u64_of),
+                );
+                Acc::set_max(
+                    &mut acc.cache_creation,
+                    u.get("cache_creation_input_tokens").and_then(u64_of),
+                );
             }
         }
     }
@@ -301,18 +308,39 @@ impl UsageExtractor {
         } else {
             UsageState::Absent
         };
+        // Cache components are summed into the input total exactly once,
+        // here, from idempotently-tracked fields. Anthropic reports
+        // cache-read and cache-creation SEPARATELY from `input_tokens`, and
+        // both are input tokens the caller was billed for; OpenAI reports
+        // cached tokens as a SUBSET of `prompt_tokens`, so folding them in
+        // there would double-count. The provider shape decides which.
+        let input_tokens = match self.shape {
+            Shape::Anthropic => {
+                let read = self.acc.cache_read.unwrap_or(0);
+                let creation = self.acc.cache_creation.unwrap_or(0);
+                if self.acc.input.is_none() && read == 0 && creation == 0 {
+                    None
+                } else {
+                    Some(
+                        self.acc
+                            .input
+                            .unwrap_or(0)
+                            .saturating_add(read)
+                            .saturating_add(creation),
+                    )
+                }
+            }
+            Shape::OpenAi => self.acc.input,
+        };
         UsageObservation {
             model: self.acc.model.clone(),
-            input_tokens: self.acc.input,
+            input_tokens,
             output_tokens: self.acc.output,
-            total_tokens: self
-                .acc
-                .total
-                .or_else(|| match (self.acc.input, self.acc.output) {
-                    (Some(i), Some(o)) => Some(i + o),
-                    _ => None,
-                }),
-            cached_input_tokens: self.acc.cached,
+            total_tokens: self.acc.total.or(match (input_tokens, self.acc.output) {
+                (Some(i), Some(o)) => Some(i.saturating_add(o)),
+                _ => None,
+            }),
+            cached_input_tokens: self.acc.cache_read,
             state,
             was_streamed: self.streaming,
             dropped_events: self.dropped_events,
@@ -722,5 +750,57 @@ mod tests {
         );
         assert!(!serialized.contains("CANARY"));
         assert_eq!(out.input_tokens, Some(4));
+    }
+}
+
+#[cfg(test)]
+mod cache_accumulation_tests {
+    use super::*;
+    use crate::forward::BodyTap;
+
+    /// Anthropic's `message_delta` carries the CUMULATIVE input and cache
+    /// counts, not just the output. Adding them per frame double-counted
+    /// every prompt-cached request; the counts must be idempotent.
+    #[test]
+    fn repeated_cumulative_cache_fields_are_not_double_counted() {
+        let mut ex = UsageExtractor::new(Shape::Anthropic, true, false);
+        ex.feed(b"data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":25,\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":10,\"output_tokens\":1}}}\n\n");
+        // The delta REPEATS the cumulative input and cache fields.
+        ex.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":25,\"cache_read_input_tokens\":100,\"cache_creation_input_tokens\":10,\"output_tokens\":73}}\n\n");
+        let out = ex.observation();
+        assert_eq!(
+            out.input_tokens,
+            Some(135),
+            "25 base + 100 cache read + 10 cache creation, counted ONCE"
+        );
+        assert_eq!(out.output_tokens, Some(73));
+        assert_eq!(out.cached_input_tokens, Some(100));
+        assert_eq!(out.total_tokens, Some(208));
+    }
+
+    #[test]
+    fn a_third_repetition_still_does_not_inflate() {
+        let mut ex = UsageExtractor::new(Shape::Anthropic, true, false);
+        for _ in 0..3 {
+            ex.feed(b"data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":50,\"output_tokens\":5}}\n\n");
+        }
+        let out = ex.observation();
+        assert_eq!(out.input_tokens, Some(60));
+        assert_eq!(out.output_tokens, Some(5));
+    }
+
+    /// OpenAI reports cached tokens as a SUBSET of prompt_tokens, so they
+    /// must NOT be added on top.
+    #[test]
+    fn openai_cached_tokens_are_a_subset_and_are_not_added() {
+        let mut ex = UsageExtractor::new(Shape::OpenAi, true, false);
+        ex.feed(b"data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":20,\"prompt_tokens_details\":{\"cached_tokens\":80}}}\n\n");
+        let out = ex.observation();
+        assert_eq!(
+            out.input_tokens,
+            Some(100),
+            "OpenAI's cached_tokens are already inside prompt_tokens"
+        );
+        assert_eq!(out.cached_input_tokens, Some(80));
     }
 }

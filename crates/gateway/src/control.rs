@@ -134,14 +134,15 @@ pub trait ControlTarget: Send + Sync {
     fn shutdown(&self);
 }
 
-fn hex_decode(s: &str) -> Option<Vec<u8>> {
+fn hex_decode(s: &str) -> Option<Zeroizing<Vec<u8>>> {
     if s.len() % 2 != 0 {
         return None;
     }
-    (0..s.len())
+    let bytes: Option<Vec<u8>> = (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-        .collect()
+        .collect();
+    bytes.map(Zeroizing::new)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -158,6 +159,12 @@ pub fn write_nonce(data_dir: &Path) -> Result<Zeroizing<String>> {
     let path = data_dir.join(NONCE_NAME);
     write_private(&path, nonce.as_bytes())?;
     Ok(Zeroizing::new(nonce))
+}
+
+/// A random, non-secret identifier for this boot, safe to persist and show.
+/// Distinct from the control nonce, which is a live capability.
+pub fn random_boot_id() -> String {
+    hex_encode(&api_tracker_core::crypto::random_bytes(8))
 }
 
 pub fn read_nonce(data_dir: &Path) -> Result<Zeroizing<String>> {
@@ -238,6 +245,11 @@ pub fn dispatch(target: &dyn ControlTarget, expected_nonce: &str, request: Reque
             if !authorized(&nonce) {
                 return denied();
             }
+            // The hex arrived inside a plain `String` from serde; move it
+            // into a zeroizing buffer immediately and drop the original, so
+            // the key's residency in unzeroized memory is as short as this
+            // layer can make it (SI-9, best-effort).
+            let key_hex = Zeroizing::new(key_hex);
             let Some(bytes) = hex_decode(&key_hex) else {
                 return Response::Error {
                     code: "invalid_input".into(),
@@ -250,7 +262,7 @@ pub fn dispatch(target: &dyn ControlTarget, expected_nonce: &str, request: Reque
                     message: "the matching key must be 32 bytes".into(),
                 };
             }
-            match target.push_key(SecretBytes::new(bytes)) {
+            match target.push_key(SecretBytes::new(bytes.to_vec())) {
                 Ok(()) => Response::Ok,
                 Err(e) => Response::Error {
                     code: e.code().to_string(),

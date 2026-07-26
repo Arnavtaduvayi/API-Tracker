@@ -82,15 +82,21 @@ impl ControlTarget for ServiceControl {
         // Installing the key does two things, in this order: the forwarding
         // path can now digest presented credentials, and the writer gets the
         // SCOPED matcher table (linked, non-password-locked projects only —
-        // never vault-wide).
+        // never vault-wide). BOTH must succeed: with the key installed but
+        // the matcher missing, every exchange would be recorded
+        // `unavailable_vault_locked` while status claimed attribution was on.
         let matcher = crate::writer::load_matcher(&self.db_path)?;
+        if !self.writer_sink.set_matcher(Some(matcher)) {
+            return Err(CoreError::Busy);
+        }
         self.gateway.set_matching_key(Some(key));
-        self.writer_sink.set_matcher(Some(matcher));
         Ok(())
     }
 
     fn revoke_key(&self) {
-        // Both halves are dropped: the key (zeroized on drop) and the table.
+        // The forwarding half is dropped FIRST and unconditionally: once the
+        // key is gone no new digests are produced, so a matcher that could
+        // not be cleared is never consulted again.
         self.gateway.set_matching_key(None);
         self.writer_sink.set_matcher(None);
     }
@@ -129,8 +135,13 @@ impl Service {
         let listener = Listener::bind(port)?;
         let bound_port = listener.port();
 
-        let boot_id = crate::control::write_nonce(data_dir)?;
-        let writer = Writer::start(&db_path, boot_id.to_string());
+        let nonce = crate::control::write_nonce(data_dir)?;
+        // The boot id is its OWN random value, never the control nonce: it is
+        // written into the plaintext `observation_sessions.command` column and
+        // shown by `tethra observe sessions`, and the nonce is a live control
+        // capability that must not be persisted or displayed anywhere.
+        let boot_id = crate::control::random_boot_id();
+        let writer = Writer::start(&db_path, boot_id);
         let writer_state = writer.state();
         let sink = writer.sink();
 
@@ -151,7 +162,7 @@ impl Service {
         // and surfaced rather than swallowed.
         let (control, control_error) = match ControlServer::start(
             data_dir,
-            boot_id.to_string(),
+            nonce.to_string(),
             Arc::new(control_target) as Arc<dyn ControlTarget>,
         ) {
             Ok(server) => (Some(server), None),

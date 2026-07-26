@@ -115,23 +115,21 @@ pub fn digest_request(
     key: Option<&SecretBytes>,
     head: &RequestHead,
 ) -> (AttributionInput, Option<CredentialDigest>) {
-    let Some(field) = head
+    // EVERY recognized credential header is considered, not just the first.
+    // Real clients send more than one: an Anthropic client configured with
+    // both an auth token and an API key sends `Authorization` AND
+    // `x-api-key`; Azure-style clients send `api-key` alongside an
+    // `Authorization: Bearer <AAD JWT>`. Taking only the first would digest
+    // the wrong bytes and report a false `unmatched` — a permanent phantom
+    // shadow-credential alarm — for the credential that actually served the
+    // request.
+    let fields: Vec<&crate::head::HeaderField> = head
         .headers
         .iter()
-        .find(|h| CREDENTIAL_HEADERS.contains(&h.lower.as_str()))
-    else {
+        .filter(|h| CREDENTIAL_HEADERS.contains(&h.lower.as_str()))
+        .collect();
+    if fields.is_empty() {
         return (AttributionInput::NoCredentialPresent, None);
-    };
-    let Some(value) = field.value_str() else {
-        return (AttributionInput::UnsupportedForm, None);
-    };
-    if value.trim().is_empty() || value.len() > MAX_CREDENTIAL_LEN {
-        return (AttributionInput::UnsupportedForm, None);
-    }
-    if field.lower == "authorization" && is_unsupported_scheme(value) {
-        // `Basic` and unknown schemes are out of scope v1; reporting them as
-        // "unmatched" would be a false shadow-credential alarm.
-        return (AttributionInput::UnsupportedForm, None);
     }
     // No key in memory: the vault is locked (or the match-while-locked toggle
     // is off). Recorded as its OWN state — never as `unmatched`.
@@ -141,13 +139,44 @@ pub fn digest_request(
     let Ok(key32) = <&[u8; 32]>::try_from(key.expose()) else {
         return (AttributionInput::UnavailableVaultLocked, None);
     };
-    let mut digests = Vec::with_capacity(2);
-    for candidate in candidates(value) {
-        // Byte-identical to core::reuse::fingerprint (trim + keyed_hash),
-        // cross-checked by test.
-        digests.push(*blake3::keyed_hash(key32, candidate.trim().as_bytes()).as_bytes());
+
+    let mut digests: Vec<[u8; 32]> = Vec::with_capacity(4);
+    let mut saw_unsupported = false;
+    for field in fields {
+        let Some(value) = field.value_str() else {
+            saw_unsupported = true;
+            continue;
+        };
+        if value.trim().is_empty() || value.len() > MAX_CREDENTIAL_LEN {
+            saw_unsupported = true;
+            continue;
+        }
+        if field.lower == "authorization" && is_unsupported_scheme(value) {
+            // `Basic` and unknown schemes are out of scope v1; reporting one
+            // as "unmatched" would be a false shadow-credential alarm. It
+            // must NOT stop the other headers from being considered.
+            saw_unsupported = true;
+            continue;
+        }
+        for candidate in candidates(value) {
+            // Byte-identical to core::reuse::fingerprint (trim + keyed_hash),
+            // cross-checked by test.
+            let digest = *blake3::keyed_hash(key32, candidate.trim().as_bytes()).as_bytes();
+            if !digests.contains(&digest) {
+                digests.push(digest);
+            }
+        }
     }
-    digests.dedup();
+    if digests.is_empty() {
+        return (
+            if saw_unsupported {
+                AttributionInput::UnsupportedForm
+            } else {
+                AttributionInput::NoCredentialPresent
+            },
+            None,
+        );
+    }
     (
         AttributionInput::Digested,
         Some(CredentialDigest {
@@ -326,7 +355,13 @@ impl Matcher {
 ///
 /// Scoping rules, all load-bearing:
 /// - only credentials of projects with a live `gateway_project_links` row,
-/// - excluding password-locked projects (`key_wrap_mode = 'vault+password'`),
+/// - excluding password-locked projects (`key_wrap_mode = 'vault+password'`)
+///   BOTH where the row itself lives and where its ROOT lives — a reference
+///   row in an unlocked project carries a COPY of the root's fingerprint, so
+///   filtering only on the row's own project would let a password-locked
+///   project's credential become oracle-confirmable through a reference
+///   (SI-9, THREAT_MODEL GW-6). The cost is honest: traffic using such a
+///   shared value reports `unmatched` until the owning project is unlocked.
 /// - references collapsed to their root credential id,
 /// - retained pre-rotation versions included, flagged as such.
 pub fn load_matcher_table(conn: &rusqlite::Connection) -> Result<Vec<FingerprintEntry>> {
@@ -339,7 +374,14 @@ pub fn load_matcher_table(conn: &rusqlite::Connection) -> Result<Vec<Fingerprint
          JOIN projects p ON p.id = c.project_id
          WHERE p.key_wrap_mode <> 'vault+password'
            AND EXISTS (SELECT 1 FROM gateway_project_links g
-                       WHERE g.project_id = c.project_id)",
+                       WHERE g.project_id = c.project_id)
+           AND NOT EXISTS (
+                 SELECT 1
+                 FROM credentials root
+                 JOIN projects rp ON rp.id = root.project_id
+                 WHERE root.id = c.linked_credential_id
+                   AND rp.key_wrap_mode = 'vault+password'
+               )",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(FingerprintEntry {
@@ -356,15 +398,27 @@ pub fn load_matcher_table(conn: &rusqlite::Connection) -> Result<Vec<Fingerprint
 
     // Retained pre-rotation versions: a still-deployed old key must report
     // `matched_old_version`, not `unmatched`.
+    // Retained versions belong to the ROOT credential, but the root may live
+    // in a project that is not itself linked while a REFERENCE to it is. The
+    // scoping question is "is this value in scope for some linked,
+    // non-password-locked project?", so the check follows the reference the
+    // same way the current-value query does: a version is in scope if the
+    // root OR any reference to it sits in a linked, unlocked project.
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(c.linked_credential_id, c.id) AS root_id,
-                v.fingerprint, v.version, c.value_version
+        "SELECT v.credential_id AS root_id, v.fingerprint, v.version, c.value_version
          FROM credential_versions v
          JOIN credentials c ON c.id = v.credential_id
-         JOIN projects p ON p.id = c.project_id
-         WHERE p.key_wrap_mode <> 'vault+password'
-           AND EXISTS (SELECT 1 FROM gateway_project_links g
-                       WHERE g.project_id = c.project_id)",
+         JOIN projects rp ON rp.id = c.project_id
+         WHERE rp.key_wrap_mode <> 'vault+password'
+           AND EXISTS (
+                 SELECT 1
+                 FROM credentials ref
+                 JOIN projects p ON p.id = ref.project_id
+                 JOIN gateway_project_links g ON g.project_id = ref.project_id
+                 WHERE (ref.id = v.credential_id
+                        OR ref.linked_credential_id = v.credential_id)
+                   AND p.key_wrap_mode <> 'vault+password'
+               )",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(FingerprintEntry {
@@ -682,5 +736,112 @@ mod tests {
         // The head's own Debug must not print the header value either.
         let head_printed = format!("{head:?}");
         assert!(!head_printed.contains(value));
+    }
+}
+
+#[cfg(test)]
+mod multi_header_tests {
+    use super::*;
+
+    fn key() -> SecretBytes {
+        SecretBytes::new(vec![7u8; 32])
+    }
+
+    fn head_with(headers: &[(&str, &str)]) -> RequestHead {
+        let mut raw = String::from("GET /openai/v1/x HTTP/1.1\r\nHost: h\r\n");
+        for (name, value) in headers {
+            raw.push_str(&format!("{name}: {value}\r\n"));
+        }
+        raw.push_str("\r\n");
+        let mut c = std::io::Cursor::new(raw.into_bytes());
+        crate::head::read_request_head(&mut c, Zeroizing::new(Vec::new()), None)
+            .unwrap()
+            .unwrap()
+            .0
+    }
+
+    /// A client sending BOTH an Authorization header and an x-api-key must
+    /// have both digested: taking only the first would report a false
+    /// `unmatched` for whichever one the provider actually honored.
+    #[test]
+    fn every_recognized_credential_header_is_digested() {
+        let k = key();
+        let bearer = "FAKE-TEST-NOT-A-REAL-KEY-BEARER";
+        let apikey = "FAKE-TEST-NOT-A-REAL-KEY-XAPIKEY";
+        let table = Matcher::new(vec![FingerprintEntry {
+            credential_id: "cred-x".into(),
+            fingerprint: core_fingerprint_for_test(&k, apikey).unwrap(),
+            retained_version: None,
+            current_version: Some(1),
+            revoked: false,
+        }]);
+        // Authorization comes FIRST on the wire; the match is on x-api-key.
+        let head = head_with(&[
+            ("Authorization", &format!("Bearer {bearer}")),
+            ("x-api-key", apikey),
+        ]);
+        let (input, digest) = digest_request(Some(&k), &head);
+        assert_eq!(input, AttributionInput::Digested);
+        assert_eq!(
+            table.resolve(&digest.unwrap()),
+            Attribution::Matched {
+                credential_id: "cred-x".into(),
+                revoked: false
+            },
+            "the second credential header must still be considered"
+        );
+    }
+
+    /// A leading `Basic` (unsupported) must not hide a following supported
+    /// header.
+    #[test]
+    fn an_unsupported_leading_scheme_does_not_mask_a_later_credential() {
+        let k = key();
+        let apikey = "FAKE-TEST-NOT-A-REAL-KEY-BEHIND-BASIC";
+        let table = Matcher::new(vec![FingerprintEntry {
+            credential_id: "cred-y".into(),
+            fingerprint: core_fingerprint_for_test(&k, apikey).unwrap(),
+            retained_version: None,
+            current_version: Some(1),
+            revoked: false,
+        }]);
+        let head = head_with(&[
+            ("Authorization", "Basic ZmFrZTpmYWtl"),
+            ("x-api-key", apikey),
+        ]);
+        let (input, digest) = digest_request(Some(&k), &head);
+        assert_eq!(input, AttributionInput::Digested);
+        assert_eq!(
+            table.resolve(&digest.unwrap()),
+            Attribution::Matched {
+                credential_id: "cred-y".into(),
+                revoked: false
+            }
+        );
+    }
+
+    /// When EVERY recognized header is unsupported, the honest answer is
+    /// still `unsupported_form`, not `unmatched`.
+    #[test]
+    fn all_unsupported_headers_still_report_unsupported_form() {
+        let k = key();
+        let head = head_with(&[("Authorization", "Basic ZmFrZTpmYWtl")]);
+        let (input, digest) = digest_request(Some(&k), &head);
+        assert_eq!(input, AttributionInput::UnsupportedForm);
+        assert!(digest.is_none());
+    }
+
+    /// A locked vault still short-circuits before any hashing, whatever the
+    /// header mix.
+    #[test]
+    fn a_locked_vault_short_circuits_regardless_of_header_count() {
+        let head = head_with(&[
+            ("Authorization", "Bearer FAKE-TEST-NOT-A-REAL-KEY-A"),
+            ("x-api-key", "FAKE-TEST-NOT-A-REAL-KEY-B"),
+        ]);
+        assert_eq!(
+            digest_request(None, &head).0,
+            AttributionInput::UnavailableVaultLocked
+        );
     }
 }

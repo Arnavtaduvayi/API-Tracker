@@ -43,6 +43,8 @@ pub const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Max records written under one database connection.
 pub const BATCH_MAX: usize = 256;
+/// How long a matcher install/clear waits for a queue slot before failing.
+pub const MATCHER_INSTALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// What the writer is told about the world, updated by the control plane.
 #[derive(Default)]
@@ -120,10 +122,30 @@ impl WriterSink {
         self.in_flight.load(Ordering::Relaxed) as usize
     }
 
-    /// Install the scoped matcher table. Sent through the SAME channel as
-    /// records so it can never race a record already queued.
-    pub fn set_matcher(&self, matcher: Option<Matcher>) {
-        let _ = self.tx.try_send(Message::Matcher(matcher));
+    /// Install (or clear) the scoped matcher table. Sent through the SAME
+    /// channel as records so it can never race a record already queued.
+    ///
+    /// This is a CONTROL-plane call, not a forwarding-path one, so — unlike
+    /// `record` — it may wait briefly for a queue slot and REPORTS failure.
+    /// Dropping it silently would make `push-key` return success while every
+    /// subsequent exchange was recorded `unavailable_vault_locked`, and
+    /// would leave a revoked matcher resident.
+    pub fn set_matcher(&self, matcher: Option<Matcher>) -> bool {
+        let deadline = Instant::now() + MATCHER_INSTALL_TIMEOUT;
+        let mut message = Message::Matcher(matcher);
+        loop {
+            match self.tx.try_send(message) {
+                Ok(()) => return true,
+                Err(mpsc::TrySendError::Full(m)) => {
+                    if Instant::now() >= deadline {
+                        return false;
+                    }
+                    message = m;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            }
+        }
     }
 
     /// Block until everything queued so far has been processed. Used by the
@@ -367,8 +389,16 @@ impl WriterThread {
             }
             Err(e) => {
                 // Persistence is down: count the loss honestly, never block.
+                // Counter bumps are accounted too, so "every bump is either
+                // applied or accounted as dropped" stays true when the
+                // database — not the queue — is the thing that failed.
                 for _ in 0..record_count {
                     self.note_failure(&e);
+                }
+                if !counters_batch.is_empty() {
+                    self.state
+                        .dropped_counters
+                        .fetch_add(counters_batch.len() as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -416,7 +446,16 @@ impl WriterThread {
     }
 
     fn persist_one(&mut self, conn: &Connection, record: ExchangeRecord) {
-        if let Err(e) = self.persist_with(conn, &record) {
+        // One exchange is one transaction: a mid-sequence failure must not
+        // leave an event row without its usage row, or a session without its
+        // event, and must not be counted as a partial success.
+        let result = match conn.unchecked_transaction() {
+            Ok(tx) => self
+                .persist_with(&tx, &record)
+                .and_then(|()| tx.commit().map_err(api_tracker_core::error::CoreError::Db)),
+            Err(e) => Err(api_tracker_core::error::CoreError::Db(e)),
+        };
+        if let Err(e) = result {
             self.note_failure(&e);
             return;
         }
@@ -593,6 +632,20 @@ impl WriterThread {
         let Some(usage) = &record.usage else {
             return Ok(());
         };
+        // Cache-READ tokens are billed at a steep discount (an order of
+        // magnitude at both providers), and `estimate_token_cost_as_of` knows
+        // only the base input and output rates — it does not consult the
+        // cached rate the pricing tables carry. Charging cache reads at the
+        // full input rate would overstate a prompt-cached workload's spend
+        // several-fold, which for a budgeting tool is the more harmful error
+        // than understating. They are therefore EXCLUDED from the estimate,
+        // which is consequently a LOWER bound for cached traffic. The
+        // estimate is already labeled estimated and never asserted; the
+        // exclusion is recorded in HANDOFF_PHASE_2.md as a known limitation.
+        let billable_input = usage
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_sub(usage.cached_input_tokens.unwrap_or(0));
         let cost = usage
             .model
             .as_deref()
@@ -602,7 +655,7 @@ impl WriterThread {
                     &record.provider_id,
                     model,
                     &record.at,
-                    usage.input_tokens.unwrap_or(0) as i64,
+                    billable_input as i64,
                     usage.output_tokens.unwrap_or(0) as i64,
                 )
                 .ok()
