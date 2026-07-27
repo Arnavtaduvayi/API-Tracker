@@ -41,7 +41,7 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway --all-targets -- -D warnings
+        run: cargo clippy -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking --all-targets -- -D warnings
       - name: Tests
         env:
           API_TRACKER_INSECURE_FAST_KDF: "1"
@@ -51,7 +51,7 @@ jobs:
         # api-tracker-gateway is added in the same commit that creates the
         # crate (KNOWN_CONFLICTS C9: the explicit -p lists give a new crate
         # zero coverage unless it is listed here).
-        run: cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway
+        run: cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking
 
   rust-windows:
     name: Rust core (Windows)
@@ -68,7 +68,7 @@ jobs:
         # api-tracker-gateway is included so the gateway's Windows build
         # (Unix-only control channel cfg-gated out — ADR 0019 D8) is
         # compiled and tested on a real Windows runner.
-        run: cargo test -p api-tracker-core -p api-tracker-gateway
+        run: cargo test -p api-tracker-core -p api-tracker-gateway -p api-tracker-tracking
       - name: Build the CLI (compile-validates the Windows service lifecycle)
         # Phase 3 requirement: the full CLI — including the HKCU Run-key
         # lifecycle and gateway command family — must COMPILE on real
