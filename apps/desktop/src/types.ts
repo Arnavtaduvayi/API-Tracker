@@ -1341,3 +1341,94 @@ export interface GatewayActivitySummary {
   first_event_at: string | null;
   last_event_at: string | null;
 }
+
+// --- Track API activity (ADR 0022) ------------------------------------
+
+export interface TrackingProvider {
+  provider_id: string;
+  display_name: string;
+  confidence: "confirmed" | "likely" | "possible";
+  configurability: "automatic" | "needs_origin_confirm" | "needs_origin_input" | "unsupported";
+  inferred_origin: string | null;
+  evidence: string[];
+  limitations: string[];
+  credential_candidates: string[];
+  selected_by_default: boolean;
+}
+
+export interface TrackingScan {
+  folder: string;
+  project_name: string;
+  project_exists: boolean;
+  providers: TrackingProvider[];
+  scanned_files: number;
+  skipped_oversized: number;
+  env_files: string[];
+  already_tracking: boolean;
+}
+
+export interface TrackingFile {
+  path: string;
+  exists: boolean;
+  changed: boolean;
+  diff: string;
+}
+
+export interface TrackingPlan {
+  project_name: string;
+  creates_project: boolean;
+  service_actions: string[];
+  routes: string[];
+  files: TrackingFile[];
+  warnings: string[];
+  restart_expected: boolean;
+  port: number;
+  providers: string[];
+}
+
+export interface TrackingStep {
+  title: string;
+  outcome: "done" | "skipped" | "failed";
+  detail: string;
+}
+
+export interface TrackingApplyReport {
+  steps: TrackingStep[];
+  state: string;
+  setup_id: string | null;
+  install_blocked: boolean;
+  attribution_enabled: boolean;
+  failed: boolean;
+  restart_expected: boolean;
+}
+
+export interface TrackingFreshness {
+  provider_id: string;
+  last_observed_at: string | null;
+}
+
+export interface TrackingStatus {
+  setup_id: string;
+  state: string;
+  project_id: string;
+  folder: string;
+  watch: "observed" | "partial" | "waiting" | "not_watchable";
+  observed_provider: string | null;
+  observed_latency_ms: number | null;
+  observed_model: string | null;
+  providers: TrackingFreshness[];
+  attribution_paused: boolean;
+}
+
+export interface TrackingDiagnosis {
+  id: string;
+  severity: string;
+  message: string;
+}
+
+export interface TrackingUndoReport {
+  complete: boolean;
+  restored: string[];
+  removed_routes: string[];
+  kept_routes: string[];
+}

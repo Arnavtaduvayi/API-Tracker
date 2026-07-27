@@ -57,9 +57,23 @@ struct VaultSlot {
     last_activity: Instant,
 }
 
+/// One in-flight "Track API activity" flow: the scan result and the plan
+/// built from it. Held in Rust because a `LinkPlan`'s file contents and
+/// digest deliberately never cross the IPC boundary — the frontend sees
+/// the rendered diff, the backend applies exactly the previewed plan.
+struct TrackingSession {
+    detection: tracking_detect::ProjectDetection,
+    project: tracking_plan::ProjectRef,
+    plan: Option<tracking_plan::TrackingPlan>,
+}
+
 struct AppState {
     slot: Mutex<VaultSlot>,
     data_dir: PathBuf,
+    tracking: Mutex<Option<TrackingSession>>,
+    /// A foreground `gateway serve` child (the unsigned-build fallback);
+    /// killed on drop so tracking honestly "pauses when Tethra closes".
+    foreground_gateway: Mutex<Option<std::process::Child>>,
 }
 
 impl AppState {
@@ -2460,6 +2474,11 @@ use api_tracker_gateway::{
     control as gw_control, doctor as gw_doctor, envlink, lifecycle as gw_lifecycle,
     routes as gw_routes, store as gw_store,
 };
+use api_tracker_tracking::{
+    apply as tracking_apply, detect as tracking_detect, diagnose as tracking_diagnose,
+    plan as tracking_plan, state as tracking_state, undo as tracking_undo,
+    verify as tracking_verify,
+};
 
 #[tauri::command]
 fn gateway_doctor(state: State<'_, AppState>) -> CmdResult<gw_doctor::Doctor> {
@@ -3026,6 +3045,614 @@ fn gateway_recording(state: State<'_, AppState>, pause: bool) -> CmdResult<()> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Track API activity (ADR 0022)
+//
+// Thin wrappers over the shared `api-tracker-tracking` orchestrator — the
+// same engine `tethra track` drives, so the desktop and CLI cannot drift.
+// The in-flight scan and plan live in `AppState.tracking`: a `LinkPlan`
+// carries file contents and the digest that binds apply to exactly what
+// was previewed, and neither belongs on the IPC boundary.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct TrackingScanDto {
+    folder: String,
+    project_name: String,
+    project_exists: bool,
+    providers: Vec<TrackingProviderDto>,
+    scanned_files: u32,
+    skipped_oversized: u32,
+    env_files: Vec<String>,
+    /// Already-configured providers (a re-run over an existing setup).
+    already_tracking: bool,
+}
+
+#[derive(Serialize)]
+struct TrackingProviderDto {
+    provider_id: String,
+    display_name: String,
+    confidence: String,
+    /// "automatic" | "needs_origin_confirm" | "needs_origin_input" |
+    /// "unsupported"
+    configurability: String,
+    inferred_origin: Option<String>,
+    evidence: Vec<String>,
+    limitations: Vec<String>,
+    credential_candidates: Vec<String>,
+    /// Pre-selected in the review screen.
+    selected_by_default: bool,
+}
+
+#[derive(Serialize)]
+struct TrackingPlanDto {
+    project_name: String,
+    creates_project: bool,
+    service_actions: Vec<String>,
+    routes: Vec<String>,
+    files: Vec<TrackingFileDto>,
+    warnings: Vec<String>,
+    restart_expected: bool,
+    port: u16,
+    providers: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TrackingFileDto {
+    path: String,
+    exists: bool,
+    changed: bool,
+    diff: String,
+}
+
+fn confidence_str(c: tracking_detect::DetectionConfidence) -> String {
+    c.label().to_string()
+}
+
+fn configurability_str(c: &tracking_detect::Configurability) -> (String, Option<String>) {
+    match c {
+        tracking_detect::Configurability::Automatic => ("automatic".into(), None),
+        tracking_detect::Configurability::NeedsOriginConfirm { inferred_origin } => {
+            ("needs_origin_confirm".into(), Some(inferred_origin.clone()))
+        }
+        tracking_detect::Configurability::NeedsOriginInput => ("needs_origin_input".into(), None),
+        tracking_detect::Configurability::Unsupported { .. } => ("unsupported".into(), None),
+    }
+}
+
+/// Scan a user-selected folder and start a tracking session.
+#[tauri::command]
+fn tracking_scan(state: State<'_, AppState>, folder: String) -> CmdResult<TrackingScanDto> {
+    let folder_path = PathBuf::from(&folder);
+    let (detection, project, already_tracking) = with_vault(&state, |vault| {
+        let ids = vault::projects_for_folder(vault.connection(), &folder_path)?;
+        let project = match ids.first() {
+            Some(id) => {
+                let p = vault.get_project(id)?;
+                tracking_plan::ProjectRef {
+                    id: Some(p.id),
+                    name: p.name,
+                }
+            }
+            None => tracking_plan::ProjectRef {
+                id: None,
+                name: folder_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("tracked-project")
+                    .to_string(),
+            },
+        };
+        let detection = tracking_detect::detect(
+            vault.connection(),
+            &tracking_detect::DetectionInput {
+                folder: &folder_path,
+                project_id: project.id.as_deref(),
+            },
+        )?;
+        let already = match &project.id {
+            Some(id) => tracking_state::find_setup(vault.connection(), id, &detection.folder)?
+                .map(|s| s.applied_at.is_some())
+                .unwrap_or(false),
+            None => false,
+        };
+        Ok((detection, project, already))
+    })?;
+
+    let defaults = tracking_plan::Selections::defaults(&detection);
+    let dto = TrackingScanDto {
+        folder: detection.folder.display().to_string(),
+        project_name: project.name.clone(),
+        project_exists: project.id.is_some(),
+        providers: detection
+            .providers
+            .iter()
+            .map(|p| {
+                let (configurability, inferred_origin) = configurability_str(&p.configurability);
+                TrackingProviderDto {
+                    provider_id: p.provider_id.clone(),
+                    display_name: p.display_name.clone(),
+                    confidence: confidence_str(p.confidence),
+                    configurability,
+                    inferred_origin,
+                    evidence: p.evidence.iter().map(|e| e.describe()).collect(),
+                    limitations: p.limitations.clone(),
+                    credential_candidates: p.credential_candidates.clone(),
+                    selected_by_default: defaults.include.contains(&p.provider_id),
+                }
+            })
+            .collect(),
+        scanned_files: detection.scanned_files,
+        skipped_oversized: detection.skipped_oversized,
+        env_files: detection
+            .env_files
+            .iter()
+            .map(|f| f.rel_path.clone())
+            .collect(),
+        already_tracking,
+    };
+    *state.tracking.lock().unwrap() = Some(TrackingSession {
+        detection,
+        project,
+        plan: None,
+    });
+    Ok(dto)
+}
+
+/// Build the combined plan for the current session's selections.
+#[tauri::command]
+fn tracking_plan_build(
+    state: State<'_, AppState>,
+    providers: Vec<String>,
+    origins: Vec<(String, String)>,
+) -> CmdResult<TrackingPlanDto> {
+    let mut guard = state.tracking.lock().unwrap();
+    let Some(session) = guard.as_mut() else {
+        return Err(ErrDto {
+            code: "no_session".into(),
+            message: "no folder has been scanned yet".into(),
+        });
+    };
+    let mut selections = tracking_plan::Selections::default();
+    selections.include.extend(providers);
+    for (provider, origin) in origins {
+        selections.confirmed_origins.insert(provider, origin);
+    }
+    let service = gw_lifecycle::Lifecycle::for_host(&state.data_dir)
+        .map(|lc| lc.status())
+        .map_err(ErrDto::from)?;
+    let port_now = with_vault(&state, |vault| {
+        Ok(gw_store::load_config(vault.connection())?.port)
+    })?;
+    let listener_live = matches!(
+        gw_control::verify_listener(&state.data_dir, port_now.unwrap_or(0)),
+        gw_control::ListenerIdentity::Verified { .. }
+    );
+    let plan = with_vault(&state, |vault| {
+        tracking_plan::ensure_port(vault.connection())?;
+        tracking_plan::plan(
+            vault.connection(),
+            &session.detection,
+            &selections,
+            session.project.clone(),
+            &service,
+            listener_live,
+        )
+    })?;
+    let dto = TrackingPlanDto {
+        project_name: plan.project.name.clone(),
+        creates_project: plan.project.id.is_none(),
+        service_actions: plan
+            .service_actions
+            .iter()
+            .map(|a| match a {
+                tracking_plan::ServiceAction::InstallService => {
+                    "Install and start the local tracking service".to_string()
+                }
+                tracking_plan::ServiceAction::StartService => {
+                    "Start the local tracking service".to_string()
+                }
+                tracking_plan::ServiceAction::RepairService { installed, current } => {
+                    format!("Update the tracking helper ({installed} → {current})")
+                }
+                tracking_plan::ServiceAction::AlreadyRunning => {
+                    "Local tracking service is already running".to_string()
+                }
+            })
+            .collect(),
+        routes: plan
+            .route_actions
+            .iter()
+            .map(|a| match a {
+                tracking_plan::RouteAction::CreateCustomRoute { prefix, origin, .. } => {
+                    format!("{prefix} → {origin}")
+                }
+                other => other.prefix().to_string(),
+            })
+            .collect(),
+        files: plan
+            .link_plans
+            .iter()
+            .flat_map(|lp| lp.files.iter())
+            .map(|f| TrackingFileDto {
+                path: f.path.clone(),
+                exists: f.exists,
+                changed: f.changed,
+                diff: f.diff.clone(),
+            })
+            .collect(),
+        warnings: plan.warnings.iter().map(|w| w.describe()).collect(),
+        restart_expected: !matches!(
+            plan.restart_expectation,
+            tracking_plan::RestartExpectation::NotNeeded
+        ),
+        port: plan.port,
+        providers: plan
+            .route_actions
+            .iter()
+            .map(|a| a.provider_id().to_string())
+            .collect(),
+    };
+    session.plan = Some(plan);
+    Ok(dto)
+}
+
+#[derive(Serialize)]
+struct TrackingApplyDto {
+    steps: Vec<TrackingStepDto>,
+    state: String,
+    setup_id: Option<String>,
+    install_blocked: bool,
+    attribution_enabled: bool,
+    failed: bool,
+    restart_expected: bool,
+}
+
+#[derive(Serialize)]
+struct TrackingStepDto {
+    title: String,
+    /// "done" | "skipped" | "failed"
+    outcome: String,
+    detail: String,
+}
+
+/// Apply the previewed plan. `password` (optional) enables credential
+/// attribution in the same step — ADR 0020's reauth requirement, moved
+/// into the Start-tracking confirmation instead of a later dialog.
+#[tauri::command]
+fn tracking_apply(
+    state: State<'_, AppState>,
+    password: Option<String>,
+) -> CmdResult<TrackingApplyDto> {
+    let (detection, plan) = {
+        let guard = state.tracking.lock().unwrap();
+        let Some(session) = guard.as_ref() else {
+            return Err(ErrDto {
+                code: "no_session".into(),
+                message: "no tracking plan has been previewed yet".into(),
+            });
+        };
+        let Some(plan) = session.plan.clone() else {
+            return Err(ErrDto {
+                code: "no_plan".into(),
+                message: "no tracking plan has been previewed yet".into(),
+            });
+        };
+        (session.detection.clone(), plan)
+    };
+    let helper = locate_cli(&state.data_dir).ok_or_else(|| ErrDto {
+        code: "cli_not_found".into(),
+        message: "the helper that runs tracking could not be found or executed. It \
+                  normally ships inside the app — reinstalling Tethra restores it."
+            .into(),
+    })?;
+    let ops = tracking_apply::HostServiceOps {
+        data_dir: state.data_dir.clone(),
+        helper_source: helper,
+        port: plan.port,
+    };
+    let options = tracking_apply::ApplyOptions {
+        master_password: password.map(SecretString::new),
+    };
+    let report = with_vault(&state, |vault| {
+        Ok(tracking_apply::apply(
+            vault, &detection, &plan, &options, &ops,
+        ))
+    })?;
+    Ok(TrackingApplyDto {
+        steps: report
+            .steps
+            .iter()
+            .map(|s| {
+                let (outcome, detail) = match &s.outcome {
+                    tracking_apply::StepOutcome::Done { detail } => ("done", detail.clone()),
+                    tracking_apply::StepOutcome::Skipped { reason } => ("skipped", reason.clone()),
+                    tracking_apply::StepOutcome::Failed { error } => ("failed", error.clone()),
+                };
+                TrackingStepDto {
+                    title: s.title.to_string(),
+                    outcome: outcome.to_string(),
+                    detail,
+                }
+            })
+            .collect(),
+        state: report.state.as_str().to_string(),
+        failed: report.failed_step().is_some(),
+        setup_id: report.setup_id.clone(),
+        install_blocked: report.install_blocked,
+        attribution_enabled: report.attribution_enabled,
+        restart_expected: !matches!(
+            plan.restart_expectation,
+            tracking_plan::RestartExpectation::NotNeeded
+        ),
+    })
+}
+
+#[derive(Serialize)]
+struct TrackingStatusDto {
+    setup_id: String,
+    state: String,
+    project_id: String,
+    folder: String,
+    /// "observed" | "partial" | "waiting" | "not_watchable"
+    watch: String,
+    observed_provider: Option<String>,
+    observed_latency_ms: Option<i64>,
+    observed_model: Option<String>,
+    providers: Vec<TrackingFreshnessDto>,
+    attribution_paused: bool,
+}
+
+#[derive(Serialize)]
+struct TrackingFreshnessDto {
+    provider_id: String,
+    last_observed_at: Option<String>,
+}
+
+/// One poll of the tracking state (the UI drives the cadence).
+#[tauri::command]
+fn tracking_status(state: State<'_, AppState>, setup_id: String) -> CmdResult<TrackingStatusDto> {
+    let attribution_paused = attribution_is_paused(&state);
+    with_vault(&state, |vault| {
+        let mut setup = tracking_state::get_setup(vault.connection(), &setup_id)?.ok_or(
+            CoreError::NotFound {
+                kind: "tracking setup",
+                ident: setup_id.clone(),
+            },
+        )?;
+        let status = tracking_verify::check_traffic(vault.connection(), &mut setup)?;
+        let (watch, exchange, freshness) = match status {
+            tracking_verify::WatchStatus::Observed {
+                exchange,
+                freshness,
+            } => ("observed", exchange, freshness),
+            tracking_verify::WatchStatus::PartiallyObserved {
+                exchange,
+                freshness,
+            } => ("partial", exchange, freshness),
+            tracking_verify::WatchStatus::Waiting => ("waiting", None, Vec::new()),
+            tracking_verify::WatchStatus::NotWatchable { .. } => {
+                ("not_watchable", None, Vec::new())
+            }
+        };
+        Ok(TrackingStatusDto {
+            setup_id: setup.id.clone(),
+            state: setup.state.as_str().to_string(),
+            project_id: setup.project_id.clone(),
+            folder: setup.folder_path.clone(),
+            watch: watch.to_string(),
+            observed_provider: exchange
+                .as_ref()
+                .map(|e| e.provider_id.clone().unwrap_or_else(|| e.host.clone())),
+            observed_latency_ms: exchange.as_ref().and_then(|e| e.latency_ms),
+            observed_model: exchange.as_ref().and_then(|e| e.model.clone()),
+            providers: freshness
+                .into_iter()
+                .map(|f| TrackingFreshnessDto {
+                    provider_id: f.provider_id,
+                    last_observed_at: f.last_observed_at,
+                })
+                .collect(),
+            attribution_paused,
+        })
+    })
+}
+
+/// Attribution is "paused" when the gateway is live and forwarding but
+/// holds no matching key — traffic is still recorded (SI-11/12/13).
+fn attribution_is_paused(state: &AppState) -> bool {
+    if !gw_control::instance_is_live(&state.data_dir) {
+        return false;
+    }
+    let Ok(nonce) = gw_control::read_nonce(&state.data_dir) else {
+        return false;
+    };
+    match gw_control::send(
+        &state.data_dir,
+        &gw_control::Request::Status {
+            nonce: nonce.to_string(),
+        },
+    ) {
+        Ok(gw_control::Response::Status(status)) => {
+            !status.matching_key_present || status.matching_key_expired
+        }
+        _ => false,
+    }
+}
+
+/// Every tracking setup, for the dashboard's per-project cards.
+#[tauri::command]
+fn tracking_list(state: State<'_, AppState>) -> CmdResult<Vec<TrackingStatusDto>> {
+    let attribution_paused = attribution_is_paused(&state);
+    with_vault(&state, |vault| {
+        let mut out = Vec::new();
+        for mut setup in tracking_state::list_setups(vault.connection())? {
+            let freshness = tracking_state::refresh(vault.connection(), &mut setup)?;
+            out.push(TrackingStatusDto {
+                setup_id: setup.id.clone(),
+                state: setup.state.as_str().to_string(),
+                project_id: setup.project_id.clone(),
+                folder: setup.folder_path.clone(),
+                watch: match setup.state {
+                    tracking_state::TrackingState::TrafficObserved => "observed",
+                    tracking_state::TrackingState::PartiallyObserved => "partial",
+                    _ => "waiting",
+                }
+                .to_string(),
+                observed_provider: None,
+                observed_latency_ms: None,
+                observed_model: None,
+                providers: freshness
+                    .into_iter()
+                    .map(|f| TrackingFreshnessDto {
+                        provider_id: f.provider_id,
+                        last_observed_at: f.last_observed_at,
+                    })
+                    .collect(),
+                attribution_paused,
+            });
+        }
+        Ok(out)
+    })
+}
+
+#[derive(Serialize)]
+struct TrackingDiagnosisDto {
+    id: String,
+    severity: String,
+    message: String,
+}
+
+#[tauri::command]
+fn tracking_diagnose(
+    state: State<'_, AppState>,
+    setup_id: String,
+) -> CmdResult<Vec<TrackingDiagnosisDto>> {
+    let data_dir = state.data_dir.clone();
+    with_vault(&state, |vault| {
+        let setup = tracking_state::get_setup(vault.connection(), &setup_id)?.ok_or(
+            CoreError::NotFound {
+                kind: "tracking setup",
+                ident: setup_id.clone(),
+            },
+        )?;
+        let diagnoses = tracking_diagnose::diagnose(vault.connection(), &data_dir, &setup)?;
+        Ok(diagnoses
+            .into_iter()
+            .map(|d| TrackingDiagnosisDto {
+                id: d.id.to_string(),
+                severity: format!("{:?}", d.severity).to_lowercase(),
+                message: d.message,
+            })
+            .collect())
+    })
+}
+
+#[derive(Serialize)]
+struct TrackingUndoDto {
+    complete: bool,
+    restored: Vec<String>,
+    removed_routes: Vec<String>,
+    kept_routes: Vec<String>,
+}
+
+#[tauri::command]
+fn tracking_undo(state: State<'_, AppState>, setup_id: String) -> CmdResult<TrackingUndoDto> {
+    let data_dir = state.data_dir.clone();
+    let report = with_vault(&state, |vault| {
+        let setup = tracking_state::get_setup(vault.connection(), &setup_id)?.ok_or(
+            CoreError::NotFound {
+                kind: "tracking setup",
+                ident: setup_id.clone(),
+            },
+        )?;
+        tracking_undo::undo(vault.connection(), &setup)
+    })?;
+    // Let a running service drop the removed links immediately.
+    if let Ok(nonce) = gw_control::read_nonce(&data_dir) {
+        let _ = gw_control::send(
+            &data_dir,
+            &gw_control::Request::ReloadRoutes {
+                nonce: nonce.to_string(),
+            },
+        );
+    }
+    Ok(TrackingUndoDto {
+        complete: report.complete,
+        restored: report
+            .links
+            .iter()
+            .flat_map(|l| l.outcomes.iter())
+            .map(|o| format!("{o:?}"))
+            .collect(),
+        removed_routes: report.removed_routes.clone(),
+        kept_routes: report
+            .kept_routes
+            .iter()
+            .map(|(route, why)| format!("{route} ({why})"))
+            .collect(),
+    })
+}
+
+/// The unsigned-build fallback: run the bundled helper in the foreground
+/// (`gateway serve`) so tracking works while Tethra is open. Same `serve`
+/// path a CLI user runs; no new gateway mode, no elevation.
+#[tauri::command]
+fn tracking_foreground_start(state: State<'_, AppState>) -> CmdResult<()> {
+    let mut guard = state.foreground_gateway.lock().unwrap();
+    if guard.is_some() {
+        return Ok(());
+    }
+    let helper = locate_cli(&state.data_dir).ok_or_else(|| ErrDto {
+        code: "cli_not_found".into(),
+        message: "the tracking helper could not be found or executed.".into(),
+    })?;
+    let child = std::process::Command::new(helper)
+        .args(["gateway", "serve"])
+        .arg("--data-dir")
+        .arg(&state.data_dir)
+        .spawn()
+        .map_err(|e| ErrDto {
+            code: "spawn_failed".into(),
+            message: format!("could not start the foreground tracking service: {e}"),
+        })?;
+    *guard = Some(child);
+    Ok(())
+}
+
+/// Whether the foreground fallback is the thing currently running (the
+/// dashboard says "tracking pauses when Tethra closes").
+#[tauri::command]
+fn tracking_foreground_active(state: State<'_, AppState>) -> CmdResult<bool> {
+    let mut guard = state.foreground_gateway.lock().unwrap();
+    let active = match guard.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(Some(_)) => {
+                *guard = None;
+                false
+            }
+            Ok(None) => true,
+            Err(_) => false,
+        },
+        None => false,
+    };
+    Ok(active)
+}
+
+/// Resume credential attribution after a lock (Journey B). Same reauth
+/// gate as every other matching-key push.
+#[tauri::command]
+fn tracking_resume_attribution(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = SecretString::new(password);
+    let key = with_vault(&state, |vault| vault.gateway_matching_key(&password))?;
+    let ops = tracking_apply::HostServiceOps {
+        data_dir: state.data_dir.clone(),
+        helper_source: PathBuf::new(),
+        port: 0,
+    };
+    tracking_apply::ServiceOps::push_matching_key(&ops, key).map_err(ErrDto::from)
+}
+
 fn main() {
     // Absolutize for the same reason the CLI does: this path is baked into
     // the installed service's argv, and service managers start with a working
@@ -3035,12 +3662,15 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
             slot: Mutex::new(VaultSlot {
                 vault: None,
                 last_activity: Instant::now(),
             }),
             data_dir,
+            tracking: Mutex::new(None),
+            foreground_gateway: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             vault_status,
@@ -3227,6 +3857,16 @@ fn main() {
             gateway_match_while_locked_get,
             gateway_match_while_locked_set,
             gateway_recording,
+            tracking_scan,
+            tracking_plan_build,
+            tracking_apply,
+            tracking_status,
+            tracking_list,
+            tracking_diagnose,
+            tracking_undo,
+            tracking_foreground_start,
+            tracking_foreground_active,
+            tracking_resume_attribution,
             gateway_activity,
             credential_activity_sources,
         ])

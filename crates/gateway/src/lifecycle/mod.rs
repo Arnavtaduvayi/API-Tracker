@@ -262,7 +262,10 @@ pub fn helper_answers_probe(runner: &dyn CommandRunner, candidate: &Path) -> boo
         return false;
     }
     runner
-        .run(&candidate.display().to_string(), &["gateway", "service-probe"])
+        .run(
+            &candidate.display().to_string(),
+            &["gateway", "service-probe"],
+        )
         .map(|out| out.ok() && out.stdout.contains(PROBE_MARKER))
         .unwrap_or(false)
 }

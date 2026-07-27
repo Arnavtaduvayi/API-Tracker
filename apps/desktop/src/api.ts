@@ -59,6 +59,12 @@ import type {
   ProviderKeyListing,
   CredentialActivitySources,
   GatewayActivitySummary,
+  TrackingScan,
+  TrackingPlan,
+  TrackingApplyReport,
+  TrackingStatus,
+  TrackingDiagnosis,
+  TrackingUndoReport,
   GatewayDisableReport,
   GatewayDoctor,
   GatewayInstallReport,
@@ -595,4 +601,20 @@ export const api = {
     call<GatewayActivitySummary>("gateway_activity", { since }),
   credentialActivitySources: (selector: string) =>
     call<CredentialActivitySources>("credential_activity_sources", { selector }),
+
+  // --- Track API activity (ADR 0022) ----------------------------------
+  trackingScan: (folder: string) => call<TrackingScan>("tracking_scan", { folder }),
+  trackingPlanBuild: (providers: string[], origins: [string, string][]) =>
+    call<TrackingPlan>("tracking_plan_build", { providers, origins }),
+  trackingApply: (password: string | null) =>
+    call<TrackingApplyReport>("tracking_apply", { password }),
+  trackingStatus: (setupId: string) => call<TrackingStatus>("tracking_status", { setupId }),
+  trackingList: () => call<TrackingStatus[]>("tracking_list"),
+  trackingDiagnose: (setupId: string) =>
+    call<TrackingDiagnosis[]>("tracking_diagnose", { setupId }),
+  trackingUndo: (setupId: string) => call<TrackingUndoReport>("tracking_undo", { setupId }),
+  trackingForegroundStart: () => call<void>("tracking_foreground_start"),
+  trackingForegroundActive: () => call<boolean>("tracking_foreground_active"),
+  trackingResumeAttribution: (password: string) =>
+    call<void>("tracking_resume_attribution", { password }),
 };

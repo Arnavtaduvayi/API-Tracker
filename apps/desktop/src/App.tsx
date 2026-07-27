@@ -44,8 +44,12 @@ import { AccessView } from "./components/AccessView";
 import { NotifyView } from "./components/NotifyView";
 import { ApiActivityView } from "./components/ApiActivityView";
 import { GatewayView, GatewayLockStrip } from "./components/GatewayView";
+import { DashboardView } from "./components/DashboardView";
+import { TrackFlow } from "./components/TrackFlow";
 
 export type View =
+  | { name: "dashboard" }
+  | { name: "track" }
   | { name: "projects" }
   | { name: "project"; ident: string }
   | { name: "project-new" }
@@ -98,7 +102,7 @@ async function notifyNewAlerts(severities: string[]) {
 export default function App() {
   const [vaultState, setVaultState] = useState<VaultState>("loading");
   const [dataDir, setDataDir] = useState("");
-  const [view, setView] = useState<View>({ name: "projects" });
+  const [view, setView] = useState<View>({ name: "dashboard" });
   const [fatal, setFatal] = useState<string | null>(null);
   const [monitorMinutes, setMonitorMinutes] = useState(0);
 
@@ -197,6 +201,14 @@ export default function App() {
     <div>
       <nav className="topbar">
         <strong>Tethra</strong>
+        <button
+          className={view.name === "dashboard" ? undefined : "link"}
+          onClick={() => setView({ name: "dashboard" })}
+        >
+          Activity
+        </button>
+        <button onClick={() => setView({ name: "track" })}>Track API activity</button>
+        <span className="navgroup">Vault</span>
         <button className="link" onClick={() => setView({ name: "projects" })}>
           Projects
         </button>
@@ -221,20 +233,22 @@ export default function App() {
         <button className="link" onClick={() => setView({ name: "access" })}>
           Temporary access
         </button>
+        <span className="navgroup">Security</span>
         <button className="link" onClick={() => setView({ name: "alerts" })}>
           Alerts
         </button>
         <button className="link" onClick={() => setView({ name: "notify" })}>
           Notifications
         </button>
+        <span className="navgroup">Advanced</span>
         <button className="link" onClick={() => setView({ name: "usage" })}>
           Usage
         </button>
         <button className="link" onClick={() => setView({ name: "api-activity" })}>
-          API activity
+          Observation runs
         </button>
         <button className="link" onClick={() => setView({ name: "gateway" })}>
-          Gateway
+          Gateway internals
         </button>
         <button className="link" onClick={() => setView({ name: "pricing" })}>
           Pricing
@@ -251,6 +265,10 @@ export default function App() {
         <span className="spacer" />
         <button onClick={() => void lockNow()}>Lock vault</button>
       </nav>
+      {view.name === "dashboard" && (
+        <DashboardView onTrack={() => setView({ name: "track" })} />
+      )}
+      {view.name === "track" && <TrackFlow onDone={() => setView({ name: "dashboard" })} />}
       {view.name === "projects" && (
         <ProjectList
           onOpen={(ident) => setView({ name: "project", ident })}
