@@ -139,3 +139,62 @@ anti-vacuity floor pattern: minimum check count, `assert_db`,
 Windows execution (labeled), Linux packaged run unless Phase 5 does one,
 live-provider streaming, Docker-project tracking (diagnosed, not
 supported), and any provider not in `provider-manifests/`.
+
+---
+
+# Remediation coverage (2026-07-27)
+
+Added or rewritten in response to the independent audit of PR #16. Every
+suite below is new unless marked *(extended)*, and every one is paired with
+a mutant in `scripts/mutation_checks.sh` that removes the protection and
+requires the suite to fail.
+
+## The four blockers
+
+| Suite | Checks | What it pins |
+|---|---|---|
+| `crates/core/tests/git_execution_canaries.rs` | 6 | scanning executes nothing the repository controls — eleven vectors, a hostile global config, a hostile environment, plus a control that requires each canary to FIRE against unhardened git |
+| `crates/core/tests/gitsafe_differential.rs` | 7 | the non-executing reader agrees with real `git` on tracked/ignored/untracked, nested `.gitignore` precedence, `info/exclude`, index v4; a corrupt index degrades to Unknown |
+| `crates/tracking/tests/scan_bounds.rs` | 10 | containment in BOTH readers, the size check before the open, the walk budgets, non-UTF-8 accounting — each with a control proving the scan still works |
+| `crates/tracking/tests/origin_trust.rs` | 14 | repository content never authorizes a destination; built-in origins stay automatic; approvals are exact, tamper-evident and revocable; the planner refuses a foreign service slot |
+| `crates/tracking/tests/verification_freshness.rs` | 16 | present health vs history — dead gateway, stale observation, missing route, missing link, unknown liveness, session isolation, newer-failure-wins and its converse, the `>=` boundary and the `observation_source` filter |
+| `crates/gateway/tests/service_namespace.rs` | 16 | one slot per data directory; no destructive verb reaches a foreign target; legacy migration is one-sided; repair does not force; an unparseable definition is not overwritten |
+| `crates/tracking/tests/undo_ground_truth.rs` | 7 | undo derives from ground truth or refuses; route provenance survives re-apply; a re-enabled route returns to disabled |
+| `crates/tracking/tests/detect_coverage.rs` | 9 | a REAL thirty-integration fixture: every input accounted for, buckets sum to the headline, values never leak, hints never become providers |
+| `crates/core/tests/provider_manifests.rs` | 11 | every manifest parses under the shipping parser; origins pass the gateway's own destination policy; the catalog counts are pinned against literals |
+| `crates/gateway/tests/privacy_canaries.rs` *(extended)* | 10 | a base URL carrying key material after the authority never reaches `vault.db`, its WAL or its SHM — with an anti-vacuity gate proving the record was written |
+| `crates/core/tests/scanning.rs` *(extended)* | 13 | a placeholder-looking word never unmasks a credential — with a control that ordinary configuration stays legible |
+
+## Mutation testing
+
+`bash scripts/mutation_checks.sh` — **20 checks, 20 killed, 0 survivors, 0
+skipped.**
+
+It rewrites production source to remove each protection, requires the test
+that claims to cover it to fail, and restores from an EXIT trap. A mutation
+that only breaks the build is SKIPPED and reported, not counted — a compile
+error is not evidence that a test catches a defect.
+
+The first run found three survivors and one skipped check. All four were
+real gaps in the tests, not in the product, and all four are closed. One
+further mutant was rewritten rather than accepted: routing the scan through
+the hardened runner left the canary correctly quiet, so the mutant survived
+*for the right reason*, which made the check meaningless. It now injects a
+raw unhardened `Command::new("git")`.
+
+`bash scripts/validation_harness_mutants.sh` — **7 mutants, 7 killed.** The
+validation harness's own anti-tautology gate, which was itself decorative
+when first written (see PACKAGED_VALIDATION.md).
+
+## Measured totals at the final commit
+
+```text
+Rust workspace           1131 passed, 0 failed  (72 suites)
+Desktop vitest             90 passed, 0 failed  (11 files)
+Packaged validation        22 passed, 0 failed  (--scope offline)
+Harness self-check          5 passed, 0 failed  (--scope selfcheck)
+Product mutants            20 killed, 0 survived
+Harness mutants             7 killed, 0 survived
+```
+
+No count on this page is carried over from an earlier run.

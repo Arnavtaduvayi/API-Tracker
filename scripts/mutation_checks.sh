@@ -247,6 +247,31 @@ mutate "undo-refuses-when-the-plan-is-unknown" \
   -p api-tracker-tracking --test undo_ground_truth
 
 # ---------------------------------------------------------------------------
+# Privacy — nothing secret reaches plaintext storage or stdout
+# ---------------------------------------------------------------------------
+
+# Revert the recordability check to authority-only: the ZFT-016 defect
+# exactly, where everything after the host was waved through into
+# `prior_env_json`.
+mutate "prior-env-refuses-query-material" \
+  "crates/gateway/src/envlink.rs" \
+  'import re
+i = s.find("fn prior_value_is_recordable")
+j = s.find("\n}\n", i)
+if i != -1 and j != -1:
+    s = s[:i] + "fn prior_value_is_recordable(_value: &str) -> bool {\n    true" + s[j:]' \
+  -p api-tracker-gateway --test privacy_canaries no_env_value_canary
+
+# Put the placeholder exemption back into the masker: the ZFT-017 defect,
+# where a host containing "example" printed the whole line.
+mutate "diff-masking-has-no-placeholder-exemption" \
+  "crates/core/src/envgov.rs" \
+  's = s.replace(
+      "    if value.chars().count() <= MAX_LEGIBLE_VALUE && !crate::scanner::looks_like_key_material(value)\n    {\n        return line.to_string();\n    }",
+      "    if crate::scanner::is_placeholder_value(value) {\n        return line.to_string();\n    }")' \
+  -p api-tracker-core --test scanning
+
+# ---------------------------------------------------------------------------
 # BLOCKER 4 — one environment cannot control another
 # ---------------------------------------------------------------------------
 

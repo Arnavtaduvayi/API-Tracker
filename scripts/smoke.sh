@@ -474,8 +474,16 @@ check $? "track undo is honest when there is nothing to undo"
 EMPTYAPP="$WORK/emptyapp"; mkdir -p "$EMPTYAPP"
 "$BIN" track "$EMPTYAPP" >/dev/null 2>&1; [ $? -eq 2 ]
 check $? "an empty folder exits 2 (no trackable APIs), not an error"
-"$BIN" track "$EMPTYAPP" 2>&1 | grep -q "No trackable APIs detected"
-check $? "the empty-folder message is actionable"
+EMPTY_OUT="$("$BIN" track "$EMPTYAPP" 2>&1 || true)"
+printf '%s' "$EMPTY_OUT" | grep -q "No API integrations found"
+check $? "the empty-folder message names the outcome plainly"
+printf '%s' "$EMPTY_OUT" | grep -q "wrong folder"
+check $? "the empty-folder message says what the user can do about it"
+# ZFT-009: the desktop-only user has no `tethra` on PATH — the CLI lives
+# inside Tethra.app/Contents/MacOS. An empty state that sends them to a
+# terminal command is a dead end, not guidance.
+! printf '%s' "$EMPTY_OUT" | grep -qE "tethra provider list|tethra gateway route add"
+check $? "the empty-folder message points at no unexecutable CLI command"
 
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0

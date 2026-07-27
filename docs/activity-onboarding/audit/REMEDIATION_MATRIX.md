@@ -232,7 +232,7 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Code changes:** The CLI empty state no longer names either command. The desktop provides in-app actions instead of a terminal instruction (see DETECTION_COVERAGE.md for the exact list). Provider coverage also grew from 3 trackable to 13, so the dead end is reached far less often.
 * **Test changes:** `apps/cli/tests/track.rs::no_detection_exits_2_with_honest_guidance` asserts NEITHER command appears; desktop vitest covers the in-app path.
 * **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
-* **Residual risk:** A provider with no manifest still cannot be tracked automatically; the honest statement of that is the remediation, not a claim of universal coverage.
+* **Residual risk:** A provider with no manifest still cannot be tracked automatically; the honest statement of that is the remediation, not a claim of universal coverage. Three of the in-app actions the brief lists were **deliberately not built**, rather than added as buttons that do nothing: a durable *mark as ignored* needs a persisted store in a crate the desktop does not own; *request provider support* is clipboard-copy only, because an outbound call would breach the local-first rule; and an in-flow *add this API* form for an **unrecognised** credential could create a route but could never wire the app to it, since Tethra has no manifest naming a base-URL variable to rewrite. `KNOWN_LIMITATIONS.md` states all three.
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
 
 ## ZFT-010
@@ -334,10 +334,10 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Audit reproduction:** OPENAI_BASE_URL=https://host/v1?api_key=sk-... then link; SELECT prior_env_json returns the full URL. Canary found at vault.db byte offset 527979.
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** `envlink.rs` allowlisted on the AUTHORITY only, ignoring path, query and fragment, so a raw URL with a query string was persisted in plaintext in `vault.db`.
-* **Code changes:** See REMEDIATION_EVIDENCE.md §privacy for the exact change and the canary reproduction.
-* **Test changes:** `gateway/tests/privacy_canaries.rs` extended with a query-string canary searched for in the DB, WAL and SHM raw bytes.
-* **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
-* **Residual risk:** Recorded per REMEDIATION_EVIDENCE.md.
+* **Code changes:** `envlink::prior_value_is_recordable` now severs the authority from the tail before judging, and refuses userinfo, ANY query string or fragment, and path segments that look like key material. The existing withholding machinery carries it end to end: `prior_withheld = true`, a `LinkWarning::PriorValueWithheld` shown BEFORE the user confirms, and `RestoreOutcome::PriorNotRecorded` at undo with the line left in place. `redact_unrecordable` is wired into `existing_prior` so a re-link cannot carry a stale leak forward, and `scrub_stored_prior_env_once` re-filters rows written by earlier builds, guarded by a `vault_meta` marker so it runs once per vault. Two further leaks in the same class were found and closed: the `NO_PROXY` branch recorded `prior` with no recordability check at all, and `merge_prior` kept the FIRST prior, so every re-link copied a legacy leak straight back.
+* **Test changes:** `gateway/tests/privacy_canaries.rs` extended with a query-string canary searched for in the raw bytes of the DB, WAL and SHM; `gateway/tests/envlink.rs` keeps `an_ordinary_prior_base_url_is_still_recorded_and_restored` as the control.
+* **Documentation changes:** `KNOWN_LIMITATIONS.md` records the undo trade-off.
+* **Residual risk:** Encrypting the prior value would need vault-key plumbing into the gateway crate, and a redacted display copy would still leave undo unable to restore — so a prior base URL carrying a query string is now NOT recorded, and undo cannot restore it byte-for-byte. That is deliberate and visible: warned at preview, reported at undo. The path-segment rule is a heuristic: a secret path segment shorter than 20 characters, or one with no digits, is still recorded.
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
 
 ## ZFT-017
@@ -349,10 +349,10 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Audit reproduction:** DATABASE_URL containing 'db.example.com' with a password in userinfo printed in full by track --dry-run
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** `is_placeholder_value` fired on a SUBSTRING, so a `DATABASE_URL` containing `example` was treated as a placeholder and printed unmasked.
-* **Code changes:** The placeholder test no longer fires on a substring inside a long, high-entropy value.
-* **Test changes:** `core/tests/scanning.rs` covers `DATABASE_URL` values containing example/test/sample/changeme/localhost.
-* **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
-* **Residual risk:** Recorded per REMEDIATION_EVIDENCE.md.
+* **Code changes:** Two layers. In `scanner::is_placeholder_value` the word needles are consulted LAST, and only after a new `scanner::looks_like_key_material` confirms the value carries nothing that cannot be a placeholder — `scheme://user:password@`, a query string or fragment, or a run of key characters ≥20 chars mixing digits and letters at ≥3.5 bits/char. And `envgov::mask_assignment` no longer exempts placeholders **at all**: a value stays legible only when it is at most 16 characters AND is not key-shaped. The exemption was the wrong trade for a function whose output goes to stdout and across IPC — masking a genuine placeholder costs a reader nothing; being wrong once prints a credential.
+* **Test changes:** `core/tests/scanning.rs` covers `DATABASE_URL` values whose HOST contains example/test/sample/changeme/localhost/demo, and a query-string credential — plus the control `ordinary_configuration_stays_legible_in_the_diff`, without which a rule that simply masked everything would pass every leak assertion and silently destroy the consent surface the diff exists for.
+* **Documentation changes:** none required.
+* **Residual risk:** `is_placeholder_value` is now biased toward "not a placeholder", so a long template value mixing letters and digits may newly be offered for import from a `.env.example`. That is noise, not a leak.
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
 
 ## ZFT-018
@@ -379,10 +379,10 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Audit reproduction:** Disable a route, run track (re-enables it), undo -> still enabled
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** Undo restored the route row but never its prior `enabled` state.
-* **Code changes:** See REMEDIATION_EVIDENCE.md §privacy.
-* **Test changes:** Covered in `gateway/tests/envlink.rs`.
-* **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
-* **Residual risk:** Recorded per REMEDIATION_EVIDENCE.md.
+* **Code changes:** `PlanSummary` gains `re_enabled_routes` (`serde(default)`, so summaries from earlier builds still deserialize); the apply loop routes `Ok("re-enabled")` into it instead of letting it fall through the `Ok(_)` arm into `reused_routes`; and undo returns each such route to `enabled = false` under the SAME "is anyone still linking it?" guard that protects removal — a link whose restore failed still counts, so a half-undone setup cannot disable a route its own environment file still points at.
+* **Test changes:** `tracking/tests/undo_ground_truth.rs::undo_returns_a_re_enabled_route_to_disabled`, with the control `::undo_does_not_disable_a_re_enabled_route_another_project_still_links`.
+* **Documentation changes:** none required.
+* **Residual risk:** None.
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
 
 ## ZFT-020
@@ -410,7 +410,7 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** No `kill()` anywhere; `RunEvent::Exit` never touched the foreground child, while the UI said 'Tracking pauses when Tethra closes'.
 * **Code changes:** The foreground child is killed on app exit.
-* **Test changes:** Desktop coverage per REMEDIATION_EVIDENCE.md §desktop.
+* **Test changes:** Desktop vitest; the Tauri `RunEvent::Exit` handler is not reachable from vitest, so the kill path is covered by inspection plus the changed copy, and that limit is stated rather than implied.
 * **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
 * **Residual risk:** None.
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
@@ -439,10 +439,10 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Audit reproduction:** Change OPENAI_BASE_URL between preview and apply keeping quoting shape -> digest passes, edit silently overwritten
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** The digest bound the planned OUTPUT rather than the previewed INPUT, so a value-only edit between preview and apply was silently overwritten while the doc claimed it refuses when ANY file changed.
-* **Code changes:** See REMEDIATION_EVIDENCE.md §privacy.
+* **Code changes:** The digest now includes the previewed input (`old_content`), not only the planned output, so a value-only edit between preview and apply is detected instead of being silently overwritten.
 * **Test changes:** `gateway/tests/envlink.rs`.
-* **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
-* **Residual risk:** Recorded per REMEDIATION_EVIDENCE.md.
+* **Documentation changes:** none required — the claim was already "refuses when any file changed"; the code now meets it.
+* **Residual risk:** Apply is strictly stricter than before. A caller that deliberately previewed one file state and applied against another would now be refused; none exists (the chained multi-provider projection is exactly consistent, and the plan/apply, doctor and lifecycle suites pass).
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
 
 ## ZFT-024
@@ -529,7 +529,7 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Audit reproduction:** Track two folders, generate traffic from both, open Activity
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** `GatewayActivitySummary` had no project or provider dimension.
-* **Code changes:** See REMEDIATION_EVIDENCE.md §desktop for the chosen approach and its justification.
+* **Code changes:** A per-PROJECT dimension was added (a Tauri command returning per-project totals), so "which project generated this traffic?" is answerable. The per-PROVIDER dimension the finding's title also names was **not** built: it needs `runtime_request_events.service_id` joined to the observed-service inventory, which belongs in `gateway::store` rather than in the desktop crate. The per-project query currently lives in the desktop crate for the same ownership reason and should move to `gateway::store` so the CLI can reuse it — recorded as a follow-up in `RE_AUDIT_HANDOFF.md`.
 * **Test changes:** Desktop vitest.
 * **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
 * **Residual risk:** Recorded per REMEDIATION_EVIDENCE.md.
@@ -814,8 +814,8 @@ All 15 merge-blocking findings are resolved: ZFT-001, ZFT-002, ZFT-003, ZFT-004,
 * **Audit reproduction:** grep -rn 'tracking_validate|smoke.sh' .github/workflows/ -> no hits; the desktop CI job is clippy-only
 * **Remediation reproduction:** reproduced against `24acc470` before the fix; the regression tests below fail without the fix (`scripts/mutation_checks.sh` where a mutant exists).
 * **Root cause:** CI ran neither `tracking_validate_macos.sh` nor `smoke.sh`, and never built a packaged app; the desktop job was clippy-only.
-* **Code changes:** See PACKAGED_VALIDATION.md for exactly which jobs run which scripts on which OS, and for the honest split between what CI executes and what remains manual.
-* **Test changes:** The CI workflow itself.
+* **Code changes:** A new `packaged-macos` job on `macos-latest` runs, on every PR: the harness self-check, the harness mutation suite, `npm ci`, `scripts/bundle_cli.sh`, `tauri build --bundles app` (a REAL `.app`), `tracking_validate_macos.sh --scope offline` (22 required checks) and `scripts/smoke.sh`. Every one fails the build.
+* **Test changes:** The CI workflow itself, plus `scripts/validation_harness_mutants.sh` (7 mutants, 7 killed).
 * **Documentation changes:** see `SECURITY_AND_PRIVACY.md`, `DETECTION_COVERAGE.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md` as applicable.
 * **Residual risk:** Recorded per PACKAGED_VALIDATION.md — hosted runners cannot exercise the full LaunchAgent login lifecycle, and that is stated rather than claimed.
 * **Commit:** see `REMEDIATION_EVIDENCE.md` for the per-commit mapping.
