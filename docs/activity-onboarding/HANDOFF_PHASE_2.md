@@ -44,7 +44,7 @@ landed.
 
 ## What was built
 
-Five commits, each independently green:
+Eight commits, each independently green:
 
 1. `fix:` Phase 0 hygiene — the two test fixes above plus the
    user-facing `tethra vault unlock` string (no such subcommand; it is
