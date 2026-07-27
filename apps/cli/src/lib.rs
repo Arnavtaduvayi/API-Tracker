@@ -27,6 +27,7 @@ mod run_cmd;
 mod scan_cmd;
 mod sync_cmd;
 mod template_cmd;
+mod track_cmd;
 mod usage_cmd;
 mod vault_cmd;
 
@@ -146,6 +147,8 @@ enum Commands {
     /// Inspect and manage runtime API observability (metadata-only).
     #[command(subcommand)]
     Observe(observe_cmd::ObserveCmd),
+    /// Track a project folder's API activity (one-command setup).
+    Track(track_cmd::TrackArgs),
     /// Local Gateway: an optional loopback reverse gateway for local API
     /// observation (opt-in; nothing else depends on it).
     #[command(subcommand)]
@@ -223,6 +226,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Mapping(cmd) => usage_cmd::mapping(&ctx, cmd),
         Commands::Run(args) => run_cmd::run(&ctx, args),
         Commands::Observe(cmd) => observe_cmd::run(&ctx, cmd),
+        Commands::Track(args) => track_cmd::run(&ctx, args),
         Commands::Gateway(cmd) => gateway_cmd::run(&ctx, cmd),
         Commands::Env(cmd) => env_cmd::run(&ctx, cmd),
         Commands::Destination(cmd) => destination_cmd::run(&ctx, cmd),

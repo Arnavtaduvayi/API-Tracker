@@ -442,6 +442,35 @@ export API_TRACKER_PASSWORD="$MASTER-changed01"
 "$BIN" key list >/dev/null 2>&1
 check $? "the new master password unlocks the vault"
 
+echo "-- zero-friction tracking (offline: dry-run, status, undo honesty) --"
+TRACKAPP="$WORK/trackapp"
+mkdir -p "$TRACKAPP"
+printf 'OPENAI_API_KEY=sk-proj-SMOKE-FAKE-TRACK-NOT-A-REAL-KEY-01\n' > "$TRACKAPP/.env"
+printf '{ "dependencies": { "openai": "^4.0.0", "dotenv": "^16.0.0" } }\n' > "$TRACKAPP/package.json"
+ENV_BEFORE=$(cat "$TRACKAPP/.env")
+TRACK_OUT=$("$BIN" track "$TRACKAPP" --dry-run 2>&1)
+check $? "track --dry-run succeeds on a detectable project"
+echo "$TRACK_OUT" | grep -q "openai" && echo "$TRACK_OUT" | grep -q "OPENAI_BASE_URL"
+check $? "the dry run shows the detection and the exact env diff"
+echo "$TRACK_OUT" | grep -q "Dry run: nothing was changed."
+check $? "the dry run says it changed nothing"
+[ "$(cat "$TRACKAPP/.env")" = "$ENV_BEFORE" ]
+check $? "the dry run really changed nothing on disk"
+echo "$TRACK_OUT" | grep -q "sk-proj-SMOKE-FAKE-TRACK" && bad "track output leaked a key value" || ok "no key value appears in track output"
+echo "$TRACK_OUT" | grep -q "print-export" && bad "track printed shell-export choreography" || ok "track never prints shell-export choreography"
+"$BIN" project list 2>/dev/null | grep -q "trackapp" && bad "dry-run created a project" || ok "the dry run created no project"
+"$BIN" track status "$TRACKAPP" >/dev/null 2>&1; [ $? -eq 2 ]
+check $? "track status exits 2 while tracking is not configured"
+"$BIN" track status "$TRACKAPP" 2>&1 | grep -q "not configured"
+check $? "track status names the unconfigured state honestly"
+"$BIN" track undo "$TRACKAPP" --yes 2>&1 | grep -q "nothing to undo"
+check $? "track undo is honest when there is nothing to undo"
+EMPTYAPP="$WORK/emptyapp"; mkdir -p "$EMPTYAPP"
+"$BIN" track "$EMPTYAPP" >/dev/null 2>&1; [ $? -eq 2 ]
+check $? "an empty folder exits 2 (no trackable APIs), not an error"
+"$BIN" track "$EMPTYAPP" 2>&1 | grep -q "No trackable APIs detected"
+check $? "the empty-folder message is actionable"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

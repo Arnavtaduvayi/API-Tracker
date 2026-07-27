@@ -187,6 +187,17 @@ pub fn master_password() -> Result<SecretString> {
     prompt_hidden("Master password")
 }
 
+/// The master password from the environment only — `None` when unset.
+/// `track --yes` uses this so a non-interactive run can include
+/// attribution WITHOUT ever prompting or failing over its absence (O-22-3).
+pub fn master_password_from_env() -> Option<SecretString> {
+    if envcompat::is_set(ENV_PASSWORD) {
+        env_secret(ENV_PASSWORD).ok()
+    } else {
+        None
+    }
+}
+
 /// A newly chosen password, confirmed twice when prompted interactively.
 /// `env_suffix` names the `TETHRA_*`/`API_TRACKER_*` pair consulted first.
 pub fn new_password(what: &str, env_suffix: &str) -> Result<SecretString> {
