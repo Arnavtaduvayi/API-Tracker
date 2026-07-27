@@ -117,8 +117,21 @@ Configurability is orthogonal to confidence:
   `[gateway]` section). They still appear in the review screen, honestly
   labeled. Expanding the supported set is provider-manifest work, tracked
   in `OPEN_DECISIONS.md` O-22-5.
-* A provider detected only via S5 with no manifest at all →
-  `Unsupported { UnknownProvider }`.
+* A credential-shaped variable with no matching manifest at all → it is NOT
+  a "provider" and gets no `Configurability` value, because Tethra has
+  nothing to say about it beyond that it exists. It appears in
+  `ProjectDetection.unrecognized` with its variable NAME, its file, and a
+  presentation-only name hint, and it is counted in the coverage headline.
+  `Unsupported { UnknownProvider }` is still in the enum for a manifest-less
+  id arriving from another signal path; it is not how an unrecognised
+  credential surfaces.
+
+  This page previously promised `Unsupported { UnknownProvider }` for this
+  case while `DETECTION_COVERAGE.md` said "anything without a provider
+  manifest is not detected at all", and the code did the second — so
+  twenty-six credentials in a thirty-API project appeared nowhere
+  (`ZFT-010`). The two documents now say the same thing, and it is the
+  thing the code does.
 
 The normal workflow auto-configures `Confirmed × Automatic`. `Likely` and
 `NeedsOriginConfirm` rows appear pre-selected in the review screen;
@@ -139,7 +152,12 @@ and pinned by tests (`TEST_PLAN.md` §3):
 * Reuse stackdetect's `MAX_FILE_BYTES = 262_144` per manifest/config file;
   count and report skips (`skipped_oversized`).
 * Parse only: never execute project files, `.env` files, or package
-  scripts; `EnvDocument::parse` never interpolates.
+  scripts; `EnvDocument::parse` never interpolates. This bound is
+  load-bearing and was NOT met before the remediation: detection asked
+  `git` four questions per file, and git executes programs named by the
+  scanned repository's own config, so a hostile `core.fsmonitor` ran during
+  `--dry-run` (`ZFT-001`). The automatic path now spawns no subprocess at
+  all — see ADR 0023 and `crates/core/tests/git_execution_canaries.rs`.
 * No persistence of application payloads; evidence is names, files, and
   provider ids only.
 * No network access during detection. Nothing leaves the machine.

@@ -112,10 +112,18 @@ exists; no new gateway mode. The state model treats it as
 Unchanged and already correct: `uninstall` removes service definition,
 binaries dir, logs, runtime files; recorded history stays; the service
 self-unloads if the data dir vanishes. The bundled sidecar is removed with
-the app bundle by the OS. One addition: the Advanced uninstall screen
-notes that dragging the app to Trash without disabling leaves the
-LaunchAgent until self-unload triggers, with a [Disable service first]
-button (this is today's behavior, now stated where the user can see it).
+the app bundle by the OS. **Correction (2026-07-27).** This section previously described an Advanced
+uninstall notice and a [Disable service first] button as though they
+existed. Neither string nor button was ever built (`ZFT-042`). The claim is
+removed rather than left as a promise; the fact it described is now
+documented where a user will actually meet it, in `docs/INSTALL.md`.
+
+The audit's secondary claim is also corrected: a stale plist does NOT make
+launchd fail-spawn at each login. The service self-exits cleanly when its
+data directory is gone and `KeepAlive={Crashed:true}` treats a clean exit as
+terminal, so the result is one spawn per login that exits immediately — a
+permanently orphaned Login Item, not a crash loop. Still a defect, and still
+worth the documented uninstall step.
 
 ## 8. Size and build-time cost
 
