@@ -103,6 +103,27 @@ fn compiled_patterns() -> &'static [CompiledPattern] {
     })
 }
 
+/// Whether `value` matches one of `provider_id`'s published key-format
+/// patterns.
+///
+/// The manifests have carried these patterns since the catalog was written
+/// and detection never consulted them, so a variable's NAME plus a
+/// non-placeholder value was enough to auto-configure a provider —
+/// `OPENAI_API_KEY=abcdefgh` reached the auto-select threshold (ZFT-027).
+///
+/// The value is tested and dropped: nothing about it is returned, stored or
+/// logged, only whether it has the shape the provider publishes.
+pub fn value_matches_provider_format(provider_id: &str, value: &str) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    compiled_patterns()
+        .iter()
+        .filter(|p| p.provider == provider_id)
+        .any(|p| p.regex.is_match(value))
+}
+
 /// Secret-bearing env-var names → provider id, built from the manifests.
 fn env_var_index() -> &'static [(String, String)] {
     static INDEX: OnceLock<Vec<(String, String)>> = OnceLock::new();
@@ -119,10 +140,44 @@ fn env_var_index() -> &'static [(String, String)] {
 
 /// Placeholder values that should never be treated as real secrets.
 /// Public so `.env` governance can exclude placeholders from import.
+///
+/// Being wrong in the "yes, placeholder" direction is a LEAK, not a false
+/// positive: every caller treats a `true` here as permission to stop
+/// protecting the value. `envgov::mask_assignment` prints a "placeholder"
+/// verbatim into the consent diff that goes to stdout and across IPC, and
+/// detection stops treating the variable as a credential at all. A bare
+/// substring match handed that permission to anyone who could get one of
+/// twelve common words to appear anywhere in the string — and a HOSTNAME is
+/// enough: `DATABASE_URL=postgresql://app:<password>@db.example.com/prod`
+/// contains "example", so the whole connection string, password included,
+/// was printed in full.
+///
+/// The word needles are therefore consulted LAST, and only after the value
+/// has been checked for material that cannot be a placeholder.
 pub fn is_placeholder_value(value: &str) -> bool {
     let v = value.trim().trim_matches(|c| c == '"' || c == '\'').trim();
     if v.len() < 8 {
         return true;
+    }
+    // Structural placeholders first: the whole value IS the template marker,
+    // so there is nothing else in it that could be real key material.
+    // Angle-bracket / mustache / template placeholders: <token>, ${TOKEN},
+    // {{TOKEN}}, {TOKEN}, %TOKEN%.
+    if v.starts_with('<') || v.starts_with("${") || v.starts_with("{{") {
+        return true;
+    }
+    if (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('%') && v.ends_with('%')) {
+        return true;
+    }
+    // A single repeated character (e.g. xxxxxxxx, ********).
+    if v.chars().collect::<HashSet<_>>().len() <= 2 {
+        return true;
+    }
+    // A word needle is the weakest signal here and the only one that can be
+    // planted inside an otherwise-real value, so it decides nothing when the
+    // value carries something that can only be key material.
+    if looks_like_key_material(v) {
+        return false;
     }
     let lower = v.to_ascii_lowercase();
     const NEEDLES: [&str; 12] = [
@@ -139,22 +194,54 @@ pub fn is_placeholder_value(value: &str) -> bool {
         "notreal",
         "fixme",
     ];
-    if NEEDLES.iter().any(|n| lower.contains(n)) {
-        return true;
+    NEEDLES.iter().any(|n| lower.contains(n))
+}
+
+/// True when a value carries something that can only be REAL key material,
+/// whatever placeholder-ish words appear elsewhere in it: credentials
+/// embedded in a URL, a URL query string or fragment, or a long
+/// high-entropy token.
+///
+/// This is deliberately a "cannot be a placeholder" test, not a "is a
+/// secret" test — it only ever overrides the word needles, so its errors
+/// cost noise (an extra finding, an extra masked line) rather than a leaked
+/// credential.
+///
+/// Public because the `.env` link writer needs the same judgement about the
+/// path segments of a URL it is about to record in a PLAINTEXT column.
+pub fn looks_like_key_material(v: &str) -> bool {
+    if let Some((_scheme, rest)) = v.split_once("://") {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        // `scheme://user:password@host`: the password is a credential, and
+        // the host is exactly where a benign "example" lives.
+        if let Some((userinfo, _host)) = authority.split_once('@') {
+            if let Some((_user, password)) = userinfo.split_once(':') {
+                if !password.is_empty() {
+                    return true;
+                }
+            }
+        }
+        // A query string or fragment. The audit recovered a planted key from
+        // exactly that position (`…/v1?api_key=sk-…`) while the word that
+        // made the URL look like a placeholder came from the hostname. No
+        // rule can tell `?version=2` from `?api_key=…`, so query material is
+        // never unmasked on the strength of a word match.
+        if v.contains('?') || v.contains('#') {
+            return true;
+        }
     }
-    // Angle-bracket / mustache / template placeholders: <token>, ${TOKEN},
-    // {{TOKEN}}, {TOKEN}, %TOKEN%.
-    if v.starts_with('<') || v.starts_with("${") || v.starts_with("{{") {
-        return true;
-    }
-    if (v.starts_with('{') && v.ends_with('}')) || (v.starts_with('%') && v.ends_with('%')) {
-        return true;
-    }
-    // A single repeated character (e.g. xxxxxxxx, ********).
-    if v.chars().collect::<HashSet<_>>().len() <= 2 {
-        return true;
-    }
-    false
+    // A long, mixed, high-entropy run of key characters anywhere in the
+    // value. The length and entropy bars are the ones the generic
+    // entropy rule in `scan_text` already uses; the digit-and-letter
+    // requirement is what keeps English placeholder phrases
+    // ("your-openai-api-key-goes-here", 3.5 bits/char) out.
+    v.split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '+' | '.' | '~')))
+        .any(|token| {
+            token.len() >= 20
+                && token.chars().any(|c| c.is_ascii_digit())
+                && token.chars().any(|c| c.is_ascii_alphabetic())
+                && shannon_entropy(token) >= 3.5
+        })
 }
 
 /// Shannon entropy in bits per character.
@@ -505,6 +592,41 @@ mod tests {
         ] {
             let findings = scan_text(placeholder, ".env", &ScanOptions::default());
             assert!(findings.is_empty(), "flagged placeholder: {placeholder}");
+        }
+    }
+
+    /// A placeholder WORD inside real key material must not make the whole
+    /// value a placeholder. Callers read `true` as permission to print the
+    /// value verbatim, so this was a masking bypass anyone could trigger with
+    /// a hostname (ZFT-017).
+    #[test]
+    fn a_placeholder_word_inside_real_key_material_decides_nothing() {
+        for real in [
+            // "example" arrives via the HOST; the password is the secret.
+            "postgresql://app:S3cr3t-CANARY-8f21c9d0@db.example.com:5432/appdb",
+            // ...via the host again, with the key in the query string.
+            "https://api.example.com/v1?api_key=sk-QUERYCANARY-3f7a19d4c8e25b60",
+            // ...and simply prefixed onto a long high-entropy token.
+            "your-key-4c8e25b60f7a19d43f7a19d4c8e25b60",
+        ] {
+            assert!(
+                !is_placeholder_value(real),
+                "a word needle overrode real key material: {real}"
+            );
+            assert!(looks_like_key_material(real));
+        }
+        // The needles still decide when the word IS the whole value.
+        for placeholder in [
+            "your-api-key-here",
+            "changeme-please",
+            "replace-with-your-openai-key",
+            "sk-proj-EXAMPLE00000000000000000000000000",
+        ] {
+            assert!(
+                is_placeholder_value(placeholder),
+                "a real placeholder stopped being recognised: {placeholder}"
+            );
+            assert!(!looks_like_key_material(placeholder));
         }
     }
 

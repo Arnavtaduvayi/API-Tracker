@@ -5,9 +5,24 @@
 // labeled section under Usage. Every panel distinguishes loading, empty,
 // and error — a failed fetch renders the error and a retry, never an
 // empty chart presented as "no data".
+//
+// Two things this file is deliberately careful about:
+//
+// * Present tense and past tense are separate headings. `CurrentHealth`
+//   answers "is this working now"; `VerificationHistory` answers "was it
+//   ever". Collapsing the two is how "verified previously, gateway down"
+//   rendered as a success (ZFT-005).
+// * No internal enum token reaches the screen. Every state, including the
+//   attribution labels the gateway writes, is mapped to a sentence
+//   (ZFT-030).
 import { useCallback, useEffect, useState } from "react";
 import { api, isApiError } from "../api";
-import type { GatewayActivitySummary, TrackingStatus } from "../types";
+import type {
+  ForegroundStatus,
+  GatewayActivitySummary,
+  ProjectActivity,
+  TrackingStatus,
+} from "../types";
 import { ReauthDialog } from "./ReauthDialog";
 
 function errText(e: unknown): string {
@@ -24,20 +39,56 @@ function sinceIso(days: number): string {
   return new Date(Date.now() - days * 86_400_000).toISOString();
 }
 
+/**
+ * The attribution labels the gateway and the runtime store write, as
+ * sentences.
+ *
+ * The dashboard used to print the raw column values — "matched_fingerprint
+ * — 12", "unavailable — 4" — which are internal identifiers, not English,
+ * and which a user cannot act on or even reliably guess at (ZFT-030). An
+ * unknown label (a newer service writing a value this build predates) is
+ * reported as unknown rather than shown bare.
+ */
+function attributionSentence(state: string): string {
+  switch (state) {
+    case "matched_fingerprint":
+      return "Matched a stored credential by its fingerprint";
+    case "confirmed":
+      return "Matched the credential Tethra itself injected";
+    case "high":
+      return "Very likely the credential Tethra injected";
+    case "possible":
+      return "Possibly one of several stored credentials";
+    case "ambiguous":
+      return "Matched more than one stored credential, so none can be named";
+    case "unattributed":
+      return "No stored credential matched this request";
+    case "unavailable":
+      return "Attribution was not running when these requests were recorded";
+    default:
+      return `Recorded with a label this version of Tethra does not know (“${state}”)`;
+  }
+}
+
+/**
+ * The persisted `TrackingState` as a sentence. Kept as a fallback only:
+ * present-tense truth comes from `status.health.sentence`, which is derived
+ * from live evidence rather than from a cached row.
+ */
 function stateLabel(state: string): string {
   switch (state) {
     case "traffic_observed":
-      return "Tracking verified";
+      return "Traffic observed in this configuration";
     case "partially_observed":
-      return "Tracking verified — some APIs not yet observed";
+      return "Some configured APIs observed, others not yet";
     case "awaiting_restart":
-      return "Project needs restart";
+      return "Applied; waiting for the project to restart";
     case "awaiting_first_request":
-      return "Waiting for first request";
+      return "Applied; waiting for the first request";
     case "needs_attention":
       return "Needs attention";
     case "applying":
-      return "Setting up…";
+      return "Setting up";
     case "unsupported":
       return "Nothing trackable detected";
     default:
@@ -49,10 +100,13 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
   const [days, setDays] = useState(1);
   const [summary, setSummary] = useState<GatewayActivitySummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [byProject, setByProject] = useState<ProjectActivity[] | null>(null);
+  const [byProjectError, setByProjectError] = useState<string | null>(null);
   const [setups, setSetups] = useState<TrackingStatus[] | null>(null);
   const [setupsError, setSetupsError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [foreground, setForeground] = useState(false);
+  const [foreground, setForeground] = useState<ForegroundStatus | null>(null);
+  const [foregroundError, setForegroundError] = useState<string | null>(null);
   const [resume, setResume] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -70,6 +124,15 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         setSummaryError(errText(e));
       }
     })();
+    const perProject = (async () => {
+      try {
+        setByProject(await api.gatewayActivityByProject(sinceIso(days)));
+        setByProjectError(null);
+      } catch (e) {
+        setByProject(null);
+        setByProjectError(errText(e));
+      }
+    })();
     const tracking = (async () => {
       try {
         setSetups(await api.trackingList());
@@ -79,14 +142,20 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         setSetupsError(errText(e));
       }
     })();
+    // A failed foreground check is NOT "the background service is running".
+    // Swallowing it into `false` rendered exactly like the healthy case, so
+    // a user whose foreground helper had died believed tracking continued
+    // after closing the app (ZFT-031).
     const fg = (async () => {
       try {
         setForeground(await api.trackingForegroundActive());
-      } catch {
-        setForeground(false);
+        setForegroundError(null);
+      } catch (e) {
+        setForeground(null);
+        setForegroundError(errText(e));
       }
     })();
-    await Promise.all([activity, tracking, fg]);
+    await Promise.all([activity, perProject, tracking, fg]);
     setLoading(false);
   }, [days]);
 
@@ -95,14 +164,13 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
   }, [reload]);
 
   const attributionPaused = (setups ?? []).some((s) => s.attribution_paused);
-  const needsAttention = (setups ?? []).filter(
-    (s) => s.state === "needs_attention" || s.state === "awaiting_restart",
-  );
+  const notWorking = (setups ?? []).filter((s) => !s.health.currently_working);
   const cost = summary ? (summary.estimated_cost_micros / 1_000_000).toFixed(4) : null;
   const successRate =
     summary && summary.total_requests > 0
       ? Math.round((summary.success_count / summary.total_requests) * 100)
       : null;
+  const multiProject = (byProject ?? []).length > 1 || (setups ?? []).length > 1;
 
   return (
     <section className="stack">
@@ -122,9 +190,47 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         <button onClick={onTrack}>Track API activity</button>
       </div>
 
-      {foreground && (
-        <p className="notice">
-          Tracking pauses when Tethra closes (running in the foreground).
+      {foreground?.active && (
+        <div className="notice">
+          <p>
+            Tracking pauses when Tethra closes (running in the foreground). Tethra stops that
+            helper when it quits.
+          </p>
+          <button
+            className="link"
+            onClick={() => {
+              void api
+                .trackingForegroundStop()
+                .then(() => {
+                  setNotice("The foreground tracking helper was stopped.");
+                  return reload();
+                })
+                .catch((e) => setNotice(`The helper could not be stopped: ${errText(e)}`));
+            }}
+          >
+            Stop it now
+          </button>
+        </div>
+      )}
+      {foreground?.stopped && (
+        <div className="warnbox" role="alert">
+          <p>
+            {foreground.detail ??
+              "The helper that was tracking while Tethra is open is no longer running."}
+          </p>
+          <p className="muted">
+            Traffic is not being recorded through it. Start tracking again, or allow the
+            background service in System Settings → Privacy &amp; Security.
+          </p>
+        </div>
+      )}
+      {foregroundError && (
+        <p className="error" role="alert">
+          Whether tracking is running in the foreground could not be checked: {foregroundError}.
+          Treat the tracking state below as unconfirmed.{" "}
+          <button className="link" onClick={() => void reload()}>
+            Retry
+          </button>
         </p>
       )}
       {attributionPaused && (
@@ -137,6 +243,11 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
 
       {/* --- locally observed traffic ---------------------------------- */}
       <h2>Observed locally (through Tethra)</h2>
+      <p className="muted">
+        {multiProject
+          ? "These totals cover every tracked project on this machine. The per-project split is below."
+          : "These totals cover every tracked project on this machine."}
+      </p>
       {loading && !summary && !summaryError && <p className="muted">Loading activity…</p>}
       {summaryError && (
         <p className="error" role="alert">
@@ -191,6 +302,34 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         </dl>
       )}
 
+      {/* --- which project generated it (ZFT-029) ---------------------- */}
+      <h2>By project</h2>
+      {byProjectError && (
+        <p className="error" role="alert">
+          The per-project split could not be loaded: {byProjectError}. The totals above are
+          across all projects.{" "}
+          <button className="link" onClick={() => void reload()}>
+            Retry
+          </button>
+        </p>
+      )}
+      {byProject && byProject.length === 0 && !byProjectError && (
+        <p className="muted">No requests in this window, so there is nothing to attribute.</p>
+      )}
+      {byProject && byProject.length > 0 && (
+        <ul>
+          {byProject.map((p) => (
+            <li key={p.project_id}>
+              <strong>{p.project_name ?? "A project that has since been removed"}</strong> —{" "}
+              {p.total_requests} request(s), {p.error_count} error(s)
+              {p.transport_error_count > 0 &&
+                `, ${p.transport_error_count} transport failure(s)`}
+              {p.last_event_at && <span className="muted"> · last {p.last_event_at}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+
       {summary && summary.top_endpoints.length > 0 && (
         <>
           <h2>Endpoints</h2>
@@ -221,7 +360,7 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
           <ul>
             {summary.attribution.map(([state, n]) => (
               <li key={state}>
-                {state} — {n}
+                {attributionSentence(state)} — {n} request(s)
               </li>
             ))}
           </ul>
@@ -247,7 +386,23 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
       {setups?.map((s) => (
         <div key={s.setup_id} className="stack">
           <div>
-            <strong className="mono">{s.folder}</strong> — {stateLabel(s.state)}
+            <strong className="mono">{s.folder}</strong>
+          </div>
+          <div>
+            <h3>Right now</h3>
+            <p
+              className={s.health.currently_working ? undefined : "warnbox"}
+              role={s.health.currently_working ? undefined : "status"}
+            >
+              {s.health.sentence}
+            </p>
+          </div>
+          <div>
+            <h3>Previously</h3>
+            <p className="muted">
+              {s.history.sentence ??
+                `This setup has never been verified. Recorded state: ${stateLabel(s.state)}.`}
+            </p>
           </div>
           <div className="muted">
             {s.providers.length === 0
@@ -300,9 +455,10 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         </div>
       ))}
 
-      {needsAttention.length > 0 && (
+      {notWorking.length > 0 && (
         <p className="warnbox">
-          {needsAttention.length} project(s) need attention — see the states above.
+          {notWorking.length} project(s) are not tracking right now — see &ldquo;Right
+          now&rdquo; above for each.
         </p>
       )}
 
@@ -316,7 +472,20 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         <ReauthDialog
           title="Resume credential attribution"
           actionLabel="Resume"
-          body="Tethra will label observed requests with the stored credential that made them. Traffic is recorded either way."
+          /* The same ADR-0020 disclosure as the Advanced push-key dialog and
+             the Start-tracking screen. Resuming re-installs the same key, so
+             it must state the same consequence (ZFT-013). */
+          body={
+            "This hands the local gateway a derived matching-only key so it can label " +
+            "observed requests with the stored credential that made them. The key cannot " +
+            "decrypt anything, but while it is resident, a process that can read the " +
+            "gateway's memory (or its database) gains an oracle for testing whether a " +
+            "value matches one of your credentials. It covers only credentials in linked, " +
+            "non-password-locked projects. The key is dropped when the service stops, when " +
+            "you revoke it, and when the vault locks (keep-while-locked defaults OFF; with " +
+            "it ON a locked vault keeps matching for at most your auto-lock duration, 8 h " +
+            "cap). Traffic is recorded either way."
+          }
           onConfirm={async (password) => {
             await api.trackingResumeAttribution(password);
             setResume(false);

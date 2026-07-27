@@ -418,6 +418,56 @@ fn apply_refuses_when_the_file_changed_after_the_preview() {
     assert!(e.to_string().contains("changed since the preview"), "{e}");
 }
 
+/// The digest has to bind the previewed INPUT, not just the planned output.
+///
+/// The rewrite is not injective: the writer sets the same gateway URL
+/// whatever the variable held before, so a user who changed the value between
+/// preview and apply produced a byte-identical planned output. Hashing only
+/// that output made the documented refusal ("any file changed") silently
+/// untrue for exactly the edit a user is most likely to make — the value was
+/// overwritten without ever appearing in a diff (ZFT-023).
+#[test]
+fn apply_refuses_a_value_edit_the_rewrite_would_have_flattened() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = linkable(dir.path());
+    let env = dir.path().join(".env");
+    let previewed = "OPENAI_BASE_URL=https://old.internal-host.net/v1\n";
+    std::fs::write(&env, previewed).unwrap();
+
+    let req = request(&env, None);
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+
+    // The user repoints the variable after seeing the preview.
+    let edited = "OPENAI_BASE_URL=https://new.internal-host.net/v1\n";
+    std::fs::write(&env, edited).unwrap();
+
+    // Precondition, and the whole reason an output-only digest failed here:
+    // both inputs plan to the SAME bytes.
+    let after_edit = envlink::plan_link_with_slug(&conn, &req, &plan.link_slug).unwrap();
+    assert_eq!(
+        after_edit.files[0].new_content, plan.files[0].new_content,
+        "precondition: the rewrite flattens both prior values to one output"
+    );
+    assert_ne!(
+        after_edit.digest, plan.digest,
+        "the digest must distinguish the two previews"
+    );
+
+    let e = envlink::apply_link(&conn, &req, &plan).unwrap_err();
+    assert!(e.to_string().contains("changed since the preview"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(&env).unwrap(),
+        edited,
+        "a refused apply must leave the user's edit exactly as it was"
+    );
+    assert!(
+        routes::find_project_link(&conn, "p1", "openai")
+            .unwrap()
+            .is_none(),
+        "and must not have recorded a link for a plan it never applied"
+    );
+}
+
 #[test]
 fn unsupported_provider_requires_an_explicit_variable_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -552,6 +602,122 @@ fn a_base_url_with_embedded_credentials_is_withheld_too() {
     let recorded = serde_json::to_string(&plan.files[0].prior).unwrap();
     assert!(!recorded.contains("CANARYPASSWORD"), "{recorded}");
     assert!(!plan.files[0].diff.contains("CANARYPASSWORD"));
+}
+
+/// Rows an EARLIER build wrote still hold what the tightened rule now
+/// refuses, and nothing else ever rewrites them — so the fix to the writer
+/// alone leaves the recovered value sitting in `vault.db` (ZFT-016).
+#[test]
+fn a_legacy_restore_record_is_scrubbed_and_never_carried_forward() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_BASE_URL=https://api.openai.com/v1\n").unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+
+    // Exactly what a pre-fix build would have stored: the raw URL, query and
+    // all, under a variable it believed it could restore.
+    const LEGACY: &str = "https://api.internal-host.net/v1?api_key=CANARYLEGACY0123456789";
+    conn.execute(
+        "UPDATE gateway_project_links
+         SET prior_env_json = replace(prior_env_json, 'https://api.openai.com/v1', ?1)",
+        [LEGACY],
+    )
+    .unwrap();
+    let stored = |conn: &Connection| -> String {
+        conn.query_row(
+            "SELECT prior_env_json FROM gateway_project_links WHERE project_id = 'p1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        stored(&conn).contains("CANARYLEGACY"),
+        "precondition: the legacy value really is in the column"
+    );
+
+    assert_eq!(
+        envlink::scrub_stored_prior_env(&conn).unwrap(),
+        1,
+        "the row must be rewritten"
+    );
+    let after = stored(&conn);
+    assert!(
+        !after.contains("CANARYLEGACY"),
+        "the legacy value must be gone from the plaintext column: {after}"
+    );
+    assert!(
+        after.contains("\"prior_withheld\":true"),
+        "and the loss of automatic restore must be recorded honestly: {after}"
+    );
+    assert_eq!(
+        envlink::scrub_stored_prior_env(&conn).unwrap(),
+        0,
+        "scrubbing is idempotent"
+    );
+
+    // Unlink now says what it can no longer do instead of claiming a restore.
+    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    assert!(
+        report.outcomes.iter().any(
+            |o| matches!(o, RestoreOutcome::PriorNotRecorded { key, .. } if key == "OPENAI_BASE_URL")
+        ),
+        "{:?}",
+        report.outcomes
+    );
+}
+
+/// A base URL that carries its key in a QUERY STRING is never written to the
+/// plaintext restore record, and the undo that this costs is degraded
+/// HONESTLY rather than guessed at (ZFT-016).
+///
+/// The old allowlist inspected only the authority, so everything after the
+/// host went into `vault.db` verbatim. There is no way to tell `?version=2`
+/// from `?api_key=…`, so nothing with a query is recorded — which means unlink
+/// must say so and leave the line alone, not delete it and not invent a value.
+#[test]
+fn a_query_bearing_base_url_is_withheld_and_undo_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    let original =
+        "OPENAI_BASE_URL=https://api.internal-host.net/v1?api_key=CANARYQUERYKEY0123456789\n";
+    std::fs::write(&env, original).unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+    let recorded = serde_json::to_string(&plan.files[0].prior).unwrap();
+    assert!(
+        !recorded.contains("CANARYQUERYKEY"),
+        "the query string must not reach the plaintext restore record: {recorded}"
+    );
+    assert!(
+        plan.warnings.iter().any(
+            |w| matches!(w, LinkWarning::PriorValueWithheld { key, .. } if key == "OPENAI_BASE_URL")
+        ),
+        "the user must be told before confirming: {:?}",
+        plan.warnings
+    );
+    envlink::apply_link(&conn, &req, &plan).unwrap();
+
+    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    assert!(report.outcomes.iter().any(
+        |o| matches!(o, RestoreOutcome::PriorNotRecorded { key, .. } if key == "OPENAI_BASE_URL")
+    ), "undo must report the value it never kept, not claim a restore: {:?}", report.outcomes);
+    let after = std::fs::read_to_string(&env).unwrap();
+    assert!(
+        after.contains("OPENAI_BASE_URL=http://127.0.0.1:49723/p/"),
+        "the line is LEFT in place: deleting it would destroy what is still \
+         there, and inventing a value would be worse: {after}"
+    );
+    // The variable OPENAI_API_BASE (created by the link, nothing withheld)
+    // still restores normally — degradation is per-variable, not wholesale.
+    assert!(
+        !after.contains("OPENAI_API_BASE="),
+        "a variable the link created must still be removed: {after}"
+    );
 }
 
 /// An ordinary base URL still records and restores exactly — the withholding

@@ -73,6 +73,14 @@ the app bundle**: open it, click **Track API activity**, pick your
 project folder, review one screen, and click Start tracking. No CLI
 install, no PATH changes, no terminal.
 
+**Where this has actually been executed.** The zero-terminal claim above is
+verified end to end on **macOS arm64**, against the packaged `.app` with no
+CLI on PATH. The Windows and Linux desktop builds compile and are covered by
+CI, but the packaged install-and-track lifecycle has **not** been executed on
+either platform; the claim is not made for them. See
+`docs/activity-onboarding/PACKAGED_VALIDATION.md` for exactly what was run
+where (audit finding `ZFT-044`).
+
 If you prefer the terminal, the whole flow is one command:
 
 ```bash

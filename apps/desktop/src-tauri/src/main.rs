@@ -65,15 +65,38 @@ struct TrackingSession {
     detection: tracking_detect::ProjectDetection,
     project: tracking_plan::ProjectRef,
     plan: Option<tracking_plan::TrackingPlan>,
+    /// Destinations read out of this project's own files that the user has
+    /// explicitly approved in THIS review, keyed by provider.
+    ///
+    /// Repository content may suggest a destination; it may never authorize
+    /// one (ADR 0024). The desktop's only way to fill this map is
+    /// `tracking_origin_approve`, driven by a per-origin checkbox that
+    /// starts unchecked. "Start tracking" reads the map — it can never add
+    /// to it, which is what makes approving the setup and approving a
+    /// destination two separate decisions (ZFT-004).
+    approved_origins: std::collections::BTreeMap<String, String>,
+}
+
+/// State of the unsigned-build foreground fallback (`gateway serve` as a
+/// child of this app).
+#[derive(Default)]
+struct ForegroundGateway {
+    child: Option<std::process::Child>,
+    /// Set when a child we started is no longer running. The dashboard must
+    /// be able to tell "never started" from "started and died", because the
+    /// second one means tracking silently stopped (ZFT-031).
+    exited: Option<String>,
 }
 
 struct AppState {
     slot: Mutex<VaultSlot>,
     data_dir: PathBuf,
     tracking: Mutex<Option<TrackingSession>>,
-    /// A foreground `gateway serve` child (the unsigned-build fallback);
-    /// killed on drop so tracking honestly "pauses when Tethra closes".
-    foreground_gateway: Mutex<Option<std::process::Child>>,
+    /// A foreground `gateway serve` child (the unsigned-build fallback).
+    /// Killed explicitly on `RunEvent::Exit`: `std::process::Child` does
+    /// NOT kill on drop, so without that the child outlived the app while
+    /// the UI promised "tracking pauses when Tethra closes" (ZFT-021).
+    foreground_gateway: Mutex<ForegroundGateway>,
 }
 
 impl AppState {
@@ -2476,8 +2499,8 @@ use api_tracker_gateway::{
 };
 use api_tracker_tracking::{
     apply as tracking_apply, detect as tracking_detect, diagnose as tracking_diagnose,
-    plan as tracking_plan, state as tracking_state, undo as tracking_undo,
-    verify as tracking_verify,
+    origin as tracking_origin, plan as tracking_plan, state as tracking_state,
+    undo as tracking_undo, verify as tracking_verify,
 };
 
 #[tauri::command]
@@ -3009,6 +3032,78 @@ fn gateway_activity(
     gw_store::gateway_activity_summary(&conn, since.as_deref()).map_err(ErrDto::from)
 }
 
+/// Locally observed gateway traffic for ONE project.
+///
+/// `GatewayActivitySummary` has no project dimension, so with two or more
+/// tracked projects the dashboard could not answer "which project generated
+/// this?" (ZFT-029). `runtime_request_events` already carries `project_id`
+/// (indexed), so the dimension exists in the data — only the read was
+/// missing.
+#[derive(Serialize)]
+struct ProjectActivityDto {
+    project_id: String,
+    /// The project's name, or `None` when the project row is gone but its
+    /// events remain. Rendered as an explicit "removed project" rather than
+    /// as a blank.
+    project_name: Option<String>,
+    total_requests: i64,
+    success_count: i64,
+    error_count: i64,
+    transport_error_count: i64,
+    first_event_at: Option<String>,
+    last_event_at: Option<String>,
+}
+
+/// Per-project totals over the same window and the same rows as
+/// `gateway_activity`, so the parts and the whole cannot disagree.
+///
+/// Lock-free for the same reason `gateway_activity` is: this is non-secret
+/// request metadata and the panel must render while the vault is locked.
+/// Project NAMES are not secret either — they are already listed unlocked
+/// by the tracked-projects panel.
+#[tauri::command]
+fn gateway_activity_by_project(
+    state: State<'_, AppState>,
+    since: Option<String>,
+) -> CmdResult<Vec<ProjectActivityDto>> {
+    let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .map_err(ErrDto::from)?;
+    let since_clause = since.unwrap_or_default();
+    let read = || -> Result<Vec<ProjectActivityDto>, CoreError> {
+        let mut stmt = conn.prepare(
+            "SELECT e.project_id, p.name,
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN e.status_code BETWEEN 200 AND 399 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN e.status_code >= 400 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN e.transport_error != 'none' THEN 1 ELSE 0 END), 0),
+                    MIN(e.at), MAX(e.at)
+             FROM runtime_request_events e
+             LEFT JOIN projects p ON p.id = e.project_id
+             WHERE e.observation_source = 'gateway' AND e.at >= ?1
+             GROUP BY e.project_id
+             ORDER BY 3 DESC",
+        )?;
+        let mut out = Vec::new();
+        let rows = stmt.query_map([&since_clause], |r| {
+            Ok(ProjectActivityDto {
+                project_id: r.get(0)?,
+                project_name: r.get(1)?,
+                total_requests: r.get(2)?,
+                success_count: r.get(3)?,
+                error_count: r.get(4)?,
+                transport_error_count: r.get(5)?,
+                first_event_at: r.get(6)?,
+                last_event_at: r.get(7)?,
+            })
+        })?;
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    };
+    read().map_err(ErrDto::from)
+}
+
 #[tauri::command]
 fn credential_activity_sources(
     state: State<'_, AppState>,
@@ -3066,6 +3161,34 @@ struct TrackingScanDto {
     env_files: Vec<String>,
     /// Already-configured providers (a re-run over an existing setup).
     already_tracking: bool,
+    /// The honest headline: every integration the scan saw, in exactly one
+    /// bucket, rendered by the shared `CoverageSummary` so the desktop and
+    /// the CLI cannot describe the same scan differently (ZFT-010).
+    coverage_lines: Vec<String>,
+    coverage: TrackingCoverageDto,
+    /// Secret-shaped variables with no Tethra provider definition. Names and
+    /// files only — a value is never carried here.
+    unrecognized: Vec<TrackingUnrecognizedDto>,
+    /// What the scan could NOT inspect, if anything.
+    scan_gaps: Option<String>,
+    git_warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct TrackingCoverageDto {
+    total: usize,
+    tracked_automatically: usize,
+    needs_origin_confirmation: usize,
+    detected_unsupported: usize,
+    unrecognized: usize,
+    low_confidence: usize,
+}
+
+#[derive(Serialize)]
+struct TrackingUnrecognizedDto {
+    var: String,
+    file: String,
+    name_hint: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3080,8 +3203,15 @@ struct TrackingProviderDto {
     evidence: Vec<String>,
     limitations: Vec<String>,
     credential_candidates: Vec<String>,
-    /// Pre-selected in the review screen.
+    /// Pre-selected in the review screen. False for every destination read
+    /// from project content — those are approved one at a time, or not at
+    /// all.
     selected_by_default: bool,
+    /// Whether this provider's destination needs a separate per-origin
+    /// approval before it can be planned at all.
+    needs_origin_approval: bool,
+    /// Why Tethra cannot observe this provider, when it cannot.
+    unsupported_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3118,6 +3248,36 @@ fn configurability_str(c: &tracking_detect::Configurability) -> (String, Option<
         tracking_detect::Configurability::NeedsOriginInput => ("needs_origin_input".into(), None),
         tracking_detect::Configurability::Unsupported { .. } => ("unsupported".into(), None),
     }
+}
+
+/// The unsupported reason as a sentence. The frontend never sees the enum
+/// token: a user reading "no_configurable_base_url" learns nothing (ZFT-030).
+fn unsupported_reason_sentence(c: &tracking_detect::Configurability) -> Option<String> {
+    match c {
+        tracking_detect::Configurability::Unsupported { reason } => Some(match reason {
+            tracking_detect::UnsupportedReason::NoConfigurableBaseUrl => {
+                "This provider's SDK reads no base-URL setting, so Tethra has no way to route \
+                 its traffic through the local service. Nothing about your setup is wrong."
+                    .to_string()
+            }
+            tracking_detect::UnsupportedReason::UnknownProvider => {
+                "Tethra has no provider definition for this service yet, so it does not know \
+                 where its traffic goes or how to recognise it."
+                    .to_string()
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// The `BaseUrlVar` evidence behind an inferred origin: which file and which
+/// variable the destination was read from. This is the "why Tethra suggests
+/// it" half of the disclosure, and the shared `origin::describe` renders it.
+fn origin_source_of(p: &tracking_detect::ProviderDetection) -> Option<(String, String)> {
+    p.evidence.iter().find_map(|e| match e {
+        tracking_detect::Evidence::BaseUrlVar { var, file } => Some((var.clone(), file.clone())),
+        _ => None,
+    })
 }
 
 /// Scan a user-selected folder and start a tracking session.
@@ -3159,7 +3319,16 @@ fn tracking_scan(state: State<'_, AppState>, folder: String) -> CmdResult<Tracki
         Ok((detection, project, already))
     })?;
 
+    // `Selections::defaults` covers only manifest-origin providers. Anything
+    // whose destination was read from the project is absent by construction,
+    // so `selected_by_default` is false for it and the review screen renders
+    // its checkbox unchecked (ADR 0024, ZFT-004).
     let defaults = tracking_plan::Selections::defaults(&detection);
+    let pending: std::collections::BTreeSet<String> =
+        tracking_plan::Selections::pending_origin_approvals(&detection)
+            .into_iter()
+            .map(|(provider_id, _)| provider_id)
+            .collect();
     let dto = TrackingScanDto {
         folder: detection.folder.display().to_string(),
         project_name: project.name.clone(),
@@ -3179,6 +3348,12 @@ fn tracking_scan(state: State<'_, AppState>, folder: String) -> CmdResult<Tracki
                     limitations: p.limitations.clone(),
                     credential_candidates: p.credential_candidates.clone(),
                     selected_by_default: defaults.include.contains(&p.provider_id),
+                    needs_origin_approval: pending.contains(&p.provider_id)
+                        || matches!(
+                            p.configurability,
+                            tracking_detect::Configurability::NeedsOriginInput
+                        ),
+                    unsupported_reason: unsupported_reason_sentence(&p.configurability),
                 }
             })
             .collect(),
@@ -3190,21 +3365,309 @@ fn tracking_scan(state: State<'_, AppState>, folder: String) -> CmdResult<Tracki
             .map(|f| f.rel_path.clone())
             .collect(),
         already_tracking,
+        coverage_lines: detection.coverage.lines(),
+        coverage: TrackingCoverageDto {
+            total: detection.coverage.total(),
+            tracked_automatically: detection.coverage.tracked_automatically,
+            needs_origin_confirmation: detection.coverage.needs_origin_confirmation,
+            detected_unsupported: detection.coverage.detected_unsupported,
+            unrecognized: detection.coverage.unrecognized,
+            low_confidence: detection.coverage.low_confidence,
+        },
+        unrecognized: detection
+            .unrecognized
+            .iter()
+            .map(|u| TrackingUnrecognizedDto {
+                var: u.var.clone(),
+                file: u.file.clone(),
+                name_hint: u.name_hint.clone(),
+            })
+            .collect(),
+        scan_gaps: detection.accounting.describe_gaps(),
+        git_warnings: detection.accounting.git_warnings.clone(),
     };
     *state.tracking.lock().unwrap() = Some(TrackingSession {
         detection,
         project,
         plan: None,
+        // A new scan starts with nothing approved. Approvals never carry
+        // over from a previous folder.
+        approved_origins: std::collections::BTreeMap::new(),
     });
     Ok(dto)
 }
 
+// --- repository-discovered destinations (ADR 0024) -------------------------
+
+/// One destination the user is being asked to allow. Every field comes from
+/// the shared `origin::OriginApprovalRequest`, including the question and the
+/// ordered disclosure lines, so the CLI prompt and the desktop checkbox
+/// cannot describe the same destination differently.
+#[derive(Serialize)]
+struct TrackingOriginRequestDto {
+    provider_id: String,
+    provider_display_name: String,
+    origin: String,
+    scheme: String,
+    host: String,
+    port: u16,
+    /// "public" | "restricted"
+    network_class: String,
+    source_file: Option<String>,
+    source_var: Option<String>,
+    forwards_credentials: bool,
+    /// "built_in_manifest" | "previously_approved" | "repository_discovered"
+    trust: String,
+    question: String,
+    disclosure: Vec<String>,
+    /// A prior approval of this exact origin, if one is recorded and its MAC
+    /// verifies. Presentation only — it still starts unchecked.
+    previously_approved_at: Option<String>,
+    /// Approved in THIS review. The checkbox's checked state.
+    approved_now: bool,
+    /// Set when the destination fails the gateway's unchanged destination
+    /// policy, so the screen explains a refusal instead of offering a
+    /// checkbox that could never work.
+    refusal: Option<String>,
+}
+
+fn origin_request_dto(
+    request: &tracking_origin::OriginApprovalRequest,
+    previously_approved_at: Option<String>,
+    approved_now: bool,
+) -> TrackingOriginRequestDto {
+    TrackingOriginRequestDto {
+        provider_id: request.provider_id.clone(),
+        provider_display_name: request.provider_display_name.clone(),
+        origin: request.origin.clone(),
+        scheme: request.scheme.clone(),
+        host: request.host.clone(),
+        port: request.port,
+        network_class: match request.network_class {
+            tracking_origin::NetworkClass::Public => "public".to_string(),
+            tracking_origin::NetworkClass::Restricted => "restricted".to_string(),
+        },
+        source_file: request.source_file.clone(),
+        source_var: request.source_var.clone(),
+        forwards_credentials: request.forwards_credentials,
+        trust: match request.trust {
+            tracking_origin::OriginTrust::BuiltInManifest => "built_in_manifest".to_string(),
+            tracking_origin::OriginTrust::PreviouslyApproved { .. } => {
+                "previously_approved".to_string()
+            }
+            tracking_origin::OriginTrust::RepositoryDiscovered => {
+                "repository_discovered".to_string()
+            }
+        },
+        question: request.question(),
+        disclosure: request.disclosure(),
+        previously_approved_at,
+        approved_now,
+        refusal: None,
+    }
+}
+
+/// Every repository-discovered destination in the current session, with the
+/// full disclosure the user needs in order to decide.
+///
+/// Called once when the review screen renders. Each entry becomes one
+/// checkbox that starts UNCHECKED — including one the user approved in a
+/// previous session: the prior approval is shown as context, never as a
+/// silent pre-tick.
+#[tauri::command]
+fn tracking_origin_requests(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<TrackingOriginRequestDto>> {
+    let (pending, approved_now, detection) = {
+        let guard = state.tracking.lock().unwrap();
+        let Some(session) = guard.as_ref() else {
+            return Err(ErrDto {
+                code: "no_session".into(),
+                message: "no folder has been scanned yet".into(),
+            });
+        };
+        (
+            tracking_plan::Selections::pending_origin_approvals(&session.detection),
+            session.approved_origins.clone(),
+            session.detection.clone(),
+        )
+    };
+    if pending.is_empty() {
+        return Ok(Vec::new());
+    }
+    with_vault(&state, |vault| {
+        let vault_id = gw_routes::vault_id(vault.connection())?;
+        let mac_key = vault.gateway_route_mac_key().ok();
+        let mut out = Vec::new();
+        for (provider_id, inferred) in pending {
+            let detected = detection
+                .providers
+                .iter()
+                .find(|p| p.provider_id == provider_id);
+            let display = detected
+                .map(|p| p.display_name.clone())
+                .unwrap_or_else(|| provider_id.clone());
+            let source = detected.and_then(origin_source_of);
+            match tracking_origin::describe(
+                &provider_id,
+                &display,
+                &inferred,
+                source.as_ref().map(|(_, f)| f.as_str()),
+                source.as_ref().map(|(v, _)| v.as_str()),
+                true,
+                tracking_origin::OriginTrust::RepositoryDiscovered,
+            ) {
+                Ok(request) => {
+                    let prior = mac_key.as_ref().and_then(|k| {
+                        tracking_origin::is_approved(
+                            vault.connection(),
+                            &vault_id,
+                            k,
+                            &inferred,
+                            &provider_id,
+                        )
+                        .ok()
+                        .flatten()
+                    });
+                    out.push(origin_request_dto(
+                        &request,
+                        prior.map(|p| p.approved_at),
+                        approved_now
+                            .get(&provider_id)
+                            .is_some_and(|o| o == &inferred),
+                    ));
+                }
+                // A destination the gateway would refuse is still listed —
+                // silently dropping it would leave the user wondering why a
+                // detected API vanished.
+                Err(e) => out.push(TrackingOriginRequestDto {
+                    provider_id: provider_id.clone(),
+                    provider_display_name: display,
+                    origin: inferred.clone(),
+                    scheme: "https".into(),
+                    host: String::new(),
+                    port: 0,
+                    network_class: "restricted".into(),
+                    source_file: source.as_ref().map(|(_, f)| f.clone()),
+                    source_var: source.as_ref().map(|(v, _)| v.clone()),
+                    forwards_credentials: true,
+                    trust: "repository_discovered".into(),
+                    question: format!("Tethra will not send traffic to {inferred}."),
+                    disclosure: Vec::new(),
+                    previously_approved_at: None,
+                    approved_now: false,
+                    refusal: Some(e.to_string()),
+                }),
+            }
+        }
+        Ok(out)
+    })
+}
+
+/// Record the user's approval of one exact destination for this review.
+///
+/// This is the ONLY way a repository-discovered origin enters a desktop
+/// plan. It is deliberately a separate command from `tracking_plan_build`
+/// and `tracking_apply`: neither of those can approve anything, so clicking
+/// "Start tracking" cannot approve a destination the user did not tick.
+///
+/// The approval is held in the session only. It is written to the vault
+/// (MAC-bound, `origin::approve`) after a successful apply — the same point
+/// the CLI persists it — so a review the user abandons leaves no trace.
+#[tauri::command]
+fn tracking_origin_approve(
+    state: State<'_, AppState>,
+    provider_id: String,
+    origin: String,
+) -> CmdResult<TrackingOriginRequestDto> {
+    let mut guard = state.tracking.lock().unwrap();
+    let Some(session) = guard.as_mut() else {
+        return Err(ErrDto {
+            code: "no_session".into(),
+            message: "no folder has been scanned yet".into(),
+        });
+    };
+    let detected = session
+        .detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == provider_id)
+        .ok_or_else(|| ErrDto {
+            code: "not_detected".into(),
+            message: format!("'{provider_id}' was not detected in the scanned folder"),
+        })?;
+    // A repository-discovered origin is approvable only as the exact value
+    // that was detected. For a provider whose origin could not be inferred
+    // the user types the destination, which is a first-hand decision rather
+    // than one the repository proposed.
+    match &detected.configurability {
+        tracking_detect::Configurability::NeedsOriginConfirm { inferred_origin } => {
+            if inferred_origin != &origin {
+                return Err(ErrDto {
+                    code: "origin_mismatch".into(),
+                    message: format!(
+                        "approval is granted for one exact destination; {inferred_origin} was \
+                         detected but {origin} was submitted"
+                    ),
+                });
+            }
+        }
+        tracking_detect::Configurability::NeedsOriginInput => {}
+        _ => {
+            return Err(ErrDto {
+                code: "not_approvable".into(),
+                message: format!(
+                    "'{provider_id}' does not use a destination read from this project, so there \
+                     is nothing to approve"
+                ),
+            })
+        }
+    }
+    let source = origin_source_of(detected);
+    let display = detected.display_name.clone();
+    let request = tracking_origin::describe(
+        &provider_id,
+        &display,
+        &origin,
+        source.as_ref().map(|(_, f)| f.as_str()),
+        source.as_ref().map(|(v, _)| v.as_str()),
+        true,
+        tracking_origin::OriginTrust::RepositoryDiscovered,
+    )
+    .map_err(ErrDto::from)?;
+    session
+        .approved_origins
+        .insert(provider_id.clone(), origin.clone());
+    Ok(origin_request_dto(&request, None, true))
+}
+
+/// Withdraw an approval given in this review (the checkbox went back off,
+/// or the typed destination changed).
+#[tauri::command]
+fn tracking_origin_revoke(state: State<'_, AppState>, provider_id: String) -> CmdResult<()> {
+    let mut guard = state.tracking.lock().unwrap();
+    let Some(session) = guard.as_mut() else {
+        return Err(ErrDto {
+            code: "no_session".into(),
+            message: "no folder has been scanned yet".into(),
+        });
+    };
+    session.approved_origins.remove(&provider_id);
+    Ok(())
+}
+
 /// Build the combined plan for the current session's selections.
+///
+/// Takes provider ids only. Destinations are NOT a parameter: a
+/// repository-discovered origin can reach a plan solely through
+/// `Selections::approve_origin`, fed from the session approvals that
+/// `tracking_origin_approve` records. The previous signature accepted an
+/// `origins` list from the frontend, which meant the IPC boundary — not the
+/// user — decided where traffic goes (ZFT-004).
 #[tauri::command]
 fn tracking_plan_build(
     state: State<'_, AppState>,
     providers: Vec<String>,
-    origins: Vec<(String, String)>,
 ) -> CmdResult<TrackingPlanDto> {
     let mut guard = state.tracking.lock().unwrap();
     let Some(session) = guard.as_mut() else {
@@ -3214,9 +3677,34 @@ fn tracking_plan_build(
         });
     };
     let mut selections = tracking_plan::Selections::default();
-    selections.include.extend(providers);
-    for (provider, origin) in origins {
-        selections.confirmed_origins.insert(provider, origin);
+    for provider in providers {
+        let detected = session
+            .detection
+            .providers
+            .iter()
+            .find(|p| p.provider_id == provider);
+        let needs_origin = matches!(
+            detected.map(|p| &p.configurability),
+            Some(tracking_detect::Configurability::NeedsOriginConfirm { .. })
+                | Some(tracking_detect::Configurability::NeedsOriginInput)
+        );
+        if needs_origin {
+            // Refuse rather than silently drop: a provider the user ticked
+            // that quietly vanished from the plan would be worse than an
+            // error, because the review screen would still show it selected.
+            let Some(origin) = session.approved_origins.get(&provider) else {
+                let inferred = match detected.map(|p| &p.configurability) {
+                    Some(tracking_detect::Configurability::NeedsOriginConfirm {
+                        inferred_origin,
+                    }) => inferred_origin.clone(),
+                    _ => "its destination".to_string(),
+                };
+                return Err(ErrDto::from(tracking_origin::refusal(&inferred, &provider)));
+            };
+            selections.approve_origin(&provider, origin);
+        } else {
+            selections.include.insert(provider);
+        }
     }
     let service = gw_lifecycle::Lifecycle::for_host(&state.data_dir)
         .map(|lc| lc.status())
@@ -3324,7 +3812,7 @@ fn tracking_apply(
     state: State<'_, AppState>,
     password: Option<String>,
 ) -> CmdResult<TrackingApplyDto> {
-    let (detection, plan) = {
+    let (detection, plan, approved_origins) = {
         let guard = state.tracking.lock().unwrap();
         let Some(session) = guard.as_ref() else {
             return Err(ErrDto {
@@ -3338,7 +3826,11 @@ fn tracking_apply(
                 message: "no tracking plan has been previewed yet".into(),
             });
         };
-        (session.detection.clone(), plan)
+        (
+            session.detection.clone(),
+            plan,
+            session.approved_origins.clone(),
+        )
     };
     let helper = locate_cli(&state.data_dir).ok_or_else(|| ErrDto {
         code: "cli_not_found".into(),
@@ -3355,9 +3847,29 @@ fn tracking_apply(
         master_password: password.map(SecretString::new),
     };
     let report = with_vault(&state, |vault| {
-        Ok(tracking_apply::apply(
-            vault, &detection, &plan, &options, &ops,
-        ))
+        let report = tracking_apply::apply(vault, &detection, &plan, &options, &ops);
+        // Persist the destination approvals only once the setup they were
+        // given for actually succeeded — the same point the CLI persists
+        // them. An abandoned or failed review leaves no approval behind, so
+        // "you approved this before" can never be shown for a decision that
+        // never took effect. Best-effort: a failure here costs one re-ask.
+        if report.failed_step().is_none() && !approved_origins.is_empty() {
+            if let (Ok(key), Ok(vault_id)) = (
+                vault.gateway_route_mac_key(),
+                gw_routes::vault_id(vault.connection()),
+            ) {
+                for (provider_id, origin) in &approved_origins {
+                    let _ = tracking_origin::approve(
+                        vault.connection(),
+                        &vault_id,
+                        &key,
+                        origin,
+                        provider_id,
+                    );
+                }
+            }
+        }
+        Ok(report)
     })?;
     Ok(TrackingApplyDto {
         steps: report
@@ -3401,6 +3913,104 @@ struct TrackingStatusDto {
     observed_model: Option<String>,
     providers: Vec<TrackingFreshnessDto>,
     attribution_paused: bool,
+    /// What is true NOW. Rendered under its own heading, never merged with
+    /// the history below it (ZFT-005).
+    health: TrackingHealthDto,
+    /// What was true before. Facts that survive the session — shown
+    /// alongside present health, never instead of it.
+    history: TrackingHistoryDto,
+}
+
+/// `state::CurrentHealth`, flattened for the UI: a machine tag for styling
+/// and a finished sentence for the user. The sentence comes from the shared
+/// `CurrentHealth::describe`, so no internal token is ever rendered
+/// (ZFT-030), and `currently_working` comes from
+/// `CurrentHealth::is_currently_working`, which is deliberately narrow —
+/// "verified previously, gateway down" is not a success.
+#[derive(Serialize)]
+struct TrackingHealthDto {
+    kind: String,
+    sentence: String,
+    currently_working: bool,
+}
+
+#[derive(Serialize)]
+struct TrackingHistoryDto {
+    first_verified_at: Option<String>,
+    last_observed_at: Option<String>,
+    verification_session: Option<String>,
+    config_generation: i64,
+    /// The one-line history sentence, or `None` when this setup has never
+    /// been verified — in which case the UI must say exactly that rather
+    /// than render an empty section.
+    sentence: Option<String>,
+}
+
+fn health_kind(health: &tracking_state::CurrentHealth) -> &'static str {
+    use tracking_state::CurrentHealth as H;
+    match health {
+        H::VerifiedAndActive => "verified_and_active",
+        H::PartiallyTracked { .. } => "partially_tracked",
+        H::VerifiedPreviouslyGatewayDown => "verified_previously_gateway_down",
+        H::VerifiedPreviouslyIdle { .. } => "verified_previously_idle",
+        H::WaitingForFirstRequest => "waiting_for_first_request",
+        H::NeedsRestart => "needs_restart",
+        H::ConfigurationChanged { .. } => "configuration_changed",
+        H::GatewayUnavailable => "gateway_unavailable",
+        H::NeedsAttention { .. } => "needs_attention",
+        H::AttributionPaused => "attribution_paused",
+        H::NotConfigured => "not_configured",
+        H::Unsupported => "unsupported",
+    }
+}
+
+fn health_dto(health: &tracking_state::CurrentHealth) -> TrackingHealthDto {
+    TrackingHealthDto {
+        kind: health_kind(health).to_string(),
+        sentence: health.describe(),
+        currently_working: health.is_currently_working(),
+    }
+}
+
+fn history_dto(history: &tracking_state::VerificationHistory) -> TrackingHistoryDto {
+    let sentence = match (&history.first_verified_at, &history.last_observed_at) {
+        (Some(first), Some(last)) => Some(format!(
+            "First verified {first}. Most recent observation in this configuration: {last}."
+        )),
+        (Some(first), None) => Some(format!(
+            "First verified {first}. Nothing has been observed since the configuration last \
+             changed."
+        )),
+        (None, Some(last)) => Some(format!("Last observed {last}.")),
+        (None, None) => None,
+    };
+    TrackingHistoryDto {
+        first_verified_at: history.first_verified_at.clone(),
+        last_observed_at: history.last_observed_at.clone(),
+        verification_session: history.verification_session.clone(),
+        config_generation: history.config_generation,
+        sentence,
+    }
+}
+
+/// Probe whether this vault's gateway is answering right now.
+///
+/// `GatewayLiveness::Unknown` is the honest answer when we did not probe;
+/// `refresh_with` treats it as "cannot confirm health", so historical facts
+/// survive but present-tense claims do not.
+fn gateway_liveness(state: &AppState) -> tracking_state::GatewayLiveness {
+    let port = match api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .ok()
+        .and_then(|conn| gw_store::load_config(&conn).ok())
+        .and_then(|c| c.port)
+    {
+        Some(port) => port,
+        None => return tracking_state::GatewayLiveness::Down,
+    };
+    match gw_control::verify_listener(&state.data_dir, port) {
+        gw_control::ListenerIdentity::Verified { .. } => tracking_state::GatewayLiveness::Verified,
+        _ => tracking_state::GatewayLiveness::Down,
+    }
 }
 
 #[derive(Serialize)]
@@ -3413,6 +4023,7 @@ struct TrackingFreshnessDto {
 #[tauri::command]
 fn tracking_status(state: State<'_, AppState>, setup_id: String) -> CmdResult<TrackingStatusDto> {
     let attribution_paused = attribution_is_paused(&state);
+    let liveness = gateway_liveness(&state);
     with_vault(&state, |vault| {
         let mut setup = tracking_state::get_setup(vault.connection(), &setup_id)?.ok_or(
             CoreError::NotFound {
@@ -3421,6 +4032,10 @@ fn tracking_status(state: State<'_, AppState>, setup_id: String) -> CmdResult<Tr
             },
         )?;
         let status = tracking_verify::check_traffic(vault.connection(), &mut setup)?;
+        // Derived AFTER `check_traffic`, which re-derives the row itself:
+        // health must describe the row the user is about to be shown, and
+        // this pass is the one that knows whether the gateway answered.
+        let report = tracking_state::refresh_with(vault.connection(), &mut setup, liveness)?;
         let (watch, exchange, freshness) = match status {
             tracking_verify::WatchStatus::Observed {
                 exchange,
@@ -3454,6 +4069,8 @@ fn tracking_status(state: State<'_, AppState>, setup_id: String) -> CmdResult<Tr
                 })
                 .collect(),
             attribution_paused,
+            health: health_dto(&report.current),
+            history: history_dto(&report.history),
         })
     })
 }
@@ -3484,10 +4101,15 @@ fn attribution_is_paused(state: &AppState) -> bool {
 #[tauri::command]
 fn tracking_list(state: State<'_, AppState>) -> CmdResult<Vec<TrackingStatusDto>> {
     let attribution_paused = attribution_is_paused(&state);
+    // Probed once for the whole list rather than per setup: the answer is a
+    // property of the machine, and the dashboard must be able to say "this
+    // was verified before, but nothing is listening now" — which it cannot
+    // do from `GatewayLiveness::Unknown`.
+    let liveness = gateway_liveness(&state);
     with_vault(&state, |vault| {
         let mut out = Vec::new();
         for mut setup in tracking_state::list_setups(vault.connection())? {
-            let freshness = tracking_state::refresh(vault.connection(), &mut setup)?;
+            let report = tracking_state::refresh_with(vault.connection(), &mut setup, liveness)?;
             out.push(TrackingStatusDto {
                 setup_id: setup.id.clone(),
                 state: setup.state.as_str().to_string(),
@@ -3502,14 +4124,17 @@ fn tracking_list(state: State<'_, AppState>) -> CmdResult<Vec<TrackingStatusDto>
                 observed_provider: None,
                 observed_latency_ms: None,
                 observed_model: None,
-                providers: freshness
-                    .into_iter()
+                providers: report
+                    .freshness
+                    .iter()
                     .map(|f| TrackingFreshnessDto {
-                        provider_id: f.provider_id,
-                        last_observed_at: f.last_observed_at,
+                        provider_id: f.provider_id.clone(),
+                        last_observed_at: f.last_observed_at.clone(),
                     })
                     .collect(),
                 attribution_paused,
+                health: health_dto(&report.current),
+                history: history_dto(&report.history),
             });
         }
         Ok(out)
@@ -3600,7 +4225,7 @@ fn tracking_undo(state: State<'_, AppState>, setup_id: String) -> CmdResult<Trac
 #[tauri::command]
 fn tracking_foreground_start(state: State<'_, AppState>) -> CmdResult<()> {
     let mut guard = state.foreground_gateway.lock().unwrap();
-    if guard.is_some() {
+    if guard.child.is_some() {
         return Ok(());
     }
     let helper = locate_cli(&state.data_dir).ok_or_else(|| ErrDto {
@@ -3616,27 +4241,98 @@ fn tracking_foreground_start(state: State<'_, AppState>) -> CmdResult<()> {
             code: "spawn_failed".into(),
             message: format!("could not start the foreground tracking service: {e}"),
         })?;
-    *guard = Some(child);
+    guard.child = Some(child);
+    guard.exited = None;
     Ok(())
+}
+
+#[derive(Serialize)]
+struct ForegroundStatusDto {
+    /// A foreground helper we started is running right now.
+    active: bool,
+    /// A foreground helper we started is no longer running. Distinct from
+    /// `active == false` with `stopped == false`, which means one was never
+    /// started and the background service is what is (or is not) running.
+    stopped: bool,
+    /// Why, when we know. Never a bare enum token.
+    detail: Option<String>,
 }
 
 /// Whether the foreground fallback is the thing currently running (the
 /// dashboard says "tracking pauses when Tethra closes").
+///
+/// Returns three distinguishable outcomes rather than a bool. The dashboard
+/// used to collapse a failed check into `false`, which renders identically
+/// to "the background service is running" — so a user whose foreground
+/// helper had died was told nothing at all (ZFT-031).
 #[tauri::command]
-fn tracking_foreground_active(state: State<'_, AppState>) -> CmdResult<bool> {
+fn tracking_foreground_active(state: State<'_, AppState>) -> CmdResult<ForegroundStatusDto> {
     let mut guard = state.foreground_gateway.lock().unwrap();
-    let active = match guard.as_mut() {
+    match guard.child.as_mut() {
         Some(child) => match child.try_wait() {
-            Ok(Some(_)) => {
-                *guard = None;
-                false
+            Ok(Some(status)) => {
+                guard.child = None;
+                let detail = format!(
+                    "The helper that was tracking while Tethra is open exited ({status}). \
+                     Traffic is not being recorded until it is started again."
+                );
+                guard.exited = Some(detail.clone());
+                Ok(ForegroundStatusDto {
+                    active: false,
+                    stopped: true,
+                    detail: Some(detail),
+                })
             }
-            Ok(None) => true,
-            Err(_) => false,
+            Ok(None) => Ok(ForegroundStatusDto {
+                active: true,
+                stopped: false,
+                detail: None,
+            }),
+            // We cannot tell whether it is alive. Saying "not running" would
+            // be a claim we cannot support, so report the uncertainty.
+            Err(e) => Ok(ForegroundStatusDto {
+                active: false,
+                stopped: true,
+                detail: Some(format!(
+                    "The state of the foreground tracking helper could not be read: {e}"
+                )),
+            }),
         },
-        None => false,
+        None => Ok(ForegroundStatusDto {
+            active: false,
+            stopped: guard.exited.is_some(),
+            detail: guard.exited.clone(),
+        }),
+    }
+}
+
+/// Stop the foreground helper this app started.
+///
+/// Called on `RunEvent::Exit` and from the dashboard. `std::process::Child`
+/// does not kill on drop, so nothing else ends this process: without this
+/// the helper kept forwarding — and kept a resident matching key — after the
+/// app that promised "tracking pauses when Tethra closes" was gone
+/// (ZFT-021).
+fn stop_foreground_gateway(state: &AppState) {
+    let mut guard = match state.foreground_gateway.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     };
-    Ok(active)
+    if let Some(mut child) = guard.child.take() {
+        let _ = child.kill();
+        // Reap it so the helper cannot linger as a zombie holding the
+        // loopback port against the next start.
+        let _ = child.wait();
+        guard.exited = Some(
+            "The foreground tracking helper was stopped because Tethra is closing.".to_string(),
+        );
+    }
+}
+
+#[tauri::command]
+fn tracking_foreground_stop(state: State<'_, AppState>) -> CmdResult<()> {
+    stop_foreground_gateway(&state);
+    Ok(())
 }
 
 /// Resume credential attribution after a lock (Journey B). Same reauth
@@ -3670,7 +4366,7 @@ fn main() {
             }),
             data_dir,
             tracking: Mutex::new(None),
-            foreground_gateway: Mutex::new(None),
+            foreground_gateway: Mutex::new(ForegroundGateway::default()),
         })
         .invoke_handler(tauri::generate_handler![
             vault_status,
@@ -3858,6 +4554,9 @@ fn main() {
             gateway_match_while_locked_set,
             gateway_recording,
             tracking_scan,
+            tracking_origin_requests,
+            tracking_origin_approve,
+            tracking_origin_revoke,
             tracking_plan_build,
             tracking_apply,
             tracking_status,
@@ -3866,8 +4565,10 @@ fn main() {
             tracking_undo,
             tracking_foreground_start,
             tracking_foreground_active,
+            tracking_foreground_stop,
             tracking_resume_attribution,
             gateway_activity,
+            gateway_activity_by_project,
             credential_activity_sources,
         ])
         .build(tauri::generate_context!())
@@ -3888,6 +4589,11 @@ fn main() {
                     minutes
                 };
                 notify_gateway_vault_locked(&state.data_dir, minutes);
+                // The foreground fallback is a CHILD of this app, and the UI
+                // promises "tracking pauses when Tethra closes". Nothing else
+                // ends it — `Child` has no kill-on-drop — so the promise is
+                // only true because of this line (ZFT-021).
+                stop_foreground_gateway(&state);
             }
         });
 }

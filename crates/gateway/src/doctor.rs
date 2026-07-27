@@ -103,6 +103,7 @@ fn placeholder_service(why: String) -> lifecycle::ServiceStatus {
         matches_data_dir: false,
         binary_exists: false,
         binary_version: None,
+        binary_version_measured: false,
         registered: false,
         running: false,
         pid: None,

@@ -55,7 +55,7 @@ The disclosure's file list moves into the primary card — this also retires
 accepted-risk #5 from `docs/gateway/audit/REMEDIATION.md` ("the consent
 file list is behind Learn more").
 
-Residual risks stated at consent time, carried over verbatim: loopback
+Residual risks stated at consent time, carried over verbatim (CORRECTED — see below): loopback
 port usable by any local program (GW-11); standing local egress relay;
 matching-key-resident memory oracle while attribution is on (GW-6).
 
@@ -128,3 +128,37 @@ version-drifted service binary without an extra confirmation), O-22-3
 (attribution password UX for the CLI `--yes` path), O-22-9 (the PR #15
 merge-without-re-audit governance gap — a process finding, not a code
 finding, but it belongs on the security record).
+
+
+## Correction (2026-07-27): attribution disclosure and origin approval
+
+The independent audit of PR #16 found two claims on this page that the
+implementation did not meet. Both are now true; the record of what was wrong
+is kept here rather than quietly edited away.
+
+**The attribution disclosure was NOT carried over verbatim (`ZFT-013`).**
+This page claimed the residual risks were "stated at consent time, carried
+over verbatim: … matching-key-resident memory oracle while attribution is on
+(GW-6)". The Advanced push-key dialog did that properly. The primary Track
+flow, the dashboard resume dialog and the CLI step line authorized the same
+capability with only *"Label traffic with which stored credential was used
+(recommended)"*. Consent consolidation had moved the password field but not
+the ADR-0020 disclosure copy. All three surfaces now carry it: the oracle
+while the key is resident, the scope, and that the key is dropped on stop,
+revoke and lock.
+
+**The disclosed scope was too narrow (`ZFT-020`).** `PRODUCT_BEHAVIOR.md`
+called it a "narrowly scoped matching capability". It is not narrow: the key
+pushed to the gateway is the **vault-wide fingerprint key**, and the matcher
+covers **every gateway-linked project**, not just the one being set up. The
+mechanism is unchanged and was always what ADR 0020 describes; the wording
+was wrong, and the consent copy now says vault-wide at the point of consent.
+
+**A custom origin required an explicit checkbox — and there was none
+(`ZFT-004`).** This page promised that a repository-derived route origin
+"requires an **explicit checkbox** (never part of Confirmed auto-config)".
+The CLI had no checkbox and the desktop shipped it pre-checked with the
+origin pre-filled, so a repository containing no secrets at all could cause
+a MAC'd, enabled route to an attacker-chosen host. The promise is now
+implemented as written: default off, per destination, with the full
+disclosure, and `--yes` refuses rather than granting it. See ADR 0024.

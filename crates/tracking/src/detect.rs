@@ -600,6 +600,9 @@ struct Signals {
     /// Origin candidates that FAILED validation (count is enough; the
     /// value is deliberately not carried).
     rejected_origins: u32,
+    /// A value under a manifest-declared secret variable matched that
+    /// provider's published key format. Raises confidence; never lowers it.
+    s1_key_format_confirmed: bool,
     /// For a FIXED-origin provider: base-URL values already present in the
     /// project that do NOT match the manifest origin. Their presence means
     /// the project already points somewhere else, so the provider must not
@@ -710,12 +713,45 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
                         file: file.rel_path.clone(),
                     });
                     sig.target_env_files.insert(file.rel_path.clone());
+                    // The manifest's own key-format patterns are the
+                    // provider's PUBLIC shape markers (`sk-proj-…`,
+                    // `sk-ant-…`). They already existed and were never
+                    // consulted, so the placeholder filter was the only
+                    // check a value ever got: `OPENAI_API_KEY=abcdefgh`
+                    // reached `likely` and was auto-selected (ZFT-027).
+                    //
+                    // A match RAISES confidence; a non-match does not
+                    // lower it, because a provider may issue a format
+                    // Tethra's manifest predates and refusing on that
+                    // would be worse than the false positive. The value is
+                    // tested and discarded — never stored or rendered.
+                    if !manifest.detection.is_empty()
+                        && scanner::value_matches_provider_format(
+                            &manifest.id,
+                            entry.value.expose(),
+                        )
+                    {
+                        sig.s1_key_format_confirmed = true;
+                    }
                     // Claimed by a manifest: no longer unattributed.
                     unattributed.remove(&entry.key);
                 }
             }
             // S3: base-URL variable present by NAME…
-            if let Some(manifests) = base_url_vars.get(&entry.key) {
+            //
+            // …unless the value is Tethra's OWN loopback writing. After the
+            // first link, `OPENAI_BASE_URL=http://127.0.0.1:<port>/p/<slug>/…`
+            // sat in the file, and its mere presence counted as the second
+            // "independent signal class" that promotes a detection to
+            // Confirmed — so Tethra's output became Tethra's evidence
+            // (ZFT-025). The value was already excluded from ORIGIN
+            // inference for this reason; excluding it from the SIGNAL too is
+            // the same rule applied consistently.
+            let is_our_own_writing = entry.value.expose().trim().contains("127.0.0.1:");
+            if let Some(manifests) = base_url_vars
+                .get(&entry.key)
+                .filter(|_| !is_our_own_writing)
+            {
                 for manifest in manifests {
                     let sig = signals.entry(manifest.id.clone()).or_default();
                     sig.s3_base_url.push(Evidence::BaseUrlVar {
@@ -952,8 +988,24 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             continue;
         }
 
-        let mut confidence = if ((s1 || s4) && (s2 || s3)) || (s1 && s4) {
+        // A key whose VALUE matches the provider's published format is
+        // strong, independent evidence — much stronger than the variable
+        // name alone, which anyone can type. It promotes a lone S1 from
+        // Likely to Confirmed, and a value that matches NO known format
+        // holds a lone S1 at Possible rather than the auto-select
+        // threshold (ZFT-027).
+        let key_format = sig.s1_key_format_confirmed;
+        let two_independent_classes = ((s1 || s4) && (s2 || s3)) || (s1 && s4);
+        let mut confidence = if two_independent_classes || (s1 && key_format) {
+            // Two independent signal classes, OR one signal class whose
+            // VALUE matches the provider's published key format — a shape
+            // no one types by accident.
             DetectionConfidence::Confirmed
+        } else if s1 && !key_format && !(s2 || s3 || s4) {
+            // A recognised variable NAME holding a value of no recognised
+            // shape. Real evidence, not enough of it to configure without
+            // being asked.
+            DetectionConfidence::Possible
         } else if [s1, s2, s4].iter().filter(|x| **x).count() == 1 {
             DetectionConfidence::Likely
         } else {

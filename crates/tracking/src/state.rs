@@ -289,6 +289,15 @@ pub struct PlanSummary {
     pub created_routes: Vec<String>,
     /// Route prefixes this setup reused.
     pub reused_routes: Vec<String>,
+    /// Route prefixes that EXISTED but were disabled, and which this setup
+    /// turned back on.
+    ///
+    /// Undo restored the route row but never its prior `enabled` state, so
+    /// a route the user had deliberately disabled was left permanently
+    /// re-enabled (ZFT-019). `serde(default)` so plan summaries written by
+    /// earlier builds still deserialize.
+    #[serde(default)]
+    pub re_enabled_routes: Vec<String>,
     /// Link route-prefixes this setup created or re-applied.
     pub links: Vec<String>,
     /// Files the approved link plans touched (paths only).
@@ -482,6 +491,18 @@ pub fn record_applied(conn: &Connection, setup_id: &str, plan_summary: &PlanSumm
         params![setup_id, serde_json::to_string(plan_summary)?, now],
     )?;
     Ok(())
+}
+
+/// The setup's persisted plan summary, or an empty one when absent.
+///
+/// Callers that must distinguish "no plan" from "an empty plan" — undo
+/// does — read `plan_summary_json` directly instead.
+pub fn plan_summary_of(setup: &TrackingSetup) -> PlanSummary {
+    setup
+        .plan_summary_json
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<PlanSummary>(json).ok())
+        .unwrap_or_default()
 }
 
 /// Providers this setup configured, from the plan summary (fallback: none).

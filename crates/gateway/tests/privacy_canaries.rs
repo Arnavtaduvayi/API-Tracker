@@ -31,6 +31,13 @@ const CANARY_QUERY: &str = "CANARY-QUERY-7ab3f602";
 const CANARY_COOKIE: &str = "CANARY-COOKIE-1d94ce55";
 const CANARY_HEADER: &str = "CANARY-HEADER-b7e02f14";
 
+/// Markers planted in a project's `.env` rather than in traffic. The `.env`
+/// link writer records what it overwrites in `gateway_project_links
+/// .prior_env_json`, which is a PLAINTEXT column — so a prior value carrying
+/// key material must never reach it (ZFT-016).
+const CANARY_ENV_QUERY: &str = "sk-QUERYCANARY-3f7a19d4c8e25b60";
+const CANARY_ENV_PATH: &str = "9f2c8a71e45b30d6PATHCANARY4b8e";
+
 fn all_canaries() -> Vec<(&'static str, &'static str)> {
     vec![
         ("credential value", CANARY_CREDENTIAL),
@@ -39,6 +46,8 @@ fn all_canaries() -> Vec<(&'static str, &'static str)> {
         ("query value", CANARY_QUERY),
         ("cookie value", CANARY_COOKIE),
         ("header value", CANARY_HEADER),
+        (".env query-string value", CANARY_ENV_QUERY),
+        (".env URL-path value", CANARY_ENV_PATH),
     ]
 }
 
@@ -656,6 +665,111 @@ fn no_canary_survives_the_real_persistence_path() {
         "expected to scan at least the database and one sidecar/file; \
          scanning nothing is not a pass"
     );
+}
+
+/// The `.env` link writer's restore record is a PLAINTEXT column, and the
+/// allowlist that decides what may go into it originally inspected only the
+/// URL's authority. Everything after the host — path, query, fragment — was
+/// waved through, so a base URL that carried its key in a query string was
+/// written verbatim into `vault.db`; the audit recovered `sk-QUERYCANARY-…`
+/// from the raw file at a byte offset (ZFT-016).
+///
+/// This drives the real plan → apply path against a real database and then
+/// reads every byte the run left on disk.
+#[test]
+fn no_env_value_canary_survives_the_link_writers_restore_record() {
+    use api_tracker_gateway::envlink::{self, LinkRequest, LinkWarning};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = test_db(dir.path());
+    let conn = open_db(&db_path);
+    api_tracker_gateway::routes::add_manifest_route(&conn, "openai", "openai").unwrap();
+    let mut config = api_tracker_gateway::store::load_config(&conn).unwrap();
+    config.port = Some(49723);
+    api_tracker_gateway::store::save_config(&conn, &config).unwrap();
+
+    // Both declared OpenAI variables already hold a base URL that hides key
+    // material AFTER the authority: one in a query string, one in a path
+    // segment. Each host says "example", which is exactly what made the old
+    // masking rule print them in full as well.
+    let project = dir.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    let env = project.join(".env");
+    std::fs::write(
+        &env,
+        format!(
+            "OPENAI_BASE_URL=https://api.example.com/v1?api_key={CANARY_ENV_QUERY}\n\
+             OPENAI_API_BASE=https://gw.example.com/{CANARY_ENV_PATH}/v1\n"
+        ),
+    )
+    .unwrap();
+
+    let req = LinkRequest {
+        project_id: "p1".into(),
+        project_name: "app".into(),
+        route_prefix: "openai".into(),
+        project_dir: Some(project.clone()),
+        files: vec![env.clone()],
+        var_override: None,
+    };
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+
+    // The consent diff is shown on stdout and across IPC before anything is
+    // written, so it is an artifact too.
+    assert_absent("the link plan's diff", plan.files[0].diff.as_bytes());
+    assert_absent(
+        "the serialized link plan",
+        serde_json::to_string(&plan).unwrap().as_bytes(),
+    );
+    envlink::apply_link(&conn, &req, &plan).unwrap();
+
+    // ANTI-VACUITY GATE: scanning the database proves nothing unless the
+    // restore record really was written to it.
+    let stored: String = conn
+        .query_row(
+            "SELECT prior_env_json FROM gateway_project_links WHERE project_id = 'p1'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("apply must have written a restore record");
+    assert!(
+        stored.contains("OPENAI_BASE_URL") && stored.contains("prior_withheld"),
+        "the record must really describe these variables, else the scan is \
+         vacuous: {stored}"
+    );
+    assert_absent("the stored prior_env_json", stored.as_bytes());
+    // The file itself was still rewritten, so the feature works — this is a
+    // privacy test, not an "it did nothing" test.
+    assert!(std::fs::read_to_string(&env)
+        .unwrap()
+        .contains("OPENAI_BASE_URL=http://127.0.0.1:49723/p/"));
+
+    db::checkpoint_truncate(&conn);
+    drop(conn);
+
+    let mut scanned = 0usize;
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert_absent(&format!("data-dir file {}", path.display()), &bytes);
+            scanned += 1;
+        }
+    }
+    assert!(scanned >= 1, "scanning nothing is not a pass");
+
+    // Withholding must be VISIBLE, not silent. Refusing to persist the value
+    // costs the user automatic restore, so they are told BEFORE they confirm
+    // — a quiet refusal would be its own defect.
+    for var in ["OPENAI_BASE_URL", "OPENAI_API_BASE"] {
+        assert!(
+            plan.warnings
+                .iter()
+                .any(|w| matches!(w, LinkWarning::PriorValueWithheld { key, .. } if key == var)),
+            "{var}'s prior value was withheld but the user was never warned: {:?}",
+            plan.warnings
+        );
+    }
 }
 
 /// Negative control for the canary machinery itself: `assert_absent` must

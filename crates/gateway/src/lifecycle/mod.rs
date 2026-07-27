@@ -300,6 +300,9 @@ pub struct ServiceStatus {
     pub binary_exists: bool,
     /// Version parsed from the installed binary's file name.
     pub binary_version: Option<String>,
+    /// Whether `binary_version` came from RUNNING the installed helper
+    /// (true) or from the file name this build stamped on it (false).
+    pub binary_version_measured: bool,
     pub registered: bool,
     pub running: bool,
     pub pid: Option<u32>,
@@ -325,6 +328,7 @@ impl Default for ServiceStatus {
             matches_data_dir: false,
             binary_exists: false,
             binary_version: None,
+            binary_version_measured: false,
             registered: false,
             running: false,
             pid: None,
@@ -726,7 +730,37 @@ impl Lifecycle {
             .as_ref()
             .map(|d| d.binary.exists())
             .unwrap_or(false);
+        // MEASURE the installed helper's version by asking it, rather than
+        // reading the version out of the file NAME we ourselves chose. The
+        // name is stamped by whichever build did the install, so a helper
+        // that was replaced out from under us — a fallback copy, a manual
+        // overwrite — reported the stamped version and drift detection saw
+        // nothing wrong. The exec probe has always printed the true version
+        // and the answer was thrown away (ZFT-041).
+        //
+        // Falls back to the stamped name when the probe cannot run, with
+        // `binary_version_measured` saying which answer this is, so a
+        // status surface never presents a guess as a measurement.
+        let mut binary_version_measured = false;
         let binary_version = definition.as_ref().and_then(|d| {
+            if d.binary.is_file() {
+                if let Ok(out) = self.runner.run(
+                    &d.binary.display().to_string(),
+                    &["gateway", "service-probe"],
+                ) {
+                    if out.ok() && out.stdout.contains(PROBE_MARKER) {
+                        if let Some(v) = out
+                            .stdout
+                            .split_whitespace()
+                            .nth(1)
+                            .filter(|v| !v.is_empty())
+                        {
+                            binary_version_measured = true;
+                            return Some(v.to_string());
+                        }
+                    }
+                }
+            }
             d.binary
                 .file_name()
                 .and_then(|n| version_of_binary_name(&n.to_string_lossy()))
@@ -775,6 +809,7 @@ impl Lifecycle {
             matches_data_dir: matches,
             binary_exists,
             binary_version,
+            binary_version_measured,
             registered: reg.registered,
             running: reg.running,
             pid: reg.pid,

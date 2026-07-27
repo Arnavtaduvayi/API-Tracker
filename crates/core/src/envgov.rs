@@ -576,7 +576,29 @@ fn mask_assignment(line: &str) -> String {
     let value = line[eq + 1..]
         .trim()
         .trim_matches(|c| c == '"' || c == '\'');
-    if value.is_empty() || crate::scanner::is_placeholder_value(value) {
+    if value.is_empty() {
+        return line.to_string();
+    }
+    // The exemption here used to be `is_placeholder_value`, a SUBSTRING
+    // test: a `DATABASE_URL` whose host merely contained the word
+    // "example" was printed verbatim, credentials and all, to stdout and
+    // across IPC (ZFT-017).
+    //
+    // The diff exists so the user can see what is about to change, so
+    // masking everything would damage the consent surface it serves —
+    // `A=1` and `NODE_ENV=production` have to stay legible. The rule is
+    // therefore structural rather than lexical: a value stays legible only
+    // when it is SHORT and carries nothing that could be key material.
+    // Length alone bounds what a mistake can disclose; `looks_like_key_material`
+    // catches userinfo, query strings and high-entropy runs regardless of
+    // any word that happens to appear in them.
+    //
+    // The failure directions are deliberately asymmetric: an over-masked
+    // configuration value costs a reader one glance at the file, while an
+    // under-masked one prints a credential.
+    const MAX_LEGIBLE_VALUE: usize = 16;
+    if value.chars().count() <= MAX_LEGIBLE_VALUE && !crate::scanner::looks_like_key_material(value)
+    {
         return line.to_string();
     }
     format!("{}={}", &line[..eq], mask_value(value))

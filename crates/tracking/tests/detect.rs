@@ -40,9 +40,14 @@ fn key_plus_sdk_is_confirmed_and_automatic() {
 }
 
 #[test]
-fn key_alone_is_likely_and_sdk_alone_is_likely() {
+fn a_key_whose_value_matches_the_published_format_is_confirmed() {
+    // The manifests have always carried each provider's PUBLIC key-format
+    // patterns (`sk-ant-…`, `sk-proj-…`), and detection never consulted
+    // them: the placeholder filter was the only check a value ever got, so
+    // `OPENAI_API_KEY=abcdefgh` reached the auto-select threshold
+    // (ZFT-027). A value of the right shape is strong, independent
+    // evidence — much stronger than a variable name anyone can type.
     let (_db, conn) = test_conn();
-    // Key alone (no SDK): anthropic key only.
     let dir = TempDir::new().unwrap();
     write_project(
         dir.path(),
@@ -54,9 +59,44 @@ fn key_alone_is_likely_and_sdk_alone_is_likely() {
         .iter()
         .find(|p| p.provider_id == "anthropic")
         .expect("anthropic detected");
-    assert_eq!(anthropic.confidence, DetectionConfidence::Likely);
+    assert_eq!(anthropic.confidence, DetectionConfidence::Confirmed);
+}
 
-    // SDK alone (no key).
+#[test]
+fn a_key_of_no_recognised_shape_stays_below_the_auto_select_threshold() {
+    // The other half of the same rule, and the one that matters for
+    // safety: a recognised variable NAME holding a value of no recognised
+    // shape is real evidence, but not enough of it to configure without
+    // asking. `Possible` is below the `Likely` threshold `Selections`
+    // auto-includes at.
+    let (_db, conn) = test_conn();
+    let dir = TempDir::new().unwrap();
+    write_project(dir.path(), &[(".env", "OPENAI_API_KEY=abcdefgh12345678\n")]);
+    let detection = run(&dir, &conn);
+    let openai = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "openai")
+        .expect("openai is still DETECTED — the name is real evidence");
+    assert_eq!(
+        openai.confidence,
+        DetectionConfidence::Possible,
+        "a value of no recognised shape must not reach the auto-select threshold"
+    );
+    assert!(
+        !api_tracker_tracking::plan::Selections::defaults(&detection)
+            .include
+            .contains("openai"),
+        "and it must not be auto-selected"
+    );
+}
+
+#[test]
+fn an_sdk_dependency_alone_is_likely() {
+    // A declared SDK dependency with no key: the project plainly intends to
+    // call the provider, so it is worth configuring, but nothing here
+    // proves a credential exists.
+    let (_db, conn) = test_conn();
     let dir2 = TempDir::new().unwrap();
     write_project(
         dir2.path(),
@@ -72,6 +112,58 @@ fn key_alone_is_likely_and_sdk_alone_is_likely() {
         .find(|p| p.provider_id == "openai")
         .expect("openai detected");
     assert_eq!(openai.confidence, DetectionConfidence::Likely);
+}
+
+#[test]
+fn a_prefix_named_package_is_not_the_package_it_prefixes() {
+    // `openai-whisper` is an OFFLINE speech-to-text package that makes no
+    // OpenAI API calls. `pyproject.toml` matched dependency names by PREFIX
+    // while `requirements.txt` matched them exactly, so the same project
+    // detected differently depending on which file it used (ZFT-026).
+    let (_db, conn) = test_conn();
+    for (file, content) in [
+        (
+            "pyproject.toml",
+            "[project]\ndependencies = [\n  \"openai-whisper>=20231117\",\n]\n",
+        ),
+        ("requirements.txt", "openai-whisper==20231117\n"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        write_project(dir.path(), &[(file, content)]);
+        let detection = run(&dir, &conn);
+        assert!(
+            !detection
+                .providers
+                .iter()
+                .any(|p| p.provider_id == "openai"),
+            "{file}: openai-whisper must not be read as the openai SDK: {:?}",
+            detection
+                .providers
+                .iter()
+                .map(|p| &p.provider_id)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // The control: the REAL package is still detected from both files.
+    for (file, content) in [
+        (
+            "pyproject.toml",
+            "[project]\ndependencies = [\n  \"openai>=1.40\",\n]\n",
+        ),
+        ("requirements.txt", "openai==1.40.0\n"),
+    ] {
+        let dir = TempDir::new().unwrap();
+        write_project(dir.path(), &[(file, content)]);
+        let detection = run(&dir, &conn);
+        assert!(
+            detection
+                .providers
+                .iter()
+                .any(|p| p.provider_id == "openai"),
+            "{file}: the real openai dependency must still be detected"
+        );
+    }
 }
 
 #[test]

@@ -61,6 +61,23 @@ npx tauri dev
 `TETHRA_INSECURE_FAST_KDF=1` weakens Argon2id **in debug builds only**
 so tests are fast; release builds ignore it.
 
+### Release builds need the CLI bundled first
+
+`cargo build --release --workspace` **fails on a clean checkout** with
+`resource path binaries/tethra-<target> doesn't exist`. That is correct and
+deliberate: the desktop app declares the CLI as a Tauri `externalBin`
+sidecar, and a build that silently produced an `.app` with no helper inside
+would ship a product that cannot perform its primary function. Run the
+bundling step first:
+
+```bash
+cargo build --release -p api-tracker-cli
+bash scripts/bundle_cli.sh
+cargo build --release --workspace
+```
+
+The ordering was undocumented until audit finding `ZFT-045`.
+
 To experiment without touching your real vault:
 
 ```bash
@@ -88,8 +105,21 @@ copy an existing file and:
   `manual_only`, plus `requires_admin_credential` and `attribution` as
   applicable. Never present account/project-level usage as exact per-key.
 
-Then add the file to `MANIFEST_SOURCES` and run `cargo test -p api-tracker-core
-providers::` — the validation test will reject malformed manifests.
+- If the provider's official SDK reads a **base-URL environment variable**,
+  add a `[gateway]` section naming it, with the origin the SDK defaults to.
+  Verify BOTH against the SDK's own source, not a blog post, and record the
+  source in a comment. If you cannot confirm it from an official source,
+  **omit `[gateway]`** — the provider is then detected and honestly labelled
+  unsupported, which is far better than a route that never carries traffic.
+  Nothing in CI can tell a fabricated environment-variable name from a real
+  one; this rule is the control.
+
+Then add the file to `MANIFEST_SOURCES` and run
+`cargo test -p api-tracker-core --test provider_manifests` — the conformance
+suite validates every origin against the gateway's own destination policy and
+pins the catalog counts, so a new provider fails the build until the counts in
+`docs/activity-onboarding/DETECTION_COVERAGE.md` are updated in the same
+change.
 
 ## Database migrations
 

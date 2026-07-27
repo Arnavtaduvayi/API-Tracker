@@ -7,17 +7,65 @@ configure, and what it deliberately does not do. Implementation:
 
 ## Providers
 
-| Provider | Detected | Configurable | How |
-|---|---|---|---|
-| OpenAI | yes | **automatic** | manifest `[gateway]` with a fixed origin and `OPENAI_BASE_URL` / `OPENAI_API_BASE` |
-| Anthropic | yes | **automatic** | manifest `[gateway]` with a fixed origin and `ANTHROPIC_BASE_URL` |
-| Supabase | yes | **needs one confirmation** | per-project origin, inferred from `SUPABASE_URL` and confirmed verbatim |
-| Stripe | yes | no | the SDK does not read a base-URL environment variable |
-| GitHub | yes | no | Octokit takes a base URL in code, not from the environment |
+Measured from `provider-manifests/` and pinned by
+`crates/core/tests/provider_manifests.rs`, which asserts these counts
+against literals — so the numbers here cannot drift away from the tree
+without failing the build:
 
-Anything without a provider manifest is not detected at all. Adding a
-provider is manifest work (`provider-manifests/*.toml`), not code; the
-fusion layer absorbs new entries without an API change.
+* **21** provider manifests in total
+* **13** are *trackable*: they declare a `[gateway]` section naming the
+  base-URL environment variable their official SDK reads
+* **8** are detected and honestly labelled **unsupported**: their SDK
+  exposes no base-URL environment variable, so Tethra cannot observe them
+  this way
+
+### Trackable — configured automatically (11)
+
+`openai`, `anthropic`, `groq`, `together`, `cerebras`, `fireworks`,
+`perplexity`, `cohere`, `replicate`, `langsmith`, `google-gemini`.
+
+Each has a fixed origin compiled into its manifest, so the route
+destination cannot be influenced by the project being scanned and needs no
+confirmation (ADR 0024 D1).
+
+### Trackable — needs one destination confirmation (2)
+
+`supabase` and `azure-openai` have no fixed origin: every account gets its
+own host. The origin is read from the project's own configuration, so it is
+**detection evidence, not authorization**: it is shown verbatim with its
+source file and variable, and requires an explicit approval that defaults
+to off (ADR 0024). Approving one exact origin never approves another.
+
+### Detected, not trackable (8)
+
+`stripe`, `github`, `mistral`, `deepseek`, `xai`, `openrouter`,
+`huggingface`, `aws-bedrock`.
+
+These are listed on the review screen with a per-provider explanation
+rather than being hidden. Two of them deserve their reasons stated:
+
+* **`aws-bedrock`** can never work through a loopback route in its SigV4
+  mode, because the signature covers the `Host` header.
+* **`huggingface`** documents `HF_INFERENCE_ENDPOINT`, but the current
+  `huggingface_hub` client demonstrably does not read it. A route that
+  never carries traffic is worse than an honest "not supported yet".
+
+### What is NOT detected
+
+Anything without a provider manifest has no provider identity here. It is
+**not** invisible: credential-shaped variables Tethra cannot attribute are
+listed explicitly as "not recognised", with their name and file, and are
+counted in the coverage headline. A screen that says *N API integrations
+found* accounts for every one of them. (Before the remediation, a 30-API
+project showed four providers under a heading reading `Detected:` and
+twenty-six credentials appeared nowhere at all — audit finding `ZFT-010`.)
+
+Adding a provider is manifest work (`provider-manifests/*.toml`), not code.
+The one rule that cannot be enforced by CI: a manifest can name a base-URL
+variable no SDK actually reads. Nothing in the test suite can tell a
+fabricated variable name from a real one, so every `[gateway]` section must
+be verified against the SDK's own source and the source recorded in a
+comment — see `CONTRIBUTING.md`.
 
 ## Signals and confidence
 
@@ -68,17 +116,40 @@ assigned to the project. Never their values.
 
 ## Hard bounds
 
-Every one of these is a test, not a promise:
+Every one of these is a test, not a promise. Where a bound's *fixture* is
+platform-specific, that is said explicitly rather than left for a reader to
+discover (audit finding `ZFT-VAL-14`).
 
-* Reads only under the selected folder, canonicalized first.
+* **Nothing the project controls is executed.** The automatic scan path
+  spawns no subprocess at all: repository status comes from a byte reader
+  (`crates/core/src/gitsafe.rs`), not from `git`. Pinned by
+  `crates/core/tests/git_execution_canaries.rs`, which plants an
+  executable canary for `core.fsmonitor`, hooks, clean/smudge filters,
+  textconv, external diff drivers, aliases, pager, editor, credential
+  helper, submodule update, a nested hostile repository, a hostile *global*
+  config and a hostile *environment* — and additionally proves each canary
+  is capable of firing by running the unprotected equivalent. See ADR 0023.
+* Reads only under the selected folder, canonicalized first — by **every**
+  reader. `crates/tracking/tests/scan_bounds.rs` covers a symlinked
+  `package.json`, `requirements.txt`, `pyproject.toml` and marker file,
+  each with a control proving a real in-folder file is still read. The
+  symlink *fixtures* are `#[cfg(unix)]` because creating a symlink on
+  Windows needs a privilege hosted runners may lack; the containment code
+  is not platform-conditional.
 * Refuses the filesystem root, the home directory, and the directory
   containing home directories — including via a path that canonicalizes
-  to one of them.
+  to one of them, on every platform (`HOME`, `USERPROFILE`,
+  `HOMEDRIVE`+`HOMEPATH`).
 * Depth ≤ 6; a file at depth 7 is invisible.
-* 256 KiB per file; oversized files are *counted* (`skipped_oversized`),
-  never silently dropped.
-* Symlinks are never followed out of the folder; a symlinked `.env`
-  pointing outside is not read at all.
+* 256 KiB per file, **checked on the directory entry before the file is
+  opened**. An oversized file stays in the inventory marked `oversized`
+  with zero parsed entries — its bytes never enter memory.
+* Bounded in more than depth: files, directories, total bytes and wall
+  clock. A pass that stops early reports *why*, and is never presented as
+  a complete scan.
+* Every file the scan touches lands in exactly one accounting bucket —
+  read, oversized, outside-the-folder, or not-valid-text. A non-UTF-8 file
+  is counted, not silently dropped.
 * Parse-only. `.env` content is never executed or interpolated — a
   fixture containing `$(touch pwned)` proves the file is not created.
 * No network calls; a source-level test asserts the detection module
@@ -86,6 +157,14 @@ Every one of these is a test, not a promise:
 * Evidence carries variable names, file paths, dependency names, and
   provider ids. A canary test serializes every fixture's detection and
   asserts no secret value appears.
+
+### Bounds a hardlink defeats
+
+A **hardlink** inside the folder pointing at a file outside it is
+indistinguishable from an ordinary file at the filesystem level, and is
+read. Only variable names and dependency names leave the parse, so the
+consequence is a detection the user did not expect, not a value
+disclosure. Recorded in `KNOWN_LIMITATIONS.md`.
 
 ## The one value-read exception
 

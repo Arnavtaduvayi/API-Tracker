@@ -250,54 +250,92 @@ fn scan_python_manifests(repo: &Path, out: &mut Vec<StackSignal>, counters: &mut
             if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
                 continue;
             }
-            let name: String = line
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect::<String>()
-                .to_lowercase();
+            if let Some(name) = python_requirement_name(line) {
+                if let Some(rule) = py_dep_rule(&name) {
+                    push(
+                        out,
+                        "requirements.txt",
+                        format!("requirement \"{name}\""),
+                        rule,
+                        Confidence::High,
+                    );
+                }
+            }
+        }
+    }
+    // pyproject.toml: dependency entries are PEP 508 requirement strings,
+    // either quoted inside a `dependencies` array or written as a
+    // `name = "spec"` key (Poetry).
+    //
+    // This used to test `line.starts_with("\"openai")`, a PREFIX match, so
+    // `"openai-whisper>=20231117"` — an OFFLINE speech-to-text package that
+    // makes no OpenAI API calls at all — produced `openai likely Automatic`
+    // and got a route (ZFT-026). `requirements.txt` above always matched
+    // exactly, so the two parsers disagreed about the same project.
+    // Both now extract the package name and compare it whole.
+    if let Some(text) = read_bounded(repo, &repo.join("pyproject.toml"), counters) {
+        for line in text.lines() {
+            let l = line.trim();
+            let candidate = l
+                .strip_prefix('"')
+                .or_else(|| l.strip_prefix('\''))
+                .unwrap_or(l);
+            let Some(name) = python_requirement_name(candidate) else {
+                continue;
+            };
             if let Some(rule) = py_dep_rule(&name) {
                 push(
                     out,
-                    "requirements.txt",
-                    format!("requirement \"{name}\""),
+                    "pyproject.toml",
+                    format!("dependency \"{name}\""),
                     rule,
                     Confidence::High,
                 );
             }
         }
     }
-    // pyproject.toml: look for the dependency name as a quoted token on a
-    // line inside a dependencies-ish context. Parsed leniently but
-    // line-anchored so a mention in prose does not count.
-    if let Some(text) = read_bounded(repo, &repo.join("pyproject.toml"), counters) {
-        for line in text.lines() {
-            let l = line.trim();
-            for name in [
-                "openai",
-                "anthropic",
-                "stripe",
-                "supabase",
-                "fastapi",
-                "flask",
-                "django",
-            ] {
-                let quoted = l.starts_with(&format!("\"{name}"))
-                    || l.starts_with(&format!("'{name}"))
-                    || l.starts_with(&format!("{name} ="))
-                    || l.starts_with(&format!("{name}="));
-                if quoted {
-                    if let Some(rule) = py_dep_rule(name) {
-                        push(
-                            out,
-                            "pyproject.toml",
-                            format!("dependency \"{name}\""),
-                            rule,
-                            Confidence::High,
-                        );
-                    }
-                }
+}
+
+/// The package name at the head of a PEP 508 requirement string, normalized
+/// per PEP 503 (runs of `-`, `_` and `.` collapse to a single `-`, lowercase).
+///
+/// Returns `None` when the line does not begin with something name-shaped,
+/// so prose inside a manifest cannot become a dependency.
+fn python_requirement_name(line: &str) -> Option<String> {
+    let raw: String = line
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .collect();
+    if raw.is_empty() || !raw.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    // What follows the name must be a separator a requirement can legally
+    // use — not another name character, and not the start of prose.
+    let rest = line[raw.len()..].trim_start();
+    let plausible = rest.is_empty()
+        || rest.starts_with(['"', '\'', '[', '=', '<', '>', '!', '~', ';', ',', ']'])
+        || rest.starts_with("@ ");
+    if !plausible {
+        return None;
+    }
+    let mut normalized = String::with_capacity(raw.len());
+    let mut last_was_sep = false;
+    for c in raw.chars() {
+        if matches!(c, '-' | '_' | '.') {
+            if !last_was_sep && !normalized.is_empty() {
+                normalized.push('-');
             }
+            last_was_sep = true;
+        } else {
+            normalized.push(c.to_ascii_lowercase());
+            last_was_sep = false;
         }
+    }
+    let normalized = normalized.trim_end_matches('-').to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
     }
 }
 

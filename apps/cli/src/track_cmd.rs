@@ -545,6 +545,20 @@ fn track(
     );
     n += 1;
     println!("  {n}. enable credential attribution (asks for your master password; Enter skips)");
+    // The ADR-0020 disclosure, identical in substance to the desktop flow
+    // and the Advanced push-key dialog. Consenting to a memory oracle must
+    // not be cheaper here than there just because this is the one-command
+    // path (ZFT-013).
+    println!("     This hands the local gateway a derived matching-only key so it can label");
+    println!("     observed traffic with which vault credential was used. The key cannot decrypt");
+    println!(
+        "     anything, but while it is resident a process that can read the gateway's memory"
+    );
+    println!("     (or its database) gains an oracle for testing whether a value matches one of");
+    println!("     your credentials. It covers credentials in every linked, non-password-locked");
+    println!("     project in this vault — not only this one. The key is dropped when the service");
+    println!("     stops, when you revoke it, and when the vault locks. Press Enter to skip:");
+    println!("     tracking records traffic either way.");
 
     // ---- diff ----------------------------------------------------------
     for lp in &tracking_plan.link_plans {
@@ -767,6 +781,7 @@ fn fallback_service_status() -> api_tracker_gateway::lifecycle::ServiceStatus {
         matches_data_dir: false,
         binary_exists: false,
         binary_version: None,
+        binary_version_measured: false,
         registered: false,
         running: false,
         pid: None,
@@ -778,17 +793,65 @@ fn fallback_service_status() -> api_tracker_gateway::lifecycle::ServiceStatus {
     }
 }
 
+/// The setup `undo` and `doctor` act on.
+///
+/// Two defects lived in these four lines. The connection was opened WITHOUT
+/// running migrations, so the first `track undo` or `track doctor` after a
+/// v14→v15 upgrade failed with "no such table: tracking_setups" (ZFT-036).
+/// And `setups_for_folder` returns newest-transition-first, so `pop()` took
+/// the OLDEST setup while `track status` reported the newest — `undo` and
+/// `doctor` could act on a different setup than the one the user had just
+/// been shown (ZFT-037).
+/// One plain sentence per restore outcome.
+///
+/// `undo` used to print the Rust `Debug` form straight to the terminal —
+/// `Restored { path: "…", key: "…" }` — which is a data structure, not an
+/// answer to "what happened to my file?" (ZFT-034).
+fn describe_restore(outcome: &api_tracker_gateway::envlink::RestoreOutcome) -> String {
+    use api_tracker_gateway::envlink::RestoreOutcome as R;
+    match outcome {
+        R::Restored { path, key } => format!("restored {key} in {path}"),
+        R::LeftUserEdit { path, key } => format!(
+            "left {key} in {path} alone — you changed it after tracking started, so your value \
+             was kept"
+        ),
+        R::AlreadyRestored { path, key } => {
+            format!("{key} in {path} was already back to its original value")
+        }
+        R::FileMissing { path } => format!("{path} no longer exists; nothing to restore in it"),
+        R::CreatedFileRemoved { path } => {
+            format!("removed {path} — Tethra created it and nothing else was ever in it")
+        }
+        R::PriorNotRecorded { path, key } => format!(
+            "left {key} in {path} in place: its original value was never recorded (it did not \
+             look like non-secret configuration), so restoring it is a manual step"
+        ),
+        R::Failed { path, key, error } => {
+            format!("could NOT restore {key} in {path}: {error}")
+        }
+    }
+}
+
 fn setup_for_folder(ctx: &Ctx, path: Option<PathBuf>) -> Result<Option<state::TrackingSetup>> {
     let folder = resolve_folder(path)?;
-    let conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
-    let mut setups = state::setups_for_folder(&conn, &folder)?;
-    Ok(setups.pop())
+    let mut conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
+    api_tracker_core::db::migrate(&mut conn)?;
+    // One-time privacy scrub of link rows written by builds that recorded
+    // query strings in plaintext (ZFT-016). Best-effort: it must not stop
+    // the command the user asked for.
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn);
+    let setups = state::setups_for_folder(&conn, &folder)?;
+    Ok(setups.into_iter().next())
 }
 
 fn status(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
     let folder = resolve_folder(path)?;
     let mut conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
     api_tracker_core::db::migrate(&mut conn)?;
+    // One-time privacy scrub of link rows written by builds that recorded
+    // query strings in plaintext (ZFT-016). Best-effort: it must not stop
+    // the command the user asked for.
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn);
     let setups = state::setups_for_folder(&conn, &folder)?;
     let Some(mut setup) = setups.into_iter().next() else {
         println!("Tracking is not configured for {}.", folder.display());
@@ -911,6 +974,10 @@ fn doctor(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
     };
     let mut conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
     api_tracker_core::db::migrate(&mut conn)?;
+    // One-time privacy scrub of link rows written by builds that recorded
+    // query strings in plaintext (ZFT-016). Best-effort: it must not stop
+    // the command the user asked for.
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn);
     let diagnoses = diagnose::diagnose(&conn, &ctx.paths.data_dir, &setup)?;
     render::emit(ctx.json, &diagnoses, || {
         println!("Tracking diagnosis (most likely causes first):\n");
@@ -937,8 +1004,11 @@ fn undo(ctx: &Ctx, path: Option<PathBuf>, yes: bool) -> Result<()> {
     let report = track_undo::undo(vault.connection(), &setup)?;
     for link in &report.links {
         for outcome in &link.outcomes {
-            println!("  {}", render::sanitize(&format!("{outcome:?}")));
+            println!("  {}", render::sanitize(&describe_restore(outcome)));
         }
+    }
+    for note in &report.notes {
+        println!("! {}", render::sanitize(note));
     }
     if !report.removed_routes.is_empty() {
         println!("Routes removed: {}", report.removed_routes.join(", "));
@@ -960,7 +1030,10 @@ fn undo(ctx: &Ctx, path: Option<PathBuf>, yes: bool) -> Result<()> {
         println!("turn it off with `tethra gateway disable` if you're done with it.");
         Ok(())
     } else {
-        println!("Some files could not be fully restored (see above). The link was kept so you can retry.");
+        println!(
+            "Tracking was NOT fully stopped (see above). Nothing was removed that could not be \
+             restored, and the links were kept so you can retry."
+        );
         std::process::exit(1);
     }
 }

@@ -166,6 +166,7 @@ pub fn service_absent() -> api_tracker_gateway::lifecycle::ServiceStatus {
         matches_data_dir: true,
         binary_exists: false,
         binary_version: None,
+        binary_version_measured: false,
         registered: false,
         running: false,
         pid: None,

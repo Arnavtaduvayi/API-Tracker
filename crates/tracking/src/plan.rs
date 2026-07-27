@@ -533,7 +533,23 @@ pub fn render_link_warning(w: &envlink::LinkWarning) -> String {
         OutsideProject { path } => {
             format!("{path} is outside the selected project folder.")
         }
-        ReadOnly { path } => format!("{path} is read-only; the write will fail as-is."),
+        // An atomic rename replaces the directory ENTRY, so on Unix it
+        // succeeds regardless of the file's own read-only bit — the write
+        // does NOT "fail as-is" there. Saying it does sends the user to fix
+        // something that is not broken (ZFT-035).
+        ReadOnly { path } => {
+            if cfg!(windows) {
+                format!(
+                    "{path} is read-only; clear the read-only attribute or the write will fail."
+                )
+            } else {
+                format!(
+                    "{path} is marked read-only. Tethra replaces it by atomic rename, which \
+                     succeeds anyway on this platform — but the read-only mark suggests \
+                     something else manages this file, so check before continuing."
+                )
+            }
+        }
         ProxyVariablePresent { path, key } => format!(
             "{key} in {path}: a proxy variable is set — traffic may bypass the local gateway."
         ),

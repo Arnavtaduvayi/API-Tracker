@@ -1,7 +1,12 @@
 # Troubleshooting tracking
 
-Start with the built-in diagnosis — it checks these causes in order and
-tells you which ones actually apply to your project:
+Start with the built-in diagnosis. It checks **most** of the causes below in
+order and tells you which ones actually apply to your project. Two of them —
+"you pointed Tethra at the wrong folder" and "a proxy is bypassing the
+gateway" — have **no automated check** and are marked *(manual)* where they
+appear; the diagnosis will not mention them, so read past its output if it
+comes back clean. (This page previously implied all eight were automated —
+audit finding `ZFT-VAL-15`.)
 
 * Desktop: the project's card on the Activity dashboard → **Run tracking
   check**, or **Run diagnostics** on the waiting screen.
@@ -41,11 +46,11 @@ reason. Tethra flags a `.devcontainer` directory as a possible cause.
 base URL in code, not from the environment. If your client constructs its
 own base URL, pass the local one there instead.
 
-**7. Wrong folder.** If you picked a parent or sibling directory, the
+**7. Wrong folder** *(manual — no automated check).* If you picked a parent or sibling directory, the
 `.env` Tethra edited isn't the one your app reads. Check the file path in
 the diff against the one your app loads.
 
-**8. Traffic is bypassing Tethra.** If a proxy variable is set
+**8. Traffic is bypassing Tethra** *(manual — no automated check).* If a proxy variable is set
 (`HTTP_PROXY`/`HTTPS_PROXY`), loopback traffic can detour around the
 local service. Tethra adds `NO_PROXY` entries for loopback during setup;
 if you removed them, restore them.

@@ -77,8 +77,13 @@ Accepting that disclosure authorizes, in one step:
 
 * starting the local gateway,
 * installing the per-user background component,
-* supplying the gateway with the narrowly scoped matching capability
-  (credential attribution),
+* supplying the gateway with the credential-matching capability
+  (credential attribution). This is **not narrowly scoped**, and the
+  earlier wording here said it was: the key pushed to the gateway is the
+  vault-wide fingerprint key, and the matcher covers every
+  gateway-linked project, not just the one being set up. It is a real
+  capability with a real residual risk (GW-6), disclosed at the point of
+  consent and dropped when the vault locks (audit finding `ZFT-020`),
 * creating the required provider routes,
 * recording sanitized request metadata,
 * associating observed traffic with locally stored credentials when

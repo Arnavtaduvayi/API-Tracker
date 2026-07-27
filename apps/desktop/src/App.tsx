@@ -166,8 +166,25 @@ export default function App() {
     return () => clearInterval(timer);
   }, [vaultState, monitorMinutes, runBackgroundMonitor]);
 
+  const [lockError, setLockError] = useState<string | null>(null);
+
+  // A failed lock must never look like a successful one. Without the catch,
+  // a rejected `vaultLock` left the UI on whatever screen it was on with an
+  // unhandled rejection in the console — and the user, having clicked "Lock
+  // vault", reasonably believed the vault was locked when it was not
+  // (ZFT-031). The view and the state flag move only after the backend
+  // confirms.
   const lockNow = async () => {
-    await api.vaultLock();
+    setLockError(null);
+    try {
+      await api.vaultLock();
+    } catch (e) {
+      setLockError(
+        `The vault could NOT be locked: ${isApiError(e) ? e.message : String(e)}. It is still ` +
+          `unlocked. Try again, or quit Tethra — quitting ends the session.`,
+      );
+      return;
+    }
     setView({ name: "projects" });
     setVaultState("locked");
   };
@@ -265,10 +282,23 @@ export default function App() {
         <span className="spacer" />
         <button onClick={() => void lockNow()}>Lock vault</button>
       </nav>
+      {lockError && (
+        <p className="error" role="alert">
+          {lockError}
+        </p>
+      )}
       {view.name === "dashboard" && (
         <DashboardView onTrack={() => setView({ name: "track" })} />
       )}
-      {view.name === "track" && <TrackFlow onDone={() => setView({ name: "dashboard" })} />}
+      {view.name === "track" && (
+        // The manual route form lives in Advanced → Gateway internals. A
+        // desktop-only user must be able to REACH it, not be told to run a
+        // CLI command they do not have (ZFT-009).
+        <TrackFlow
+          onDone={() => setView({ name: "dashboard" })}
+          onOpenAdvanced={() => setView({ name: "gateway" })}
+        />
+      )}
       {view.name === "projects" && (
         <ProjectList
           onOpen={(ident) => setView({ name: "project", ident })}

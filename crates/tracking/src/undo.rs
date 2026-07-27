@@ -121,6 +121,36 @@ pub fn undo(conn: &Connection, setup: &TrackingSetup) -> Result<UndoReport> {
             removed_routes.push(prefix.clone());
         }
     }
+    // A route this setup RE-ENABLED existed before, so it is not removed —
+    // but its `enabled = false` was a deliberate choice by the user, and
+    // undo restored the row while leaving the flag on (ZFT-019). Put it
+    // back, under the same "is anyone still using it?" guard that protects
+    // removal: a link whose restore FAILED still counts, so a half-undone
+    // setup does not disable a route its own environment file still points
+    // at.
+    for prefix in &summary.re_enabled_routes {
+        if removed_routes.contains(prefix) {
+            continue;
+        }
+        let still_linked: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM gateway_project_links WHERE route_prefix = ?1",
+            [prefix],
+            |r| r.get(0),
+        )?;
+        if still_linked > 0 {
+            kept_routes.push((
+                prefix.clone(),
+                "was re-enabled by this setup, but another project still links it — left enabled"
+                    .to_string(),
+            ));
+            continue;
+        }
+        routes::set_route_enabled(conn, prefix, false)?;
+        kept_routes.push((
+            prefix.clone(),
+            "existed before this setup but was disabled; returned to disabled".to_string(),
+        ));
+    }
     for prefix in &summary.reused_routes {
         kept_routes.push((
             prefix.clone(),

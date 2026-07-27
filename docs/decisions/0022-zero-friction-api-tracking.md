@@ -133,7 +133,10 @@ is limited to: bounded folder reading (D5's bounds, test-pinned), one
 confirmed origin inference (validated as today's manual entry is), a
 second executable in the app bundle (same code, same signing status,
 reduces today's PATH/symlink exposure), and an additive plaintext table
-whose contents are value-free (consistent with the existing
+whose contents carry no SECRET values — the one non-secret value they do
+carry is a user-approved custom origin, which undo needs and which the user
+was shown verbatim before approving it (audit finding `ZFT-047`)
+(consistent with the existing
 metadata-unencrypted trade-off). Consent consolidation reduces prompts
 without reducing disclosure. Full reconciliation:
 `docs/activity-onboarding/SECURITY_AND_PRIVACY.md`.

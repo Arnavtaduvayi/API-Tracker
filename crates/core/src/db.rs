@@ -1013,9 +1013,17 @@ CREATE INDEX IF NOT EXISTS idx_gue_event ON gateway_usage_events(event_id);
 -- state behind "Track API activity" / `tethra track` (ADR 0022 D8). The row
 -- caches the state machine value; readers re-derive it against the
 -- observation tables on every load, so a stale row can never overclaim
--- `traffic_observed` (SI-19). Contents are value-free: provider ids,
--- confidence labels, evidence kinds, and file paths only — never env values,
--- secrets, or wire data.
+-- `traffic_observed` (SI-19). Contents carry NO SECRET VALUES: provider ids,
+-- confidence labels, evidence kinds, and file paths — never a credential,
+-- a header, a body, or wire data.
+--
+-- One NON-SECRET value is carried, deliberately: a repository-discovered
+-- origin the user explicitly approved (`NeedsOriginConfirm.inferred_origin`,
+-- read from a manifest-declared base-URL variable such as `SUPABASE_URL`).
+-- It is a host name the user was shown verbatim at the approval point, and
+-- undo needs it. This comment previously said "value-free", which the
+-- crate's own test contradicts by asserting the host IS present
+-- (audit finding `ZFT-047`).
 CREATE TABLE tracking_setups (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
