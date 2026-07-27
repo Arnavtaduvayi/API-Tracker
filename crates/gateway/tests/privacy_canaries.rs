@@ -19,6 +19,7 @@ use api_tracker_core::secret::SecretBytes;
 use api_tracker_gateway::attribution::{self, FingerprintEntry, Matcher};
 use api_tracker_gateway::forward::BodyTap;
 use api_tracker_gateway::server;
+use api_tracker_gateway::upstream::InsecurePlainConnectorForTests;
 use api_tracker_gateway::usage::{Shape, UsageExtractor};
 
 /// Every marker routed through the gateway. If any of these bytes reach any
@@ -206,6 +207,15 @@ fn no_canary_survives_a_live_exchange_into_any_artifact() {
     drop(conn);
 
     // --- raw artifact canaries: every byte on disk ---
+    //
+    // NOTE ON SCOPE (audit remediation): this test's gateway uses an
+    // in-memory `CollectingSink`, so NOTHING it forwarded was ever written to
+    // the database scanned below. The scan therefore proves only that the
+    // canaries are absent from the schema and the seed row — which is worth
+    // asserting, but is not a persistence canary. The REAL persistence path
+    // (Writer -> runtime_request_events / gateway_usage_* / counters) is
+    // scanned by `no_canary_survives_the_real_persistence_path` below, which
+    // drives an actual `Writer` and flushes before reading the files.
 
     // Force everything through to the main database file, then scan the main
     // DB, the WAL, and the SHM sidecar. The WAL is scanned BEFORE and AFTER
@@ -488,4 +498,172 @@ fn a_hostile_stream_cannot_grow_the_extractor_without_bound() {
     ex.feed(b"\n\n");
     assert!(ex.bound() <= 256 * 1024, "the extractor stays bounded");
     assert_eq!(ex.dropped_events(), 1);
+}
+
+/// The canary that scans what a REAL writer actually persisted.
+///
+/// The audit found the flagship raw-artifact scan vacuous: the exchange under
+/// test used an in-memory sink, so the database it scanned had never received
+/// the record. This test closes that by running the genuine persistence path
+/// — `Writer::start` -> `WriterSink` -> `process_batch` -> the runtime and
+/// gateway tables — flushing it, and only then reading every byte on disk.
+///
+/// It is written so that it CANNOT pass vacuously: it asserts the row count
+/// went up before it scans, so a writer that silently persisted nothing fails
+/// here rather than reporting a clean scan.
+#[test]
+fn no_canary_survives_the_real_persistence_path() {
+    use api_tracker_gateway::writer::{Writer, DRAIN_TIMEOUT};
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = test_db(dir.path());
+
+    // A synthetic upstream that echoes a canary-bearing response body.
+    let up = MockUpstream::start(move |sock, requests| {
+        use std::io::Read;
+        let mut buf = vec![0u8; 8192];
+        let n = sock.read(&mut buf).unwrap_or(0);
+        requests.lock().unwrap().push(buf[..n].to_vec());
+        let body = format!("{{\"text\":\"{CANARY_RESPONSE}\"}}");
+        let _ = sock.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Set-Cookie: sid={CANARY_COOKIE}\r\n\
+                 X-Canary: {CANARY_HEADER}\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+    });
+
+    // The REAL writer, against the real database.
+    let mut writer = Writer::start(&db_path, "canary-boot".into());
+    let sink = writer.sink();
+    // A route WITH a project link: unlinked traffic is counted, not recorded,
+    // so without the link there would be nothing persisted to scan.
+    const SLUG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut table = api_tracker_gateway::routes::RouteTable::default();
+    table.insert_for_test(api_tracker_gateway::routes::Route {
+        prefix: "openai".into(),
+        provider_id: "openai".into(),
+        target: api_tracker_gateway::routes::RouteTarget::Ready(
+            api_tracker_gateway::routes::UpstreamOrigin {
+                host: "127.0.0.1".into(),
+                port: up.port,
+            },
+        ),
+        custom: false,
+        usage_shape: "openai".into(),
+    });
+    table.insert_link_for_test(api_tracker_gateway::routes::LinkInfo {
+        project_id: "p1".into(),
+        route_prefix: "openai".into(),
+        link_slug: SLUG.into(),
+    });
+    let routes = Arc::new(api_tracker_gateway::routes::RouteState::from_table_for_test(table));
+    // Bind FIRST: the Host gate compares against the gateway's own declared
+    // port, so it must be the real bound one.
+    let listener = api_tracker_gateway::server::Listener::bind(0).unwrap();
+    let port = listener.port();
+    let mut gw = api_tracker_gateway::forward::Gateway::new(routes, sink.clone(), port);
+    // Synthetic upstreams are plain-TCP loopback listeners, exactly as in the
+    // rest of the suite; the production SSRF policy (which refuses loopback)
+    // is untouched.
+    gw.connector = Arc::new(InsecurePlainConnectorForTests);
+    let gw = gw;
+    let serve_gw = gw.clone();
+    let handle = std::thread::spawn(move || {
+        server::serve_with_taps(serve_gw, listener, server::usage_tap_factory())
+    });
+
+    // One exchange carrying every canary the gateway could possibly see.
+    {
+        use std::io::Read;
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        let body = format!("{{\"prompt\":\"{CANARY_PROMPT}\"}}");
+        write!(
+            c,
+            "POST /p/{SLUG}/openai/v1/chat/completions?key={CANARY_QUERY} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{port}\r\n\
+             Authorization: Bearer {CANARY_CREDENTIAL}\r\n\
+             Cookie: sid={CANARY_COOKIE}\r\n\
+             X-Canary: {CANARY_HEADER}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut got = String::new();
+        let _ = c.read_to_string(&mut got);
+        assert!(
+            got.starts_with("HTTP/1.1 200 "),
+            "precondition: the exchange must succeed, got: {got:?}"
+        );
+    }
+
+    // Drain the writer so the row is committed before anything is read.
+    assert!(
+        sink.flush(DRAIN_TIMEOUT),
+        "the writer must drain; an undrained queue would make the scan vacuous"
+    );
+    gw.shutdown
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = handle.join();
+    writer.stop();
+
+    // ANTI-VACUITY GATE: the scan below is meaningless unless the writer
+    // really wrote. This is the assertion whose absence made the original
+    // canary unable to fail.
+    let conn = open_db(&db_path);
+    let events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM runtime_request_events WHERE observation_source = 'gateway'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        events >= 1,
+        "no gateway event was persisted, so scanning the database proves \
+         nothing — this is the vacuity the audit found"
+    );
+    db::checkpoint_truncate(&conn);
+    drop(conn);
+
+    // Now scan every byte the run left on disk.
+    let mut scanned = 0usize;
+    for name in ["vault.db", "vault.db-wal", "vault.db-shm"] {
+        let path = dir.path().join(name);
+        if path.exists() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert_absent(&format!("{name} (real persistence path)"), &bytes);
+            scanned += 1;
+        }
+    }
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert_absent(&format!("data-dir file {}", path.display()), &bytes);
+            scanned += 1;
+        }
+    }
+    assert!(
+        scanned >= 2,
+        "expected to scan at least the database and one sidecar/file; \
+         scanning nothing is not a pass"
+    );
+}
+
+/// Negative control for the canary machinery itself: `assert_absent` must
+/// FAIL when a canary really is present. Without this, a broken matcher would
+/// make every canary test above pass silently.
+#[test]
+#[should_panic(expected = "privacy invariant violation")]
+fn the_canary_scanner_fails_when_a_canary_is_actually_present() {
+    let planted = format!("harmless prefix {CANARY_PROMPT} harmless suffix");
+    assert_absent("a deliberately planted canary", planted.as_bytes());
 }
