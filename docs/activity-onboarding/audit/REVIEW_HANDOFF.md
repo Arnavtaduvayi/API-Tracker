@@ -107,7 +107,7 @@ byte caps are arithmetic, and the root refusal uses `Path::parent`.
 
 Executed on the implementer's machine, macOS aarch64:
 
-* Rust workspace (5 crates): 1004 passed, 0 failed.
+* Rust workspace (5 crates): 1005 passed, 0 failed.
 * Frontend vitest: 65 passed, 0 failed, 0 unhandled errors.
 * `scripts/smoke.sh`: 138 passed, 0 failed.
 * `scripts/tracking_validate_macos.sh`: 42 passed, 0 failed, against the
