@@ -1,5 +1,12 @@
 # Fresh independent re-audit — handoff
 
+> **Status correction (2026-07-27):** PR #15 was merged into `main`
+> (`0e6764b`, 2026-07-27) before any independent re-audit occurred. This
+> document's instructions were not followed. It is preserved unchanged as
+> the specification for a post-merge re-audit, should the owner
+> commission one (tracked as O-22-9 in
+> `docs/activity-onboarding/OPEN_DECISIONS.md`).
+
 **The Local Gateway is NOT approved for merge. PR #15 is open and unmerged,
 and must stay that way until an independent reviewer who did not perform this
 remediation reaches their own verdict.**

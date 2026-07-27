@@ -1,5 +1,11 @@
 # Local Gateway — final-audit remediation report
 
+> **Status correction (2026-07-27):** PR #15 was merged into `main`
+> (`0e6764b`, 2026-07-27); the "open and unmerged" row below records the
+> state when this report was written. The fresh independent re-audit it
+> anticipated has not been performed (see O-22-9 in
+> `docs/activity-onboarding/OPEN_DECISIONS.md`).
+
 Remediation of the final independent audit of `feat/local-gateway`.
 
 | Field | Value |
