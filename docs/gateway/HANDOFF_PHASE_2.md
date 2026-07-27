@@ -13,7 +13,7 @@ demonstrates it.
 
 | Commit | Stage |
 |---|---|
-| `4814a3b` | test: drop a vacuous assertion newer clippy rejects (pre-fix) |
+| `4814a3b` | test: drop a vacuous assertion newer clippy rejects (`overly_complex_bool_expr`) — a one-line DELETION in `crates/core/tests/rotation_access.rs`, no production code touched. A CI-hygiene prerequisite: the assertion was tautological and the newer clippy refused it, so it blocked the branch until removed. Its parent is `927cadf`, so it sits inside the Phase-2 range; plain `git log --oneline` prints it below `927cadf` (equal commit dates), which makes it look out of range. |
 | `34126ac` | Stage A — crate, v13 migration, exact-version open, CI wiring |
 | `0403e42` | Stage B — secure route table, manifest origins, MAC'd custom routes |
 | `af46f3b` | Stage C — forwarding engine |

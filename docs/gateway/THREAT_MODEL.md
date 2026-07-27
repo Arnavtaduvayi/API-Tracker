@@ -79,15 +79,25 @@ intercept the user's clients directly; the gateway adds no capability A4 lacks.
 Route writes through Tethra require an unlocked vault + re-auth and are audited.
 
 ### GW-4 Port squatting when the service is down (A3, A4) — MITIGATED, residual
-A fixed port (8787) can be bound by another same-uid process while the service
-is down, then receive cleartext requests carrying the caller's credential.
-Mitigations: KeepAlive restart shrinks the window; `status` and the desktop
-verify the listener's identity (same-uid PID + expected binary path) before
-telling the user the gateway is healthy or writing `.env`; the port binds
-`127.0.0.1` only. *Accepted residual:* a brief squat window exists; a
-same-uid attacker who can squat the port can also already read the unlocked
-vault and the clients' traffic. Multi-user machines: documented limitation.
-(Randomized-stable-port is OPEN_DECISIONS O3 if the residual proves material.)
+The listener port can be bound by another same-uid process while the service is
+down, then receive cleartext requests carrying the caller's credential.
+Mitigations: the port is a RANDOM high port chosen at enable time and persisted
+(not a fixed 8787, which is pre-squattable before Tethra is even installed and
+collides with RStudio Server — OPEN_DECISIONS O3, RESOLVED); KeepAlive restart
+shrinks the window; `status`, `doctor`, the desktop, and the link flow verify
+the listener's identity by a NONCE CHALLENGE-RESPONSE on `/_tethra/probe`
+(a keyed BLAKE3 PRF over a derive_key of the per-boot nonce, with a fresh
+random client challenge and constant-time compare) before telling the user the
+gateway is healthy or writing `.env`; the port binds `127.0.0.1` only.
+*Accepted residual:* a brief squat window exists; a same-uid attacker who can
+squat the port can also already read the unlocked vault and the clients'
+traffic. Multi-user machines: documented limitation.
+
+This entry previously described a "fixed port (8787)" and a "same-uid PID +
+expected binary path" identity check. Both were superseded during design:
+OPEN_DECISIONS O3 records that PID+path verification is unimplementable from
+an unprivileged process on macOS and TOCTOU-prone regardless, which is why the
+nonce probe replaced it. The text was never updated.
 
 ### GW-5 Credential capture from persistence (A5) — DEFENDED
 No credential value, header value, body, prompt, query, or cookie is ever
@@ -111,9 +121,18 @@ outlives the vault key. The earlier "strictly weaker than reading live
 headers" claim is RETRACTED (false on lifetime, scope, and capability — the
 review's `fingerprint-key-in-locked-daemon` finding). *Accepted, disclosed
 residual:* with the toggle ON and the key resident, a memory+DB attacker gains
-an oracle over in-scope fingerprints; named on the consent screen. SIGKILL
-leaves the key resident until page reuse (a SIGTERM handler clears it first);
-core dumps/swap are out of scope, stated honestly.
+an oracle over in-scope fingerprints; named on the consent screen.
+
+**Termination behavior, stated precisely (no signal handler exists).** The key
+is cleared on a GRACEFUL stop — `tethra gateway stop`, the control-channel
+shutdown that `launchctl`/`systemctl` stop paths go through, and `Service::stop`
+— because that path runs in-process. It is NOT cleared on `SIGTERM`, `SIGINT`
+(Ctrl-C), `SIGKILL`, a service-manager force-kill, a crash, an OS shutdown, or
+power loss: no signal handler is installed, and one is not added because it
+needs a dependency ADR 0019 rules out. Any of those leaves the key resident in
+freed memory until page reuse. Core dumps and OS paging are likewise out of
+scope. This paragraph previously claimed "a SIGTERM handler clears it first",
+which was never true of any shipped build.
 
 ### GW-7 Egress-control bypass (A4, sandboxed processes) — PARTIALLY WIDENED (corrected)
 The earlier "equivalent to direct provider access; no privilege gained" claim
@@ -123,9 +142,19 @@ egress control. A process denied outbound 443 can still open loopback and have
 `tethra-gateway` (which has an allow rule) perform the connection, DNS, and TLS
 for it; same for a sandbox given host-loopback but no outbound policy. The
 gateway does NOT tunnel arbitrary destinations (only registered public
-origins). *Mitigation:* routes are individually enable/disable-able and a route
-unused within a configurable window is auto-disabled, so a forgotten link does
-not leave a permanent relay. *Accepted, disclosed residual:* the gateway is a
+origins). *Mitigation:* routes are individually enable/disable-able, disabling
+a route takes effect within one poll interval, and disable/uninstall removes
+the relay entirely in one action. **There is NO automatic disabling of unused
+routes.** It was previously cited here as THE mitigation; it exists nowhere in
+the code, and `gateway_routes` has no last-used column from which "unused"
+could even be determined. It is deliberately not being added: silently
+disabling a route would break a project that happens to run monthly, "unused"
+is not reliably observable (absence of recorded traffic is never evidence of
+absence of traffic — the coverage rule this feature is built on), and a
+mechanism that stops forwarding without warning is worse product behavior than
+a disclosed standing exposure. **A route left enabled is therefore a STANDING
+exposure until the user disables it**, which is what the residual below
+describes. *Accepted, disclosed residual:* the gateway is a
 standing local egress relay to its registered origins and therefore bypasses
 per-application (not per-user) egress controls — stated in the consent screen
 and the ADR, not hidden behind a false equivalence.

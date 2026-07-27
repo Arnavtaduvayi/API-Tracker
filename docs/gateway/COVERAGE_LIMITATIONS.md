@@ -94,3 +94,34 @@ the caveat inline.
 - An **empty gateway view is not zero usage** — it means zero *observed*
   traffic. Provider-side truth requires the provider-usage sync (where the
   provider supports it), which remains labeled separately.
+
+## Runtimes the link warning does NOT detect
+
+The link-time "this project may not load `.env`" heuristic is **Node-only**:
+it fires when a `package.json` exists and never mentions `dotenv`. It does not
+fire for:
+
+- Python projects (no `python-dotenv` detection);
+- Go projects;
+- shell scripts and Makefiles;
+- any project with no `package.json` at all — which is most of the above.
+
+For those, a project that never loads `.env` will link successfully, show no
+warning, and then produce no gateway traffic at all. An empty activity view is
+the only signal, and by the rule this whole document rests on, absence of
+recorded traffic is never evidence of absence of traffic.
+
+PRODUCT_BEHAVIOR.md previously promised a per-tool note naming the Vercel AI
+SDK, `curl` scripts, and hardcoded clients. That note was never implemented;
+this document is the accurate scope.
+
+## Platform validation coverage
+
+| Platform | What has actually been executed |
+|---|---|
+| macOS | Full packaged lifecycle against a real LaunchAgent — but the recorded run predates the validation-script corrections and has NOT been re-executed (`PACKAGED_MACOS_RESULTS.md` is marked superseded). Unit and integration tests run locally. |
+| Linux | **Compiled and tested in CI only.** No packaged service-lifecycle validation on a real user session has ever been performed. |
+| Windows | **Compiled and tested in CI only.** The HKCU `Run` autostart path has never been executed on a real Windows login session; status reports `RegisteredButNeverValidated` by design. |
+
+"Compiled and tested in CI" and "packaged lifecycle validated" are different
+claims. Only macOS has ever had the second, and that record is superseded.

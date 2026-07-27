@@ -69,21 +69,55 @@ reporting a blocker.
   attribution STATE (five labels) and, on a match, a credential id are stored
   — never the header value. `attribution_method` distinguishes value-derived
   from injection-derived rows. *Verified by:* §5/§6.
-- **SI-9 The fingerprint matching key cannot decrypt anything, and the
-  matcher table is never vault-wide.** The key is the ADR 0005 keyed-hash key
-  (matching only), lives only in `Zeroizing` memory, never at rest outside
-  vault wrapping, is dropped on stop/disable/lock/toggle-off, and (when the
-  "match while locked" toggle is ON) is TTL-bounded by the pushing session's
-  auto-lock. The table contains only credentials of linked, non-password-
-  locked projects, with references resolved to their root. *Verified by:* §5
-  key-lifecycle and table-scoping tests.
+- **SI-9 The fingerprint matching key cannot decrypt anything, the matcher
+  table is never vault-wide, and the key's residency is bounded.** The key is
+  the ADR 0005 keyed-hash key (matching only), lives only in `Zeroizing`
+  memory, and is never at rest outside vault wrapping. Lifecycle (ADR 0020,
+  which is authoritative and carries the full table):
+  - dropped on explicit revoke, on toggle-off of "keep matching while locked",
+    and on a GRACEFUL stop;
+  - dropped on EVERY vault-lock path by default — manual lock, both desktop
+    auto-lock paths, backup restore, app exit, and `tethra vault lock`;
+  - with the consented, default-OFF keep-while-locked toggle ON, retained
+    after a lock for the locking session's `auto_lock_minutes`, hard-capped at
+    8 hours, then dropped;
+  - never reconstructed by a restart: nothing persists it, and attribution
+    stays off until a vault session pushes it again;
+  - an unreadable or malformed policy configuration fails TOWARD dropping it.
+
+  Not covered: abrupt termination. No signal handler exists, so SIGTERM,
+  SIGINT, SIGKILL, a crash, or power loss leaves the key resident until page
+  reuse (THREAT_MODEL GW-6).
+
+  The table contains only credentials of linked, non-password-locked projects,
+  with references resolved to their root. *Verified by:* the eleven key-
+  lifecycle tests in `crates/gateway/tests/control.rs` (including a
+  mutation-checked drop-on-lock test) and the table-scoping tests.
 - **SI-21 The matching key arrives only over the authenticated control
   channel.** It is accepted only over the `<data-dir>/gateway.sock` Unix
-  socket with a peer-euid == our-uid check, never over the TCP listener,
-  never via argv or an environment variable. The channel is write-only (no
-  key read-back). Each push is reauth-gated and audited. *(Windows v1 refuses
-  key push rather than fall back to TCP.)* *Verified by:* a source-grep guard
-  ("the key never crosses TCP/argv/env") + §5 peer-cred tests.
+  socket, never over the TCP listener, never via argv or an environment
+  variable. The channel is write-only (no key read-back — there is no response
+  variant capable of carrying a key, so read-back is unrepresentable rather
+  than merely refused). Each push is reauth-gated and audited. *(Windows v1
+  refuses key push rather than fall back to TCP.)*
+
+  **The same-uid gate is FILESYSTEM PERMISSIONS, not `SO_PEERCRED`.** This
+  invariant previously specified a peer-euid check and cited "peer-cred
+  tests"; neither exists. `UnixStream::peer_cred` is still unstable, and
+  reading the socket option directly needs `unsafe` (forbidden crate-wide) or
+  a new `libc`/`nix` dependency (ruled out by ADR 0019). What enforces it is
+  the kernel's own rule one layer down and equally same-uid-exact:
+  `connect(2)` to a Unix socket requires WRITE permission on the socket inode,
+  the socket is 0600, and its parent data directory is 0700 — so another local
+  user cannot connect and cannot even traverse to the path. The check is
+  re-run on EVERY accept, not only at bind, so a mode loosened underneath the
+  process stops the channel rather than silently widening it. The residual
+  versus a peer-cred call is a same-uid process, which the peer-cred check
+  would also have admitted. Revisit when `peer_cred` stabilizes.
+  (Recorded as deviation D3 in HANDOFF_PHASE_2; this invariant now matches it.)
+  *Verified by:* a source-grep guard ("the key never crosses TCP/argv/env"),
+  the owner-only socket/nonce/pid mode tests, and the loosened-mode test that
+  asserts the channel STOPS serving.
 - **SI-10 No cookies, query values, request bodies, response bodies,
   prompts, or generated responses are ever persisted or logged.** Query and
   fragment are severed before any stored string is constructed;

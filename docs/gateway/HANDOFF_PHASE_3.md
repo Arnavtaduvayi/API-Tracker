@@ -10,30 +10,46 @@ measurement, or a validation run in this document demonstrates it.
 - **Starting commit:** `0e76eed` (end of Phase 2 — "CORE LOCAL GATEWAY
   READY FOR PRODUCTIZATION: YES").
 - **Ending commit:** the `feat/local-gateway` tip. Phase 3 range is
-  `0e76eed..HEAD`, 17 commits (15 feature/doc + 2 CI-hygiene: the
-  link/unlink reload fix and the removal of a stray Phase-2 debug probe
-  plus Unix-gating of the control-channel tests).
+  `0e76eed..HEAD`, **28 commits** — verified with
+  `git rev-list --count 0e76eed..HEAD`, not asserted from memory.
+  This number was previously stated as 17, including once in a commit whose
+  own message was "correct the handoff commit range"; it was wrong then too.
+  The table below is regenerated from `git log` rather than maintained by
+  hand, and now includes the audit-remediation commits (ADRs 0020/0021).
 - **PR #13 dependency:** merged into `origin/main` (`5efec9b`) before
   Phase 1; `git merge-base HEAD origin/main == origin/main`, so no rebase
   was required and none was performed. No force-push, no history rewrite.
 
 | Commit | What |
 |---|---|
-| `4916826` | core: `.env` gateway ownership markers (`set_with_comment`, skip in `generate_example`) |
-| `3ee1f6a` | gateway: `/_tethra/probe` listener identity, disabled-route count, richer status |
-| `b57c1fd` | gateway: `.env` link engine (`envlink.rs`) |
-| `d94d2e3` | gateway: per-user service lifecycle (macOS/Linux/Windows) |
-| `3970280` | gateway: the doctor diagnosis engine |
-| `9b2be37` | cli: the complete `tethra gateway` family |
-| `a262f1f` | ci: compile-validate the full CLI on Windows |
-| `45964d3` | desktop: Tauri gateway commands |
-| `d4787d2` | desktop: the Gateway panel + consent onboarding + lock strip |
-| `199c33a` | source-labeled activity + gateway metrics |
-| `532a372` | perf: measurement suite, results, the accept-latency fix |
-| `3da8b88` | docs: user guide / troubleshooting / privacy / security / coverage |
-| `c7b9052` | style: prettier |
-| `0439dc5` | docs: Stage-7 honesty amendments, implementation status, ADR deviations, platform records |
-| `c75f574` | fix: reload snapshot on link/unlink; packaged macOS validation (42/42) |
+| `4916826` | feat(core): gateway ownership markers in .env documents |
+| `3ee1f6a` | feat(gateway): listener-identity probe, disabled-route visibility, richer status |
+| `b57c1fd` | feat(gateway): .env link engine — lossless rewrite, recorded prior state, exact restore |
+| `d94d2e3` | feat(gateway): per-user service lifecycle for macOS, Linux, and Windows |
+| `3970280` | feat(gateway): the doctor engine — one lock-free diagnosis for CLI, desktop, and banners |
+| `9b2be37` | feat(cli): the complete tethra gateway command family |
+| `a262f1f` | ci: compile-validate the full CLI (gateway lifecycle included) on Windows |
+| `45964d3` | feat(desktop): Tauri gateway commands — lock-free control, vault-gated mutation |
+| `d4787d2` | feat(desktop): the Gateway panel — consent-first onboarding, truthful status, routes, links, failure surfaces |
+| `199c33a` | feat: source-labeled activity — per-source last-used, gateway-only metrics |
+| `532a372` | perf(gateway): measurement suite, results, and a measured accept-latency fix |
+| `3da8b88` | docs(gateway): user guide, troubleshooting, privacy, security, coverage limitations |
+| `c7b9052` | style(desktop): prettier over the gateway activity additions |
+| `0439dc5` | docs(gateway): Stage-7 honesty amendments, implementation status, ADR Phase-3 deviations, platform result records |
+| `c75f574` | fix(gateway): reload the running snapshot on link/unlink; packaged macOS validation (42/42) |
+| `234ddce` | docs(gateway): Phase 3 handoff and packaged macOS results |
+| `0fcfa4d` | fix(desktop): isolate the supplementary credential-activity load from the reload chain |
+| `ad4f51e` | test(gateway): remove a stray Phase-2 debug probe; gate control-channel tests to unix |
+| `ee1b15c` | docs(gateway): correct the handoff commit range after the CI-hygiene fixes |
+| `ad8f000` | test(gateway): gate Unix service-manager and git/symlink tests to cfg(unix) |
+| `4f03214` | test(gateway): gate the unlink-open-DB scenario to unix (Windows can't delete an open file) |
+| `155fc69` | fix(gateway): account a failed counter bump as dropped (SI-12 accounting gap) |
+| `ae66ca7` | test(gateway): scope strict counter conservation to unix; document the Windows WAL quirk |
+| `f202193` | fix(gateway): drop the matching key on vault lock; bound the consented opt-out |
+| `7ec7289` | fix(gateway): install the custom-route verification key; bind the prefix into the MAC |
+| `b348084` | fix: remediate the high-severity audit findings across link, lifecycle, privacy |
+| `45390f0` | fix(gateway): remediate the medium and low audit findings |
+| `d78f740` | test: make the validation evidence executable and non-vacuous |
 
 ## What was built
 

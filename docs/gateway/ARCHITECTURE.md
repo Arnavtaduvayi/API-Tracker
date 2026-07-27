@@ -2,9 +2,10 @@
 
 How the gateway is built. Authority for guarantees is `SECURITY_INVARIANTS.md`
 and `PRIVACY_MODEL.md`; authority for "why this and not that" is ADR 0019.
-This document is descriptive of the intended production shape; the
-architecture phase validated it with the spike in `experiments/gateway-spike`
-(9 passing tests) but did NOT build the production crate.
+This document describes the SHIPPED production shape. The architecture phase
+originally validated the design with a feasibility spike (11 passing tests);
+that spike has since been deleted, its coverage having been superseded by the
+production suite in `crates/gateway/tests/`.
 
 ## Placement in the workspace
 
@@ -21,14 +22,27 @@ family `tethra gateway ...` lives in `apps/cli`; desktop panels live in
 `apps/desktop`. All request/route/attribution/usage logic lives in the crate
 (shared by CLI and desktop), never in the frontends.
 
+## Forked from observe, with reasons
+
+Two modules the architecture phase expected to reuse verbatim were FORKED
+during implementation. This section previously listed them under "Reused,
+unchanged", which was false in the shipped code:
+
+- `head.rs` forks `observe::wire`. Reason: observe's head buffers are plain
+  `Vec`s, and a gateway head carries a live third-party credential, so the
+  gateway needs `Zeroizing` buffers allocated once at `MAX_HEAD` (SI-7). It
+  also adds head rewriting and stricter framing validation. `wire::BodyFraming`
+  survives only as a type conversion.
+- `stream.rs` forks `observe::relay`. Reason: `observe::relay` tolerates a
+  bare `LF` as a chunk-line terminator and echoes it verbatim. For an
+  observation proxy relaying between a client and the origin that client
+  chose, that is harmless; for a GATEWAY it is a request-smuggling primitive,
+  and SI-15 requires rejecting malformed framing rather than forwarding it.
+  The fork also feeds the usage tap DECODED chunk data so a chunked SSE stream
+  extracts like an unchunked one.
+
 ## Reused, unchanged
 
-- `observe::wire` — bounded httparse head parsing, `BodyFraming`, Slowloris
-  deadline read, secret-redacting `Debug`. The gateway adds head-rewrite and
-  stricter framing validation on top; it does not fork wire.
-- `observe::relay` — streaming, backpressured body relay
-  (Content-Length/chunked/until-close) with carryover. This is the exact
-  primitive path-prefix forwarding and SSE need; the spike used it verbatim.
 - `observe::policy` — SSRF/private-range/metadata denial for route origins
   and connect-time IP checks.
 - `observe::tls` (upstream side) — rustls client, webpki-roots, ALPN
@@ -102,7 +116,9 @@ shared vault.db:
 The running service holds an in-memory, validated route table and detects
 changes by polling SQLite `PRAGMA data_version` (cheap, no vault). Route/config
 WRITES require an unlocked vault + re-auth via the CLI/desktop and are audited;
-the service only READS. Because origins are never obeyed from the DB (manifest
+the service only READS CONFIGURATION. (It is not read-only overall: its writer
+thread bumps `gateway_route_counters`, inserts `gateway_usage_events` and
+`gateway_usage_daily`, and deletes expired rows on its retention sweep.) Because origins are never obeyed from the DB (manifest
 lookup or MAC-verified), a same-user `UPDATE gateway_routes` cannot redirect a
 live pass-through credential. Every upstream connection runs the observe
 two-phase SSRF check (`check_authority` at load AND `resolve_validated` at
@@ -183,7 +199,11 @@ via status) — KeepAlive respawn of a fast-exiting process is a crash loop
 (macOS) or a permanent fail (systemd rate limit). macOS: LaunchAgent
 `KeepAlive={Crashed:true}`, `bootout`/`kickstart`, never `disable`. Linux:
 systemd user unit, honest linger reporting. Windows: foreground
-`tethra gateway run` only in v1 (`enable` says "not yet supported"). Upgrade: a
+`tethra gateway serve` is the supported mode; `enable` DOES register an HKCU
+`Run` autostart value via `reg.exe` (implemented, compile-validated in CI,
+never executed on a real Windows session — status reports
+`RegisteredButNeverValidated`). The earlier "enable says not yet supported"
+text described a build that never shipped. Upgrade: a
 version handshake re-copies + rewrites the service + kickstarts + prunes old
 copies. Disable/uninstall is one ordered action: stop → remove service
 artifacts → **restore every linked `.env`** → delete `<data-dir>/bin` + logs →

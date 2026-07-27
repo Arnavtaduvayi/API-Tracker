@@ -1,10 +1,37 @@
 # Local Gateway — implementation status
 
 The authoritative implemented-versus-not ledger for the gateway feature
-after Phase 3 (productization), 2026-07-26. Anything not listed as
-implemented here should be assumed absent. Details live in the referenced
+after Phase 3 (productization) and the Phase 5 audit remediation, 2026-07-26.
+Anything not listed as implemented here should be assumed absent. Details live in the referenced
 documents; nothing below is claimed without a shipped test or a recorded
 measurement.
+
+## Phase 5 — audit remediation (shipped)
+
+Remediating the final independent audit (`audit/lg-final-independent-20260726`
+against base `ae66ca7`). Full matrix: `docs/gateway/audit/REMEDIATION.md`.
+
+| Piece | State |
+|---|---|
+| Matching-key lock lifecycle (ADR 0020) | Implemented: `VaultLocked`/`VaultUnlocked` control ops, policy in the service (`lock_disposition`, fails toward revoking), bounded keep-while-locked retention on dual clocks, enforcement in the poller. Every lock path in both frontends signals. 11 tests, one mutation-checked. |
+| Keep-while-locked toggle | Implemented and ENFORCED (it was a stored column with no consumer): reauth-gated to enable, immediate key drop on disable, CLI + desktop surfaces, live countdown in status. |
+| Matching-key TTL | Implemented: locking session's `auto_lock_minutes`, hard cap 8 h. Decision and reasoning in ADR 0020. |
+| Custom-route verification key (ADR 0021) | Implemented: `PushRouteKey`/`RevokeRouteKey`, installed on route add, unlock, route enable, and foreground `serve`. Before this, `set_mac_key` had no callers and every custom route was permanently 503. 13 end-to-end tests. |
+| Route MAC v2 | Implemented: binds `route_prefix`, so a MAC'd row cannot be transplanted onto another prefix. Fails closed for v1 MACs. |
+| Gateway-table deletion | Implemented: `observe delete-all` reaches all three gateway tables; per-project deletion reaches the two project-scoped ones. Previously none had any deletion path. |
+| Migration v14 | Implemented: index on `gateway_usage_events(event_id)`. |
+| Black-box attack battery | Adopted from the audit branch: 17 tests over 16 attack categories (`adversarial_blackbox.rs`). |
+| Validation-script integrity | Corrected: no unconditional passes, semantic assertions, privacy canaries, negative controls, minimum-check floor. `PACKAGED_MACOS_RESULTS.md` is marked superseded pending a fresh run. |
+
+**NOT implemented, and no longer claimed anywhere** (each previously appeared
+as a present-tense mitigation):
+
+| Claim | Reality |
+|---|---|
+| SIGTERM handler clears the key | No signal handler exists. Graceful stop clears it; SIGTERM/SIGINT/SIGKILL/crash/power-loss do not. THREAT_MODEL GW-6 now says so. |
+| Automatic disabling of unused routes | Does not exist and is deliberately not being added (no last-used column; "unused" is not reliably observable; silent disabling would break periodic projects). An enabled route is a disclosed standing exposure. THREAT_MODEL GW-7. |
+| `SO_PEERCRED` peer-euid enforcement | Not implemented; `peer_cred` is unstable and the alternatives need `unsafe` or a new dependency. The gate is filesystem permissions re-checked per accept. SI-21. |
+| Per-tool link coverage note | Not implemented. The shipped heuristics are Node `package.json` dotenv detection and a compose-file warning. PRODUCT_BEHAVIOR corrected. |
 
 ## Core (Phase 2 — shipped)
 

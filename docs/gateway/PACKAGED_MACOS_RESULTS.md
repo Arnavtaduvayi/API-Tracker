@@ -1,7 +1,35 @@
 # Packaged macOS validation — results (Phase 3)
 
-**Result: 42 checks passed, 0 failed.** The full 28-step lifecycle was
-executed end to end against a REAL per-user LaunchAgent.
+> **STATUS: this record is SUPERSEDED and has NOT been re-executed.**
+>
+> The final independent audit found that the run below included checks that
+> could not fail. `scripts/gateway_validate_macos.sh` has since been corrected
+> (unconditional passes removed, semantic assertions added, negative controls
+> and a minimum-check floor added), so **the numbers in this document no
+> longer describe the script that exists**. A fresh run on macOS hardware is
+> required before this file can be cited as evidence again; nothing here has
+> been edited to look successful.
+>
+> What was wrong, specifically:
+> - **Steps 11-12** called the pass helper unconditionally after two `curl`s
+>   whose exit codes were discarded. They would have reported PASS with the
+>   gateway returning nothing.
+> - **The "distinct fingerprint" claim in step 12 was never established by any
+>   assertion.** It has been removed from the table below rather than restated.
+> - **Step 13** counted a pointer at other evidence as a passing check.
+> - **Steps 10 and 17-18** piped status into a Python one-liner that only
+>   printed, so it exited 0 — and reported PASS — even against empty output.
+>
+> The corrected script asserts against the vault database and the status JSON,
+> treats an empty response as failure, scans for privacy canaries, exercises
+> its own helpers against conditions that must be rejected, and fails the run
+> if too few checks executed.
+
+**Historical result (superseded): 42 checks reported passed, 0 failed**, of
+which at least four were unconditional. The 28-step lifecycle was executed
+against a REAL per-user LaunchAgent, and the platform facts it recorded (plist
+shape, launchd registration, file layout, uninstall completeness) were observed
+rather than asserted vacuously — those remain informative.
 
 - **Machine:** macOS 26.5 (build 25F71), Apple Silicon (arm64)
 - **Date:** 2026-07-26
@@ -51,8 +79,8 @@ below says which evidence it rests on.
 | 8 | Run Python Requests through the gateway | PASS — `401` |
 | 9 | Run Node through the gateway | PASS — `401` |
 | 10 | Verify metadata | PASS — 3 events recorded (status/latency/path/bytes; no bodies) |
-| 11 | Verify known fake-credential attribution | PASS — matching key pushed; known-key traffic forwarded and recorded |
-| 12 | Verify unknown fake credential | PASS — unknown-key traffic forwarded and recorded (distinct fingerprint) |
+| 11 | Verify known fake-credential attribution | REPORTED PASS, NOT ASSERTED — the pass helper ran unconditionally. The corrected script asserts the event count rose and that a credential was matched. |
+| 12 | Verify unknown fake credential | REPORTED PASS, NOT ASSERTED — traffic was sent; nothing verified that it was recorded, and the "distinct fingerprint" claim had no assertion behind it. The corrected script asserts both. |
 | 13 | Verify SSE begins promptly | Covered by measured in-process evidence — a `401` does not stream; `PERFORMANCE_RESULTS.md` records +5.6 ms first-byte, 200/200 events intact |
 | 14 | Lock vault during traffic | PASS (as SI-11: the service holds no vault key material; forwarding continues with NO unlocked vault anywhere) |
 | 15 | Verify forwarding continues | PASS — `401` still returned with no vault session |

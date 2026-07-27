@@ -145,6 +145,9 @@ events / 90-day buckets). Because the existing `retention::sweep` touches only
 on the 7-day window, `gateway_usage_daily` on ~90 days (so the displayed spend
 series keeps history), `gateway_route_counters` swept with the same logic. The
 gateway drives `aggregate::roll_up` + the extended `retention::sweep` on a
-timer (DB connection only, no vault). Uninstall ENUMERATES and deletes every
-gateway table; the same deletion scopes (session/project/all, reauth-gated for
-all) apply.
+timer (DB connection only, no vault). Uninstall was documented here as enumerating and deleting every
+gateway table. **Correction:** uninstall does NOT delete any table — it
+deliberately keeps recorded history, which is the user's data (see
+PRODUCT_BEHAVIOR and the user guide). What enumerates and deletes every
+gateway table is `observe delete-all` (reauth-gated); per-project deletion
+covers the two project-scoped gateway tables. Retention sweeps bound the rest.

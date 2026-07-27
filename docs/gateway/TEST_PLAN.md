@@ -4,9 +4,8 @@ Only tests that exist may ever be cited in coverage claims
 (`RUNTIME_COMPATIBILITY_MATRIX.md` discipline). This plan enumerates the
 tests the implementation must ship, grouped by what they prove. Mock
 upstreams are loopback listeners; NO test uses a real credential or makes a
-live provider call. The spike tests in `experiments/gateway-spike/` are the
-templates for §1–§3 and are superseded (and deleted) once their production
-equivalents land in `crates/gateway`.
+live provider call. The spike that originally templated §1–§3 has been deleted; its coverage now
+lives in the production suite under `crates/gateway/tests/`.
 
 ## 1. HTTP correctness (unit + loopback integration)
 
@@ -66,11 +65,24 @@ equivalents land in `crates/gateway`.
   bearing `Origin`/`Referer`/`Sec-Fetch-Mode: no-cors`/`Sec-Fetch-Site`≠absent
   or a CORS-safelisted Content-Type without a credential header, is refused
   and writes NO observation row/counter/alert (only `rejected_browser_origin`).
-- Route prefix confusion: `/openai2/x` does not match route `openai`;
-  `/openai/../anthropic/x` and percent-encoded traversal do not escape the
-  route (path is normalized/validated before prefix strip); empty path,
-  bare `/openai`, and query-only tails behave per spec; unknown prefix and
-  unknown slug return an IDENTICAL 404.
+- Route prefix confusion: `/openai2/x` does not match route `openai`; empty
+  path, bare `/openai`, and query-only tails behave per spec; unknown prefix
+  and unknown slug return an IDENTICAL 404.
+- Traversal, stated precisely. The path is VALIDATED, never normalized: a
+  literal `.`/`..` segment, a backslash, `%2e`, `%2f`, `%5c`, `%25`, and any
+  segment containing a `..` run are rejected with a 400 before the prefix
+  strip; everything else is forwarded byte-for-byte. The tail is never
+  rewritten, so there is no gateway-side base path to escape.
+  **What prevents crossing between routes is NOT the traversal parser** — it
+  is that the upstream origin comes from the registered route and is never
+  derived from the forwarded path. The parser is defense in depth against
+  confusing the PROVIDER's own routing. Both properties are asserted
+  separately (`adversarial_blackbox.rs`), so tightening or relaxing the parser
+  can never be mistaken for changing the origin binding.
+  *(Earlier wording here claimed the path is "normalized/validated before
+  prefix strip" and that "percent-encoded traversal" was blocked. Nothing is
+  normalized, and only the `%2e` spelling was blocked — `..%2f` passed the
+  gate. It is now rejected, and the reasoning above is what actually holds.)*
 - Host-header gate: absent, foreign (`evil.com`), `localhost.evil.com`,
   duplicate, and bare-hostname-without-port Host values are rejected;
   exact `127.0.0.1:<port>` / `localhost:<port>` / `[::1]:<port>` accepted;
@@ -131,9 +143,17 @@ equivalents land in `crates/gateway`.
   documented as "some process on this machine presented this value").
 - `attribution_method` = `observed_fingerprint` on value-derived rows,
   `injected` on injection-derived rows.
-- Key lifecycle: handoff over the peer-checked Unix socket; zeroize-on-drop;
-  SIGTERM handler clears the key before drain; no key → attribution is
-  `unavailable_no_key` and fingerprint computation is impossible.
+- Key lifecycle (`crates/gateway/tests/control.rs`, eleven tests): handoff over
+  the permission-gated Unix socket; zeroize-on-drop; no key → attribution is
+  `unavailable_no_key` and fingerprint computation is impossible. Lock
+  behavior per ADR 0020 — default drop on lock (mutation-checked: deleting the
+  revoke fails the test), forwarding continues after the drop, unreadable
+  config fails toward revoking, the consented opt-out is honored and BOUNDED,
+  the window is enforced and clamped to the documented cap, a restart never
+  reconstructs the key, toggle-off drops it immediately, and repeated lock
+  signals never extend the window.
+  There is NO SIGTERM-handler test because there is no SIGTERM handler; the
+  termination limits are stated in THREAT_MODEL GW-6.
 - Timing: the digest is computed on the forwarding path and the table lookup
   (`subtle::ConstantTimeEq`) runs on the writer thread, so no forwarding-path
   timing depends on a match (provable by construction).
@@ -174,7 +194,7 @@ written for gateway events.
   does not sum the same consumption (gateway rows never enter
   `usage_snapshots`).
 
-## 8. Migration and store (v13)
+## 8. Migration and store (v13 gateway tables, v14 index)
 
 - Fresh migrate to head; upgrade from a v12 fixture; migration is
   append-only (existing entries untouched). The v12→v13 populated-upgrade
@@ -207,9 +227,11 @@ written for gateway events.
 - Linux: unit golden test (`WantedBy=default.target`); enable/disable
   round-trip where systemd is present (skipped, not faked, elsewhere); linger
   state reported by `status`.
-- Windows: v1 asserts `enable` prints "not supported" and foreground
-  `run` works; a later scheduled-task impl adds golden task XML +
-  `SO_EXCLUSIVEADDRUSE` on the listener.
+- Windows: `enable` registers an HKCU `Run` value; the tests assert the
+  rendered value and its round-trip parse (including a trailing-separator
+  path), and that foreground `serve` works. All Windows coverage is
+  COMPILE-AND-UNIT only — no test has ever run against a real Windows login
+  session (`PACKAGED_WINDOWS_RESULTS.md`).
 - Upgrade: version handshake detects a stale service binary; refresh replaces
   + rewrites + kickstarts + prunes old copies; uninstall removes every artifact
   `status` lists AND restores linked `.env` files.

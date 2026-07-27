@@ -57,9 +57,11 @@ keeping a terminal open.
    credential passed through untouched. Streaming (SSE) works; provider
    errors arrive verbatim. At link time Tethra runs a keyless probe through
    the route to confirm the path actually reaches the provider, and flags a
-   project whose runtime does not load `.env` (plain Python/Node without a
-   dotenv loader, Go, shell scripts) — those need the variable set another
-   way, or the gateway sees nothing.
+   NODE project whose `package.json` never mentions a dotenv loader. Python,
+   Go, and shell projects are NOT detected — the heuristic is Node-only, and a
+   project in those languages that never loads `.env` will silently produce no
+   gateway traffic. Those need the variable set another way, or the gateway
+   sees nothing.
 5. **See it in Tethra.** The activity screens show gateway-observed services,
    endpoints (sanitized templates), statuses, latency, and — for supported
    response shapes — model and token counts with estimated (never asserted)
@@ -97,10 +99,13 @@ labeled distinctly and never summed.
 
 The compatibility target is the mainstream SDKs that honor a base-URL variable
 (OpenAI Python/JS `OPENAI_BASE_URL` / `OPENAI_API_BASE`, Anthropic
-`ANTHROPIC_BASE_URL`, plus explicit client `base_url` parameters). The link
-screen shows a short per-tool coverage note naming tools that do NOT honor a
-variable (e.g. the Vercel AI SDK, `curl` scripts, hardcoded clients) rather
-than a generic caveat.
+`ANTHROPIC_BASE_URL`, plus explicit client `base_url` parameters). **Shipped scope, corrected:** the link screen shows the generic coverage
+caveat plus two heuristic warnings — a Node project whose `package.json` never
+mentions `dotenv`, and a `docker-compose.yml` next to the project. It does NOT
+name individual tools. A per-tool note naming the Vercel AI SDK, `curl`
+scripts, and hardcoded clients was specified here but never implemented;
+`COVERAGE_LIMITATIONS.md` carries the accurate list and is the document to
+read for what the gateway can and cannot see.
 
 ## Uninstall / disable
 

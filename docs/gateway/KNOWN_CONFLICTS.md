@@ -195,7 +195,10 @@ would erase the displayed 90-day spend series.
 
 **Resolution:** retention is extended (new function or params) — raw usage on
 7 days, `gateway_usage_daily` on ~90 days, counters swept alongside; the
-gateway timer drives it; uninstall enumerates and deletes all gateway tables.
+gateway timer drives it. **Correction (audit remediation):** uninstall keeps
+recorded history by design; the call that enumerates and deletes all gateway
+tables is `observe delete-all` (reauth-gated), with per-project deletion
+covering the two project-scoped ones.
 PRIVACY_MODEL §6 wording corrected. (ADR 0019 D6/D7.)
 
 ## C17. Roll-up watermark vs the async writer

@@ -91,7 +91,16 @@ degradation).
 - **Disable/uninstall** stop and remove the service (uninstall also removes
   binaries, logs, and runtime files) but deliberately keep recorded history
   — it is your data.
-- To purge observed history: the runtime observability deletion tools
-  (`tethra observe delete-all`, or per-session deletion) cover gateway
-  events too, since gateway records flow through the same runtime tables;
-  retention windows bound everything else.
+- To purge observed history: `tethra observe delete-all` (reauthentication-
+  gated) covers gateway records too. The runtime half of a gateway exchange
+  lives in the shared runtime tables; the gateway's own three tables
+  (`gateway_usage_events`, `gateway_usage_daily`, `gateway_route_counters`)
+  are enumerated and cleared by the same call. Per-project deletion covers the
+  two project-scoped ones; `gateway_route_counters` is route-scoped and cannot
+  be attributed per project, so it clears only with delete-all — it holds a
+  route name, a day, a counter name, and a total, and nothing per-request.
+  Retention windows bound everything else.
+  *(Until the audit remediation those three tables had no deletion path at
+  all — their only removal mechanism was the age-based retention sweep — so
+  this promise was false when first written. It is now asserted by
+  `deleting_all_observability_data_really_removes_gateway_rows`.)*

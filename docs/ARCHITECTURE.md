@@ -1,10 +1,11 @@
 # Architecture Overview
 
-Current state: milestones 1–5 — encrypted vault, project/credential
-management, reuse detection, backups, provider catalog + connectors,
-scanning + hooks, monitoring + doc watching, OpenAI usage/cost sync,
-`.env` governance, destinations, and synchronization plans. CLI + desktop
-parity throughout.
+Current state: encrypted vault, project/credential management, reuse
+detection, backups, provider catalog + connectors, scanning + hooks,
+monitoring + doc watching, OpenAI usage/cost sync, `.env` governance,
+destinations, synchronization plans, runtime observability (`crates/observe`,
+ADR 0017), and the optional Local Gateway (`crates/gateway`, ADR 0019/0020/
+0021). CLI + desktop parity throughout.
 
 ## Workspace
 
@@ -42,7 +43,21 @@ parity throughout.
 │                          GitHub Actions, Vercel) + catalog   │
 │  syncplan  reviewable value-change rollout plans             │
 │  templates/stackdetect  stack templates + local detection    │
+│  runtime   observed services/endpoints/events, aggregation,  │
+│            retention (shared by observe and gateway)         │
 └──────────────────────────────────────────────────────────────┘
+        ▲                                    ▲
+        │                                    │
+┌───────┴──────────────────┐   ┌─────────────┴────────────────┐
+│ crates/observe           │   │ crates/gateway               │
+│ (api-tracker-observe)    │   │ (api-tracker-gateway)        │
+│ opt-in interception      │   │ OPTIONAL loopback reverse    │
+│ proxy for `tethra run`:  │   │ gateway (ADR 0019): path-    │
+│ local CA, SSRF policy,   │   │ prefix routing, pass-through │
+│ wire/relay primitives    │   │ credentials, .env linking,   │
+│ (ADR 0017)               │   │ per-user service lifecycle   │
+└──────────────────────────┘   └──────────────────────────────┘
+    Neither is required: Tethra is fully functional with both absent.
                               │
                               ▼
         one SQLite database: <data-dir>/vault.db
@@ -53,7 +68,7 @@ Both frontends resolve the same data directory (`TETHRA_DIR` override — the
 legacy `API_TRACKER_DIR` name still works — platform default otherwise), so
 they operate on the same vault concurrently (SQLite WAL + busy timeout).
 
-## Data model (schema v5)
+## Data model (schema v14)
 
 - `vault_meta` — key/value: vault id, crypto version, KDF params, master
   salt, wrapped vault key, wrapped fingerprint key, settings.
@@ -80,6 +95,13 @@ they operate on the same vault concurrently (SQLite WAL + busy timeout).
 - v8: `pricing_records` (effective-dated; legacy overrides migrated).
 - v9: `project_templates`, `stack_preferences` (local decision history).
 - v10: provider-account identity columns on `provider_connections`.
+- v11–v12: runtime observability (observed services/endpoints, request
+  events, metric buckets, observation sessions, attributions).
+- v13: Local Gateway tables (`gateway_config`, `gateway_routes`,
+  `gateway_project_links`, `gateway_usage_events`, `gateway_usage_daily`,
+  `gateway_route_counters`) + `attribution_method` on request events.
+- v14: index on `gateway_usage_events(event_id)` (the FK the retention sweep
+  scans).
 
 Timestamps are RFC 3339 UTC strings. Schema changes are append-only
 migrations tracked via SQLite `user_version`.

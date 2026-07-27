@@ -17,7 +17,7 @@ dependencies.
 ## Stage 0 — Architecture (this session) — DONE
 
 Docs under `docs/gateway/`, ADR 0018 backfill + ADR 0019, the isolated
-feasibility spike (`experiments/gateway-spike`, 9 tests). No production crate.
+feasibility spike (`experiments/gateway-spike`, 11 tests; deleted after its coverage was superseded). No production crate at that point.
 
 ## Stage 1 — Crate skeleton, schema, config (no listener yet)
 
@@ -51,7 +51,9 @@ feasibility spike (`experiments/gateway-spike`, 9 tests). No production crate.
   Slowloris deadline, WebSocket/CONNECT/absolute-form rejection.
 - Bind loopback only; `tethra gateway run` foreground command.
 - **Exit:** TEST_PLAN §1, §2, §3 green (promote the spike's HTTP tests to
-  production; delete the spike once equivalents exist). Forwarding works with
+  production; delete the spike once equivalents exist). *(Done: the
+  production equivalents landed in Phase 2 and the spike was deleted during
+  audit remediation.)* Forwarding works with
   NO database (SI-11/13). This is the stage that must be adversarially
   re-reviewed before proceeding.
 

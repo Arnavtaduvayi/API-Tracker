@@ -113,3 +113,31 @@ operational, high-churn) or are excluded like other derived data.
 **Default:** include (matches every other operational table; simplest honest
 story).
 **Close at:** Stage 1 (migration), aligned with ADR 0015 semantics.
+
+## O2 (match-while-locked) — RESOLVED, and now actually implemented
+
+The toggle defaults OFF, as decided. What was NOT decided here, and was left
+open, is what "ON" should mean over time. **Decision (ADR 0020):** ON grants
+retention bounded by the locking session's `auto_lock_minutes`, hard-capped at
+8 hours; it is never indefinite. Enabling is reauth-gated; disabling drops any
+resident key immediately.
+
+Note for the record: until the Phase 5 audit remediation this toggle had **no
+consumer anywhere in the code**. It was a stored column that every document
+described as a working control. Reasoning, rejected alternatives, and the
+lifecycle table are in ADR 0020.
+
+## O6 (custom-route verification key delivery) — RESOLVED
+
+Not previously tracked as an open decision, which is part of why it was missed:
+ADR 0019 D3 specified the MAC and the trust model but never said how the
+verification key reaches a running gateway. It reached it nowhere, so every
+custom-origin route was permanently unavailable.
+
+**Decision (ADR 0021):** the key is pushed over the authenticated control
+channel from every flow that has an unlocked vault and could precede a
+custom-route request — route add (the only minting site), vault unlock, route
+enable, and foreground `serve`. It is not reauth-gated (it verifies route
+integrity only and cannot decrypt or confirm anything about a credential), and
+it is NOT dropped on vault lock, because dropping it would stop forwarding for
+custom routes and break forward-while-locked.

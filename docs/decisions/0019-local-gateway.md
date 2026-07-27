@@ -120,6 +120,44 @@ The gateway sees only traffic whose base URL was repointed at it, from processes
 
 The feature is additive and reversible. Migration v13 adds tables only; existing migrations are immutable. Backup v2 restore rebuilds the new tables structurally. Disabling restores every rewritten `.env`; uninstall removes all service artifacts and (optionally) the gateway data, leaving the vault and every other feature untouched. Because no feature depends on the gateway, it can be removed entirely by reverting the additive crate/CLI/desktop changes and dropping the v13 tables in a future migration without affecting the rest of the product. **Production implementation has NOT begun** and is gated on this ADR plus the staged plan in `IMPLEMENTATION_PLAN.md`; Stage 2 (the forwarding core) must be adversarially re-reviewed before any persistence or attribution surface is built.
 
+## Amendments from the final independent audit (2026-07-26)
+
+The Phase-1 body above records the design as it was decided. Several of its
+statements were superseded by implementation or found false by the final
+independent audit. They are left in place — rewriting a decision record to
+pretend it always said the right thing destroys the audit trail — and
+corrected here. Where a gate document and this ADR disagree, the gate document
+plus ADR 0020/0021 are authoritative.
+
+- **D3 (custom-origin routes).** The MAC now binds `route_prefix` as well
+  (v2 domain string), and the verification key is actually installed into a
+  running gateway — before remediation `RouteState::set_mac_key` had no
+  callers, so every custom-origin route was permanently 503. Full lifecycle:
+  **ADR 0021**.
+- **D5 (matching key).** "Dropped on lock, default OFF while locked,
+  TTL-bounded" was designed here and implemented nowhere. All three now hold,
+  and the TTL this ADR deferred is decided. Full lifecycle and reasoning:
+  **ADR 0020**.
+- **D5 (control channel), line 53.** "peer-euid == our-uid check
+  (LOCAL_PEERCRED/SO_PEERCRED)" — not implemented, and not implementable
+  without `unsafe` or a new dependency this ADR rules out. The gate is
+  filesystem permissions re-checked on every accept (HANDOFF_PHASE_2 D3,
+  SECURITY_INVARIANTS SI-21).
+- **D1/D2 (observe reuse).** `observe::wire` and `observe::relay` are FORKED,
+  not reused unchanged, for stated security reasons (gateway ARCHITECTURE,
+  "Forked from observe").
+- **Line 41 ("the service only READS").** True of configuration only: the
+  service's writer thread writes counters, usage rows, and retention deletes.
+- **Line 70 ("uninstall enumerates and deletes them").** Uninstall keeps
+  recorded history by design; `observe delete-all` is what clears the gateway
+  tables — and until remediation it did not reach them at all.
+- **Line 77 ("`--data-dir <resolved>`").** The path was not absolutized until
+  remediation; it now is, at the single entry point in both frontends.
+- **Line 80 (Windows `enable` "not yet supported").** `enable` registers an
+  HKCU `Run` value; the platform remains compile-validated only.
+- **Line 121 ("production implementation has NOT begun").** Superseded by the
+  Phase 3 amendments below.
+
 ## Phase 3 amendments (productization)
 
 Recorded 2026-07-26 at the end of the productization phase. The sentence
