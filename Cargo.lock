@@ -125,6 +125,7 @@ dependencies = [
  "api-tracker-core",
  "api-tracker-gateway",
  "api-tracker-observe",
+ "api-tracker-tracking",
  "assert_cmd",
  "clap",
  "predicates",
@@ -222,6 +223,20 @@ dependencies = [
  "tempfile",
  "time",
  "webpki-roots",
+ "zeroize",
+]
+
+[[package]]
+name = "api-tracker-tracking"
+version = "0.1.0"
+dependencies = [
+ "api-tracker-core",
+ "api-tracker-gateway",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
  "zeroize",
 ]
 

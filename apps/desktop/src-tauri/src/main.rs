@@ -2467,12 +2467,18 @@ fn gateway_doctor(state: State<'_, AppState>) -> CmdResult<gw_doctor::Doctor> {
 }
 
 /// Locate a `tethra` CLI binary this machine can run, verified by its
-/// service-probe output. The desktop bundles no CLI (externalBin is
-/// deferred until signing exists — OPEN_DECISIONS O10), so enable depends
-/// on the separately installed CLI and says so honestly when it is absent.
+/// service-probe output. The app BUNDLES the CLI as a Tauri sidecar
+/// (ADR 0022 D4, closes gateway OPEN_DECISIONS O10), so the bundled copy
+/// — always version-matched to this build — is the first candidate; every
+/// pre-existing fallback (installed service copy, PATH, the usual homes)
+/// is kept for dev builds and unusual installs.
 fn locate_cli(data_dir: &std::path::Path) -> Option<PathBuf> {
     let exe = format!("tethra{}", std::env::consts::EXE_SUFFIX);
     let mut candidates: Vec<PathBuf> = Vec::new();
+    // The bundled sidecar, beside this executable.
+    if let Ok(current) = std::env::current_exe() {
+        candidates.extend(gw_lifecycle::bundled_helper_candidate(&current));
+    }
     // An already-installed service binary works too (repair path).
     if let Ok(entries) = std::fs::read_dir(gw_lifecycle::bin_dir(data_dir)) {
         for e in entries.flatten() {
@@ -2494,17 +2500,9 @@ fn locate_cli(data_dir: &std::path::Path) -> Option<PathBuf> {
             candidates.push(home.join(rel).join(&exe));
         }
     }
-    candidates.into_iter().find(|c| {
-        c.is_file()
-            && std::process::Command::new(c)
-                .args(["gateway", "service-probe"])
-                .output()
-                .map(|o| {
-                    o.status.success()
-                        && String::from_utf8_lossy(&o.stdout).contains(gw_lifecycle::PROBE_MARKER)
-                })
-                .unwrap_or(false)
-    })
+    candidates
+        .into_iter()
+        .find(|c| gw_lifecycle::helper_answers_probe(&gw_lifecycle::HostRunner, c))
 }
 
 #[tauri::command]
@@ -2520,9 +2518,9 @@ fn gateway_install(
     let Some(source) = locate_cli(&state.data_dir) else {
         return Err(ErrDto {
             code: "cli_not_found".into(),
-            message: "the Tethra CLI is not installed (or not executable) on this \
-                      machine. The gateway service runs the CLI binary; install the \
-                      tethra CLI archive first, then enable the gateway again."
+            message: "the helper that runs tracking could not be found or executed. \
+                      It normally ships inside the app — reinstalling Tethra restores \
+                      it. (Advanced: a `tethra` CLI on PATH also works.)"
                 .into(),
         });
     };
@@ -2621,7 +2619,9 @@ fn gateway_repair(state: State<'_, AppState>) -> CmdResult<gw_lifecycle::Install
     let Some(source) = locate_cli(&state.data_dir) else {
         return Err(ErrDto {
             code: "cli_not_found".into(),
-            message: "repair needs a runnable tethra CLI binary and none was found".into(),
+            message: "repair needs the bundled tracking helper and it could not be found \
+                      or executed; reinstalling Tethra restores it."
+                .into(),
         });
     };
     let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;

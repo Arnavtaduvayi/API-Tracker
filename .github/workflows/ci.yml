@@ -114,5 +114,7 @@ jobs:
       - name: Build frontend (required by tauri::generate_context!)
         working-directory: apps/desktop
         run: npm ci && npm run build
+      - name: Stage the bundled CLI sidecar (required by externalBin)
+        run: bash scripts/bundle_cli.sh
       - name: Clippy (desktop backend)
         run: cargo clippy -p api-tracker-desktop -- -D warnings

@@ -239,6 +239,34 @@ pub fn version_of_binary_name(name: &str) -> Option<String> {
     stem.strip_prefix("tethra-gateway-").map(|v| v.to_string())
 }
 
+/// Where a bundled helper CLI would sit next to the given executable
+/// (Tauri's `externalBin` places the sidecar beside the main binary on
+/// every platform: `Contents/MacOS/tethra` inside a macOS app bundle,
+/// alongside the executable on Linux/Windows). Pure path derivation — the
+/// caller decides whether the file exists and answers the exec probe.
+pub fn bundled_helper_candidate(current_exe: &Path) -> Option<PathBuf> {
+    let dir = current_exe.parent()?;
+    Some(dir.join(format!("tethra{}", std::env::consts::EXE_SUFFIX)))
+}
+
+/// Whether a candidate helper binary actually runs on this machine and is
+/// the real Tethra CLI: it must exit 0 from the hidden
+/// `gateway service-probe` subcommand and print [`PROBE_MARKER`]. This is
+/// the same gate `prepare_binary` applies before a service definition may
+/// point at a copied binary — a missing, corrupted (unexecutable), or
+/// impostor file all fail it; a version-drifted but genuine helper passes
+/// (drift is surfaced by doctor and repaired by the tracking apply step,
+/// never hidden at discovery time).
+pub fn helper_answers_probe(runner: &dyn CommandRunner, candidate: &Path) -> bool {
+    if !candidate.is_file() {
+        return false;
+    }
+    runner
+        .run(&candidate.display().to_string(), &["gateway", "service-probe"])
+        .map(|out| out.ok() && out.stdout.contains(PROBE_MARKER))
+        .unwrap_or(false)
+}
+
 /// Fresh byte-write of `src` to `dst` (never `fs::copy`: quarantine and
 /// other metadata must NOT propagate — C12). Creates the parent, replaces
 /// any previous file, sets 0755 on Unix.
