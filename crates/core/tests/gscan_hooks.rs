@@ -71,6 +71,23 @@ fn write_stub_named(stub_dir: &Path, names: &[&str]) {
 /// Stage a unique file and run `git commit` with the stub first on PATH.
 /// Returns (commit_succeeded, scan_ran).
 fn commit_with_stub(repo: &Path, stub_dir: &Path, marker: &Path, stub_exit: i32) -> (bool, bool) {
+    let path_env = format!(
+        "{}:{}",
+        stub_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    commit_with_stub_path(repo, marker, stub_exit, &path_env)
+}
+
+/// Like `commit_with_stub`, but with a caller-controlled PATH. Used by the
+/// fallback test, which must NOT see a real `tethra` installed on the
+/// developer's machine (the hook prefers it over the legacy stub).
+fn commit_with_stub_path(
+    repo: &Path,
+    marker: &Path,
+    stub_exit: i32,
+    path_env: &str,
+) -> (bool, bool) {
     let _ = std::fs::remove_file(marker);
     let name = format!(
         "f-{}.txt",
@@ -81,11 +98,6 @@ fn commit_with_stub(repo: &Path, stub_dir: &Path, marker: &Path, stub_exit: i32)
     );
     std::fs::write(repo.join(&name), "harmless content\n").unwrap();
     git(repo, &["add", "."]);
-    let path_env = format!(
-        "{}:{}",
-        stub_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -437,7 +449,23 @@ fn hook_falls_back_to_the_legacy_binary_name() {
     write_stub_named(&r.stub_dir, &["api-tracker"]);
     let _ = std::fs::remove_file(r.stub_dir.join("tethra"));
     hooks::install(&r.root, false).expect("install");
-    let (ok, ran) = commit_with_stub(&r.root, &r.stub_dir, &r.marker, 0);
+    // Hermetic PATH: stub dir + git's own dir + POSIX baseline. The real
+    // PATH may carry an installed `tethra`, which the hook would prefer
+    // over the legacy stub and the fallback would never be exercised.
+    let git_dir = {
+        let out = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("locate git");
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        PathBuf::from(p).parent().map(|d| d.to_path_buf()).unwrap()
+    };
+    let path_env = format!(
+        "{}:{}:/usr/bin:/bin",
+        r.stub_dir.display(),
+        git_dir.display()
+    );
+    let (ok, ran) = commit_with_stub_path(&r.root, &r.marker, 0, &path_env);
     assert!(ok, "clean scan lets the commit through");
     assert!(ran, "the legacy-named binary still runs the scan");
 }

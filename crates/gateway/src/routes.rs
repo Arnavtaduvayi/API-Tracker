@@ -150,7 +150,7 @@ pub fn route_mac(
 /// Whether this vault has ever minted a route verification key. Lets callers
 /// avoid creating one as a side effect of an unrelated command: a vault with
 /// no custom routes should not acquire route-signing material just because
-/// the user ran `tethra vault unlock`.
+/// the user ran `tethra unlock`.
 pub fn route_key_exists(conn: &Connection) -> Result<bool> {
     Ok(conn
         .query_row(

@@ -1420,12 +1420,20 @@ fn a_304_response_carries_no_body_and_keeps_the_connection_usable() {
             gw.authority()
         ),
     );
-    let resp = read_response(&mut c);
+    // Read only the head. `read_response` would honor the upstream's bogus
+    // `Content-Length: 99` and block on a body that (correctly) never
+    // arrives, turning this test into a 20 s read-timeout wait that loaded
+    // CI runners can exceed (it failed exactly that way on the PR #15 merge
+    // commit). Body absence is proven deterministically below instead: any
+    // wrongly-relayed body byte would sit in the stream ahead of the second
+    // response and corrupt its status line.
+    let resp = String::from_utf8_lossy(&read_head(&mut c)).to_string();
     assert!(resp.starts_with("HTTP/1.1 304"), "got: {resp:?}");
     assert!(resp.contains("ETag: \"abc\""));
-    assert!(resp.ends_with("\r\n\r\n"), "a 304 has no body: {resp:?}");
+    assert!(resp.ends_with("\r\n\r\n"), "head terminated: {resp:?}");
     assert!(resp.contains("Connection: keep-alive"));
-    // The connection really is still usable.
+    // The connection really is still usable — and the stream position is
+    // exactly at the end of the 304 head (no body bytes were relayed).
     send(
         &mut c,
         &format!(
@@ -1434,7 +1442,10 @@ fn a_304_response_carries_no_body_and_keeps_the_connection_usable() {
         ),
     );
     let second = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
-    assert!(second.starts_with("HTTP/1.1 304"));
+    assert!(
+        second.starts_with("HTTP/1.1 304"),
+        "a relayed 304 body byte would corrupt this parse: {second:?}"
+    );
 }
 
 #[test]

@@ -778,8 +778,8 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
                 if custom_unavailable {
                     println!(
                         "custom-origin routes: unavailable (no unlocked vault session, so the \
-                         route verification key could not be installed). Run `tethra vault \
-                         unlock` in this shell and restart, or use the desktop app."
+                         route verification key could not be installed). Run `tethra unlock` \
+                         in this shell and restart, or use the desktop app."
                     );
                 }
             }
