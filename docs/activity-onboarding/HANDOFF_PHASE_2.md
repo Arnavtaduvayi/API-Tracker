@@ -13,11 +13,25 @@ Companion records: `IMPLEMENTATION_STATUS.md` (what works, with counts),
 
 ```text
 Base commit    0e6764b  (main, PR #15 merge)
-Final head     see PR #16 head
+Final head     cb8edac
 Branch         feat/zero-friction-api-tracking
 PR             #16 (open, NOT merged)
 Commits behind base  0 (branch is a fast-forward of main @ 0e6764b)
 ```
+
+Authoritative CI on `cb8edac` (run 30290195444) — all four checks pass:
+
+```text
+Desktop frontend        pass    25s
+Desktop backend (macOS) pass  1m58s
+Rust (core + CLI)       pass  4m00s
+Rust core (Windows)     pass  9m44s
+```
+
+Exact local counts at that head: Rust 1005 passed / 0 failed
+(core 533, gateway 269, cli 86, observe 63, tracking 54); frontend
+vitest 65 passed / 0 failed / 0 unhandled errors; `smoke.sh` 138
+passed / 0 failed; `tracking_validate_macos.sh` 42 passed / 0 failed.
 
 A note on history: the first push was rejected by GitHub push protection,
 which matched a synthetic Stripe fixture value in the new tests. The
