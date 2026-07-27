@@ -4806,11 +4806,27 @@ impl UnlockedVault {
     // ------------------------------------------------------------------
 
     /// Discover environment files across a project's registered repositories
-    /// (or an explicit path).
+    /// (or an explicit path). Non-executing: no subprocess is spawned, and
+    /// `git_history` is reported as `NotChecked`.
     pub fn env_discover(
         &self,
         project: Option<&str>,
         path: Option<&std::path::Path>,
+    ) -> Result<Vec<crate::envgov::EnvFileInfo>> {
+        self.env_discover_with(project, path, crate::envgov::HistoryProbe::Skip)
+    }
+
+    /// [`Self::env_discover`] with an explicit history policy.
+    ///
+    /// `HistoryProbe::HardenedGit` runs `git log` under `gitrepo`'s
+    /// argument and environment hardening. Callers must only pass it for a
+    /// command the user explicitly invoked against a folder they chose for
+    /// that purpose — never from an automatic scan (ADR 0023).
+    pub fn env_discover_with(
+        &self,
+        project: Option<&str>,
+        path: Option<&std::path::Path>,
+        probe: crate::envgov::HistoryProbe,
     ) -> Result<Vec<crate::envgov::EnvFileInfo>> {
         let mut roots: Vec<PathBuf> = Vec::new();
         if let Some(path) = path {
@@ -4828,7 +4844,14 @@ impl UnlockedVault {
         }
         let mut out = Vec::new();
         for root in roots {
-            out.extend(crate::envgov::discover(&root)?);
+            out.extend(
+                crate::envgov::discover_bounded(
+                    &root,
+                    crate::envgov::DiscoveryLimits::default(),
+                    probe,
+                )?
+                .files,
+            );
         }
         Ok(out)
     }

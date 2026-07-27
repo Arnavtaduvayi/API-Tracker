@@ -170,6 +170,64 @@ pub struct EnvFileSummary {
     pub git_tracked: bool,
 }
 
+/// Every file the scan touched, in exactly one bucket each.
+///
+/// The pre-remediation scan reported `scanned_files` only for the reader in
+/// this module, so a folder whose manifests were all read through
+/// `stackdetect` printed "0 file(s) read" while their contents drove the
+/// plan (ZFT-002), and an oversized `.env` was never counted at all
+/// (ZFT-003). Every reader now reports into the same accounting.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanAccounting {
+    /// Files read in full.
+    pub read: u32,
+    /// Refused for exceeding the per-file byte cap; bytes never loaded.
+    pub skipped_oversized: u32,
+    /// Refused as a symlink, or because the path resolves outside the
+    /// selected folder.
+    pub skipped_outside_folder: u32,
+    /// In bounds, but not valid UTF-8.
+    pub skipped_not_utf8: u32,
+    /// The walk stopped before exhausting the folder; the reason is
+    /// rendered to the user verbatim.
+    pub truncated: Option<String>,
+    /// Bounds hit inside the non-executing Git reader.
+    pub git_warnings: Vec<String>,
+}
+
+impl ScanAccounting {
+    /// Files that exist and matched a scan rule but were not inspected.
+    pub fn skipped_total(&self) -> u32 {
+        self.skipped_oversized + self.skipped_outside_folder + self.skipped_not_utf8
+    }
+
+    /// One line for the review screen, or `None` when nothing was skipped
+    /// and nothing was truncated.
+    pub fn describe_gaps(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.skipped_oversized > 0 {
+            parts.push(format!("{} too large to read", self.skipped_oversized));
+        }
+        if self.skipped_outside_folder > 0 {
+            parts.push(format!(
+                "{} outside the selected folder (symlink)",
+                self.skipped_outside_folder
+            ));
+        }
+        if self.skipped_not_utf8 > 0 {
+            parts.push(format!("{} not readable as text", self.skipped_not_utf8));
+        }
+        if let Some(reason) = &self.truncated {
+            parts.push(reason.clone());
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("; "))
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectDetection {
     pub folder: PathBuf,
@@ -178,6 +236,9 @@ pub struct ProjectDetection {
     pub project_signals: ProjectSignals,
     pub scanned_files: u32,
     pub skipped_oversized: u32,
+    /// Full accounting for every file the scan touched.
+    #[serde(default)]
+    pub accounting: ScanAccounting,
 }
 
 impl ProjectDetection {
@@ -249,6 +310,7 @@ fn read_bounded(
     path: &Path,
     scanned: &mut u32,
     skipped_oversized: &mut u32,
+    not_utf8: &mut u32,
 ) -> Option<String> {
     let meta = std::fs::symlink_metadata(path).ok()?;
     if meta.file_type().is_symlink() {
@@ -267,9 +329,19 @@ fn read_bounded(
         *skipped_oversized += 1;
         return None;
     }
-    let content = std::fs::read_to_string(path).ok()?;
-    *scanned += 1;
-    Some(content)
+    // Read bytes, then decode: a file that exists but is not UTF-8 must be
+    // COUNTED, not silently dropped (ZFT-040).
+    let bytes = std::fs::read(path).ok()?;
+    match String::from_utf8(bytes) {
+        Ok(content) => {
+            *scanned += 1;
+            Some(content)
+        }
+        Err(_) => {
+            *not_utf8 += 1;
+            None
+        }
+    }
 }
 
 /// Provider id → stack template id, mirroring `stackdetect`'s private map,
@@ -341,10 +413,19 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
 
     let mut scanned: u32 = 0;
     let mut skipped_oversized: u32 = 0;
+    let mut not_utf8: u32 = 0;
     let mut signals: BTreeMap<String, Signals> = BTreeMap::new();
 
-    // --- .env inventory (envgov bounds: depth ≤ 6, no symlinks) ---------
-    let env_files = envgov::discover(&canonical)?;
+    // --- .env inventory (envgov bounds; NON-EXECUTING git status) -------
+    // `discover_bounded` spawns nothing: repository status comes from
+    // `gitsafe`'s byte reader, and the per-file size check happens before
+    // any file is opened (ADR 0023; ZFT-001, ZFT-003, ZFT-028).
+    let discovery = envgov::discover_bounded(
+        &canonical,
+        envgov::DiscoveryLimits::default(),
+        envgov::HistoryProbe::Skip,
+    )?;
+    let env_files = discovery.files;
     let env_summaries: Vec<EnvFileSummary> = env_files
         .iter()
         .map(|f| EnvFileSummary {
@@ -374,8 +455,13 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             continue;
         }
         let path = Path::new(&file.path);
-        let Some(content) = read_bounded(&canonical, path, &mut scanned, &mut skipped_oversized)
-        else {
+        let Some(content) = read_bounded(
+            &canonical,
+            path,
+            &mut scanned,
+            &mut skipped_oversized,
+            &mut not_utf8,
+        ) else {
             continue;
         };
         let doc = EnvDocument::parse(&content);
@@ -437,7 +523,7 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
     }
 
     // --- stackdetect signals (root manifests, own byte caps) ------------
-    let stack_signals = stackdetect::detect(&canonical)?;
+    let (stack_signals, stack_counters) = stackdetect::detect_counted(&canonical)?;
     for sig in &stack_signals {
         let Some(provider) = &sig.provider else {
             continue;
@@ -472,8 +558,13 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
     // --- lockfile mentions (S5), bounded ---------------------------------
     for lockfile in LOCKFILES {
         let path = canonical.join(lockfile);
-        let Some(content) = read_bounded(&canonical, &path, &mut scanned, &mut skipped_oversized)
-        else {
+        let Some(content) = read_bounded(
+            &canonical,
+            &path,
+            &mut scanned,
+            &mut skipped_oversized,
+            &mut not_utf8,
+        ) else {
             continue;
         };
         for (provider, needle) in LOCKFILE_NEEDLES {
@@ -523,10 +614,13 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             "compose.yaml",
         ]
         .iter()
-        .any(|f| canonical.join(f).is_file()),
-        dockerfile: canonical.join("Dockerfile").is_file(),
-        devcontainer: canonical.join(".devcontainer").is_dir()
-            || canonical.join(".devcontainer.json").is_file(),
+        .any(|f| stackdetect::is_contained_file(&canonical, &canonical.join(f))),
+        // `is_file`/`is_dir` follow symlinks; containment checks keep a
+        // symlinked marker from asserting facts about content outside the
+        // selected folder (ZFT-002).
+        dockerfile: stackdetect::is_contained_file(&canonical, &canonical.join("Dockerfile")),
+        devcontainer: stackdetect::is_contained_dir(&canonical, &canonical.join(".devcontainer"))
+            || stackdetect::is_contained_file(&canonical, &canonical.join(".devcontainer.json")),
         dotenv_loader: None,
     };
     if let Some(pkg) = read_bounded(
@@ -534,6 +628,7 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
         &canonical.join("package.json"),
         &mut scanned,
         &mut skipped_oversized,
+        &mut not_utf8,
     ) {
         let has_loader = NODE_ENV_LOADERS
             .iter()
@@ -546,6 +641,7 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             &canonical.join(pyfile),
             &mut scanned,
             &mut skipped_oversized,
+            &mut not_utf8,
         ) {
             let has_loader = PYTHON_ENV_LOADERS.iter().any(|dep| content.contains(dep));
             project_signals.dotenv_loader =
@@ -686,12 +782,28 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             .then(a.provider_id.cmp(&b.provider_id))
     });
 
+    // One accounting across BOTH readers. `scanned_files` keeps its old
+    // meaning for compatibility but is now the true total, so the review
+    // screen can no longer print "0 file(s) read" over content that drove
+    // the plan.
+    let accounting = ScanAccounting {
+        read: scanned + stack_counters.read,
+        skipped_oversized: skipped_oversized
+            + stack_counters.skipped_oversized
+            + discovery.skipped_oversized.len() as u32,
+        skipped_outside_folder: stack_counters.skipped_outside_folder,
+        skipped_not_utf8: not_utf8 + stack_counters.skipped_not_utf8,
+        truncated: discovery.truncated.map(|t| t.describe().to_string()),
+        git_warnings: discovery.git_warnings,
+    };
+
     Ok(ProjectDetection {
         folder: canonical,
         providers: detections,
         env_files: env_summaries,
         project_signals,
-        scanned_files: scanned,
-        skipped_oversized,
+        scanned_files: accounting.read,
+        skipped_oversized: accounting.skipped_oversized,
+        accounting,
     })
 }

@@ -119,12 +119,204 @@ fn git_program() -> String {
     "git".to_string()
 }
 
+// ---------------------------------------------------------------------------
+// Execution hardening (ADR 0023)
+//
+// Git is not a passive reader. A repository's own `.git/config` — which an
+// attacker controls in any repository the user clones, extracts, or is
+// handed — can name programs that Git executes during commands that look
+// read-only: `core.fsmonitor` (ls-files, status, diff), external diff
+// drivers and textconv (log -p, show), pagers, editors, credential and
+// askpass helpers. `safe.directory` does not help: it only fires for
+// repositories owned by a *different* user, and a cloned repository is
+// owned by the user running the scan.
+//
+// Command-line `-c` beats every configuration file, so the overrides below
+// neutralize a hostile repository-local config as well as a hostile global
+// one. The environment scrub removes the variable-shaped equivalents plus
+// the loader hooks.
+//
+// This is defence in depth, not the primary control: the automatic scan
+// path spawns no Git at all (see `crate::gitsafe`). These protections
+// cover the deliberate, user-invoked secret scanner and history probe.
+// ---------------------------------------------------------------------------
+
+/// A path Git can open but that can never contain a hook or a config file.
+#[cfg(windows)]
+const NULL_PATH: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_PATH: &str = "/dev/null";
+
+/// `-c key=value` overrides applied to every Git invocation.
+///
+/// Each entry neutralizes one documented way repository or user
+/// configuration turns a Git command into a program launch. The list is
+/// pinned by `tests/git_execution_canaries.rs`, which plants an executable
+/// canary for each one and fails if it ever runs.
+fn hardened_config() -> Vec<String> {
+    vec![
+        // Runs a program on ls-files / status / diff. The ZFT-001 vector.
+        "core.fsmonitor=false".to_string(),
+        // Hooks: no command Tethra runs fires one today, but a future Git
+        // could, and the cost of pinning it is nil.
+        format!("core.hooksPath={NULL_PATH}"),
+        // Pager and editor: both are shell commands when set.
+        "core.pager=cat".to_string(),
+        "core.editor=".to_string(),
+        "sequence.editor=".to_string(),
+        // External diff drivers and textconv: run by `log -p` / `show`
+        // when `.gitattributes` (also attacker-controlled) assigns them.
+        "diff.external=".to_string(),
+        // Credential and askpass helpers: shell commands on any operation
+        // Git decides needs authentication.
+        "credential.helper=".to_string(),
+        "core.askPass=".to_string(),
+        // Transports that execute a helper program by name.
+        "protocol.ext.allow=never".to_string(),
+        "core.gitProxy=".to_string(),
+        "core.sshCommand=".to_string(),
+    ]
+}
+
+/// Environment variables that must not reach a Git child: the
+/// variable-shaped equivalents of the config above, the state variables
+/// that would redirect Git at another repository, and the dynamic-loader
+/// hooks that inject code into any process.
+const SCRUBBED_ENV: &[&str] = &[
+    "GIT_EXTERNAL_DIFF",
+    "GIT_DIFF_OPTS",
+    "GIT_PAGER",
+    "PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "EDITOR",
+    "VISUAL",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_ATTR_SOURCE",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+];
+
+/// Apply every hardening measure to a prepared command.
+///
+/// Public so the hooks module and any future Git caller share exactly one
+/// definition of "hardened" — there must never be a second, weaker spawn.
+pub fn harden(cmd: &mut Command) {
+    harden_execution_env(cmd);
+    harden_config_sources(cmd);
+}
+
+/// The part of the hardening every invocation gets, including the
+/// read-through one: remove the environment variables that name a program
+/// for Git (or the dynamic loader) to run, and the ones that would
+/// redirect Git at a different repository.
+fn harden_execution_env(cmd: &mut Command) {
+    // Never block on a prompt, never take an index lock we do not need.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.env("GIT_FLUSH", "1");
+    // A deterministic, minimal locale keeps stderr parsing stable.
+    cmd.env("LC_ALL", "C");
+    for var in SCRUBBED_ENV {
+        cmd.env_remove(var);
+    }
+    // `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` are pure injection — there
+    // is no legitimate reason for Tethra's parent process to set them — so
+    // they are cleared even on the read-through path. Clearing the count
+    // is what makes the pairs inert.
+    cmd.env("GIT_CONFIG_COUNT", "0");
+    for i in 0..64 {
+        cmd.env_remove(format!("GIT_CONFIG_KEY_{i}"));
+        cmd.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
+    }
+}
+
+/// Cut off the system and global configuration files.
+///
+/// A compromised `~/.gitconfig` or `/etc/gitconfig` must not be able to
+/// inject an executable value. Consequence, documented in
+/// `docs/activity-onboarding/KNOWN_LIMITATIONS.md`: `core.excludesFile`
+/// (the user's global ignore list) is not honoured by these commands.
+///
+/// Deliberately NOT applied by [`config_get`], whose contract is to report
+/// the value Git itself would use — including one set globally.
+fn harden_config_sources(cmd: &mut Command) {
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", NULL_PATH);
+    cmd.env("GIT_CONFIG_SYSTEM", NULL_PATH);
+}
+
+/// Arguments that must precede the subcommand on every invocation.
+fn hardened_leading_args() -> Vec<String> {
+    let mut out = vec!["--no-pager".to_string()];
+    for entry in hardened_config() {
+        out.push("-c".to_string());
+        out.push(entry);
+    }
+    out
+}
+
+/// How much of the hardening a given invocation may apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigPolicy {
+    /// Full hardening: config files isolated, every executable key
+    /// overridden. The default for everything.
+    Isolated,
+    /// Environment hardening and `--no-pager` only, with Git's real
+    /// configuration left intact.
+    ///
+    /// Exactly one caller needs this: [`config_get`], whose entire job is
+    /// to report the value Git itself would use. Overriding a key and then
+    /// reading it back would return Tethra's own placeholder — which is
+    /// how `hooks install` briefly tried to write a pre-commit hook into
+    /// `/dev/null`. `git config --get` reads and prints; it consults no
+    /// fsmonitor, runs no hook, filter or diff driver, and its pager is
+    /// suppressed, so leaving the values intact adds no execution surface.
+    ReadThrough,
+}
+
 fn spawn_git(repo: &Path, args: &[&str]) -> Result<Child> {
-    Command::new(git_program())
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .stdin(Stdio::null())
+    spawn_git_with(repo, args, ConfigPolicy::Isolated)
+}
+
+fn spawn_git_with(repo: &Path, args: &[&str], policy: ConfigPolicy) -> Result<Child> {
+    let mut cmd = Command::new(git_program());
+    harden_execution_env(&mut cmd);
+    if policy == ConfigPolicy::Isolated {
+        harden_config_sources(&mut cmd);
+    }
+    // A controlled working directory: the child must not inherit a cwd
+    // that has since been deleted, and must not pick up an unrelated
+    // enclosing repository. `-C` still selects the repository to operate
+    // on. Deliberately NOT the scanned repository itself: a cwd inside the
+    // target changes which configuration Git consults, which would mask
+    // the very vectors `tests/git_execution_canaries.rs` exists to catch.
+    cmd.current_dir(std::env::temp_dir());
+    // `--no-pager` and every `-c` override must come before `-C` and the
+    // subcommand; Git only accepts them as leading options.
+    match policy {
+        ConfigPolicy::Isolated => cmd.args(hardened_leading_args()),
+        ConfigPolicy::ReadThrough => cmd.arg("--no-pager"),
+    };
+    cmd.arg("-C").arg(repo);
+    cmd.args(args);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -215,7 +407,16 @@ fn timeout_error(args: &[&str], limits: &GitLimits) -> CoreError {
 /// overflow kills and reaps the child and returns a loud error — a bounded
 /// failure, never a hang and never silently-partial output.
 fn run_git_bounded(repo: &Path, args: &[&str], limits: &GitLimits) -> Result<GitCapture> {
-    let mut child = spawn_git(repo, args)?;
+    run_git_bounded_with(repo, args, limits, ConfigPolicy::Isolated)
+}
+
+fn run_git_bounded_with(
+    repo: &Path,
+    args: &[&str],
+    limits: &GitLimits,
+    policy: ConfigPolicy,
+) -> Result<GitCapture> {
+    let mut child = spawn_git_with(repo, args, policy)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let mut guard = ChildGuard(child);
@@ -281,10 +482,13 @@ pub(crate) fn run_git_probe(repo: &Path, args: &[&str]) -> Result<GitCapture> {
     run_git_bounded(repo, args, &GitLimits::command())
 }
 
-/// Whether `git` is usable.
+/// Whether `git` is usable. Hardened like every other invocation: even
+/// `--version` must not read a hostile global config.
 pub fn git_available() -> bool {
-    Command::new(git_program())
-        .arg("--version")
+    let mut cmd = Command::new(git_program());
+    harden(&mut cmd);
+    cmd.arg("--version")
+        .stdin(Stdio::null())
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -294,7 +498,14 @@ pub fn git_available() -> bool {
 /// local/global/system scopes, exactly the value git itself would use), or
 /// `None` when the key is unset. Errors only when git cannot run.
 pub fn config_get(repo: &Path, key: &str) -> Result<Option<String>> {
-    let out = run_git(repo, &["config", "--get", key])?;
+    // Read-through: this function exists to report the value Git itself
+    // would use, so it must not observe Tethra's own hardening overrides.
+    let out = run_git_bounded_with(
+        repo,
+        &["config", "--get", key],
+        &GitLimits::command(),
+        ConfigPolicy::ReadThrough,
+    )?;
     if out.success {
         return Ok(Some(
             String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -330,7 +541,15 @@ pub fn repo_root(path: &Path) -> Result<PathBuf> {
 pub fn staged_files(repo: &Path) -> Result<Vec<String>> {
     let out = run_git(
         repo,
-        &["diff", "--cached", "--name-only", "--diff-filter=ACM", "-z"],
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--diff-filter=ACM",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-z",
+        ],
     )?;
     if !out.success {
         return Err(CoreError::InvalidInput(
@@ -428,12 +647,18 @@ pub fn range_added_units_with_limits(
         }
     }
     let range = format!("{old}..{new}");
+    // `--no-ext-diff` and `--no-textconv` are load-bearing here: `log -p`
+    // is the one command Tethra runs that would honour a repository's
+    // `.gitattributes` diff driver or textconv filter, both of which name
+    // programs Git executes (ADR 0023).
     let args = [
         "log",
         "-p",
         "--no-color",
         "-U0",
         "--no-merges",
+        "--no-ext-diff",
+        "--no-textconv",
         "--end-of-options",
         range.as_str(),
     ];
@@ -450,7 +675,15 @@ pub fn history_added_units_with_limits(
     limits: &GitLimits,
 ) -> Result<HistoryScan> {
     let count = n.map(|c| format!("-n{c}"));
-    let mut args: Vec<&str> = vec!["log", "-p", "--no-color", "-U0", "--no-merges"];
+    let mut args: Vec<&str> = vec![
+        "log",
+        "-p",
+        "--no-color",
+        "-U0",
+        "--no-merges",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
     if let Some(c) = &count {
         args.push(c);
     } else {

@@ -64,9 +64,29 @@ fn write_stub(dir: &Path) -> PathBuf {
         &stub,
         r#"#!/bin/sh
 [ -n "$STUB_PID_FILE" ] && echo $$ > "$STUB_PID_FILE"
-# Invocations look like: git -C <repo> <subcommand> ...
-if [ "$3" = "rev-parse" ] && [ "$4" = "--show-toplevel" ]; then
-  echo "$2"
+# Invocations look like:
+#   git --no-pager -c k=v ... -C <repo> <subcommand> ...
+# The hardening options (ADR 0023) sit before `-C`, so the repository and
+# the subcommand are found by scanning argv rather than by position — a
+# positional stub would silently stop matching the moment the option list
+# changes, which is exactly how a fixture starts lying.
+REPO=""
+SUB=""
+SUBARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-pager) shift ;;
+    -c) shift 2 ;;
+    -C) REPO="$2"; shift 2 ;;
+    *)
+      SUB="$1"; shift
+      SUBARG="$1"
+      break
+      ;;
+  esac
+done
+if [ "$SUB" = "rev-parse" ] && [ "$SUBARG" = "--show-toplevel" ]; then
+  echo "$REPO"
   exit 0
 fi
 case "$STUB_MODE" in

@@ -60,12 +60,78 @@ pub struct DetectionReport {
     pub suggestions: Vec<StackSuggestion>,
 }
 
-fn read_bounded(path: &Path) -> Option<String> {
-    let meta = std::fs::metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > MAX_FILE_BYTES {
+/// Honest counters for one detection pass. Every file the pass touched is
+/// accounted for in exactly one bucket — nothing is silently dropped
+/// (ZFT-002, ZFT-003, ZFT-040).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ScanCounters {
+    /// Files read in full.
+    pub read: u32,
+    /// Files refused because they exceeded [`MAX_FILE_BYTES`]. Their bytes
+    /// were never loaded.
+    pub skipped_oversized: u32,
+    /// Files refused because they are a symlink, or resolve outside the
+    /// selected folder.
+    pub skipped_outside_folder: u32,
+    /// Files that exist and are in bounds but are not valid UTF-8.
+    pub skipped_not_utf8: u32,
+}
+
+/// Read a file that must live under `root`.
+///
+/// Three refusals, in order, before any byte is read:
+///
+/// 1. the final component is a **symlink** — it could point anywhere, and
+///    `metadata()` would silently follow it;
+/// 2. the canonical path is **not under `root`** — this catches a symlinked
+///    parent directory and a `..` escape;
+/// 3. the file is **over the byte cap**.
+///
+/// The previous implementation used `std::fs::metadata`, which follows
+/// symlinks, with no containment check at all: a symlinked `package.json`
+/// pointing outside the selected folder was read and its dependencies
+/// became auto-selected providers (ZFT-002).
+///
+/// A hardlink to a file outside the folder is indistinguishable from a
+/// real file inside it at the filesystem level and is therefore still
+/// read; that residual is recorded in
+/// `docs/activity-onboarding/KNOWN_LIMITATIONS.md`.
+fn read_bounded(root: &Path, path: &Path, counters: &mut ScanCounters) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if meta.file_type().is_symlink() {
+        counters.skipped_outside_folder += 1;
         return None;
     }
-    std::fs::read_to_string(path).ok()
+    if !meta.is_file() {
+        return None;
+    }
+    match path.canonicalize() {
+        Ok(canon) if canon.starts_with(root) => {}
+        Ok(_) => {
+            counters.skipped_outside_folder += 1;
+            return None;
+        }
+        Err(_) => return None,
+    }
+    if meta.len() > MAX_FILE_BYTES {
+        counters.skipped_oversized += 1;
+        return None;
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => {
+                counters.read += 1;
+                Some(text)
+            }
+            Err(_) => {
+                // Not valid UTF-8: a binary file under a manifest's name.
+                // Counted, never silently dropped.
+                counters.skipped_not_utf8 += 1;
+                None
+            }
+        },
+        Err(_) => None,
+    }
 }
 
 fn provider_template(provider: &str) -> Option<&'static str> {
@@ -122,8 +188,8 @@ fn push(
     });
 }
 
-fn scan_package_json(repo: &Path, out: &mut Vec<StackSignal>) {
-    let Some(text) = read_bounded(&repo.join("package.json")) else {
+fn scan_package_json(repo: &Path, out: &mut Vec<StackSignal>, counters: &mut ScanCounters) {
+    let Some(text) = read_bounded(repo, &repo.join("package.json"), counters) else {
         return;
     };
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -147,10 +213,10 @@ fn scan_package_json(repo: &Path, out: &mut Vec<StackSignal>) {
     }
 }
 
-fn scan_python_manifests(repo: &Path, out: &mut Vec<StackSignal>) {
+fn scan_python_manifests(repo: &Path, out: &mut Vec<StackSignal>, counters: &mut ScanCounters) {
     // requirements.txt: one requirement per line; the package name is the
     // leading token before any version specifier or extra.
-    if let Some(text) = read_bounded(&repo.join("requirements.txt")) {
+    if let Some(text) = read_bounded(repo, &repo.join("requirements.txt"), counters) {
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') || line.starts_with('-') {
@@ -175,7 +241,7 @@ fn scan_python_manifests(repo: &Path, out: &mut Vec<StackSignal>) {
     // pyproject.toml: look for the dependency name as a quoted token on a
     // line inside a dependencies-ish context. Parsed leniently but
     // line-anchored so a mention in prose does not count.
-    if let Some(text) = read_bounded(&repo.join("pyproject.toml")) {
+    if let Some(text) = read_bounded(repo, &repo.join("pyproject.toml"), counters) {
         for line in text.lines() {
             let l = line.trim();
             for name in [
@@ -207,14 +273,41 @@ fn scan_python_manifests(repo: &Path, out: &mut Vec<StackSignal>) {
     }
 }
 
-fn scan_config_files(repo: &Path, out: &mut Vec<StackSignal>) {
+/// Whether `path` is a real file that lives under `root`.
+///
+/// `Path::is_file` follows symlinks, so a symlinked `next.config.js`
+/// pointing outside the selected folder would otherwise become evidence
+/// about content the user did not choose to expose.
+pub fn is_contained_file(root: &Path, path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => path
+            .canonicalize()
+            .map(|c| c.starts_with(root))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Whether `path` is a real directory that lives under `root`.
+pub fn is_contained_dir(root: &Path, path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => path
+            .canonicalize()
+            .map(|c| c.starts_with(root))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn scan_config_files(repo: &Path, out: &mut Vec<StackSignal>, counters: &mut ScanCounters) {
+    let _ = &counters;
     for name in [
         "next.config.js",
         "next.config.mjs",
         "next.config.ts",
         "vercel.json",
     ] {
-        if repo.join(name).is_file() {
+        if is_contained_file(repo, &repo.join(name)) {
             push(
                 out,
                 name,
@@ -268,7 +361,7 @@ fn scan_config_files(repo: &Path, out: &mut Vec<StackSignal>) {
 /// `.env`-style files: variable NAMES only, matched against the provider
 /// manifests' known secret-bearing variables. Values never leave the
 /// parser's redacting wrappers.
-fn scan_env_names(repo: &Path, out: &mut Vec<StackSignal>) {
+fn scan_env_names(repo: &Path, out: &mut Vec<StackSignal>, counters: &mut ScanCounters) {
     let manifests = crate::providers::manifests();
     let Ok(entries) = std::fs::read_dir(repo) else {
         return;
@@ -278,7 +371,7 @@ fn scan_env_names(repo: &Path, out: &mut Vec<StackSignal>) {
         if !name.starts_with(".env") {
             continue;
         }
-        let Some(text) = read_bounded(&entry.path()) else {
+        let Some(text) = read_bounded(repo, &entry.path(), counters) else {
             continue;
         };
         let parsed = crate::envfile::EnvDocument::parse(&text);
@@ -298,14 +391,27 @@ fn scan_env_names(repo: &Path, out: &mut Vec<StackSignal>) {
     }
 }
 
-/// Detect signals in one repository. Pure reads; nothing is executed.
+/// Detect signals in one repository. Pure reads; nothing is executed, and
+/// nothing outside the repository is read.
 pub fn detect(repo: &Path) -> Result<Vec<StackSignal>> {
+    Ok(detect_counted(repo)?.0)
+}
+
+/// [`detect`], plus the honest per-file accounting the review screen needs
+/// so a folder whose manifests were all refused cannot report a clean scan.
+pub fn detect_counted(repo: &Path) -> Result<(Vec<StackSignal>, ScanCounters)> {
+    // Canonicalize once: every containment decision below compares against
+    // this, so a symlinked ancestor cannot widen the scan.
+    let root = repo.canonicalize().map_err(|e| {
+        crate::error::CoreError::InvalidInput(format!("cannot access {}: {e}", repo.display()))
+    })?;
     let mut out = Vec::new();
-    scan_package_json(repo, &mut out);
-    scan_python_manifests(repo, &mut out);
-    scan_config_files(repo, &mut out);
-    scan_env_names(repo, &mut out);
-    Ok(out)
+    let mut counters = ScanCounters::default();
+    scan_package_json(&root, &mut out, &mut counters);
+    scan_python_manifests(&root, &mut out, &mut counters);
+    scan_config_files(&root, &mut out, &mut counters);
+    scan_env_names(&root, &mut out, &mut counters);
+    Ok((out, counters))
 }
 
 fn conf_rank(c: Confidence) -> u8 {

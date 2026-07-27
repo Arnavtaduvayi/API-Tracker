@@ -39,6 +39,7 @@ pub mod envfile;
 pub mod envgov;
 pub mod error;
 pub mod gitrepo;
+pub mod gitsafe;
 pub mod hooks;
 pub mod http;
 pub mod inject;
