@@ -37,16 +37,96 @@ use crate::store;
 /// The current `prior_env_json` document version.
 const PRIOR_ENV_VERSION: u32 = 1;
 
+/// Refuse a restore record written by a NEWER build.
+///
+/// `prior_env_json` records what a file looked like before linking, and a
+/// future version may change what the fields mean. Restoring a v2 document
+/// under v1 rules could half-restore a file and then delete the record. The
+/// version was serialized from the start but never checked; failing closed
+/// is the only safe reading of an unknown one.
+fn check_prior_env_version(v: u32) -> Result<()> {
+    if v > PRIOR_ENV_VERSION {
+        return Err(CoreError::Unsupported {
+            provider: "gateway".into(),
+            capability: "env restore record",
+            hint: format!(
+                "this project's saved .env restore record is version {v}, but this \
+                 build understands up to {PRIOR_ENV_VERSION}. Upgrade Tethra to unlink \
+                 this project; the record is left untouched."
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// What one linked variable looked like before the writer touched it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PriorVar {
     pub key: String,
-    /// The value before linking; `None` when the variable did not exist.
-    /// Base URLs and proxy lists are treated as non-secret configuration —
-    /// this is what makes exact restore possible (D9).
+    /// The value before linking; `None` when the variable did not exist OR
+    /// when it did not look like non-secret configuration (see
+    /// `prior_withheld`). `prior_env_json` is a PLAINTEXT column, so only
+    /// values that are safe there are recorded (D9).
     pub prior: Option<String>,
+    /// The variable existed but its value was NOT recorded, because it did
+    /// not look like a base URL or proxy list — `--var` accepts any name, so
+    /// the prior value can be an API key, and a base URL can carry userinfo.
+    /// Restore reports this honestly instead of silently writing nothing.
+    #[serde(default)]
+    pub prior_withheld: bool,
     /// What the writer wrote, so restore can tell a user edit from its own.
     pub written: String,
+    /// Every occurrence's prior value, in file order, when the key appeared
+    /// more than once. `EnvDocument::get` is last-wins but `set` rewrites
+    /// ALL occurrences, so a single recorded value would restore
+    /// `KEY=a` … `KEY=b` as `KEY=b` … `KEY=b`, destroying the first one.
+    /// Empty for the ordinary single-occurrence case; additive, so records
+    /// written by earlier builds still restore exactly as they did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_all: Vec<String>,
+}
+
+/// Whether a prior `.env` value is safe to record in the plaintext
+/// `prior_env_json` column.
+///
+/// Deliberately a strict allowlist rather than a secret-detector: the column
+/// is plaintext and the cost of being wrong is a stored credential, while the
+/// cost of being conservative is one line the user restores by hand. A value
+/// qualifies only if it is an `http`/`https` URL with no userinfo, or a
+/// proxy-list-shaped value (comma-separated hosts/IPs/suffixes).
+pub fn prior_value_is_recordable(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return true;
+    }
+    if let Some(rest) = v
+        .strip_prefix("http://")
+        .or_else(|| v.strip_prefix("https://"))
+    {
+        // `user:pass@host` in a base URL is a credential.
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        return !authority.contains('@');
+    }
+    // A NO_PROXY-style list: hosts, IPs, dotted suffixes, optional ports.
+    // Every part must LOOK like a host — dotted, bracketed IPv6, or one of
+    // the bare loopback names. A bare token of allowed characters is not
+    // enough: `sk-proj-...` is exactly that shape.
+    v.split(',').all(|part| {
+        let p = part.trim().trim_start_matches('.');
+        if p.is_empty() || p.len() > 255 {
+            return false;
+        }
+        if !p
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']' | '*'))
+        {
+            return false;
+        }
+        p.eq_ignore_ascii_case("localhost")
+            || p.starts_with('[')
+            || p.contains('.')
+            || p.contains(':')
+    })
 }
 
 /// Everything the writer changed in one file.
@@ -92,6 +172,10 @@ pub enum LinkWarning {
     /// The variable already had a value; it is recorded and will be restored
     /// on unlink.
     ExistingValueRecorded { path: String, key: String },
+    /// The variable already had a value that does NOT look like a base URL
+    /// or proxy list — so it is not recorded in the plaintext restore record
+    /// and cannot be restored automatically. Write it down before linking.
+    PriorValueWithheld { path: String, key: String },
     /// The file has duplicate definitions of a written key; every occurrence
     /// is repointed (dotenv loaders read the last one).
     DuplicateKey { path: String, key: String },
@@ -449,24 +533,46 @@ fn plan_file(
     let mut prior_vars = Vec::new();
     for var in vars {
         let existing = doc.get(var).map(|e| e.value.expose().to_string());
+        // `prior_env_json` is plaintext. `--var` accepts ANY variable name,
+        // and a declared base-URL variable can hold a URL with embedded
+        // credentials, so a prior value is only recorded when it looks like
+        // non-secret configuration.
+        let recordable = existing.as_deref().is_none_or(prior_value_is_recordable);
         if let Some(prior) = &existing {
-            if prior != base_url {
+            if !recordable {
+                warnings.push(LinkWarning::PriorValueWithheld {
+                    path: path_str.clone(),
+                    key: var.clone(),
+                });
+            } else if prior != base_url {
                 warnings.push(LinkWarning::ExistingValueRecorded {
                     path: path_str.clone(),
                     key: var.clone(),
                 });
             }
         }
-        let occurrences = doc.entries().filter(|e| &e.key == var).count();
-        if occurrences > 1 {
+        let all: Vec<String> = doc
+            .entries()
+            .filter(|e| &e.key == var)
+            .map(|e| e.value.expose().to_string())
+            .collect();
+        if all.len() > 1 {
             warnings.push(LinkWarning::DuplicateKey {
                 path: path_str.clone(),
                 key: var.clone(),
             });
         }
+        let prior_all =
+            if all.len() > 1 && recordable && all.iter().all(|v| prior_value_is_recordable(v)) {
+                all
+            } else {
+                Vec::new()
+            };
         prior_vars.push(PriorVar {
             key: var.clone(),
-            prior: existing,
+            prior_withheld: existing.is_some() && !recordable,
+            prior: if recordable { existing } else { None },
+            prior_all,
             written: base_url.to_string(),
         });
         doc.set_with_comment(var, SecretString::new(base_url.to_string()), marker);
@@ -482,6 +588,8 @@ fn plan_file(
         prior_vars.push(PriorVar {
             key: "NO_PROXY".into(),
             prior: None,
+            prior_withheld: false,
+            prior_all: Vec::new(),
             written: NO_PROXY_ENTRIES.join(","),
         });
         doc.set_with_comment(
@@ -500,6 +608,8 @@ fn plan_file(
                 prior_vars.push(PriorVar {
                     key: key.clone(),
                     prior: Some(current),
+                    prior_withheld: false,
+                    prior_all: Vec::new(),
                     written: extended.clone(),
                 });
                 doc.set(&key, SecretString::new(extended));
@@ -690,6 +800,7 @@ fn existing_prior(conn: &Connection, slug: &str) -> Result<Vec<PriorFile>> {
         return Ok(Vec::new());
     };
     let parsed: PriorEnv = serde_json::from_str(&json).map_err(CoreError::Serde)?;
+    check_prior_env_version(parsed.v)?;
     Ok(parsed.files)
 }
 
@@ -735,6 +846,14 @@ pub enum RestoreOutcome {
     AlreadyRestored { path: String, key: String },
     /// The file is gone; nothing to restore in it.
     FileMissing { path: String },
+    /// A `.env` the link itself created was removed on restore, because
+    /// nothing but the writer's own lines was ever in it.
+    CreatedFileRemoved { path: String },
+    /// The variable's prior value was never recorded (it did not look like
+    /// non-secret configuration, so it was kept out of the plaintext restore
+    /// record). The gateway line is left in place rather than deleted —
+    /// restoring it is a manual step.
+    PriorNotRecorded { path: String, key: String },
     /// The file could not be read or written.
     Failed {
         path: String,
@@ -773,6 +892,7 @@ pub fn unlink(conn: &Connection, project_id: &str, route_prefix: &str) -> Result
 
     if let Some(json) = &link.prior_env_json {
         let prior: PriorEnv = serde_json::from_str(json).map_err(CoreError::Serde)?;
+        check_prior_env_version(prior.v)?;
         for file in &prior.files {
             restore_file(file, &mut outcomes, &mut any_failure);
         }
@@ -805,11 +925,43 @@ pub fn unlink(conn: &Connection, project_id: &str, route_prefix: &str) -> Result
 
 fn restore_file(file: &PriorFile, outcomes: &mut Vec<RestoreOutcome>, any_failure: &mut bool) {
     let path = Path::new(&file.path);
-    if !path.exists() {
-        outcomes.push(RestoreOutcome::FileMissing {
-            path: file.path.clone(),
-        });
-        return;
+    // `exists()` is false for ANY metadata error — a permission change on the
+    // parent directory, an unmounted volume, an fd-exhausted process. Treating
+    // those as "the user deleted it" would drop the restore record (the only
+    // copy of the prior values) permanently, so only a genuine NotFound is
+    // allowed to be terminal; everything else keeps the row for a retry.
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            // Link time REFUSES a symlink because an atomic rename replaces
+            // the link rather than its target. The same must hold here: a
+            // file that became a symlink after linking must not have that
+            // link silently destroyed by the restore.
+            *any_failure = true;
+            outcomes.push(RestoreOutcome::Failed {
+                path: file.path.clone(),
+                key: String::new(),
+                error: "the file is now a symlink; refusing to replace it \
+                        (restore the target file by hand, then unlink again)"
+                    .into(),
+            });
+            return;
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            outcomes.push(RestoreOutcome::FileMissing {
+                path: file.path.clone(),
+            });
+            return;
+        }
+        Err(e) => {
+            *any_failure = true;
+            outcomes.push(RestoreOutcome::Failed {
+                path: file.path.clone(),
+                key: String::new(),
+                error: e.to_string(),
+            });
+            return;
+        }
     }
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -832,11 +984,24 @@ fn restore_file(file: &PriorFile, outcomes: &mut Vec<RestoreOutcome>, any_failur
                 path: file.path.clone(),
                 key: var.key.clone(),
             }),
+            (Some(cur), _) if *cur == var.written && var.prior_withheld => {
+                // The prior value was deliberately not recorded (it did not
+                // look like non-secret configuration). Say so; do NOT delete
+                // the line, which would destroy what is still there.
+                outcomes.push(RestoreOutcome::PriorNotRecorded {
+                    path: file.path.clone(),
+                    key: var.key.clone(),
+                });
+            }
             (Some(cur), prior) if *cur == var.written => {
                 // Still exactly what the writer wrote: restore.
                 match prior {
                     Some(p) => {
-                        doc.set(&var.key, SecretString::new(p.clone()));
+                        if var.prior_all.len() > 1 {
+                            doc.set_each_occurrence(&var.key, &var.prior_all);
+                        } else {
+                            doc.set(&var.key, SecretString::new(p.clone()));
+                        }
                         doc.remove_marker_above(&var.key);
                     }
                     None => {
@@ -867,6 +1032,27 @@ fn restore_file(file: &PriorFile, outcomes: &mut Vec<RestoreOutcome>, any_failur
         }
     }
     if changed {
+        // A file the LINK created, with nothing left in it, is removed —
+        // `PriorFile.existed` promised exactly that and nothing read it, so
+        // linking a project with no .env left an empty file behind forever.
+        // "Nothing left" means no entries at all: any variable the user
+        // added after linking keeps the file.
+        if !file.existed && doc.entries().next().is_none() {
+            match std::fs::remove_file(path) {
+                Ok(()) => outcomes.push(RestoreOutcome::CreatedFileRemoved {
+                    path: file.path.clone(),
+                }),
+                Err(e) => {
+                    *any_failure = true;
+                    outcomes.push(RestoreOutcome::Failed {
+                        path: file.path.clone(),
+                        key: String::new(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+            return;
+        }
         if let Err(e) = envgov::atomic_write(path, &doc.render()) {
             *any_failure = true;
             outcomes.push(RestoreOutcome::Failed {

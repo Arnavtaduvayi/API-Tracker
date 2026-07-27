@@ -491,3 +491,215 @@ fn unlink_reports_missing_files_and_still_completes() {
         .unwrap()
         .is_none());
 }
+
+/// A prior value that does not look like non-secret configuration is NOT
+/// written into the plaintext `prior_env_json` column, and the user is told.
+///
+/// `--var` accepts any variable name, so the "base URLs and proxy lists are
+/// non-secret configuration" assumption that makes exact restore safe does
+/// not hold for an arbitrary override.
+#[test]
+fn a_secret_looking_prior_value_is_never_stored_in_plaintext() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_API_KEY=sk-proj-CANARYSECRET000000000000\n").unwrap();
+    let conn = linkable(dir.path());
+    let mut req = request(&env, Some(dir.path().to_path_buf()));
+    req.var_override = Some("OPENAI_API_KEY".into());
+
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+    let file = &plan.files[0];
+
+    let recorded = serde_json::to_string(&file.prior).unwrap();
+    assert!(
+        !recorded.contains("CANARYSECRET"),
+        "the prior value must not reach the plaintext restore record: {recorded}"
+    );
+    assert!(
+        file.prior
+            .vars
+            .iter()
+            .any(|v| v.key == "OPENAI_API_KEY" && v.prior.is_none() && v.prior_withheld),
+        "and it must be marked withheld, not silently absent"
+    );
+    assert!(
+        file.warnings
+            .iter()
+            .any(|w| matches!(w, LinkWarning::PriorValueWithheld { .. })),
+        "the user must be warned they cannot rely on automatic restore: {:?}",
+        file.warnings
+    );
+    assert!(
+        !file.diff.contains("CANARYSECRET"),
+        "the consent diff must not print the prior secret: {}",
+        file.diff
+    );
+}
+
+/// The same protection for a base URL that carries embedded credentials —
+/// this one needs no `--var` at all.
+#[test]
+fn a_base_url_with_embedded_credentials_is_withheld_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(
+        &env,
+        "OPENAI_BASE_URL=https://user:CANARYPASSWORD@proxy.internal-host.net/v1\n",
+    )
+    .unwrap();
+    let conn = linkable(dir.path());
+    let plan = envlink::plan_link(&conn, &request(&env, Some(dir.path().to_path_buf()))).unwrap();
+    let recorded = serde_json::to_string(&plan.files[0].prior).unwrap();
+    assert!(!recorded.contains("CANARYPASSWORD"), "{recorded}");
+    assert!(!plan.files[0].diff.contains("CANARYPASSWORD"));
+}
+
+/// An ordinary base URL still records and restores exactly — the withholding
+/// rule must not break the normal path.
+#[test]
+fn an_ordinary_prior_base_url_is_still_recorded_and_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_BASE_URL=https://api.openai.com/v1\n").unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+    envlink::unlink(&conn, "p1", "openai").unwrap();
+    assert!(std::fs::read_to_string(&env)
+        .unwrap()
+        .contains("OPENAI_BASE_URL=https://api.openai.com/v1"));
+}
+
+/// Duplicate definitions restore to their OWN prior values. `EnvDocument::get`
+/// is last-wins but `set` rewrites every occurrence, so recording a single
+/// value turned `KEY=a` … `KEY=b` into `KEY=b` … `KEY=b` on restore.
+#[test]
+fn duplicate_definitions_each_restore_to_their_own_prior_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(
+        &env,
+        "OPENAI_BASE_URL=https://first.example.com/v1\nOTHER=x\n\
+         OPENAI_BASE_URL=https://second.example.com/v1\n",
+    )
+    .unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+    envlink::unlink(&conn, "p1", "openai").unwrap();
+
+    let restored = std::fs::read_to_string(&env).unwrap();
+    assert!(
+        restored.contains("OPENAI_BASE_URL=https://first.example.com/v1"),
+        "the FIRST occurrence's own value must come back: {restored}"
+    );
+    assert!(
+        restored.contains("OPENAI_BASE_URL=https://second.example.com/v1"),
+        "and so must the second's: {restored}"
+    );
+}
+
+/// A `.env` the link CREATED is removed on restore when nothing else was
+/// added to it — `PriorFile.existed` promised that and nothing read it.
+#[test]
+fn a_created_env_file_is_removed_on_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+    assert!(env.exists(), "precondition: the link created the file");
+
+    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    assert!(
+        !env.exists(),
+        "a file the link created, with nothing else in it, must not be left behind"
+    );
+    assert!(report
+        .outcomes
+        .iter()
+        .any(|o| matches!(o, RestoreOutcome::CreatedFileRemoved { .. })));
+}
+
+/// ...but a created file the USER later added to is kept.
+#[test]
+fn a_created_env_file_the_user_added_to_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+    let mut content = std::fs::read_to_string(&env).unwrap();
+    content.push_str("MY_OWN_SETTING=1\n");
+    std::fs::write(&env, content).unwrap();
+
+    envlink::unlink(&conn, "p1", "openai").unwrap();
+    assert!(env.exists(), "the user's own content must survive");
+    assert!(std::fs::read_to_string(&env)
+        .unwrap()
+        .contains("MY_OWN_SETTING=1"));
+}
+
+/// A restore record from a NEWER build is refused rather than half-applied.
+#[test]
+fn a_future_version_restore_record_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_BASE_URL=https://api.openai.com/v1\n").unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+    conn.execute(
+        "UPDATE gateway_project_links
+         SET prior_env_json = replace(prior_env_json, \'\"v\":1\', \'\"v\":99\')",
+        [],
+    )
+    .unwrap();
+
+    let err = envlink::unlink(&conn, "p1", "openai").unwrap_err();
+    let text = format!("{err:?}");
+    assert!(
+        text.contains("99"),
+        "must name the version it found: {text}"
+    );
+    assert!(
+        std::fs::read_to_string(&env).unwrap().contains("127.0.0.1"),
+        "the file must be left untouched for a newer build to restore"
+    );
+}
+
+/// A file that became a SYMLINK after linking is not silently replaced. Link
+/// time refuses a symlink because an atomic rename replaces the link rather
+/// than its target; restore must hold the same line.
+#[cfg(unix)]
+#[test]
+fn restore_refuses_to_replace_a_file_that_became_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_BASE_URL=https://api.openai.com/v1\n").unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+
+    // The user migrates to a shared dotfile setup after linking.
+    let real = dir.path().join("shared.env");
+    std::fs::rename(&env, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &env).unwrap();
+
+    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    assert!(
+        !report.complete,
+        "a refused restore must keep the link row so it can be retried"
+    );
+    assert!(
+        std::fs::symlink_metadata(&env)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink must survive"
+    );
+    assert!(report.outcomes.iter().any(|o| matches!(
+        o,
+        RestoreOutcome::Failed { error, .. } if error.contains("symlink")
+    )));
+}

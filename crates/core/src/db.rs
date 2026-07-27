@@ -992,6 +992,19 @@ CREATE TABLE gateway_route_counters (
 ALTER TABLE runtime_request_events ADD COLUMN attribution_method TEXT;
 "#,
     },
+    Migration {
+        version: 14,
+        name: "index gateway_usage_events.event_id (FK-scan cost)",
+        sql: r#"
+-- `gateway_usage_events.event_id` REFERENCES runtime_request_events(id) with
+-- ON DELETE SET NULL, and foreign keys are enforced on every connection — so
+-- with no index on the child key, SQLite full-scans gateway_usage_events once
+-- PER deleted parent row. That fires on the hot path: the gateway's own
+-- writer runs `retention::sweep` every 5 minutes, deleting a whole cohort of
+-- expired runtime events at a time.
+CREATE INDEX IF NOT EXISTS idx_gue_event ON gateway_usage_events(event_id);
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

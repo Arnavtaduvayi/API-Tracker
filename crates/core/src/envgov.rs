@@ -287,11 +287,18 @@ pub fn render_diff(label: &str, old: &str, new: &str) -> String {
     render_diff_with_unmasked(label, old, new, &[])
 }
 
-/// [`render_diff`] with an allowlist of keys whose values print VERBATIM.
-/// The gateway `.env` writer must show its own lines unmasked (ADR 0019 D9:
-/// the user is approving an exact base URL — a masked loopback URL would
-/// hide the very thing being consented to); every other line keeps the
-/// masking treatment.
+/// [`render_diff`] with an allowlist of keys whose values print VERBATIM
+/// **on added lines only**.
+///
+/// The gateway `.env` writer must show the lines it is ADDING unmasked (ADR
+/// 0019 D9: the user is approving an exact base URL, and a masked loopback
+/// URL would hide the very thing being consented to). Removed and context
+/// lines are always masked, whatever their key: the allowlist says "I am
+/// about to write this value", not "whatever was previously under this name
+/// is safe to print". A prior value under an allowlisted key is arbitrary
+/// user content — `--var OPENAI_API_KEY`, or a base URL with embedded
+/// credentials — and printing it unmasked would leak a secret to the
+/// terminal and its scrollback.
 pub fn render_diff_with_unmasked(
     label: &str,
     old: &str,
@@ -301,7 +308,8 @@ pub fn render_diff_with_unmasked(
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut out = format!("--- {label} (current)\n+++ {label} (proposed)\n");
-    let mask_assignment = |line: &str| -> String {
+    let masked = |line: &str| -> String { mask_assignment(line) };
+    let unmasked_if_allowed = |line: &str| -> String {
         if let Some(eq) = line.find('=') {
             let key = line[..eq].trim().trim_start_matches("export ").trim();
             if unmasked_keys.contains(&key) {
@@ -326,16 +334,16 @@ pub fn render_diff_with_unmasked(
         .min(old_lines.len().saturating_sub(common_prefix))
         .min(new_lines.len().saturating_sub(common_prefix));
     for line in &old_lines[..common_prefix] {
-        out.push_str(&format!("  {}\n", mask_assignment(line)));
+        out.push_str(&format!("  {}\n", masked(line)));
     }
     for line in &old_lines[common_prefix..old_lines.len() - common_suffix] {
-        out.push_str(&format!("- {}\n", mask_assignment(line)));
+        out.push_str(&format!("- {}\n", masked(line)));
     }
     for line in &new_lines[common_prefix..new_lines.len() - common_suffix] {
-        out.push_str(&format!("+ {}\n", mask_assignment(line)));
+        out.push_str(&format!("+ {}\n", unmasked_if_allowed(line)));
     }
     for line in &old_lines[old_lines.len() - common_suffix..] {
-        out.push_str(&format!("  {}\n", mask_assignment(line)));
+        out.push_str(&format!("  {}\n", masked(line)));
     }
     out
 }
@@ -629,6 +637,38 @@ pub fn gitignore_protects(repo_dir: &Path, rel: &str) -> GitStatus {
 
 #[cfg(test)]
 mod tests {
+    /// The allowlist means "show what I am about to WRITE", never "whatever
+    /// was previously under this name is safe to print". `--var` accepts any
+    /// variable name, so a prior value under an allowlisted key can be an API
+    /// key — and a declared base-URL variable can hold a URL with userinfo.
+    #[test]
+    fn unmasked_keys_never_unmask_the_removed_side_of_the_diff() {
+        let old = "OPENAI_BASE_URL=https://user:SUPERSECRET-CANARY@api.openai.com/v1\n";
+        let new = "OPENAI_BASE_URL=http://127.0.0.1:49723/openai\n";
+        let diff = render_diff_with_unmasked("/p/.env", old, new, &["OPENAI_BASE_URL"]);
+        assert!(
+            !diff.contains("SUPERSECRET-CANARY"),
+            "a prior value must never print verbatim: {diff}"
+        );
+        assert!(
+            diff.contains("+ OPENAI_BASE_URL=http://127.0.0.1:49723/openai"),
+            "the value being WRITTEN must print verbatim so consent is exact: {diff}"
+        );
+    }
+
+    /// Context (unchanged) lines are masked too — an allowlisted key that is
+    /// not being changed is not being consented to.
+    #[test]
+    fn unmasked_keys_do_not_unmask_context_lines() {
+        let old = "NO_PROXY=CANARY-NOT-A-PROXY-LIST\nA=1\n";
+        let new = "NO_PROXY=CANARY-NOT-A-PROXY-LIST\nA=2\n";
+        let diff = render_diff_with_unmasked("/p/.env", old, new, &["NO_PROXY"]);
+        assert!(
+            !diff.contains("CANARY-NOT-A-PROXY-LIST"),
+            "unchanged lines stay masked: {diff}"
+        );
+    }
+
     use super::*;
     use std::process::Command;
 

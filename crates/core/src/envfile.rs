@@ -409,6 +409,28 @@ impl EnvDocument {
         }
     }
 
+    /// Restore each occurrence of `key` to its own recorded value, in file
+    /// order. [`set`] deliberately writes ONE value to every occurrence, which
+    /// is right for linking (all occurrences must point at the gateway) and
+    /// wrong for restoring (each occurrence had its own prior value). Extra
+    /// occurrences beyond `values` keep the last supplied value, so the
+    /// method is total even if the file gained a duplicate after linking.
+    pub fn set_each_occurrence(&mut self, key: &str, values: &[String]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut i = 0usize;
+        for line in &mut self.lines {
+            if let EnvLine::Entry(entry) = line {
+                if entry.key == key {
+                    let v = values.get(i).unwrap_or(&values[values.len() - 1]);
+                    entry.set_value(SecretString::new(v.clone()));
+                    i += 1;
+                }
+            }
+        }
+    }
+
     /// Remove every occurrence of `key`. Returns whether anything was removed.
     pub fn remove(&mut self, key: &str) -> bool {
         let before = self.lines.len();

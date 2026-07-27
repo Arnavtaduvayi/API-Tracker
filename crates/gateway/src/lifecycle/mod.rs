@@ -325,9 +325,19 @@ impl Lifecycle {
         fresh_byte_write(source_binary, &target)?;
         self.manager.prepare_binary(&target)?;
         std::fs::create_dir_all(logs_dir(&self.data_dir)).map_err(CoreError::Io)?;
+        // Whether a service is ALREADY running decides start vs restart: on
+        // an upgrade, `start` leaves the old process alive against the old
+        // binary — which `prune_old_binaries` is about to delete. Query
+        // before re-registering, since registering can itself change the
+        // answer.
+        let was_running = self.manager.query().running;
         self.manager.write_definition(&target)?;
         self.manager.register()?;
-        self.manager.start()?;
+        if was_running {
+            self.manager.restart()?;
+        } else {
+            self.manager.start()?;
+        }
         let pruned = self.prune_old_binaries(&target)?;
         Ok(InstallReport {
             binary: target.display().to_string(),

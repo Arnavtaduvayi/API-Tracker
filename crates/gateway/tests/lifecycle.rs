@@ -22,6 +22,12 @@ struct MockRunner {
     /// args == ["gateway", "service-probe"].
     fail_probe: bool,
     launchctl_print_running: Mutex<bool>,
+    /// Make `launchctl bootstrap` report the already-loaded case, as it does
+    /// on every upgrade of a service that is already registered.
+    already_bootstrapped: bool,
+    /// Model the post-bootout world: `kickstart` cannot find a label that has
+    /// been booted out, until a `bootstrap` puts it back.
+    kickstart_fails_until_bootstrap: Mutex<bool>,
 }
 
 impl MockRunner {
@@ -61,6 +67,45 @@ impl CommandRunner for MockRunner {
                 stdout: "501\n".into(),
                 stderr: String::new(),
             });
+        }
+        if program == "launchctl"
+            && args.first() == Some(&"bootstrap")
+            && *self.kickstart_fails_until_bootstrap.lock().unwrap()
+        {
+            *self.kickstart_fails_until_bootstrap.lock().unwrap() = false;
+            return Ok(RunOutput {
+                status: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            });
+        }
+        if program == "launchctl"
+            && args.first() == Some(&"kickstart")
+            && *self.kickstart_fails_until_bootstrap.lock().unwrap()
+        {
+            return Ok(RunOutput {
+                status: 113,
+                stdout: String::new(),
+                stderr: "Could not find service".into(),
+            });
+        }
+        if program == "launchctl" && args.first() == Some(&"bootstrap") && self.already_bootstrapped
+        {
+            // Only the FIRST bootstrap sees the loaded job: a bootout in
+            // between is what makes the retry succeed.
+            let already_out = self
+                .calls()
+                .iter()
+                .filter(|c| c.join(" ").contains("launchctl bootout"))
+                .count()
+                == 0;
+            if already_out {
+                return Ok(RunOutput {
+                    status: 5,
+                    stdout: String::new(),
+                    stderr: "Bootstrap failed: 5: Input/output error (already bootstrapped)".into(),
+                });
+            }
         }
         if program == "launchctl" && args.first() == Some(&"print") {
             let running = *self.launchctl_print_running.lock().unwrap();
@@ -561,4 +606,110 @@ fn run_as_service_serves_then_honors_a_control_shutdown() {
         api_tracker_gateway::service::ServiceExit::StopRequested
     );
     assert!(logs.lock().unwrap().iter().any(|l| l.contains("listening")));
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade and start/stop/start semantics (audit remediation)
+// ---------------------------------------------------------------------------
+
+/// Upgrading a RUNNING service must swap the running process, not leave it
+/// alive against a binary that `prune_old_binaries` is about to delete.
+///
+/// On macOS `bootstrap` does not re-read a loaded job and `kickstart`
+/// (without `-k`) does not restart a running one, so an install that only
+/// called `start` left launchd holding the previous job spec — pointing at
+/// the binary just pruned.
+#[cfg(unix)]
+#[test]
+fn upgrading_a_running_service_restarts_it_against_the_new_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner {
+        already_bootstrapped: true,
+        ..MockRunner::default()
+    });
+    *runner.launchctl_print_running.lock().unwrap() = true;
+    let lc = mac_lifecycle(dir.path(), runner.clone());
+    let src = fake_source_binary(dir.path());
+
+    lc.install(&src, false)
+        .expect("install over a running service");
+
+    let calls = runner.calls();
+    let joined: Vec<String> = calls.iter().map(|c| c.join(" ")).collect();
+    assert!(
+        joined.iter().any(|c| c.contains("launchctl bootout")),
+        "an already-bootstrapped job must be booted out so the rewritten \
+         definition is re-read, got: {joined:?}"
+    );
+    assert!(
+        joined.iter().any(|c| c.contains("kickstart -k")),
+        "a RUNNING service must be restarted (kickstart -k), not merely \
+         kickstarted, got: {joined:?}"
+    );
+    // ...and the bootout happens before the re-bootstrap that follows it.
+    let bootout = runner.call_index("launchctl bootout").unwrap();
+    let rebootstrap = joined
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.contains("launchctl bootstrap"))
+        .map(|(i, _)| i)
+        .next_back()
+        .expect("a bootstrap ran");
+    assert!(
+        bootout < rebootstrap,
+        "bootout must precede the re-bootstrap"
+    );
+}
+
+/// A service that is NOT running is started, not restarted — restarting a
+/// stopped service would be a pointless kill/respawn cycle.
+#[cfg(unix)]
+#[test]
+fn installing_when_nothing_is_running_starts_rather_than_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner::default());
+    let lc = mac_lifecycle(dir.path(), runner.clone());
+    let src = fake_source_binary(dir.path());
+    lc.install(&src, false).unwrap();
+
+    let joined: Vec<String> = runner.calls().iter().map(|c| c.join(" ")).collect();
+    assert!(joined.iter().any(|c| c.contains("kickstart")));
+    assert!(
+        !joined.iter().any(|c| c.contains("kickstart -k")),
+        "nothing was running; a plain start is correct, got: {joined:?}"
+    );
+}
+
+/// `stop` boots the label OUT, so a later `start` has nothing to kickstart.
+/// It must bootstrap the definition back rather than failing until the user
+/// logs out and in again.
+#[cfg(unix)]
+#[test]
+fn start_after_a_stop_re_bootstraps_instead_of_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner::default());
+    let lc = mac_lifecycle(dir.path(), runner.clone());
+    let src = fake_source_binary(dir.path());
+    lc.install(&src, false).unwrap();
+    lc.stop().unwrap();
+
+    // After the bootout, kickstart cannot find the label.
+    *runner.kickstart_fails_until_bootstrap.lock().unwrap() = true;
+    lc.start().expect("start after stop must succeed");
+
+    let joined: Vec<String> = runner.calls().iter().map(|c| c.join(" ")).collect();
+    let last_bootout = joined
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.contains("launchctl bootout"))
+        .map(|(i, _)| i)
+        .next_back()
+        .expect("stop booted out");
+    assert!(
+        joined
+            .iter()
+            .enumerate()
+            .any(|(i, c)| i > last_bootout && c.contains("launchctl bootstrap")),
+        "start must re-bootstrap after a stop, got: {joined:?}"
+    );
 }

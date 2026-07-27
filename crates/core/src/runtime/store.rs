@@ -1103,6 +1103,13 @@ pub fn allowlist_for_project(
 /// Delete all observability data for one project (sessions + their events/
 /// attributions/compat cascade). Services are host-scoped and shared, so they
 /// are left as inventory; use [`delete_all`] to remove everything.
+///
+/// Gateway usage rows are included: PRIVACY.md and PRIVACY_MODEL.md promise
+/// that the deletion tools "cover gateway events too, since gateway records
+/// flow through the same runtime tables". The runtime half of a gateway
+/// exchange did, but `gateway_usage_events` / `gateway_usage_daily` are
+/// separate tables that no deletion path reached — so the promise was false
+/// until this included them.
 pub fn delete_project_data(conn: &Connection, project_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM observation_sessions WHERE project_id = ?1",
@@ -1120,6 +1127,18 @@ pub fn delete_project_data(conn: &Connection, project_id: &str) -> Result<()> {
         "DELETE FROM observe_internal_allowlist WHERE project_id = ?1",
         [project_id],
     )?;
+    conn.execute(
+        "DELETE FROM gateway_usage_events WHERE project_id = ?1",
+        [project_id],
+    )?;
+    conn.execute(
+        "DELETE FROM gateway_usage_daily WHERE project_id = ?1",
+        [project_id],
+    )?;
+    // `gateway_route_counters` is route-scoped, not project-scoped: a route
+    // can serve several projects, so per-project deletion cannot attribute
+    // its counts. It carries no per-request data (route + counter name +
+    // total) and is cleared by `delete_all`.
     Ok(())
 }
 
@@ -1136,6 +1155,12 @@ pub fn delete_all(conn: &Connection) -> Result<()> {
         "observed_endpoints",
         "observed_api_services",
         "observe_internal_allowlist",
+        // Gateway tables. Before these three lines the documented
+        // "delete-all covers gateway records" promise was false: their only
+        // removal mechanism was the age-based retention sweep.
+        "gateway_usage_events",
+        "gateway_usage_daily",
+        "gateway_route_counters",
     ] {
         conn.execute(&format!("DELETE FROM {table}"), [])?;
     }

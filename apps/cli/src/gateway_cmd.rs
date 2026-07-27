@@ -1209,13 +1209,32 @@ fn link(
         if file.changed {
             any_change = true;
             println!();
-            print!("{}", render::sanitize(&file.diff));
+            // Sanitize PER LINE: `render::sanitize` maps every control
+            // character to a space, and '\n' is one — so sanitizing the whole
+            // diff printed it as a single unreadable line, defeating the
+            // consent property the preview exists for. Per-line keeps the
+            // CR/ESC stripping that motivated the call.
+            for line in file.diff.lines() {
+                println!("{}", render::sanitize(line));
+            }
         } else {
             println!(
                 "{}: already linked (no change)",
                 render::sanitize(&file.path)
             );
         }
+    }
+    // `--dry-run` writes NOTHING, including in the no-change case. The
+    // no-change branch below is idempotent-by-design and still a DB write, an
+    // audit row, and a nudge to the running gateway — all of which a dry run
+    // promised not to do.
+    if dry_run {
+        if !any_change {
+            println!("(dry run — files are already in the linked state; nothing to write)");
+        } else {
+            println!("(dry run — nothing written; run again without --dry-run to apply)");
+        }
+        return Ok(());
     }
     if !any_change {
         // Idempotent: make sure the DB row exists even when files are

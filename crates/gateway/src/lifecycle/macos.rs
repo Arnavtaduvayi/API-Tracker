@@ -202,16 +202,34 @@ impl ServiceManager for LaunchAgent {
         let out = self
             .runner
             .run("launchctl", &["bootstrap", &self.domain_target(), &plist])?;
-        // Code 5 / "already bootstrapped" is fine — kickstart will pick up
-        // the (possibly rewritten) definition on restart.
-        if !out.ok() && !out.stderr.contains("already bootstrapped") && out.status != 5 {
-            return Err(CoreError::InvalidInput(format!(
-                "launchctl bootstrap failed (status {}): {}",
-                out.status,
-                out.stderr.trim()
-            )));
+        if out.ok() {
+            return Ok(());
         }
-        Ok(())
+        // Already bootstrapped: launchd is holding the PREVIOUS job spec,
+        // including the previous binary path — and install/repair has just
+        // rewritten the plist and is about to prune that binary. `bootstrap`
+        // does not re-read a loaded job and `kickstart` (without -k) does not
+        // restart a running one, so the only way to make the new definition
+        // take effect is to bootout first and bootstrap again.
+        if out.stderr.contains("already bootstrapped") || out.status == 5 {
+            self.unregister()?;
+            let retry = self
+                .runner
+                .run("launchctl", &["bootstrap", &self.domain_target(), &plist])?;
+            if !retry.ok() {
+                return Err(CoreError::InvalidInput(format!(
+                    "launchctl bootstrap failed after bootout (status {}): {}",
+                    retry.status,
+                    retry.stderr.trim()
+                )));
+            }
+            return Ok(());
+        }
+        Err(CoreError::InvalidInput(format!(
+            "launchctl bootstrap failed (status {}): {}",
+            out.status,
+            out.stderr.trim()
+        )))
     }
 
     fn unregister(&self) -> Result<()> {
@@ -237,11 +255,22 @@ impl ServiceManager for LaunchAgent {
         let out = self
             .runner
             .run("launchctl", &["kickstart", &self.service_target()])?;
-        if !out.ok() {
+        if out.ok() {
+            return Ok(());
+        }
+        // `stop` is a bootout, which UNLOADS the label until next login, so
+        // after `tethra gateway stop` there is nothing for kickstart to find.
+        // Bootstrap it back and retry — otherwise `stop` then `start` fails
+        // on macOS until the user logs out and in again.
+        self.register()?;
+        let retry = self
+            .runner
+            .run("launchctl", &["kickstart", &self.service_target()])?;
+        if !retry.ok() {
             return Err(CoreError::InvalidInput(format!(
                 "launchctl kickstart failed (status {}): {}",
-                out.status,
-                out.stderr.trim()
+                retry.status,
+                retry.stderr.trim()
             )));
         }
         Ok(())
