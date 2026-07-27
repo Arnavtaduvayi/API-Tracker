@@ -116,11 +116,19 @@ pub fn validate_origin(origin: &str) -> Result<(String, u16)> {
 
 /// Compute the custom-origin route MAC: a BLAKE3 keyed hash over the
 /// length-prefixed identity fields, so no field boundary is ambiguous.
-/// Binding the vault id, provider id, origin, port, and consent timestamp
-/// means changing ANY of them in the DB invalidates the MAC.
+/// Binding the vault id, ROUTE PREFIX, provider id, origin, port, and consent
+/// timestamp means changing ANY of them in the DB invalidates the MAC.
+///
+/// v2 added `route_prefix`. Without it a MAC'd origin row could be
+/// transplanted onto a DIFFERENT prefix — the MAC would still verify, and a
+/// request carrying one provider's pass-through credential would be forwarded
+/// to another provider's registered origin. The domain string is versioned,
+/// so a v1 MAC does not verify under v2 and the route reports `MacMismatch`
+/// (fail closed) rather than being silently accepted.
 pub fn route_mac(
     mac_key: &SecretBytes,
     vault_id: &str,
+    route_prefix: &str,
     provider_id: &str,
     origin_host: &str,
     port: u16,
@@ -129,14 +137,29 @@ pub fn route_mac(
     let key: &[u8; 32] = mac_key.expose().try_into().map_err(|_| CoreError::Crypto {
         context: "gateway MAC key length",
     })?;
-    let mut message = Vec::with_capacity(96);
-    message.extend_from_slice(b"tethra:gateway-route-mac:v1");
-    for field in [vault_id, provider_id, origin_host, consent_ts] {
+    let mut message = Vec::with_capacity(128);
+    message.extend_from_slice(b"tethra:gateway-route-mac:v2");
+    for field in [vault_id, route_prefix, provider_id, origin_host, consent_ts] {
         message.extend_from_slice(&(field.len() as u64).to_le_bytes());
         message.extend_from_slice(field.as_bytes());
     }
     message.extend_from_slice(&port.to_le_bytes());
     Ok(*blake3::keyed_hash(key, &message).as_bytes())
+}
+
+/// Whether this vault has ever minted a route verification key. Lets callers
+/// avoid creating one as a side effect of an unrelated command: a vault with
+/// no custom routes should not acquire route-signing material just because
+/// the user ran `tethra vault unlock`.
+pub fn route_key_exists(conn: &Connection) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM vault_meta WHERE key = 'wrapped_gateway_mac_key'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 fn vault_id_of(conn: &Connection) -> Result<String> {
@@ -214,7 +237,15 @@ pub fn add_custom_route(
     let (host, port) = validate_origin(origin)?;
     let vault_id = vault_id_of(conn)?;
     let consent_ts = clock::now_rfc3339();
-    let mac = route_mac(mac_key, &vault_id, &provider_id, &host, port, &consent_ts)?;
+    let mac = route_mac(
+        mac_key,
+        &vault_id,
+        prefix,
+        &provider_id,
+        &host,
+        port,
+        &consent_ts,
+    )?;
     insert_route(
         conn,
         prefix,
@@ -634,8 +665,19 @@ pub fn load_route_table(conn: &Connection, mac_key: Option<&SecretBytes>) -> Res
                 };
                 // Re-run the full origin policy over the stored value BEFORE
                 // even considering the MAC (defense in depth: a valid MAC
-                // over a now-denied origin still must not forward).
-                if let Err(e) = validate_origin(&format!("https://{origin_host}")) {
+                // over a now-denied origin still must not forward). The
+                // STORED port is part of what is re-validated — checking a
+                // synthesized `https://host` would always re-check port 443
+                // no matter what the row says, which is not the "full origin
+                // policy" this claims to be.
+                let authority = if origin_host.starts_with('[') {
+                    format!("https://{origin_host}:{port}")
+                } else if port == 443 {
+                    format!("https://{origin_host}")
+                } else {
+                    format!("https://{origin_host}:{port}")
+                };
+                if let Err(e) = validate_origin(&authority) {
                     table.skipped.push((prefix, format!("custom origin: {e}")));
                     continue;
                 }
@@ -645,6 +687,7 @@ pub fn load_route_table(conn: &Connection, mac_key: Option<&SecretBytes>) -> Res
                         let expected = route_mac(
                             key,
                             &vault_id,
+                            &prefix,
                             &provider_id,
                             &origin_host,
                             port,
@@ -764,6 +807,12 @@ impl RouteState {
     pub fn set_mac_key(&self, key: Option<SecretBytes>) {
         *self.mac_key.lock().expect("mac key lock") = key;
         self.reload();
+    }
+
+    /// Whether the route verification key is resident (status honesty: it
+    /// is what distinguishes "no key" from "tampered row").
+    pub fn has_mac_key(&self) -> bool {
+        self.mac_key.lock().expect("mac key lock").is_some()
     }
 
     /// Cheap change check; reloads only when another connection committed.

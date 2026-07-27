@@ -68,6 +68,32 @@ impl AppState {
     }
 }
 
+/// Install the custom-origin route verification key into a running gateway
+/// (ADR 0021).
+///
+/// Without this a custom-origin route (a Supabase per-project host, say)
+/// loads but cannot be verified, so it answers 503 forever — and the 503 text
+/// told the user to unlock the vault, which did nothing because nothing
+/// installed the key. Called on unlock, on route add/enable, and when the
+/// routes panel loads.
+///
+/// Not reauth-gated: this key verifies route integrity only. It is not
+/// derived from the fingerprint key, cannot decrypt anything, and cannot
+/// confirm a guess about a credential. Best-effort — a stopped gateway is
+/// the normal case. `mint` creates the key when the vault has never had one;
+/// pass false so an unrelated command never mints route-signing material.
+fn install_gateway_route_key(state: &AppState, vault: &mut UnlockedVault, mint: bool) {
+    if !gw_control::instance_is_live(&state.data_dir) {
+        return;
+    }
+    if !mint && !gw_routes::route_key_exists(vault.connection()).unwrap_or(false) {
+        return;
+    }
+    if let Ok(key) = vault.gateway_route_mac_key() {
+        let _ = gw_control::push_route_key(&state.data_dir, &key);
+    }
+}
+
 /// Signal a running gateway that the vault locked (ADR 0020, SI-9).
 ///
 /// The matching key is a vault-derived guess-confirmation oracle over every
@@ -185,9 +211,17 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
     slot.last_activity = Instant::now();
     drop(slot);
     // A re-authorized session cancels any pending keep-while-locked
-    // retention deadline in a running gateway (ADR 0020). No key material
-    // moves; a key that already expired stays gone until re-pushed.
+    // retention deadline in a running gateway (ADR 0020). No credential-
+    // bearing key material moves: the matching key stays revoked until the
+    // user explicitly re-pushes it through the reauth-gated flow.
     let _ = gw_control::notify_vault_unlocked(&state.data_dir);
+    // Custom-origin routes, by contrast, become forwardable again here
+    // (ADR 0021) — the user already consented to them, and the key involved
+    // verifies route integrity only.
+    let _ = with_vault(&state, |vault| {
+        install_gateway_route_key(&state, vault, false);
+        Ok(())
+    });
     Ok(())
 }
 
@@ -2617,12 +2651,28 @@ fn gateway_route_list(state: State<'_, AppState>) -> CmdResult<GatewayRouteListD
     // render while the vault is locked.
     let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
         .map_err(ErrDto::from)?;
-    let table = gw_routes::load_route_table(&conn, None).map_err(ErrDto::from)?;
+    // Verify custom routes with the real key when a vault session exists.
+    // Loading with `None` unconditionally — what shipped before — made a
+    // just-added custom route always display "unavailable", contradicting a
+    // running gateway that was forwarding it perfectly well.
+    let key = with_vault(&state, |vault| vault.gateway_route_mac_key()).ok();
+    let table = gw_routes::load_route_table(&conn, key.as_ref()).map_err(ErrDto::from)?;
+    let verifiable = key.is_some();
     let mut routes: Vec<GatewayRouteDto> = table
         .iter_routes()
         .map(|r| {
             let (available, origin, why) = match &r.target {
                 gw_routes::RouteTarget::Ready(o) => (true, Some(o.host.clone()), None),
+                gw_routes::RouteTarget::Unforwardable(
+                    gw_routes::Unforwardable::MacKeyUnavailable,
+                ) if !verifiable => (
+                    false,
+                    None,
+                    Some(
+                        "cannot be verified from this view while the vault is locked —                          a running gateway may still be forwarding it; check Status"
+                            .to_string(),
+                    ),
+                ),
                 gw_routes::RouteTarget::Unforwardable(w) => (false, None, Some(format!("{w:?}"))),
             };
             GatewayRouteDto {
@@ -2685,12 +2735,22 @@ fn gateway_route_add(
     origin: Option<String>,
 ) -> CmdResult<()> {
     let prefix = prefix.unwrap_or_else(|| provider.clone());
-    with_vault(&state, |vault| match &origin {
-        Some(origin) => {
-            let key = vault.gateway_route_mac_key()?;
-            gw_routes::add_custom_route(vault.connection(), &prefix, &provider, origin, &key)
+    let custom = origin.is_some();
+    with_vault(&state, |vault| {
+        match &origin {
+            Some(origin) => {
+                let key = vault.gateway_route_mac_key()?;
+                gw_routes::add_custom_route(vault.connection(), &prefix, &provider, origin, &key)?;
+            }
+            None => gw_routes::add_manifest_route(vault.connection(), &prefix, &provider)?,
         }
-        None => gw_routes::add_manifest_route(vault.connection(), &prefix, &provider),
+        // The route the user just created must be usable NOW, not after a
+        // future unlock (ADR 0021). Minting is correct here: adding a custom
+        // route is the moment the route key legitimately comes into being.
+        if custom {
+            install_gateway_route_key(&state, vault, true);
+        }
+        Ok(())
     })?;
     gateway_nudge(&state.data_dir);
     Ok(())
@@ -2712,7 +2772,11 @@ fn gateway_route_set_enabled(
     enabled: bool,
 ) -> CmdResult<bool> {
     let changed = with_vault(&state, |vault| {
-        gw_routes::set_route_enabled(vault.connection(), &prefix, enabled)
+        let changed = gw_routes::set_route_enabled(vault.connection(), &prefix, enabled)?;
+        if enabled {
+            install_gateway_route_key(&state, vault, false);
+        }
+        Ok(changed)
     })?;
     gateway_nudge(&state.data_dir);
     Ok(changed)

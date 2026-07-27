@@ -204,6 +204,7 @@ impl ControlTarget for ServiceControl {
             recording_degraded: self.writer_state.is_degraded(),
             recording_paused: self.gateway.recording_paused.load(Ordering::Relaxed),
             matching_key_present: self.gateway.has_matching_key(),
+            route_key_present: self.routes.has_mac_key(),
             last_observation_at: self.writer_state.last_written_at(),
             last_error: self.writer_state.last_error(),
             routes_disabled: table.disabled,
@@ -240,6 +241,12 @@ impl ControlTarget for ServiceControl {
         self.gateway.set_matching_key(None);
         self.writer_sink.set_matcher(None);
         self.retention.disarm();
+    }
+
+    fn set_route_key(&self, key: Option<SecretBytes>) {
+        // Reloads the snapshot, so a custom route becomes forwardable the
+        // moment the key lands rather than at the next 5-second poll.
+        self.routes.set_mac_key(key);
     }
 
     fn vault_locked(&self, ttl_minutes: Option<u32>) {

@@ -26,6 +26,7 @@ struct TestTarget {
     stopped: AtomicBool,
     locks: Mutex<Vec<Option<u32>>>,
     unlocks: Mutex<u32>,
+    route_key: Mutex<Option<Vec<u8>>>,
 }
 
 impl ControlTarget for TestTarget {
@@ -50,6 +51,9 @@ impl ControlTarget for TestTarget {
     }
     fn revoke_key(&self) {
         *self.key.lock().unwrap() = None;
+    }
+    fn set_route_key(&self, key: Option<SecretBytes>) {
+        *self.route_key.lock().unwrap() = key.map(|k| k.expose().to_vec());
     }
     fn vault_locked(&self, ttl_minutes: Option<u32>) {
         self.locks.lock().unwrap().push(ttl_minutes);

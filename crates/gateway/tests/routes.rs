@@ -174,6 +174,7 @@ fn a_valid_mac_over_a_denied_origin_still_does_not_forward() {
     let mac = routes::route_mac(
         &key,
         "vault-test-0001",
+        "supa",
         "supabase",
         "127.0.0.1",
         443,

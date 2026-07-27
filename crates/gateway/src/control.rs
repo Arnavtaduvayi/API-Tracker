@@ -70,6 +70,24 @@ pub enum Request {
     RevokeKey {
         nonce: String,
     },
+    /// Push the custom-origin route VERIFICATION key (hex). WRITE ONLY.
+    ///
+    /// A different key from the matching key, for a different job: it
+    /// verifies that a `gateway_routes` custom-origin row was authored by
+    /// this vault (ADR 0019 D3). It is not derived from the fingerprint key,
+    /// cannot produce or confirm a credential fingerprint, and cannot decrypt
+    /// anything. Unlike the matching key it is NOT dropped on vault lock —
+    /// dropping it would stop forwarding for custom routes, which would
+    /// violate forward-while-locked (ADR 0021).
+    PushRouteKey {
+        nonce: String,
+        key_hex: String,
+    },
+    /// Drop the route verification key. Custom routes become unforwardable
+    /// (503); manifest routes are unaffected.
+    RevokeRouteKey {
+        nonce: String,
+    },
     /// The vault session that authorized the resident matching key has
     /// locked. The SERVICE decides what that means (fail toward revocation):
     /// default — revoke now; with the consented `match_while_locked` toggle
@@ -113,6 +131,8 @@ impl std::fmt::Debug for Request {
             Request::Status { .. } => f.write_str("Status"),
             Request::PushKey { .. } => f.write_str("PushKey { key_hex: <redacted> }"),
             Request::RevokeKey { .. } => f.write_str("RevokeKey"),
+            Request::PushRouteKey { .. } => f.write_str("PushRouteKey { key_hex: <redacted> }"),
+            Request::RevokeRouteKey { .. } => f.write_str("RevokeRouteKey"),
             Request::VaultLocked { ttl_minutes, .. } => f
                 .debug_struct("VaultLocked")
                 .field("ttl_minutes", ttl_minutes)
@@ -165,6 +185,11 @@ pub struct Status {
     /// Whether the matching key is resident. Attribution degrades honestly
     /// when it is not — this is the field that makes that visible.
     pub matching_key_present: bool,
+    /// Whether the custom-origin route verification key is resident. Without
+    /// it every custom route answers 503, so this is what tells the user
+    /// WHICH kind of unavailable they are looking at (ADR 0021).
+    #[serde(default)]
+    pub route_key_present: bool,
     pub last_observation_at: Option<String>,
     pub last_error: Option<String>,
     // Fields below are `serde(default)` so a CLI/desktop from one build can
@@ -201,6 +226,9 @@ pub trait ControlTarget: Send + Sync {
     fn status(&self) -> Status;
     fn push_key(&self, key: SecretBytes) -> Result<()>;
     fn revoke_key(&self);
+    /// Install (or clear, with `None`) the custom-origin route verification
+    /// key and re-resolve the route snapshot (ADR 0021).
+    fn set_route_key(&self, key: Option<SecretBytes>);
     /// A vault-lock event. Deliberately a REQUIRED method (no default no-op):
     /// forgetting to wire it in a real target would silently recreate the
     /// key-survives-lock defect this hook exists to fix (ADR 0020).
@@ -456,6 +484,33 @@ pub fn dispatch(target: &dyn ControlTarget, expected_nonce: &str, request: Reque
                 return denied();
             }
             target.revoke_key();
+            Response::Ok
+        }
+        Request::PushRouteKey { nonce, key_hex } => {
+            if !authorized(&nonce) {
+                return denied();
+            }
+            let key_hex = Zeroizing::new(key_hex);
+            let Some(bytes) = hex_decode(&key_hex) else {
+                return Response::Error {
+                    code: "invalid_input".into(),
+                    message: "the key must be hex".into(),
+                };
+            };
+            if bytes.len() != 32 {
+                return Response::Error {
+                    code: "invalid_input".into(),
+                    message: "the route key must be 32 bytes".into(),
+                };
+            }
+            target.set_route_key(Some(SecretBytes::new(bytes.to_vec())));
+            Response::Ok
+        }
+        Request::RevokeRouteKey { nonce } => {
+            if !authorized(&nonce) {
+                return denied();
+            }
+            target.set_route_key(None);
             Response::Ok
         }
         Request::VaultLocked { nonce, ttl_minutes } => {
@@ -779,6 +834,52 @@ pub fn notify_vault_unlocked(data_dir: &Path) -> bool {
     )
 }
 
+/// Install the custom-origin route verification key in a running gateway
+/// (ADR 0021). Without this the gateway can load custom-origin rows but not
+/// verify them, so every custom route answers 503 forever — which is exactly
+/// what shipped before this call existed.
+///
+/// Best-effort by design: this is called from ordinary flows (unlock, route
+/// add, link) that must not fail because no gateway happens to be running.
+/// Returns whether the key was actually installed. Not reauth-gated: unlike
+/// the matching key this verifies route integrity only. It cannot decrypt
+/// anything and cannot confirm a guess about a credential, so gating it
+/// behind a password prompt would buy nothing and would leave the user's own
+/// routes broken until they typed one.
+pub fn push_route_key(data_dir: &Path, key: &SecretBytes) -> bool {
+    let Ok(nonce) = read_nonce(data_dir) else {
+        return false;
+    };
+    let hex = Zeroizing::new(hex_encode(key.expose()));
+    matches!(
+        send(
+            data_dir,
+            &Request::PushRouteKey {
+                nonce: nonce.to_string(),
+                key_hex: hex.to_string(),
+            },
+        ),
+        Ok(Response::Ok)
+    )
+}
+
+/// Drop the route verification key from a running gateway. Custom routes
+/// become unforwardable (503); manifest routes are unaffected.
+pub fn revoke_route_key(data_dir: &Path) -> bool {
+    let Ok(nonce) = read_nonce(data_dir) else {
+        return false;
+    };
+    matches!(
+        send(
+            data_dir,
+            &Request::RevokeRouteKey {
+                nonce: nonce.to_string(),
+            },
+        ),
+        Ok(Response::Ok)
+    )
+}
+
 /// Best-effort immediate key revocation (toggle-off, explicit revoke paths
 /// that must not fail when no gateway is running). Returns whether a revoke
 /// was actually delivered.
@@ -878,6 +979,7 @@ mod tests {
         pub stopped: AtomicBool,
         pub locks: Mutex<Vec<Option<u32>>>,
         pub unlocks: Mutex<u32>,
+        pub route_key: Mutex<Option<Vec<u8>>>,
     }
 
     impl ControlTarget for FakeTarget {
@@ -896,6 +998,9 @@ mod tests {
         }
         fn revoke_key(&self) {
             *self.key.lock().unwrap() = None;
+        }
+        fn set_route_key(&self, key: Option<SecretBytes>) {
+            *self.route_key.lock().unwrap() = key.map(|k| k.expose().to_vec());
         }
         fn vault_locked(&self, ttl_minutes: Option<u32>) {
             self.locks.lock().unwrap().push(ttl_minutes);

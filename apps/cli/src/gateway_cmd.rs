@@ -759,6 +759,33 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
         println!();
     }
 
+    // Custom-origin routes need the verification key to be forwardable at
+    // all (ADR 0021). A foreground `serve` started from an unlocked shell
+    // session can install it with no prompt: it verifies route integrity
+    // only and cannot decrypt or confirm anything about a credential.
+    if service.control_unavailable().is_none() {
+        match ctx.unlocked() {
+            Ok((mut vault, token)) => {
+                install_route_key(ctx, &mut vault, false);
+                let _ = ctx.persist_session(&vault, &token);
+            }
+            Err(_) => {
+                let custom_unavailable = service
+                    .routes()
+                    .table()
+                    .iter_routes()
+                    .any(|r| matches!(r.target, routes::RouteTarget::Unforwardable(_)));
+                if custom_unavailable {
+                    println!(
+                        "custom-origin routes: unavailable (no unlocked vault session, so the \
+                         route verification key could not be installed). Run `tethra vault \
+                         unlock` in this shell and restart, or use the desktop app."
+                    );
+                }
+            }
+        }
+    }
+
     if service.control_unavailable().is_some() {
         println!("credential attribution: unavailable (no control channel)");
     } else if with_attribution {
@@ -934,7 +961,16 @@ fn route(ctx: &Ctx, cmd: RouteCmd) -> Result<()> {
     match cmd {
         RouteCmd::List => {
             let conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
-            let table = routes::load_route_table(&conn, None)?;
+            // Verify custom routes with the real key when a session exists.
+            // Loading with `None` unconditionally — what shipped before —
+            // always printed "unavailable" for a just-added custom origin,
+            // even while a running gateway forwarded it correctly.
+            let key = ctx
+                .unlocked()
+                .ok()
+                .and_then(|(mut v, _)| v.gateway_route_mac_key().ok());
+            let table = routes::load_route_table(&conn, key.as_ref())?;
+            let verifiable = key.is_some();
             // Disabled rows are invisible in the snapshot by design; list
             // them from the table directly so the user sees what exists.
             let mut rows: Vec<Vec<String>> = table
@@ -945,6 +981,13 @@ fn route(ctx: &Ctx, cmd: RouteCmd) -> Result<()> {
                         r.provider_id.clone(),
                         match &r.target {
                             routes::RouteTarget::Ready(o) => o.host.clone(),
+                            routes::RouteTarget::Unforwardable(
+                                routes::Unforwardable::MacKeyUnavailable,
+                            ) if !verifiable => {
+                                "unverifiable here (vault locked; a running gateway may \
+                                 still forward it — see `tethra gateway status`)"
+                                    .to_string()
+                            }
                             routes::RouteTarget::Unforwardable(why) => {
                                 format!("unavailable ({why:?})")
                             }
@@ -987,6 +1030,7 @@ fn route(ctx: &Ctx, cmd: RouteCmd) -> Result<()> {
         } => {
             let prefix = prefix.unwrap_or_else(|| provider.clone());
             let (mut vault, token) = ctx.unlocked()?;
+            let custom = origin.is_some();
             match origin {
                 Some(origin) => {
                     // A custom origin is authenticated by a MAC under the
@@ -1005,6 +1049,19 @@ fn route(ctx: &Ctx, cmd: RouteCmd) -> Result<()> {
             }
             ctx.persist_session(&vault, &token)?;
             println!("route '{prefix}' added for provider '{provider}'");
+            if custom {
+                // Without this the route the user just created answers 503
+                // until the next unlock — the defect the final audit found
+                // (ADR 0021). Minting is correct here: adding a custom route
+                // IS the moment the route key legitimately comes into being.
+                install_route_key(ctx, &mut vault, true);
+                if !control::instance_is_live(&ctx.paths.data_dir) {
+                    println!(
+                        "(no gateway is running; the route becomes forwardable when one starts \
+                         and this vault is unlocked)"
+                    );
+                }
+            }
             nudge_running_gateway(ctx);
             Ok(())
         }
@@ -1027,9 +1084,12 @@ fn route(ctx: &Ctx, cmd: RouteCmd) -> Result<()> {
 }
 
 fn set_route_state(ctx: &Ctx, prefix: &str, enabled: bool) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let changed = routes::set_route_enabled(vault.connection(), prefix, enabled)?;
     ctx.persist_session(&vault, &token)?;
+    if enabled {
+        install_route_key(ctx, &mut vault, false);
+    }
     if changed {
         println!(
             "route '{prefix}' is now {}",
@@ -1048,6 +1108,38 @@ fn set_route_state(ctx: &Ctx, prefix: &str, enabled: bool) -> Result<()> {
 
 /// Ask a running gateway to re-read routes immediately (best-effort; the
 /// 5-second poll would catch it anyway).
+/// Install the custom-origin route verification key into a running gateway
+/// (ADR 0021).
+///
+/// This is what makes a custom-origin route actually usable: without it the
+/// gateway loads the row but cannot verify it, so every custom route answers
+/// 503 forever. Called from every flow that both HAS an unlocked vault and
+/// could plausibly precede a custom-route request — unlock, route add/enable,
+/// link, status, and serve.
+///
+/// Silent and best-effort: no running gateway is the normal case, and a
+/// vault that has never minted a route key (no custom route ever added) must
+/// not have one minted as a side effect of an unrelated command — so this
+/// only pushes a key that already exists, unless `mint` is set.
+fn install_route_key(ctx: &Ctx, vault: &mut api_tracker_core::vault::UnlockedVault, mint: bool) {
+    if !control::instance_is_live(&ctx.paths.data_dir) {
+        return;
+    }
+    if !mint && !routes::route_key_exists(vault.connection()).unwrap_or(false) {
+        return;
+    }
+    if let Ok(key) = vault.gateway_route_mac_key() {
+        let _ = control::push_route_key(&ctx.paths.data_dir, &key);
+    }
+}
+
+/// The unlock-path entry point: install the route key if one exists, never
+/// minting a new one. Public so `vault unlock` can call it without
+/// duplicating the "is a gateway even running" logic.
+pub fn install_route_key_on_unlock(ctx: &Ctx, vault: &mut api_tracker_core::vault::UnlockedVault) {
+    install_route_key(ctx, vault, false);
+}
+
 fn nudge_running_gateway(ctx: &Ctx) {
     let data_dir = &ctx.paths.data_dir;
     if !control::instance_is_live(data_dir) {

@@ -51,13 +51,18 @@ pub struct UnlockArgs {
 
 pub fn unlock(ctx: &Ctx, args: UnlockArgs) -> Result<()> {
     let password = ctx::master_password()?;
-    let vault = vault::unlock_vault(&ctx.paths, &password)?;
+    let mut vault = vault::unlock_vault(&ctx.paths, &password)?;
     let token = SessionToken::generate();
     vault.save_session(&token)?;
     let auto_lock = vault.settings().auto_lock_minutes;
     // A re-authorized session cancels any pending keep-while-locked
-    // matching-key retention deadline in a running gateway (ADR 0020).
+    // matching-key retention deadline in a running gateway (ADR 0020), and
+    // installs the custom-origin route verification key so routes the user
+    // already consented to become forwardable again (ADR 0021). Neither
+    // moves credential-bearing material; the matching key is NOT re-pushed
+    // here — that stays reauth-gated and explicit.
     let _ = api_tracker_gateway::control::notify_vault_unlocked(&ctx.paths.data_dir);
+    crate::gateway_cmd::install_route_key_on_unlock(ctx, &mut vault);
     if args.print_export {
         print_session_exports(&token);
     } else {
