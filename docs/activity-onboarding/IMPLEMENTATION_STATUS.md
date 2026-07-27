@@ -27,9 +27,11 @@ Every claim below is executed evidence; anything not executed is labeled.
 
 ```text
 Rust workspace (5 crates)               1004 passed, 0 failed
-  of which crates/tracking (new)          53 passed
-  of which apps/cli track suite (new)       9 passed
-  of which gateway helper discovery (new)   6 passed
+  api-tracker-core                         533
+  api-tracker-gateway                      269   (+6 new: helper discovery)
+  api-tracker-cli                           86   (+9 new: track suite)
+  api-tracker-observe                       63
+  api-tracker-tracking (new crate)          53
 Frontend vitest                           65 passed, 0 failed, 0 errors
   of which TrackFlow (new)                 14
   of which DashboardView (new)             10

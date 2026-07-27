@@ -9,6 +9,23 @@ Companion records: `IMPLEMENTATION_STATUS.md` (what works, with counts),
 `KNOWN_LIMITATIONS.md`, `MIGRATION.md`, `DETECTION_COVERAGE.md`,
 `USER_GUIDE.md`, `TROUBLESHOOTING.md`, `audit/REVIEW_HANDOFF.md`.
 
+## Record
+
+```text
+Base commit    0e6764b  (main, PR #15 merge)
+Final head     see PR #16 head
+Branch         feat/zero-friction-api-tracking
+PR             #16 (open, NOT merged)
+Commits behind base  0 (branch is a fast-forward of main @ 0e6764b)
+```
+
+A note on history: the first push was rejected by GitHub push protection,
+which matched a synthetic Stripe fixture value in the new tests. The
+fixture was changed to the convention already used elsewhere in this
+repository and the (never-pushed) local commits were rewritten to remove
+the pattern. No shared history was rewritten — the rejected push never
+landed.
+
 ## Repository state as verified live
 
 * PR #15 (Local Gateway) is merged; `main` @ `0e6764b` is the base. The
