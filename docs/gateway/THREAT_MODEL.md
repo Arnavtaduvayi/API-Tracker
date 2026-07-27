@@ -161,8 +161,14 @@ and the ADR, not hidden behind a false equivalence.
 
 ### GW-8 Control-channel abuse (A3, A4, A6) — DEFENDED
 The fingerprint-key handoff is a Unix-domain socket at
-`<data-dir>/gateway.sock` (0600 in the 0700 dir) with a peer-euid == our-uid
-check, write-only (no key read-back), plus a server nonce the pusher echoes. It
+`<data-dir>/gateway.sock` (0600 in the 0700 dir). The same-uid gate is
+FILESYSTEM PERMISSIONS re-checked on every accept, not `SO_PEERCRED` — see
+SI-21 for why, and for what the residual is. Write-only (no key read-back:
+there is no response variant able to carry a key), plus a server nonce the
+pusher echoes. Note the nonce authorizes the CALLER to the server; it does not
+let the caller authenticate the server before disclosing, since a PushKey
+carries nonce and key in one message. Same-uid socket squatting is inside the
+accepted trust model. It
 is NOT the TCP forwarding listener, and the key never crosses TCP, argv, or an
 environment variable. So a local process (even same-uid, and certainly A6)
 cannot push a chosen key (attribution poisoning) or read the key back over the

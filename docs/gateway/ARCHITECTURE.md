@@ -134,10 +134,13 @@ only by the enable/unlock flow, never by the background service.
 ## Control channel (fingerprint-key handoff)
 
 Separate from the forwarding listener: a Unix-domain socket at
-`<data-dir>/gateway.sock` (0600 inside the 0700 dir) with a peer-euid check
-(`SO_PEERCRED`/`LOCAL_PEERCRED` == our uid), write-only (key push + revoke, no
-read-back), with a gateway-written nonce the pusher echoes so the pusher also
-authenticates the server. The fingerprint key NEVER crosses the TCP listener,
+`<data-dir>/gateway.sock` (0600 inside the 0700 dir). The same-uid gate is the
+socket's own filesystem permissions, re-checked on EVERY accept — NOT
+`SO_PEERCRED`/`LOCAL_PEERCRED`, which is unavailable without `unsafe` or a new
+dependency (SI-21 records the deviation and its residual). Write-only (key
+push + revoke, no read-back), with a gateway-written per-boot nonce the caller
+echoes; the nonce authorizes the caller to the server, and does not let the
+caller authenticate the server before disclosing. The fingerprint key NEVER crosses the TCP listener,
 argv, or an environment variable (source-grep guarded). Windows uses a
 per-user-DACL named pipe or refuses key push in v1 (attribution unavailable,
 labeled). Each push is reauth-gated and audited.
