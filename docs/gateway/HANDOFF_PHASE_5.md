@@ -170,6 +170,27 @@ npx vitest run                                           41 passed (9 files)
 npx vite build                                           ok
 ```
 
+## Authoritative CI
+
+All four required checks passed on the commits carrying this remediation's
+code and prose:
+
+| Commit | Rust (core + CLI) | Rust core (Windows) | Desktop backend (macOS) | Desktop frontend |
+|---|---|---|---|---|
+| `fc55d9c` — every code change plus the documentation corrections | pass | pass | pass | pass |
+| `17b314a` — the last two peer-credential doc corrections | pass | pass | pass | pass |
+
+`fc55d9c` is the important row: it contains **100% of the code** in this
+phase, including the `cfg(not(unix))` Windows session sweep and the Windows
+control-channel stub, both exercised on a real `windows-latest` runner.
+
+A caveat stated rather than papered over: every push starts a new run, so the
+commit that RECORDS a CI result is by construction not the commit that result
+came from. This table names the commits actually verified. If the branch head
+is later than `17b314a`, the delta is documentation only — check
+`git diff 17b314a..HEAD` before treating that as a gap, and re-run CI yourself
+against whatever head you audit.
+
 ## Platform validation — what was and was NOT executed
 
 | Platform | Executed |
