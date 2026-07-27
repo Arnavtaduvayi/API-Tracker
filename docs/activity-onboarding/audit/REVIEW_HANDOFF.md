@@ -70,6 +70,20 @@ claims worth checking:
   an observation.
 * **SI-20** — the new crate is `#![forbid(unsafe_code)]`.
 
+## A defect this process already caught
+
+The home-directory refusal in `detect.rs` originally consulted only
+`$HOME`. Windows does not set it, so on Windows a selected home
+directory was **not** refused and was scanned in full — a direct
+violation of "no home-directory scan, ever". It passed every macOS and
+Linux run and was caught only because the new crate was added to the
+Windows CI job. Fixed, with a mutation-verified negative control that
+names the leaking variable.
+
+Worth asking what else is platform-conditional in the bounds: the
+symlink refusal relies on `symlink_metadata` (portable), the depth and
+byte caps are arithmetic, and the root refusal uses `Path::parent`.
+
 ## Adversarial questions worth asking
 
 * Can any code path write `traffic_observed` without a matching

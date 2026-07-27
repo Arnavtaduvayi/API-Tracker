@@ -36,6 +36,13 @@ landed.
   usable` test that failed CI on the merge commit is **fixed
   deterministically**, not retried: it no longer waits out a 20 s client
   read timeout. 20/20 consecutive local runs, 0.02 s each.
+* **A real security defect was found by Windows CI**, not by inspection:
+  the detection layer's home-directory refusal consulted only `$HOME`,
+  which Windows does not set, so a Windows user selecting their home
+  directory got a full home-directory scan. Fixed to check every
+  spelling of home the platform uses (`USERPROFILE`,
+  `HOMEDRIVE`+`HOMEPATH`), with a mutation-verified negative control.
+  This is the argument for keeping the new crate in the Windows CI job.
 * A second latent flake was found and fixed while running the baseline:
   `hook_falls_back_to_the_legacy_binary_name` prepended its stub dir to
   the real `PATH`, so on any machine with a real `tethra` installed the
