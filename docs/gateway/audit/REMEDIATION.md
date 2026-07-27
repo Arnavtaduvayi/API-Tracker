@@ -171,6 +171,8 @@ cargo fmt --all --check                                  clean
 cargo clippy --workspace --all-targets -- -D warnings    clean
 cargo test --workspace                                   936 passed, 0 failed
   of which crates/gateway                                263 passed, 0 failed
+                                                         (8 perf tests ignored)
+bash scripts/smoke.sh                                    126 passed, 0 failed
 cargo build --workspace --release                        ok
 npm ci / prettier --check / eslint / tsc --noEmit         clean
 vitest run                                               41 passed (9 files)

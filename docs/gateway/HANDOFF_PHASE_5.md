@@ -122,6 +122,26 @@ Counts from the final commit, executed locally:
 | `bash scripts/smoke.sh` | **126 passed, 0 failed** |
 | `vitest run` (desktop) | **41 passed, 9 files** |
 
+Gateway suite breakdown at this head (`cargo test -p api-tracker-gateway`):
+
+| Suite | Passed |
+|---|---|
+| unit (`src/`) | 75 |
+| `adversarial_blackbox` | 17 |
+| `control` | 24 |
+| `custom_routes` | 13 |
+| `doctor` | 5 |
+| `envlink` | 22 |
+| `forwarding` | 44 |
+| `lifecycle` | 15 |
+| `no_insecure_verifier` | 6 |
+| `privacy_canaries` | 9 |
+| `routes` | 11 |
+| `schema` | 5 |
+| `writer` | 17 |
+| `perf` | 0 passed, 8 ignored (script-run; `PERFORMANCE_RESULTS.md`) |
+| **Total** | **263 passed, 0 failed, 8 ignored** |
+
 New this phase: 11 matching-key lifecycle tests (`tests/control.rs`), 5
 control-plane unit tests, 13 custom-route tests (`tests/custom_routes.rs`), 17
 black-box attack tests (`tests/adversarial_blackbox.rs`, adopted from the audit
