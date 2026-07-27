@@ -170,6 +170,98 @@ pub struct EnvFileSummary {
     pub git_tracked: bool,
 }
 
+/// A secret-shaped variable the scan saw but could not attribute to any
+/// provider Tethra knows about.
+///
+/// The screen headed `Detected:` used to list only manifest-matched
+/// providers. In a 30-API project that meant twenty-six credentials —
+/// `GROQ_API_KEY`, `MISTRAL_API_KEY`, `SENDGRID_API_KEY`, … — appeared
+/// nowhere at all: not detected, not unsupported, not unknown, not counted.
+/// A user reading that screen would reasonably conclude Tethra had seen
+/// their whole project (ZFT-010).
+///
+/// Carries the variable NAME and the file, never the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnrecognizedCredential {
+    /// The environment-variable name, e.g. `GROQ_API_KEY`.
+    pub var: String,
+    /// Folder-relative file it was found in.
+    pub file: String,
+    /// A guess at the service, derived from the variable name alone
+    /// (`GROQ_API_KEY` -> "groq"). Presentation only — it never selects a
+    /// provider, creates a route, or raises confidence.
+    pub name_hint: Option<String>,
+}
+
+/// The honest coverage summary a review screen must render.
+///
+/// Every integration the scan saw lands in exactly one bucket, and the
+/// buckets sum to the total. A project with thirty APIs gets thirty
+/// accounted for, not four listed and twenty-six invisible.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageSummary {
+    /// Supported, high enough confidence, destination from a Tethra
+    /// manifest — configured automatically.
+    pub tracked_automatically: usize,
+    /// Supported, but the destination comes from project content and needs
+    /// the user's explicit approval.
+    pub needs_origin_confirmation: usize,
+    /// Recognised provider, but its SDK exposes no base-URL variable, so
+    /// Tethra cannot observe it this way.
+    pub detected_unsupported: usize,
+    /// Secret-shaped variables Tethra has no manifest for.
+    pub unrecognized: usize,
+    /// Detected at only `Possible` confidence — real evidence, not enough
+    /// of it to act on.
+    pub low_confidence: usize,
+}
+
+impl CoverageSummary {
+    pub fn total(&self) -> usize {
+        self.tracked_automatically
+            + self.needs_origin_confirmation
+            + self.detected_unsupported
+            + self.unrecognized
+            + self.low_confidence
+    }
+
+    /// The headline lines, in the order the audit brief specifies.
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = vec![format!("{} API integrations found", self.total())];
+        if self.tracked_automatically > 0 {
+            out.push(format!(
+                "{} can be tracked automatically",
+                self.tracked_automatically
+            ));
+        }
+        if self.needs_origin_confirmation > 0 {
+            out.push(format!(
+                "{} need you to confirm where their traffic goes",
+                self.needs_origin_confirmation
+            ));
+        }
+        if self.detected_unsupported > 0 {
+            out.push(format!(
+                "{} use an SDK configuration Tethra cannot observe yet",
+                self.detected_unsupported
+            ));
+        }
+        if self.low_confidence > 0 {
+            out.push(format!(
+                "{} were detected but not confidently enough to configure",
+                self.low_confidence
+            ));
+        }
+        if self.unrecognized > 0 {
+            out.push(format!(
+                "{} could not be identified — Tethra has no provider definition for them",
+                self.unrecognized
+            ));
+        }
+        out
+    }
+}
+
 /// Every file the scan touched, in exactly one bucket each.
 ///
 /// The pre-remediation scan reported `scanned_files` only for the reader in
@@ -239,6 +331,14 @@ pub struct ProjectDetection {
     /// Full accounting for every file the scan touched.
     #[serde(default)]
     pub accounting: ScanAccounting,
+    /// Secret-shaped variables with no matching provider manifest. Listed
+    /// explicitly so the review screen never implies complete coverage
+    /// (ZFT-010).
+    #[serde(default)]
+    pub unrecognized: Vec<UnrecognizedCredential>,
+    /// Per-bucket counts; every integration lands in exactly one.
+    #[serde(default)]
+    pub coverage: CoverageSummary,
 }
 
 impl ProjectDetection {
@@ -344,6 +444,87 @@ fn read_bounded(
     }
 }
 
+/// Whether a variable NAME looks like it holds a credential.
+///
+/// Deliberately name-only: the value is inspected solely through
+/// `scanner::is_placeholder_value`, never stored or rendered. This decides
+/// whether an unattributed variable is worth telling the user about — a
+/// wrong answer costs a line on a review screen, never a route.
+fn looks_like_credential_name(name: &str) -> bool {
+    const SUBSTRINGS: &[&str] = &[
+        "API_KEY",
+        "APIKEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "PRIVATE_KEY",
+        "ACCESS_KEY",
+        "AUTH",
+        "_PAT",
+    ];
+    // A trailing `_KEY` catches the shapes a substring list keeps missing —
+    // `ALGOLIA_ADMIN_KEY`, `SEGMENT_WRITE_KEY`, `SUPABASE_ANON_KEY`. It is a
+    // SUFFIX rather than a substring so `KEYCLOAK_URL` and `KEYWORDS` do not
+    // qualify. Over-inclusion costs one line on a review screen; the failure
+    // this replaces was a credential appearing nowhere at all.
+    let upper = name.to_ascii_uppercase();
+    upper.ends_with("_KEY") || SUBSTRINGS.iter().any(|n| upper.contains(n))
+}
+
+/// A presentation-only guess at the service behind an unrecognised
+/// variable, from the name alone: `GROQ_API_KEY` -> "groq".
+///
+/// This NEVER selects a provider, creates a route, or raises confidence —
+/// inferring a real integration from a variable name is exactly the kind of
+/// evidence inflation the audit flagged elsewhere. It exists so the user
+/// can recognise their own service in a list.
+fn name_hint(var: &str) -> Option<String> {
+    const SUFFIXES: &[&str] = &[
+        "_API_KEY",
+        "_APIKEY",
+        "_SECRET_KEY",
+        "_ACCESS_KEY",
+        "_SECRET",
+        "_TOKEN",
+        "_AUTH_TOKEN",
+        "_API_TOKEN",
+        "_KEY",
+    ];
+    let upper = var.to_ascii_uppercase();
+    for suffix in SUFFIXES {
+        if let Some(head) = upper.strip_suffix(suffix) {
+            let head = head.trim_start_matches("NEXT_PUBLIC_").trim_matches('_');
+            if head.len() >= 2 {
+                return Some(head.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
+/// The bare authority of a base URL, for the origin policy.
+///
+/// SDK base URLs carry a path (`https://litellm.corp.example/v1`), but
+/// `routes::validate_origin` deliberately accepts only a bare authority —
+/// a route's destination is a host, never a host plus a path an attacker
+/// chose. Trimming here keeps that rule intact while still letting a real
+/// SDK value be understood.
+fn origin_authority(value: &str) -> String {
+    let Some(rest) = value.strip_prefix("https://") else {
+        // Anything that is not https fails `validate_origin` anyway; return
+        // it unchanged so the refusal names what was actually configured.
+        return value.to_string();
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    format!("https://{authority}")
+}
+
 /// Provider id → stack template id, mirroring `stackdetect`'s private map,
 /// for the `stack_preferences` learning-loop adjustment.
 fn provider_template(provider: &str) -> Option<&'static str> {
@@ -353,6 +534,13 @@ fn provider_template(provider: &str) -> Option<&'static str> {
         "stripe" => Some("stripe-app"),
         "supabase" => Some("supabase-web"),
         "github" => Some("github-automation"),
+        // Every other manifest-backed provider groups under the generic
+        // OpenAI-compatible template, which is the one `stackdetect` maps
+        // them to. Returning None here would silently disable the
+        // confirm/dismiss learning loop for them.
+        "groq" | "together" | "cerebras" | "cohere" | "replicate" | "langsmith" | "mistral"
+        | "google-gemini" | "huggingface" | "aws-bedrock" | "deepseek" | "xai" | "openrouter"
+        | "fireworks" | "perplexity" | "azure-openai" => Some("openai-app"),
         _ => None,
     }
 }
@@ -365,6 +553,22 @@ const LOCKFILE_NEEDLES: &[(&str, &str)] = &[
     ("supabase", "\"@supabase/"),
     ("stripe", "\"stripe\""),
     ("github", "\"@octokit/"),
+    ("groq", "\"groq-sdk\""),
+    ("groq", "\"groq\""),
+    ("together", "\"together-ai\""),
+    ("together", "\"together\""),
+    ("cerebras", "\"@cerebras/"),
+    ("cerebras", "\"cerebras-cloud-sdk\""),
+    ("cohere", "\"cohere-ai\""),
+    ("cohere", "\"cohere\""),
+    ("replicate", "\"replicate\""),
+    ("langsmith", "\"langsmith\""),
+    ("mistral", "\"@mistralai/"),
+    ("mistral", "\"mistralai\""),
+    ("google-gemini", "\"@google/genai\""),
+    ("google-gemini", "\"google-genai\""),
+    ("huggingface", "\"@huggingface/"),
+    ("huggingface", "\"huggingface-hub\""),
 ];
 
 const LOCKFILES: &[&str] = &["package-lock.json", "pnpm-lock.yaml", "yarn.lock"];
@@ -396,6 +600,11 @@ struct Signals {
     /// Origin candidates that FAILED validation (count is enough; the
     /// value is deliberately not carried).
     rejected_origins: u32,
+    /// For a FIXED-origin provider: base-URL values already present in the
+    /// project that do NOT match the manifest origin. Their presence means
+    /// the project already points somewhere else, so the provider must not
+    /// be reconfigured automatically (ZFT-012).
+    existing_base_urls: BTreeSet<String>,
 }
 
 /// Detect providers in one bounded, canonicalized folder.
@@ -414,6 +623,9 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
     let mut scanned: u32 = 0;
     let mut skipped_oversized: u32 = 0;
     let mut not_utf8: u32 = 0;
+    // Credential-shaped variables no manifest claimed. Keyed by name so the
+    // same variable in several env files is reported once.
+    let mut unattributed: BTreeMap<String, UnrecognizedCredential> = BTreeMap::new();
     let mut signals: BTreeMap<String, Signals> = BTreeMap::new();
 
     // --- .env inventory (envgov bounds; NON-EXECUTING git status) -------
@@ -466,6 +678,22 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
         };
         let doc = EnvDocument::parse(&content);
         for entry in doc.entries() {
+            // Every credential-shaped variable is remembered up front. The
+            // manifest loops below REMOVE the ones they claim, so whatever
+            // is left is genuinely unattributed and gets listed rather than
+            // dropped (ZFT-010).
+            if looks_like_credential_name(&entry.key)
+                && !scanner::is_placeholder_value(entry.value.expose())
+            {
+                unattributed.insert(
+                    entry.key.clone(),
+                    UnrecognizedCredential {
+                        var: entry.key.clone(),
+                        file: file.rel_path.clone(),
+                        name_hint: name_hint(&entry.key),
+                    },
+                );
+            }
             // S1: known secret env-var name with a non-placeholder value.
             // The value is inspected only through `is_placeholder_value`
             // and never stored or rendered.
@@ -482,6 +710,8 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
                         file: file.rel_path.clone(),
                     });
                     sig.target_env_files.insert(file.rel_path.clone());
+                    // Claimed by a manifest: no longer unattributed.
+                    unattributed.remove(&entry.key);
                 }
             }
             // S3: base-URL variable present by NAME…
@@ -498,14 +728,60 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
                     // validated by the full origin policy before they are
                     // ever surfaced; failures increment a counter only.
                     let gw = manifest.gateway.as_ref();
-                    if gw.map(|g| g.origins.is_empty()).unwrap_or(false) {
+                    let custom_origin_provider = gw.map(|g| g.origins.is_empty()).unwrap_or(false);
+                    if !custom_origin_provider {
+                        // A FIXED-origin provider whose base-URL variable
+                        // already holds a value. The value used to be
+                        // ignored entirely: its mere presence became a
+                        // second "independent" signal that pushed the
+                        // detection to Confirmed, and the route was then
+                        // built to the manifest origin — so a user behind
+                        // LiteLLM, a corporate LLM gateway, Azure OpenAI or
+                        // a self-hosted proxy had their traffic silently
+                        // re-pointed at the provider, carrying their key,
+                        // with nothing on screen saying the destination
+                        // changed (ZFT-012).
+                        //
+                        // An already-customised endpoint is now evidence
+                        // that Tethra does NOT know where this project's
+                        // traffic should go, so it is surfaced for the same
+                        // explicit approval a custom-origin provider gets.
+                        let value = entry.value.expose().trim();
+                        if !value.is_empty() && !value.contains("127.0.0.1:") {
+                            let manifest_origins: Vec<String> = gw
+                                .map(|g| g.origins.clone())
+                                .unwrap_or_default()
+                                .iter()
+                                .map(|o| o.trim_end_matches('/').to_ascii_lowercase())
+                                .collect();
+                            let bare = value.trim_end_matches('/').to_ascii_lowercase();
+                            let matches_manifest = manifest_origins
+                                .iter()
+                                .any(|o| bare == *o || bare.starts_with(&format!("{o}/")));
+                            if !matches_manifest {
+                                match routes::validate_origin(&origin_authority(value)) {
+                                    Ok((host, port)) => {
+                                        sig.existing_base_urls
+                                            .insert(format!("https://{host}:{port}"));
+                                    }
+                                    // Unparseable or policy-refused: still a
+                                    // customisation Tethra must not silently
+                                    // overwrite, so it downgrades the
+                                    // provider without offering an origin.
+                                    Err(_) => sig.rejected_origins += 1,
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    {
                         let value = entry.value.expose().trim();
                         if value.is_empty() || value.contains("127.0.0.1:") {
                             // Empty, or already pointing at a local
                             // gateway (a previous link) — not an origin.
                             continue;
                         }
-                        match routes::validate_origin(value) {
+                        match routes::validate_origin(&origin_authority(value)) {
                             Ok((host, port)) => {
                                 sig.inferred_origins
                                     .insert(format!("https://{host}:{port}"));
@@ -721,7 +997,41 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
                         reason: UnsupportedReason::NoConfigurableBaseUrl,
                     }
                 }
-                Some(gw) if !gw.origins.is_empty() => Configurability::Automatic,
+                Some(gw) if !gw.origins.is_empty() => {
+                    // Fixed-origin provider — automatic, UNLESS the project
+                    // already points its base-URL variable somewhere else.
+                    let mut existing: Vec<&String> = sig.existing_base_urls.iter().collect();
+                    if existing.len() == 1 {
+                        let inferred = existing.remove(0).clone();
+                        limitations.push(format!(
+                            "This project already sets {}'s base URL to {inferred}. Tethra will \
+                             not silently re-point it at {}: approve {inferred} to keep sending \
+                             traffic there through the gateway, or remove the variable to use \
+                             the provider directly.",
+                            m.name,
+                            gw.origins.first().cloned().unwrap_or_default()
+                        ));
+                        Configurability::NeedsOriginConfirm {
+                            inferred_origin: inferred,
+                        }
+                    } else if !existing.is_empty() {
+                        limitations.push(format!(
+                            "This project sets {}'s base URL to more than one destination; pick \
+                             one before tracking it.",
+                            m.name
+                        ));
+                        Configurability::NeedsOriginInput
+                    } else if sig.rejected_origins > 0 {
+                        limitations.push(format!(
+                            "This project already customises {}'s base URL to a destination \
+                             Tethra cannot route to safely, so it was left alone.",
+                            m.name
+                        ));
+                        Configurability::NeedsOriginInput
+                    } else {
+                        Configurability::Automatic
+                    }
+                }
                 Some(_) => {
                     if sig.rejected_origins > 0 {
                         limitations.push(format!(
@@ -782,6 +1092,30 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             .then(a.provider_id.cmp(&b.provider_id))
     });
 
+    // Base-URL variables are configuration, not credentials, so they never
+    // become "unrecognised credentials" even when their provider is known.
+    for var in base_url_vars.keys() {
+        unattributed.remove(var);
+    }
+    let unrecognized: Vec<UnrecognizedCredential> = unattributed.into_values().collect();
+
+    // Every integration lands in exactly one bucket, and the buckets sum to
+    // the number the screen reports.
+    let mut coverage = CoverageSummary {
+        unrecognized: unrecognized.len(),
+        ..CoverageSummary::default()
+    };
+    for p in &detections {
+        match &p.configurability {
+            _ if p.confidence < DetectionConfidence::Likely => coverage.low_confidence += 1,
+            Configurability::Automatic => coverage.tracked_automatically += 1,
+            Configurability::NeedsOriginConfirm { .. } | Configurability::NeedsOriginInput => {
+                coverage.needs_origin_confirmation += 1
+            }
+            Configurability::Unsupported { .. } => coverage.detected_unsupported += 1,
+        }
+    }
+
     // One accounting across BOTH readers. `scanned_files` keeps its old
     // meaning for compatibility but is now the true total, so the review
     // screen can no longer print "0 file(s) read" over content that drove
@@ -805,5 +1139,7 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
         scanned_files: accounting.read,
         skipped_oversized: accounting.skipped_oversized,
         accounting,
+        unrecognized,
+        coverage,
     })
 }

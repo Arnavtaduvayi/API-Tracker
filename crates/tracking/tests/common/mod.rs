@@ -155,6 +155,11 @@ pub fn node_two_provider_fixture(dir: &Path) {
 pub fn service_absent() -> api_tracker_gateway::lifecycle::ServiceStatus {
     api_tracker_gateway::lifecycle::ServiceStatus {
         platform: "test",
+        // Namespaced service identity (ADR 0025): fixtures use an explicit
+        // test installation so nothing in this suite can be confused with a
+        // real one.
+        installation_id: "testinstall00".to_string(),
+        service_name: "dev.api-tracker.gateway.testinstall00".to_string(),
         installed: false,
         definition_path: String::new(),
         definition: None,

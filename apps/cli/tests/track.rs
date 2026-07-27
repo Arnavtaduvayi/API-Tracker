@@ -81,7 +81,11 @@ fn dry_run_shows_the_plan_and_writes_nothing() {
         .assert()
         .success();
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    assert!(out.contains("Detected:"), "{out}");
+    // The screen leads with the honest coverage headline, then lists what
+    // it recognised. "Detected:" over a manifest-only list is exactly the
+    // heading that made twenty-six credentials look accounted for (ZFT-010).
+    assert!(out.contains("API integrations found"), "{out}");
+    assert!(out.contains("Recognised:"), "{out}");
     assert!(out.contains("openai"), "{out}");
     assert!(out.contains("OPENAI_BASE_URL"), "diff shown: {out}");
     assert!(out.contains("Dry run: nothing was changed."), "{out}");
@@ -115,8 +119,38 @@ fn no_detection_exits_2_with_honest_guidance() {
     // Empty folder: nothing to detect.
     let assert = tv.cmd().arg("track").arg(&dir).assert().code(2);
     let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
-    assert!(out.contains("No trackable APIs detected"), "{out}");
+    assert!(out.contains("No API integrations found"), "{out}");
     assert!(out.contains("nothing executed or uploaded"), "{out}");
+    // The dead end must not send a desktop-only user to commands they do
+    // not have: the CLI is inside Tethra.app/Contents/MacOS, not on PATH
+    // (ZFT-009).
+    for forbidden in ["tethra provider list", "tethra gateway route add"] {
+        assert!(
+            !out.contains(forbidden),
+            "the empty state must not point at an unexecutable command ({forbidden}): {out}"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_credentials_are_listed_not_dropped() {
+    let tv = TestVault::new();
+    let dir = tv.project_dir();
+    std::fs::write(
+        dir.join(".env"),
+        "SENDGRID_API_KEY=fake-value-0123456789abcdef
+         TWILIO_AUTH_TOKEN=fake-value-0123456789abcdef
+",
+    )
+    .unwrap();
+    let assert = tv.cmd().args(["track", "--dry-run"]).arg(&dir).assert();
+    let out = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(out.contains("Not recognised"), "{out}");
+    assert!(out.contains("SENDGRID_API_KEY"), "{out}");
+    assert!(out.contains("TWILIO_AUTH_TOKEN"), "{out}");
+    assert!(out.contains("2 API integrations found"), "{out}");
+    // Names and files only — never a value.
+    assert!(!out.contains("fake-value-0123456789abcdef"), "{out}");
 }
 
 #[test]

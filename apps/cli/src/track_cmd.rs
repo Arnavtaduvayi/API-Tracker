@@ -19,10 +19,11 @@ use api_tracker_core::vault::{self, UnlockedVault};
 use api_tracker_tracking::apply::{self, ApplyOptions, HostServiceOps, StepOutcome};
 use api_tracker_tracking::detect::{self, Configurability, DetectionInput};
 use api_tracker_tracking::diagnose;
+use api_tracker_tracking::origin;
 use api_tracker_tracking::plan::{
     self, ensure_port, AttributionPlan, PlanWarning, ProjectRef, RestartExpectation, Selections,
 };
-use api_tracker_tracking::state::{self, TrackingState};
+use api_tracker_tracking::state;
 use api_tracker_tracking::undo as track_undo;
 use api_tracker_tracking::verify::{self, WatchStatus};
 use clap::{Args, Subcommand};
@@ -33,6 +34,11 @@ use crate::render;
 /// How long the post-apply wait watches for the first request before
 /// reporting "needs attention" and exiting 2 (tracking stays on).
 const WAIT_WINDOW_SECS: u64 = 120;
+
+/// How many unrecognised credentials to list before summarising the rest.
+/// The COUNT is always exact; only the enumeration is bounded, so a
+/// thirty-API project stays readable without hiding anything.
+const UNRECOGNIZED_DISPLAY_LIMIT: usize = 12;
 const POLL_INTERVAL_SECS: u64 = 5;
 
 #[derive(Args)]
@@ -55,8 +61,21 @@ pub struct TrackArgs {
 
     /// Answer yes to the confirmation prompt (attribution is then enabled
     /// only when TETHRA_PASSWORD is set; it is never prompted for).
+    ///
+    /// Deliberately does NOT approve a destination read from the project's
+    /// own files — that is a separate decision (see `--allow-origin`).
     #[arg(long)]
     yes: bool,
+
+    /// Approve one exact destination read from this project's files, e.g.
+    /// `--allow-origin https://abcdef.supabase.co`. Repeatable.
+    ///
+    /// This is the non-interactive equivalent of the approval prompt. It
+    /// exists because a repository can choose where its configuration
+    /// points, so "run the setup" and "send my API traffic to this host"
+    /// must be two different answers (ADR 0024).
+    #[arg(long = "allow-origin", value_name = "URL")]
+    allow_origins: Vec<String>,
 }
 
 #[derive(Subcommand)]
@@ -86,7 +105,14 @@ pub fn run(ctx: &Ctx, args: TrackArgs) -> Result<()> {
         Some(TrackSub::Status { path }) => status(ctx, path),
         Some(TrackSub::Doctor { path }) => doctor(ctx, path),
         Some(TrackSub::Undo { path, yes }) => undo(ctx, path, yes),
-        None => track(ctx, args.path, args.project, args.dry_run, args.yes),
+        None => track(
+            ctx,
+            args.path,
+            args.project,
+            args.dry_run,
+            args.yes,
+            &args.allow_origins,
+        ),
     }
 }
 
@@ -164,12 +190,26 @@ fn resolve_project(
     }
 }
 
+/// Whether the user pre-approved this exact destination on the command
+/// line. Comparison is on the canonical origin, so `https://h`,
+/// `https://h:443` and `https://H/` all match — and nothing else does.
+fn args_allows(allow_origins: &[String], origin: &str) -> bool {
+    let Ok(wanted) = origin::canonicalize(origin) else {
+        return false;
+    };
+    allow_origins
+        .iter()
+        .filter_map(|o| origin::canonicalize(o).ok())
+        .any(|o| o == wanted)
+}
+
 fn track(
     ctx: &Ctx,
     path: Option<PathBuf>,
     project: Option<String>,
     dry_run: bool,
     yes: bool,
+    allow_origins: &[String],
 ) -> Result<()> {
     let folder = resolve_folder(path)?;
     let vault = unlocked(ctx)?;
@@ -202,50 +242,229 @@ fn track(
         render::sanitize(&detection.folder.display().to_string())
     );
 
-    if detection.providers.is_empty() {
-        println!("No trackable APIs detected in this folder.");
+    if detection.providers.is_empty() && detection.unrecognized.is_empty() {
+        println!("No API integrations found in this folder.");
         println!(
             "Tethra looked at .env files, package manifests, and lockfiles ({} file(s) \
              read, 6 levels deep).",
             detection.scanned_files
         );
-        println!("• Using a provider Tethra doesn't support yet? See `tethra provider list`.");
+        if let Some(gaps) = detection.accounting.describe_gaps() {
+            println!(
+                "Not everything could be inspected: {}",
+                render::sanitize(&gaps)
+            );
+        }
         println!(
-            "• Know the provider and its base URL? `tethra gateway route add` is the expert path."
+            "If this is the wrong folder, point Tethra at the one containing your .env or \
+             package manifest."
         );
         std::process::exit(2);
     }
 
-    println!("Detected:");
-    for p in &detection.providers {
-        let evidence: Vec<String> = p.evidence.iter().take(2).map(|e| e.describe()).collect();
-        let label = match &p.configurability {
-            Configurability::Unsupported { .. } => "unsupported".to_string(),
-            _ => p.confidence.label().to_string(),
-        };
+    // The honest headline first: every integration the scan saw, in exactly
+    // one bucket. The old screen listed only manifest-matched providers
+    // under a heading reading `Detected:`, so unrecognised credentials were
+    // invisible rather than merely unsupported (ZFT-010).
+    for line in detection.coverage.lines() {
+        println!("{}", render::sanitize(&line));
+    }
+    if let Some(gaps) = detection.accounting.describe_gaps() {
         println!(
-            "  {:<12}{:<12}{}",
-            render::sanitize(&p.provider_id),
-            label,
-            render::sanitize(&evidence.join("; "))
+            "Not everything could be inspected: {}",
+            render::sanitize(&gaps)
         );
-        for lim in &p.limitations {
-            println!("              {}", render::sanitize(lim));
-        }
+    }
+    for warning in &detection.accounting.git_warnings {
+        println!("! {}", render::sanitize(warning));
     }
     println!();
 
+    if !detection.providers.is_empty() {
+        println!("Recognised:");
+        for p in &detection.providers {
+            let evidence: Vec<String> = p.evidence.iter().take(2).map(|e| e.describe()).collect();
+            let label = match &p.configurability {
+                Configurability::Unsupported { .. } => "unsupported".to_string(),
+                Configurability::NeedsOriginConfirm { .. } | Configurability::NeedsOriginInput => {
+                    "needs approval".to_string()
+                }
+                _ => p.confidence.label().to_string(),
+            };
+            println!(
+                "  {:<12}{:<15}{}",
+                render::sanitize(&p.provider_id),
+                label,
+                render::sanitize(&evidence.join("; "))
+            );
+            for lim in &p.limitations {
+                println!("                             {}", render::sanitize(lim));
+            }
+        }
+        println!();
+    }
+
+    if !detection.unrecognized.is_empty() {
+        println!(
+            "Not recognised ({}) — Tethra has no provider definition for these, so it cannot \
+             track them yet. They are listed so this screen is not read as complete coverage:",
+            detection.unrecognized.len()
+        );
+        for u in detection
+            .unrecognized
+            .iter()
+            .take(UNRECOGNIZED_DISPLAY_LIMIT)
+        {
+            match &u.name_hint {
+                Some(hint) => println!(
+                    "  {:<28}{:<12}in {}",
+                    render::sanitize(&u.var),
+                    render::sanitize(hint),
+                    render::sanitize(&u.file)
+                ),
+                None => println!(
+                    "  {:<28}{:<12}in {}",
+                    render::sanitize(&u.var),
+                    "",
+                    render::sanitize(&u.file)
+                ),
+            }
+        }
+        if detection.unrecognized.len() > UNRECOGNIZED_DISPLAY_LIMIT {
+            println!(
+                "  … and {} more (all counted above)",
+                detection.unrecognized.len() - UNRECOGNIZED_DISPLAY_LIMIT
+            );
+        }
+        println!();
+    }
+
     // ---- selections ----------------------------------------------------
-    let selections = Selections::defaults(&detection);
+    // Defaults cover only providers whose destination comes from a
+    // compiled-in Tethra manifest. Anything read out of this project's own
+    // files is a separate, explicit decision below (ADR 0024).
+    let mut selections = Selections::defaults(&detection);
     for p in &detection.providers {
         if let Configurability::NeedsOriginInput = p.configurability {
             println!(
-                "{}: its project URL could not be inferred; after setup, add it under the \
-                 expert path (`tethra gateway route add {} --origin https://…`).",
-                render::sanitize(&p.provider_id),
+                "{}: its project URL could not be inferred, so Tethra cannot track it \
+                 automatically. Add the destination under Advanced, or re-run with \
+                 --allow-origin https://… once you know it.",
                 render::sanitize(&p.provider_id)
             );
         }
+    }
+
+    // ---- repository-discovered destinations ----------------------------
+    let pending = Selections::pending_origin_approvals(&detection);
+    let mut approvals_to_persist: Vec<(String, String)> = Vec::new();
+    if !pending.is_empty() {
+        let vault_id = api_tracker_gateway::routes::vault_id(vault.connection())?;
+        let mac_key = vault.gateway_route_mac_key().ok();
+        println!("Destinations read from this project (not from Tethra):");
+        for (provider_id, inferred) in &pending {
+            let display = detection
+                .providers
+                .iter()
+                .find(|p| &p.provider_id == provider_id)
+                .map(|p| p.display_name.clone())
+                .unwrap_or_else(|| provider_id.clone());
+            let source = detection
+                .providers
+                .iter()
+                .find(|p| &p.provider_id == provider_id)
+                .and_then(|p| {
+                    p.evidence.iter().find_map(|e| match e {
+                        detect::Evidence::BaseUrlVar { var, file } => {
+                            Some((var.clone(), file.clone()))
+                        }
+                        _ => None,
+                    })
+                });
+            let request = match origin::describe(
+                provider_id,
+                &display,
+                inferred,
+                source.as_ref().map(|(_, f)| f.as_str()),
+                source.as_ref().map(|(v, _)| v.as_str()),
+                true,
+                origin::OriginTrust::RepositoryDiscovered,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("  ! {} — {}", render::sanitize(provider_id), e);
+                    continue;
+                }
+            };
+
+            // Already approved, byte for byte, by this user in this vault?
+            let already = mac_key.as_ref().and_then(|k| {
+                origin::is_approved(vault.connection(), &vault_id, k, inferred, provider_id)
+                    .ok()
+                    .flatten()
+            });
+            if let Some(prior) = already {
+                println!(
+                    "  ✓ {} — you approved {} on {}",
+                    render::sanitize(provider_id),
+                    render::sanitize(&prior.origin),
+                    render::sanitize(&prior.approved_at)
+                );
+                selections.approve_origin(provider_id, inferred);
+                continue;
+            }
+
+            println!();
+            println!("  {}", render::sanitize(&request.question()));
+            for line in request.disclosure() {
+                println!("    {}", render::sanitize(&line));
+            }
+
+            // Explicit pre-approval on the command line.
+            if args_allows(allow_origins, inferred) {
+                println!("    → approved by --allow-origin");
+                selections.approve_origin(provider_id, inferred);
+                approvals_to_persist.push((provider_id.clone(), inferred.clone()));
+                continue;
+            }
+
+            if dry_run {
+                println!(
+                    "    → NOT approved. This destination will not be configured. Re-run \
+                     interactively, or pass --allow-origin {}",
+                    render::sanitize(inferred)
+                );
+                continue;
+            }
+
+            // `--yes` answers "run the setup", never "send my traffic to a
+            // host this repository chose" — the two are separate decisions.
+            if yes {
+                println!(
+                    "    → NOT approved: --yes does not approve a project-chosen destination."
+                );
+                println!(
+                    "      Re-run interactively, or pass --allow-origin {}",
+                    render::sanitize(inferred)
+                );
+                continue;
+            }
+            if !std::io::stdin().is_terminal() {
+                println!(
+                    "    → NOT approved: no terminal to ask on. Pass --allow-origin {}",
+                    render::sanitize(inferred)
+                );
+                continue;
+            }
+            // Default OFF: an empty answer declines.
+            if crate::ctx::confirm_default_no("    Allow this destination?")? {
+                selections.approve_origin(provider_id, inferred);
+                approvals_to_persist.push((provider_id.clone(), inferred.clone()));
+            } else {
+                println!("    → declined; this destination will not be configured.");
+            }
+        }
+        println!();
     }
     if selections.include.is_empty() {
         println!("Nothing detected is automatically configurable yet.");
@@ -400,6 +619,19 @@ fn track(
         &ops,
     );
 
+    // Persist the destinations the user just approved, so the next run of
+    // this project reuses them without asking again — but only after apply
+    // actually succeeded, and only for the exact origin they were shown.
+    if report.failed_step().is_none() && !approvals_to_persist.is_empty() {
+        if let Ok(key) = vault.gateway_route_mac_key() {
+            if let Ok(vault_id) = api_tracker_gateway::routes::vault_id(vault.connection()) {
+                for (provider_id, o) in &approvals_to_persist {
+                    let _ = origin::approve(vault.connection(), &vault_id, &key, o, provider_id);
+                }
+            }
+        }
+    }
+
     for step in &report.steps {
         match &step.outcome {
             StepOutcome::Done { detail } => {
@@ -524,6 +756,11 @@ fn attribution_password(yes: bool) -> Result<Option<SecretString>> {
 fn fallback_service_status() -> api_tracker_gateway::lifecycle::ServiceStatus {
     api_tracker_gateway::lifecycle::ServiceStatus {
         platform: "unknown",
+        // The lifecycle could not be built, so which installation this
+        // would have controlled is genuinely unknown — reported as empty
+        // rather than defaulted to something plausible.
+        installation_id: String::new(),
+        service_name: String::new(),
         installed: false,
         definition_path: String::new(),
         definition: None,
@@ -558,56 +795,112 @@ fn status(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
         println!("Run `tethra track .` to set it up.");
         std::process::exit(2);
     };
-    let freshness = state::refresh(&conn, &mut setup)?;
+    // Probe the gateway BEFORE deriving health. The audit's decisive
+    // reproduction was killing the service and still reading "tracking
+    // verified — traffic observed": the derivation consulted only
+    // historical event rows, so it kept reporting success while the user's
+    // application was pointed at a loopback port with nothing listening
+    // (ZFT-005). Liveness is now an input, not an afterthought.
+    let port = api_tracker_gateway::store::load_config(&conn)?
+        .port
+        .unwrap_or(0);
+    let liveness = if port == 0 {
+        state::GatewayLiveness::Down
+    } else {
+        match api_tracker_gateway::control::verify_listener(&ctx.paths.data_dir, port) {
+            api_tracker_gateway::control::ListenerIdentity::Verified { .. } => {
+                state::GatewayLiveness::Verified
+            }
+            _ => state::GatewayLiveness::Down,
+        }
+    };
+    let report = state::refresh_with(&conn, &mut setup, liveness)?;
+    let freshness = report.freshness.clone();
     #[derive(serde::Serialize)]
     struct StatusOut<'a> {
+        /// The present-tense answer. This is what a caller should act on.
+        current: &'a state::CurrentHealth,
+        /// Facts that survive the current session. Shown alongside
+        /// `current`, never instead of it.
+        history: &'a state::VerificationHistory,
+        /// Whether the gateway answered at the moment of this read.
+        gateway_running: bool,
         state: &'a str,
         folder: &'a str,
         project_id: &'a str,
         applied_at: Option<&'a str>,
-        first_traffic_at: Option<&'a str>,
         providers: &'a [state::ProviderFreshness],
         attention_reason: Option<&'a str>,
     }
     let out = StatusOut {
+        current: &report.current,
+        history: &report.history,
+        gateway_running: liveness == state::GatewayLiveness::Verified,
         state: setup.state.as_str(),
         folder: &setup.folder_path,
         project_id: &setup.project_id,
         applied_at: setup.applied_at.as_deref(),
-        first_traffic_at: setup.first_traffic_at.as_deref(),
         providers: &freshness,
         attention_reason: setup.attention_reason.as_deref(),
     };
+    let currently_working = report.current.is_currently_working();
     render::emit(ctx.json, &out, || {
-        println!("State: {}", state_label(setup.state));
-        for f in &freshness {
-            match &f.last_observed_at {
-                Some(at) => println!("  {:<12}last observed {}", f.provider_id, at),
-                None => println!("  {:<12}no traffic observed yet", f.provider_id),
+        println!("Now: {}", render::sanitize(&report.current.describe()));
+        // History is printed under its own heading so "first verified" can
+        // never be mistaken for "working right now".
+        if report.history.first_verified_at.is_some() || report.history.last_observed_at.is_some() {
+            println!("History:");
+            if let Some(at) = &report.history.first_verified_at {
+                println!("  first verified   {}", render::sanitize(at));
+            }
+            if let Some(at) = &report.history.last_observed_at {
+                println!("  last observed    {}", render::sanitize(at));
             }
         }
-        if setup.state == TrackingState::NeedsAttention {
+        if !freshness.is_empty() {
+            println!("Providers:");
+            for f in &freshness {
+                let mut notes = Vec::new();
+                if !f.route_present {
+                    notes.push("route missing");
+                }
+                if !f.link_present {
+                    notes.push("project link missing");
+                }
+                if f.last_observed_at.is_some() && !f.fresh {
+                    notes.push("no recent traffic");
+                }
+                let suffix = if notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("  ({})", notes.join(", "))
+                };
+                match &f.last_observed_at {
+                    Some(at) => println!(
+                        "  {:<12}last observed {}{}",
+                        render::sanitize(&f.provider_id),
+                        render::sanitize(at),
+                        suffix
+                    ),
+                    None => println!(
+                        "  {:<12}no traffic observed in this session{}",
+                        render::sanitize(&f.provider_id),
+                        suffix
+                    ),
+                }
+            }
+        }
+        if !currently_working {
             println!("\nRun `tethra track doctor` for the ranked diagnosis.");
         }
     });
-    match setup.state {
-        TrackingState::TrafficObserved | TrackingState::PartiallyObserved => Ok(()),
-        _ => std::process::exit(2),
-    }
-}
-
-fn state_label(s: TrackingState) -> &'static str {
-    match s {
-        TrackingState::NotConfigured => "not configured",
-        TrackingState::Scanning => "scanning",
-        TrackingState::ReadyToConfigure => "ready to configure",
-        TrackingState::Applying => "applying",
-        TrackingState::AwaitingRestart => "waiting — restart the project, then make one request",
-        TrackingState::AwaitingFirstRequest => "waiting for the first request",
-        TrackingState::TrafficObserved => "tracking verified — traffic observed",
-        TrackingState::PartiallyObserved => "tracking verified — some providers not yet observed",
-        TrackingState::NeedsAttention => "needs attention",
-        TrackingState::Unsupported => "nothing trackable detected",
+    // Exit 0 only for a present-tense success. "Verified previously" is
+    // deliberately a non-zero exit: a script that gates on tracking working
+    // must not be told yes while the service is down.
+    if currently_working {
+        Ok(())
+    } else {
+        std::process::exit(2)
     }
 }
 

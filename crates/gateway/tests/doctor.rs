@@ -15,6 +15,10 @@ use rusqlite::Connection;
 fn uninstalled_service() -> ServiceStatus {
     ServiceStatus {
         platform: "macos-launch-agent",
+        // Namespaced service identity (ADR 0025): a fixture must name an
+        // explicit test installation, never a real one.
+        installation_id: "0123456789ab".into(),
+        service_name: "dev.api-tracker.gateway.0123456789ab".into(),
         installed: false,
         definition_path: "/tmp/none.plist".into(),
         definition: None,

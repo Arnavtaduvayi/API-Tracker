@@ -162,6 +162,15 @@ pub fn route_key_exists(conn: &Connection) -> Result<bool> {
         .is_some())
 }
 
+/// This vault's stable identifier, as bound into every route MAC.
+///
+/// Public so sibling crates can bind their own authenticated records to the
+/// same vault identity instead of inventing a second notion of "which
+/// vault is this" (the origin-approval store does exactly that).
+pub fn vault_id(conn: &Connection) -> Result<String> {
+    vault_id_of(conn)
+}
+
 fn vault_id_of(conn: &Connection) -> Result<String> {
     conn.query_row(
         "SELECT value FROM vault_meta WHERE key = 'vault_id'",

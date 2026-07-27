@@ -1,0 +1,42 @@
+# xAI (Grok) provider manifest.
+#
+# NO [gateway] SECTION — deliberately. The official xai-sdk reads the key from
+# `XAI_API_KEY`, but its endpoint override is an `api_host` CONSTRUCTOR
+# ARGUMENT, not an environment variable. xAI also exposes an
+# OpenAI-compatible endpoint at https://api.x.ai/v1, but reaching it means
+# setting OPENAI_BASE_URL — a variable the openai manifest already owns, and
+# repointing it would silently redirect that project's OpenAI traffic. So xAI
+# is detected, listed and honestly labelled unsupported.
+id = "xai"
+name = "xAI"
+description = "xAI API platform (Grok models)."
+website = "https://x.ai"
+api_docs_url = "https://docs.x.ai/"
+auth_docs_url = "https://docs.x.ai/developers/quickstart"
+manage_url = "https://console.x.ai/team/default/api-keys"
+pricing_url = "https://x.ai/api"
+login_url = "https://console.x.ai/"
+# Verified from the official quickstart and the official xai-sdk, which raises
+# "Trying to read the xAI API key from the XAI_API_KEY environment variable but
+# it doesn't exist" when the key is neither passed nor set.
+env_vars = ["XAI_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in the console."
+watch_docs = [
+    "https://docs.x.ai/",
+    "https://docs.x.ai/developers/quickstart",
+]
+# No detection pattern: the official documentation does not publish the key
+# format.
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/models against https://api.x.ai would confirm the key; Tethra has no xAI connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names are shown in the console; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Usage and spend are shown in the console; no public usage API is documented, and the Local Gateway cannot observe xAI because the SDK has no base-URL environment variable." }
+read_permissions = { support = "manual_only", note = "A key's enabled endpoints are shown in the console; no public API for reading them is documented." }
+change_permissions = { support = "manual_only", note = "A key's enabled endpoints are edited in the console." }
+create_credential = { support = "manual_only", note = "Keys are created in the console; no key-creation API is documented." }
+disable_credential = { support = "manual_only", note = "A key can be disabled in the console; no public API for it is documented." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the console; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the console, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the API page; there is no official pricing API." }

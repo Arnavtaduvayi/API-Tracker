@@ -1,0 +1,56 @@
+# Replicate provider manifest.
+id = "replicate"
+name = "Replicate"
+description = "Replicate API (hosted model predictions and deployments)."
+website = "https://replicate.com"
+api_docs_url = "https://replicate.com/docs/reference/http"
+auth_docs_url = "https://replicate.com/docs/reference/http"
+manage_url = "https://replicate.com/account/api-tokens"
+pricing_url = "https://replicate.com/pricing"
+login_url = "https://replicate.com/signin"
+billing_url = "https://replicate.com/account/billing"
+# Verified against the official replicate-python client:
+# `os.environ.get("REPLICATE_API_TOKEN")`.
+env_vars = ["REPLICATE_API_TOKEN"]
+credential_types = ["api_token"]
+expiration = "No token expiration is documented; tokens stay valid until revoked in the account settings."
+watch_docs = [
+    "https://replicate.com/docs/reference/http",
+    "https://replicate.com/changelog",
+]
+
+# The `r8_` prefix is published in Replicate's official HTTP API reference
+# ("Authorization: Bearer r8_Hw***"), so this is a documented format marker,
+# not an inferred one.
+[[detection]]
+name = "replicate-api-token"
+regex = "r8_[A-Za-z0-9]{20,}"
+confidence = "high"
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# replicate-python client:
+#   * base URL env var: `os.environ.get("REPLICATE_BASE_URL")`
+#   * default base URL: `https://api.replicate.com`
+#   * API token env var: `REPLICATE_API_TOKEN`
+# The default is a bare origin; `/v1` lives in the SDK's route strings, so
+# base_path stays empty.
+[gateway]
+origins = ["https://api.replicate.com"]
+base_path = ""
+env_vars = ["REPLICATE_BASE_URL"]
+# Replicate bills predict-time, not tokens, and its responses carry no
+# token-usage object either extractor understands. The empty shape means the
+# gateway records request counts only — which is the truth for this provider.
+usage_shape = ""
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/account would confirm the token; Tethra has no Replicate connector yet." }
+fetch_metadata = { support = "supported_not_implemented", attribution = "account_level", note = "GET /v1/account returns the owning account, not per-token metadata; token names are visible only in account settings." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Predict-time spend is shown in the billing dashboard; no public usage API is documented, and Replicate bills compute seconds rather than tokens." }
+read_permissions = { support = "unsupported", note = "Replicate API tokens carry no documented per-token scopes." }
+change_permissions = { support = "unsupported", note = "There are no documented per-token scopes to change." }
+create_credential = { support = "manual_only", note = "Tokens are created in account settings; no token-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; tokens are revoked instead." }
+revoke_credential = { support = "manual_only", note = "Tokens are revoked in account settings; no token-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement token in account settings, deploy it, then revoke the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

@@ -270,6 +270,27 @@ pub fn provider_admin_key(key_stdin: bool) -> Result<SecretString> {
     prompt_hidden("Administrative key (hidden)")
 }
 
+/// Interactive yes/no confirmation that CANNOT be pre-answered.
+///
+/// Deliberately takes no `assume_yes`: it is used for decisions that a
+/// blanket "proceed" must not cover — approving a network destination the
+/// project chose (ADR 0024). Default is no, and a non-terminal answers no
+/// rather than erroring, so the caller can report which destinations were
+/// left unconfigured and continue with the rest.
+pub fn confirm_default_no(question: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// Interactive yes/no confirmation. Non-interactive runs must pass `--yes`.
 pub fn confirm(question: &str, assume_yes: bool) -> Result<bool> {
     if assume_yes {

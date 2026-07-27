@@ -1033,6 +1033,74 @@ CREATE INDEX IF NOT EXISTS idx_tracking_setups_project
     ON tracking_setups(project_id);
 "#,
     },
+    Migration {
+        version: 16,
+        name: "tracking verification sessions (current health vs historical verification)",
+        sql: r#"
+-- v15 collapsed several distinct facts into one durable `state` value plus a
+-- `first_traffic_at` watermark, and the audit showed what that costs: a
+-- setup stayed "tracking verified" after the gateway was killed, a FAILED
+-- re-run was promoted back to verified by the PREVIOUS run's traffic, and
+-- nulling one column skipped re-derivation entirely (ZFT-005, ZFT-006,
+-- ZFT-008).
+--
+-- The fix separates them. Each apply or repair attempt opens a new
+-- verification SESSION with its own non-secret id and its own generation
+-- number; only observations recorded during the CURRENT session can verify
+-- the CURRENT setup. Historical success keeps its own column so it can still
+-- be displayed without implying present health, and a failure carries its own
+-- timestamp so newer bad news is never erased by older good news.
+--
+-- All values remain non-secret: opaque ids, integers and RFC 3339 timestamps.
+ALTER TABLE tracking_setups ADD COLUMN verification_session TEXT;
+ALTER TABLE tracking_setups ADD COLUMN config_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tracking_setups ADD COLUMN first_verified_at TEXT;
+ALTER TABLE tracking_setups ADD COLUMN attention_at TEXT;
+
+-- Existing rows: carry the historical watermark across so an already-verified
+-- user keeps their "first verified" date, and open a generation so the next
+-- read re-derives against the new rules instead of trusting the cached value.
+UPDATE tracking_setups SET first_verified_at = first_traffic_at
+    WHERE first_traffic_at IS NOT NULL;
+UPDATE tracking_setups SET attention_at = last_transition_at
+    WHERE attention_reason IS NOT NULL;
+
+-- The re-derivation query filters observations by project, source, session
+-- window and freshness; this is the index that keeps it cheap.
+CREATE INDEX IF NOT EXISTS idx_rre_project_source_at
+    ON runtime_request_events(project_id, observation_source, at);
+"#,
+    },
+    Migration {
+        version: 17,
+        name: "approved route origins (repository content is not authorization)",
+        sql: r#"
+-- Destinations a user has explicitly approved for API traffic (ADR 0024).
+--
+-- The audit showed a repository with no secrets in it — just a committed
+-- `package.json` and a committed `SUPABASE_URL` — driving the creation of a
+-- MAC'd, enabled route to an attacker-chosen host (ZFT-004). Project content
+-- may suggest that an API exists; it may never authorize a destination.
+-- Origins that come from a compiled-in Tethra manifest stay automatic;
+-- origins read from project files need a row here first.
+--
+-- `mac` is a keyed BLAKE3 over (vault id, origin, provider id, approved_at)
+-- using the vault's route MAC key, in the same length-prefixed shape as
+-- `gateway_routes`. A hand-edited row fails verification and is treated as
+-- ABSENT, so tampering downgrades to "ask the user again" rather than to
+-- "silently trusted".
+--
+-- Contents are non-secret: a host name the user was shown verbatim at the
+-- moment they approved it, a provider id, and a timestamp.
+CREATE TABLE tracking_approved_origins (
+    origin TEXT NOT NULL,             -- canonical https://<host>:<port>
+    provider_id TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    mac TEXT NOT NULL,
+    PRIMARY KEY (origin, provider_id)
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

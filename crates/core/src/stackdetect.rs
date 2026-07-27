@@ -146,6 +146,11 @@ fn provider_template(provider: &str) -> Option<&'static str> {
 }
 
 /// npm dependency name → (template, provider).
+///
+/// The provider list tracks `provider-manifests/`. A provider with no
+/// stack template still maps to the nearest generic one — the template is
+/// a UI grouping, while the PROVIDER is what tracking acts on, and a
+/// missing entry here is why an installed SDK produced no detection signal.
 fn npm_dep_rule(dep: &str) -> Option<(&'static str, Option<&'static str>)> {
     match dep {
         "openai" => Some(("openai-app", Some("openai"))),
@@ -154,6 +159,19 @@ fn npm_dep_rule(dep: &str) -> Option<(&'static str, Option<&'static str>)> {
         d if d.starts_with("@supabase/") => Some(("supabase-web", Some("supabase"))),
         "octokit" => Some(("github-automation", Some("github"))),
         d if d.starts_with("@octokit/") => Some(("github-automation", Some("github"))),
+        // OpenAI-compatible and other manifest-backed providers.
+        "groq-sdk" => Some(("openai-app", Some("groq"))),
+        "together-ai" => Some(("openai-app", Some("together"))),
+        "@cerebras/cerebras_cloud_sdk" => Some(("openai-app", Some("cerebras"))),
+        "cohere-ai" => Some(("openai-app", Some("cohere"))),
+        "replicate" => Some(("openai-app", Some("replicate"))),
+        "langsmith" => Some(("openai-app", Some("langsmith"))),
+        d if d.starts_with("@mistralai/") => Some(("openai-app", Some("mistral"))),
+        d if d.starts_with("@google/gen") || d == "@google/generative-ai" => {
+            Some(("openai-app", Some("google-gemini")))
+        }
+        d if d.starts_with("@huggingface/") => Some(("openai-app", Some("huggingface"))),
+        d if d.starts_with("@aws-sdk/client-bedrock") => Some(("openai-app", Some("aws-bedrock"))),
         "next" => Some(("nextjs-app", None)),
         "express" | "fastify" | "koa" | "hono" => Some(("node-backend", None)),
         _ => None,
@@ -167,6 +185,16 @@ fn py_dep_rule(dep: &str) -> Option<(&'static str, Option<&'static str>)> {
         "anthropic" => Some(("anthropic-app", Some("anthropic"))),
         "stripe" => Some(("stripe-app", Some("stripe"))),
         "supabase" => Some(("supabase-web", Some("supabase"))),
+        "groq" => Some(("openai-app", Some("groq"))),
+        "together" => Some(("openai-app", Some("together"))),
+        "cerebras-cloud-sdk" => Some(("openai-app", Some("cerebras"))),
+        "cohere" => Some(("openai-app", Some("cohere"))),
+        "replicate" => Some(("openai-app", Some("replicate"))),
+        "langsmith" => Some(("openai-app", Some("langsmith"))),
+        "mistralai" => Some(("openai-app", Some("mistral"))),
+        "google-genai" | "google-generativeai" => Some(("openai-app", Some("google-gemini"))),
+        "huggingface-hub" => Some(("openai-app", Some("huggingface"))),
+        "boto3" => Some(("openai-app", Some("aws-bedrock"))),
         "fastapi" | "flask" | "django" => Some(("python-backend", None)),
         _ => None,
     }

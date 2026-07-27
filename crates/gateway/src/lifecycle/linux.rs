@@ -18,16 +18,45 @@ use api_tracker_core::error::{CoreError, Result};
 
 use super::{CommandRunner, Definition, OsWillRun, RegistrationState, ServiceManager};
 
-pub const UNIT_NAME: &str = "tethra-gateway.service";
+/// The unit name used before per-installation namespacing. Kept ONLY for
+/// migration (see [`SystemdUser::reclaim_legacy`]); nothing new is
+/// registered under it. A fixed name meant `systemctl --user stop` from one
+/// Tethra environment stopped another environment's gateway, since the user
+/// manager is per-USER, not per-`XDG_CONFIG_HOME` (ZFT-014).
+pub const LEGACY_UNIT_NAME: &str = "tethra-gateway.service";
+
+/// The unit name for one installation.
+pub fn unit_name_for(installation_id: &str) -> String {
+    format!("tethra-gateway-{installation_id}.service")
+}
 
 pub struct SystemdUser {
     pub data_dir: PathBuf,
+    /// Namespace for the unit name; see [`super::installation_id`].
+    pub installation_id: String,
     /// `~/.config/systemd/user` on a real host; a temp dir in tests.
     pub unit_dir: PathBuf,
     pub runner: Arc<dyn CommandRunner>,
 }
 
 impl SystemdUser {
+    /// Derives the installation id from `data_dir` — always construct
+    /// through here (or [`SystemdUser::for_host`]) so the unit name can
+    /// never disagree with the directory it serves.
+    pub fn new(data_dir: &Path, unit_dir: PathBuf, runner: Arc<dyn CommandRunner>) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            installation_id: super::installation_id(data_dir),
+            unit_dir,
+            runner,
+        }
+    }
+
+    /// This installation's systemd unit name.
+    pub fn unit_name(&self) -> String {
+        unit_name_for(&self.installation_id)
+    }
+
     pub fn for_host(data_dir: &Path, runner: Arc<dyn CommandRunner>) -> Result<Self> {
         let config_home = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -39,11 +68,11 @@ impl SystemdUser {
                         .into(),
                 )
             })?;
-        Ok(Self {
-            data_dir: data_dir.to_path_buf(),
-            unit_dir: config_home.join("systemd").join("user"),
+        Ok(Self::new(
+            data_dir,
+            config_home.join("systemd").join("user"),
             runner,
-        })
+        ))
     }
 
     /// Render the unit. `ExecStart` uses systemd quoting (double quotes
@@ -176,13 +205,74 @@ fn parse_exec_start(unit: &str) -> Vec<String> {
     out
 }
 
+/// Read and parse a unit THIS module wrote, wherever it sits. Shared by the
+/// namespaced read and the legacy-migration probe.
+fn definition_at(path: &Path) -> Option<Definition> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let args = parse_exec_start(&content);
+    let binary = args.first().map(PathBuf::from)?;
+    let data_dir = args
+        .iter()
+        .position(|a| a == "--data-dir")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)?;
+    Some(Definition { binary, data_dir })
+}
+
 impl ServiceManager for SystemdUser {
     fn platform(&self) -> &'static str {
         "linux-systemd-user"
     }
 
+    fn owned_data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+
+    fn service_name(&self) -> String {
+        self.unit_name()
+    }
+
+    fn reclaim_legacy(&self) -> Result<Option<String>> {
+        let path = self.unit_dir.join(LEGACY_UNIT_NAME);
+        // Unreadable or unparseable means we cannot PROVE it is ours, which
+        // is the same answer as "someone else's": leave it.
+        let Some(def) = definition_at(&path) else {
+            return Ok(None);
+        };
+        if !super::same_data_dir(&def.data_dir, &self.data_dir) {
+            return Ok(None);
+        }
+        // Ours, under the old global unit name. Stop and disable before the
+        // namespaced unit claims the port, then delete the file so login
+        // does not start two gateways against one vault.
+        let stop = self.systemctl(&["stop", LEGACY_UNIT_NAME])?;
+        if !stop.ok() && !stop.stderr.contains("not loaded") {
+            return Err(CoreError::InvalidInput(format!(
+                "could not stop the legacy unit {LEGACY_UNIT_NAME}: {}",
+                stop.stderr.trim()
+            )));
+        }
+        let disable = self.systemctl(&["disable", LEGACY_UNIT_NAME])?;
+        if !disable.ok()
+            && !disable.stderr.contains("does not exist")
+            && !disable.stderr.contains("No such file")
+        {
+            return Err(CoreError::InvalidInput(format!(
+                "could not disable the legacy unit {LEGACY_UNIT_NAME}: {}",
+                disable.stderr.trim()
+            )));
+        }
+        std::fs::remove_file(&path).map_err(CoreError::Io)?;
+        let _ = self.systemctl(&["daemon-reload"]);
+        Ok(Some(LEGACY_UNIT_NAME.to_string()))
+    }
+
     fn definition_path(&self) -> PathBuf {
-        self.unit_dir.join(UNIT_NAME)
+        self.unit_dir.join(self.unit_name())
     }
 
     fn write_definition(&self, binary: &Path) -> Result<()> {
@@ -207,23 +297,11 @@ impl ServiceManager for SystemdUser {
     }
 
     fn read_definition(&self) -> Result<Option<Definition>> {
-        let Ok(content) = std::fs::read_to_string(self.definition_path()) else {
-            return Ok(None);
-        };
-        let args = parse_exec_start(&content);
-        let binary = args.first().map(PathBuf::from);
-        let data_dir = args
-            .iter()
-            .position(|a| a == "--data-dir")
-            .and_then(|i| args.get(i + 1))
-            .map(PathBuf::from);
-        match (binary, data_dir) {
-            (Some(binary), Some(data_dir)) => Ok(Some(Definition { binary, data_dir })),
-            _ => Ok(None),
-        }
+        Ok(definition_at(&self.definition_path()))
     }
 
     fn remove_definition(&self) -> Result<()> {
+        self.ensure_ours("remove the service definition")?;
         let path = self.definition_path();
         if path.exists() {
             std::fs::remove_file(&path).map_err(CoreError::Io)?;
@@ -235,6 +313,10 @@ impl ServiceManager for SystemdUser {
     }
 
     fn register(&self) -> Result<()> {
+        // `enable` creates a WantedBy symlink that starts this unit at every
+        // login. Doing that for a unit we cannot prove is ours would give
+        // another installation's gateway a login slot in this session.
+        self.ensure_ours("register")?;
         let reload = self.systemctl(&["daemon-reload"])?;
         if !reload.ok() {
             return Err(CoreError::InvalidInput(format!(
@@ -242,7 +324,7 @@ impl ServiceManager for SystemdUser {
                 reload.stderr.trim()
             )));
         }
-        let out = self.systemctl(&["enable", UNIT_NAME])?;
+        let out = self.systemctl(&["enable", &self.unit_name()])?;
         if !out.ok() {
             return Err(CoreError::InvalidInput(format!(
                 "systemctl --user enable failed: {}",
@@ -253,7 +335,11 @@ impl ServiceManager for SystemdUser {
     }
 
     fn unregister(&self) -> Result<()> {
-        let out = self.systemctl(&["disable", UNIT_NAME])?;
+        // The user manager is per-USER: a unit name is a global handle, so
+        // prove the unit file names our data directory before disabling it
+        // (ZFT-014).
+        self.ensure_ours("unregister the service")?;
+        let out = self.systemctl(&["disable", &self.unit_name()])?;
         // Disabling a unit that is not enabled (or no longer exists) is
         // success for an unregister.
         if !out.ok()
@@ -269,7 +355,10 @@ impl ServiceManager for SystemdUser {
     }
 
     fn start(&self) -> Result<()> {
-        let out = self.systemctl(&["start", UNIT_NAME])?;
+        // Starting a foreign unit launches another installation's gateway
+        // against another vault.
+        self.ensure_ours("start")?;
+        let out = self.systemctl(&["start", &self.unit_name()])?;
         if !out.ok() {
             return Err(CoreError::InvalidInput(format!(
                 "systemctl --user start failed: {}",
@@ -280,7 +369,8 @@ impl ServiceManager for SystemdUser {
     }
 
     fn stop(&self) -> Result<()> {
-        let out = self.systemctl(&["stop", UNIT_NAME])?;
+        self.ensure_ours("stop the service")?;
+        let out = self.systemctl(&["stop", &self.unit_name()])?;
         if !out.ok() && !out.stderr.contains("not loaded") {
             return Err(CoreError::InvalidInput(format!(
                 "systemctl --user stop failed: {}",
@@ -291,7 +381,10 @@ impl ServiceManager for SystemdUser {
     }
 
     fn restart(&self) -> Result<()> {
-        let out = self.systemctl(&["restart", UNIT_NAME])?;
+        // A restart kills the running process, so it needs the same proof
+        // as a stop.
+        self.ensure_ours("restart the service")?;
+        let out = self.systemctl(&["restart", &self.unit_name()])?;
         if !out.ok() {
             return Err(CoreError::InvalidInput(format!(
                 "systemctl --user restart failed: {}",
@@ -302,16 +395,17 @@ impl ServiceManager for SystemdUser {
     }
 
     fn query(&self) -> RegistrationState {
+        let unit = self.unit_name();
         let enabled = self
-            .systemctl(&["is-enabled", UNIT_NAME])
+            .systemctl(&["is-enabled", &unit])
             .map(|o| o.ok())
             .unwrap_or(false);
         let active = self
-            .systemctl(&["is-active", UNIT_NAME])
+            .systemctl(&["is-active", &unit])
             .map(|o| o.ok())
             .unwrap_or(false);
         let pid = self
-            .systemctl(&["show", UNIT_NAME, "-p", "MainPID", "--value"])
+            .systemctl(&["show", &unit, "-p", "MainPID", "--value"])
             .ok()
             .and_then(|o| o.stdout.trim().parse::<u32>().ok())
             .filter(|p| *p != 0);

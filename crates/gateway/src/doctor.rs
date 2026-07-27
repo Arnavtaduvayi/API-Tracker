@@ -92,6 +92,11 @@ pub fn diagnose(data_dir: &Path) -> Doctor {
 fn placeholder_service(why: String) -> lifecycle::ServiceStatus {
     lifecycle::ServiceStatus {
         platform: "unknown",
+        // We could not build a lifecycle at all, so we cannot say which
+        // installation this would have controlled. Empty is the honest
+        // answer; diagnostics render it as "unknown", never as "default".
+        installation_id: String::new(),
+        service_name: String::new(),
         installed: false,
         definition_path: String::new(),
         definition: None,

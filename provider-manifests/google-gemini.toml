@@ -1,0 +1,59 @@
+# Google Gemini provider manifest (Gemini Developer API).
+# Scope is deliberately the API-key-authenticated Gemini Developer API. Vertex
+# AI is the same SDK but authenticates with Google Cloud credentials and a
+# per-project regional endpoint, which is a different credential model; it is
+# not claimed here.
+id = "google-gemini"
+name = "Google Gemini"
+description = "Google Gemini Developer API (API-key access to the Gemini models)."
+website = "https://ai.google.dev"
+api_docs_url = "https://ai.google.dev/api"
+auth_docs_url = "https://ai.google.dev/gemini-api/docs/api-key"
+manage_url = "https://aistudio.google.com/apikey"
+pricing_url = "https://ai.google.dev/pricing"
+login_url = "https://aistudio.google.com/"
+# Verified against the official google-genai Python SDK, which reads both
+# `GEMINI_API_KEY` and `GOOGLE_API_KEY`. Both are listed because either one in
+# a project's .env is a live credential; the SDK's precedence between them is
+# not asserted here.
+env_vars = ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in AI Studio or the underlying Google Cloud project."
+watch_docs = [
+    "https://ai.google.dev/gemini-api/docs/api-key",
+    "https://ai.google.dev/gemini-api/docs/changelog",
+]
+# No detection pattern: the `AIza` shape is a Google-wide API-key format, not a
+# Gemini-specific one, and Google's Gemini documentation does not publish it as
+# the key format. Attributing every Google API key found in a repository to
+# Gemini would be a false claim about which provider a secret belongs to.
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# google-genai Python SDK:
+#   * base URL env var: `os.getenv('GOOGLE_GEMINI_BASE_URL')`
+#     (`_base_url.py`; `GOOGLE_VERTEX_BASE_URL` is the Vertex counterpart and
+#     is deliberately NOT declared — see the scope note above)
+#   * default base URL: `https://generativelanguage.googleapis.com/`
+#   * API key env vars: `GEMINI_API_KEY` / `GOOGLE_API_KEY`
+# The default is an origin root; the SDK appends `/v1beta/models/...`, so
+# base_path stays empty.
+[gateway]
+origins = ["https://generativelanguage.googleapis.com"]
+base_path = ""
+env_vars = ["GOOGLE_GEMINI_BASE_URL"]
+# Gemini reports `usageMetadata.promptTokenCount` / `candidatesTokenCount`,
+# which is neither the OpenAI nor the Anthropic shape. The empty shape is the
+# honest declaration: request counts only, no fabricated token numbers.
+usage_shape = ""
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1beta/models would confirm the key; Tethra has no Gemini connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names and their Google Cloud project are shown in AI Studio; no public key-management API is documented for AI Studio keys." }
+fetch_usage = { support = "manual_only", attribution = "provider_project_level", note = "Request and token usage are reported per Google Cloud project in the Cloud console, never per API key. Tethra will not present project totals as per-key usage." }
+read_permissions = { support = "manual_only", note = "An AI Studio key's API restrictions are shown in the Google Cloud console for its project; there is no documented per-key scope readback for Gemini keys." }
+change_permissions = { support = "manual_only", note = "Key restrictions are edited in the Google Cloud console." }
+create_credential = { support = "manual_only", note = "Keys are created in AI Studio; no key-creation API is documented for Gemini Developer API keys." }
+disable_credential = { support = "unsupported", note = "No disable state is documented for AI Studio keys; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in AI Studio or the Google Cloud console." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in AI Studio, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

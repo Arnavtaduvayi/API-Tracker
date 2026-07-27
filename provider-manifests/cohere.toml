@@ -1,0 +1,54 @@
+# Cohere provider manifest.
+id = "cohere"
+name = "Cohere"
+description = "Cohere API platform (Command chat, Embed, Rerank)."
+website = "https://cohere.com"
+api_docs_url = "https://docs.cohere.com/reference/about"
+auth_docs_url = "https://docs.cohere.com/reference/about"
+manage_url = "https://dashboard.cohere.com/api-keys"
+pricing_url = "https://cohere.com/pricing"
+login_url = "https://dashboard.cohere.com/"
+billing_url = "https://dashboard.cohere.com/billing"
+# Verified against the official cohere-python client, which reads
+# `os.getenv("CO_API_KEY", os.getenv("COHERE_API_KEY"))` — CO_API_KEY is the
+# documented name, COHERE_API_KEY the accepted fallback. Both are listed
+# because either one in a project's .env is a real credential.
+env_vars = ["CO_API_KEY", "COHERE_API_KEY"]
+credential_types = ["trial_key", "production_key"]
+expiration = "No key expiration is documented; trial and production keys stay valid until revoked in the dashboard."
+watch_docs = [
+    "https://docs.cohere.com/reference/about",
+    "https://docs.cohere.com/changelog",
+]
+# No detection pattern: Cohere keys have no documented prefix, so a regex
+# would be an entropy heuristic with a high false-positive rate.
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# cohere-python client:
+#   * base URL env var: `base_url: typing.Optional[str] = os.getenv("CO_API_URL")`
+#   * default base URL: `ClientEnvironment.PRODUCTION = "https://api.cohere.com"`
+#   * API key env var:  `CO_API_KEY` (fallback `COHERE_API_KEY`)
+# CO_API_URL — not "COHERE_BASE_URL" — is the name the SDK actually reads; the
+# default is a bare origin with `/v1`/`/v2` carried in the SDK's route
+# strings, so base_path stays empty.
+[gateway]
+origins = ["https://api.cohere.com"]
+base_path = ""
+env_vars = ["CO_API_URL"]
+# Cohere v2 reports `usage.tokens.input_tokens` / `output_tokens`, which is
+# neither the OpenAI nor the Anthropic shape. Declaring an unknown shape would
+# silently extract nothing, so the empty shape is declared honestly: the
+# gateway counts requests for Cohere, it does not count tokens.
+usage_shape = ""
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/models would confirm the key; Tethra has no Cohere connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names and types are shown in the dashboard; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Usage and spend are shown in the dashboard; no public usage API is documented." }
+read_permissions = { support = "unsupported", note = "A Cohere key's privilege follows its type (trial vs production); no per-key scopes are exposed by the API." }
+change_permissions = { support = "unsupported", note = "A key's type cannot be changed; create a key of the desired type instead." }
+create_credential = { support = "manual_only", note = "Keys are created in the dashboard; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are revoked instead." }
+revoke_credential = { support = "manual_only", note = "Keys are revoked in the dashboard; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the dashboard, deploy it, then revoke the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

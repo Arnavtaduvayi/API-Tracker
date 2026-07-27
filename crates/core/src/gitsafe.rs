@@ -271,7 +271,7 @@ fn parse_index_with_oid_len(buf: &[u8], oid_len: usize) -> Result<BTreeSet<Strin
         return Err("missing the DIRC signature".into());
     }
     let version = be_u32(buf, 4).ok_or("truncated version")?;
-    if !matches!(version, 2 | 3 | 4) {
+    if !matches!(version, 2..=4) {
         return Err(format!("unsupported index version {version}"));
     }
     let count = be_u32(buf, 8).ok_or("truncated entry count")? as usize;

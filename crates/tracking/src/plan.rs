@@ -33,27 +33,61 @@ pub struct Selections {
 }
 
 impl Selections {
-    /// The default selection: every configurable Confirmed or Likely
-    /// provider; custom-origin providers with an inferred origin carry it
-    /// as the (still explicitly confirmable) default.
+    /// The default selection: every **`Automatic`** Confirmed or Likely
+    /// provider — that is, every provider whose destination comes from a
+    /// compiled-in Tethra manifest and cannot be influenced by the project.
+    ///
+    /// `NeedsOriginConfirm` is deliberately NOT included. It used to be:
+    /// the arm inserted the provider into `include` AND pre-filled
+    /// `confirmed_origins` with the origin read from the project's own
+    /// files, so the confirmation the variant is named for was satisfied by
+    /// the code that was supposed to ask for it. A repository containing
+    /// nothing but a committed `package.json` and a committed
+    /// `SUPABASE_URL` therefore produced an enabled, MAC'd route to an
+    /// attacker-chosen host under a single bulk "Proceed?" that `--yes`
+    /// answered (ZFT-004).
+    ///
+    /// Callers add repository-discovered origins through
+    /// [`Selections::approve_origin`] only after the user has approved that
+    /// exact destination — see [`crate::origin`].
     pub fn defaults(detection: &ProjectDetection) -> Self {
         let mut sel = Selections::default();
         for p in detection.providers.iter() {
-            match &p.configurability {
-                Configurability::Automatic if p.confidence >= DetectionConfidence::Likely => {
-                    sel.include.insert(p.provider_id.clone());
-                }
-                Configurability::NeedsOriginConfirm { inferred_origin }
-                    if p.confidence >= DetectionConfidence::Likely =>
-                {
-                    sel.include.insert(p.provider_id.clone());
-                    sel.confirmed_origins
-                        .insert(p.provider_id.clone(), inferred_origin.clone());
-                }
-                _ => {}
+            if matches!(p.configurability, Configurability::Automatic)
+                && p.confidence >= DetectionConfidence::Likely
+            {
+                sel.include.insert(p.provider_id.clone());
             }
         }
         sel
+    }
+
+    /// Providers whose destination was read from project content and which
+    /// therefore need a separate, explicit approval before they can be
+    /// configured. Returned in a stable order so one review screen can list
+    /// them all with individually unchecked boxes.
+    pub fn pending_origin_approvals(detection: &ProjectDetection) -> Vec<(String, String)> {
+        detection
+            .providers
+            .iter()
+            .filter_map(|p| match &p.configurability {
+                Configurability::NeedsOriginConfirm { inferred_origin }
+                    if p.confidence >= DetectionConfidence::Likely =>
+                {
+                    Some((p.provider_id.clone(), inferred_origin.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Record the user's approval of one exact origin for one provider.
+    /// This is the ONLY way a repository-discovered destination enters a
+    /// plan.
+    pub fn approve_origin(&mut self, provider_id: &str, origin: &str) {
+        self.include.insert(provider_id.to_string());
+        self.confirmed_origins
+            .insert(provider_id.to_string(), origin.to_string());
     }
 }
 
@@ -273,6 +307,30 @@ pub fn plan(
 
     // Service actions.
     let mut service_actions = Vec::new();
+    if service.installed && !service.matches_data_dir {
+        // The login slot is occupied by a definition pointing at a DIFFERENT
+        // Tethra data directory. `installed` alone used to be enough to fall
+        // through to Repair or Start, both of which act on that other
+        // installation's service — repair by replacing its definition, start
+        // by bootstrapping it into this session. Neither is something an
+        // automatic `track` run may do to another environment (ZFT-014).
+        //
+        // A hard stop, with the other data directory named, so the user can
+        // decide rather than discovering it when their other gateway dies.
+        return Err(CoreError::InvalidInput(format!(
+            "the login slot for the local tracking service is held by another Tethra              installation ({}). Tethra will not reconfigure it. Use that installation, or              uninstall its service first: `tethra gateway uninstall --data-dir {}`.",
+            service
+                .definition
+                .as_ref()
+                .map(|d| d.data_dir.display().to_string())
+                .unwrap_or_else(|| "unknown data directory".to_string()),
+            service
+                .definition
+                .as_ref()
+                .map(|d| d.data_dir.display().to_string())
+                .unwrap_or_else(|| "<its data dir>".to_string()),
+        )));
+    }
     if listener_live {
         // A verified gateway already answers on the port (service or a
         // foreground `gateway serve`); nothing to install or start.

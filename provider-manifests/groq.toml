@@ -1,0 +1,56 @@
+# Groq provider manifest.
+# Capability statuses are honest declarations: `connectors::for_provider` has
+# no Groq connector, so nothing here is "implemented" — the provider offers
+# the endpoint, Tethra does not call it yet.
+id = "groq"
+name = "Groq"
+description = "Groq API platform (GroqCloud inference for open models)."
+website = "https://groq.com"
+api_docs_url = "https://console.groq.com/docs/api-reference"
+auth_docs_url = "https://console.groq.com/docs/quickstart"
+manage_url = "https://console.groq.com/keys"
+pricing_url = "https://groq.com/pricing/"
+login_url = "https://console.groq.com/login"
+billing_url = "https://console.groq.com/settings/billing"
+# Secret-bearing variables only. Verified against the official groq-python
+# client: `api_key = os.environ.get("GROQ_API_KEY")`.
+env_vars = ["GROQ_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in the console."
+watch_docs = [
+    "https://console.groq.com/docs/api-reference",
+    "https://console.groq.com/docs/quickstart",
+]
+# No detection pattern: Groq's official documentation does not publish the
+# API-key format, and a guessed prefix would produce either false positives or
+# a silent blind spot. Detection still works through the GROQ_API_KEY name.
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# groq-python client:
+#   * base URL env var: `base_url = os.environ.get("GROQ_BASE_URL")`
+#   * default base URL: `https://api.groq.com`
+#   * API key env var:  `GROQ_API_KEY`
+# The SDK's own route strings carry the `/openai/v1` prefix, so the written
+# base URL must stop at the route root exactly like the default does —
+# base_path stays empty (contrast OpenAI, whose default base URL itself ends
+# in /v1; OPEN_DECISIONS O11).
+[gateway]
+origins = ["https://api.groq.com"]
+base_path = ""
+env_vars = ["GROQ_BASE_URL"]
+# Groq's /openai/v1/chat/completions responses carry OpenAI-shaped
+# `usage.prompt_tokens` / `usage.completion_tokens`, so the bounded OpenAI
+# extractor reads them correctly.
+usage_shape = "openai"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "The API accepts an authenticated GET /openai/v1/models, which would confirm the key; Tethra has no Groq connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names and creation dates are shown in the console; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Token usage and spend are shown in the console; no public usage API is documented. Per-response token counts are still observable locally through the Local Gateway." }
+read_permissions = { support = "unsupported", note = "Groq API keys carry no documented per-key scopes; there is nothing to read." }
+change_permissions = { support = "unsupported", note = "There are no documented per-key scopes to change." }
+create_credential = { support = "manual_only", note = "Keys are created in the console; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the console; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the console, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

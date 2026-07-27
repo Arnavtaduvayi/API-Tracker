@@ -19,21 +19,74 @@ pub struct UndoReport {
     /// setup only reused them).
     pub kept_routes: Vec<(String, String)>,
     pub complete: bool,
+    /// Why undo could not finish, in the user's own vocabulary. Non-empty
+    /// exactly when `complete` is false for a reason the user must act on.
+    pub notes: Vec<String>,
 }
 
 /// Undo this setup. Removes the links it made (restoring env files from
 /// their recorded prior state), removes routes it CREATED that no other
 /// project uses, and returns the setup to `not_configured`.
+///
+/// ## Why the plan summary is not trusted blindly
+///
+/// The summary is persisted at the LAST apply step, so any earlier failure
+/// leaves it NULL. The previous code read it with
+/// `.transpose()?.unwrap_or_default()`, which turned "we do not know what
+/// was done" into "nothing was done": both loops iterated empty
+/// collections, `complete` stayed `true`, the row was moved to
+/// `not_configured`, and the CLI printed "Tracking stopped." — while the
+/// user's `.env` still pointed at the gateway with routes and links intact
+/// (ZFT-007).
+///
+/// Undo now derives its work from ground truth. `gateway_project_links`
+/// rows carry the recorded prior `.env` state, so the links this project
+/// holds are authoritative regardless of what the summary says. When the
+/// summary is absent AND link rows exist, the route side cannot be
+/// reconstructed (we cannot tell created from reused), so undo restores
+/// what it can and REFUSES to report completion.
 pub fn undo(conn: &Connection, setup: &TrackingSetup) -> Result<UndoReport> {
-    let summary: PlanSummary = setup
+    let recorded: Option<PlanSummary> = setup
         .plan_summary_json
         .as_deref()
         .map(serde_json::from_str)
-        .transpose()?
-        .unwrap_or_default();
+        .transpose()?;
+
+    // Ground truth: every route prefix this project is actually linked to.
+    let live_links: Vec<String> = {
+        let mut stmt =
+            conn.prepare("SELECT route_prefix FROM gateway_project_links WHERE project_id = ?1")?;
+        let rows = stmt.query_map([&setup.project_id], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out
+    };
+
+    let summary_missing = recorded.is_none();
+    let mut summary = recorded.unwrap_or_default();
+    // Union: the summary's order matters (chained multi-provider plans over
+    // one file must unwind last-to-first), so keep it and append anything
+    // the database knows about that the summary does not.
+    for prefix in &live_links {
+        if !summary.links.contains(prefix) {
+            summary.links.push(prefix.clone());
+        }
+    }
 
     let mut links = Vec::new();
     let mut complete = true;
+    let mut notes: Vec<String> = Vec::new();
+    if summary_missing && !live_links.is_empty() {
+        complete = false;
+        notes.push(
+            "this setup failed before its plan was recorded, so Tethra cannot tell which routes \
+             it created from which it reused. Environment files were restored from the recorded \
+             link state; routes were left in place. Review them under Advanced → Gateway."
+                .to_string(),
+        );
+    }
     // Reverse order: apply chained multi-provider plans over one file
     // (provider N planned over N−1's output), so restoring last-to-first
     // unwinds each layer onto exactly the prior state it recorded.
@@ -77,20 +130,29 @@ pub fn undo(conn: &Connection, setup: &TrackingSetup) -> Result<UndoReport> {
 
     if complete {
         // Return the row to not_configured (legal from any state) and
-        // clear apply artifacts so a later setup starts clean.
+        // clear apply artifacts so a later setup starts clean. The session
+        // is closed too: nothing observed under it may verify a later one.
         state::transition(conn, setup, TrackingState::NotConfigured, None)?;
         conn.execute(
             "UPDATE tracking_setups
-             SET plan_summary_json = NULL, applied_at = NULL, first_traffic_at = NULL
+             SET plan_summary_json = NULL, applied_at = NULL, first_traffic_at = NULL,
+                 verification_session = NULL
              WHERE id = ?1",
             [&setup.id],
         )?;
     } else {
+        // An incomplete undo must NOT clear the apply artifacts: leaving
+        // `applied_at` in place is what keeps the next status read honest
+        // about a setup that is still partly in effect.
         state::transition(
             conn,
             setup,
             TrackingState::NeedsAttention,
-            Some("undo_incomplete"),
+            Some(if summary_missing {
+                "undo_incomplete_plan_unknown"
+            } else {
+                "undo_incomplete"
+            }),
         )?;
     }
     audit::record(
@@ -110,5 +172,6 @@ pub fn undo(conn: &Connection, setup: &TrackingSetup) -> Result<UndoReport> {
         removed_routes,
         kept_routes,
         complete,
+        notes,
     })
 }

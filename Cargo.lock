@@ -234,9 +234,11 @@ version = "0.1.0"
 dependencies = [
  "api-tracker-core",
  "api-tracker-gateway",
+ "blake3",
  "rusqlite",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "uuid",
  "zeroize",

@@ -23,6 +23,7 @@
 pub mod apply;
 pub mod detect;
 pub mod diagnose;
+pub mod origin;
 pub mod plan;
 pub mod state;
 pub mod undo;

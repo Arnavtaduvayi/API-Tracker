@@ -26,6 +26,12 @@
 //! vault. No secret ever appears in argv, the definition file, or the
 //! registry.
 //!
+//! Every service name is NAMESPACED by [`installation_id`], and every
+//! destructive verb proves the definition it is about to touch belongs to
+//! this data directory ([`ServiceManager::ensure_ours`]). See
+//! `installation_id` for why a fixed global name was a defect and not a
+//! simplification.
+//!
 //! Every OS interaction goes through [`CommandRunner`], so unit tests run
 //! against a mock in temporary directories — `cargo test` never installs,
 //! starts, or stops a real service.
@@ -49,6 +55,69 @@ use crate::store;
 /// subcommand). Proves the copied binary actually executes under this OS
 /// before a service definition points at it.
 pub const PROBE_MARKER: &str = "tethra-gateway-service-probe";
+
+/// Hex characters of the installation hash kept in a service name. 12 hex
+/// = 48 bits: short enough to stay readable in `launchctl print` output and
+/// a systemd unit file name, far more than enough to separate the handful
+/// of Tethra environments one user account can hold.
+const INSTALLATION_ID_LEN: usize = 12;
+
+/// A short, stable identity for ONE Tethra installation, derived from the
+/// CANONICALIZED data directory.
+///
+/// Every login-start mechanism this module drives is a single per-user
+/// namespace: one launchd label, one systemd user unit name, one HKCU `Run`
+/// value. While those names were fixed constants, a second Tethra
+/// environment — its own `TETHRA_DIR`, even its own `HOME` — addressed the
+/// FIRST environment's job, because `launchctl`'s `gui/<uid>` domain is the
+/// real session domain no matter which `HOME` the plist was read from. That
+/// environment saw no plist of its own, wrote one, hit "already
+/// bootstrapped", and booted the OTHER installation's running gateway out
+/// (ZFT-014 — observed, not theoretical). Deriving the name from the data
+/// directory gives every installation its own slot.
+///
+/// Canonicalized so that `/tmp/x` and `/private/tmp/x`, or a path reached
+/// through a symlinked home, are ONE identity rather than two competing
+/// services. A path that cannot be canonicalized (it does not exist yet)
+/// falls back to its literal form, which is stable for exactly as long as
+/// it stays uncreated — installs always run against a data directory that
+/// exists.
+pub fn installation_id(data_dir: &Path) -> String {
+    let resolved = std::fs::canonicalize(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+    // `derive_key`, not `hash`. The input is a filesystem path rather than
+    // credential material, so this is a domain-separated derivation, and
+    // saying so in the primitive keeps the crate's blanket ban on unkeyed
+    // `blake3::hash` intact (`tests/privacy_canaries.rs`) instead of
+    // carving an exception into a rule that exists to stop a stolen
+    // database becoming an offline guess-confirmation oracle.
+    let key = blake3::derive_key(
+        "tethra gateway service installation id v1",
+        resolved.as_os_str().as_encoded_bytes(),
+    );
+    let hex: String = key
+        .iter()
+        .take(INSTALLATION_ID_LEN.div_ceil(2))
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    hex[..INSTALLATION_ID_LEN].to_string()
+}
+
+/// Whether two `--data-dir` values name the SAME directory.
+///
+/// Every ownership proof runs through this, so it is deliberately
+/// conservative: equal literal paths, or two paths that canonicalize to the
+/// same real directory. Anything it cannot POSITIVELY prove equal is
+/// treated as foreign — the failure mode of a false "yes" here is tearing
+/// down another installation's gateway.
+pub fn same_data_dir(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
 
 /// Runs external commands. The host implementation shells out; tests
 /// substitute a recorder so no real `launchctl`/`systemctl`/`reg` runs.
@@ -137,6 +206,21 @@ pub struct RegistrationState {
 /// ever requires or requests elevation.
 pub trait ServiceManager: Send + Sync {
     fn platform(&self) -> &'static str;
+    /// The ONLY data directory this manager may act on. Every destructive
+    /// verb proves the definition it is about to touch points here.
+    fn owned_data_dir(&self) -> &Path;
+    /// The [`installation_id`] this manager's service name is namespaced by.
+    fn installation_id(&self) -> &str;
+    /// The resolved OS-level name: launchd label, systemd unit file name,
+    /// or HKCU `Run` value name. Surfaced in status so diagnostics say WHICH
+    /// service is being controlled.
+    fn service_name(&self) -> String;
+    /// Unload and delete a LEGACY (pre-namespacing) definition, but only
+    /// when it points at OUR data directory; returns the legacy name when
+    /// one was reclaimed. A legacy definition belonging to a different data
+    /// directory is left completely alone — it is another installation's
+    /// production gateway, and the migration is not an excuse to touch it.
+    fn reclaim_legacy(&self) -> Result<Option<String>>;
     fn definition_path(&self) -> PathBuf;
     /// Render + write the definition (0600 where the platform has modes).
     fn write_definition(&self, binary: &Path) -> Result<()>;
@@ -155,6 +239,33 @@ pub trait ServiceManager: Send + Sync {
     /// probe on macOS, exec probe elsewhere. MUST run before any
     /// definition is written.
     fn prepare_binary(&self, binary: &Path) -> Result<()>;
+
+    /// OWNERSHIP PROOF, run before every destructive verb (`unregister`,
+    /// `stop`, `restart`, `remove_definition`, and the bootout inside
+    /// `register`'s retry).
+    ///
+    /// Namespacing alone is not proof: a definition can be moved, edited by
+    /// hand, or left behind by a data directory that was relocated, and the
+    /// verb then lands on whatever job currently answers to our name. So we
+    /// re-read the definition we are about to act on and require it to
+    /// point at our own data directory. An absent definition is fine —
+    /// there is nothing to destroy — but a foreign one is refused by name
+    /// rather than silently obeyed (ZFT-014).
+    fn ensure_ours(&self, verb: &str) -> Result<()> {
+        let Some(def) = self.read_definition()? else {
+            return Ok(());
+        };
+        if same_data_dir(&def.data_dir, self.owned_data_dir()) {
+            return Ok(());
+        }
+        Err(CoreError::InvalidInput(format!(
+            "refusing to {verb}: the service {} belongs to a different Tethra data \
+             directory ({}), not this one ({}). Run the command from that installation.",
+            self.service_name(),
+            def.data_dir.display(),
+            self.owned_data_dir().display(),
+        )))
+    }
 }
 
 /// The engine: shared orchestration over a platform manager.
@@ -171,6 +282,14 @@ pub struct Lifecycle {
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceStatus {
     pub platform: &'static str,
+    /// WHICH installation these facts describe: the short id derived from
+    /// this data directory ([`installation_id`]). Two Tethra environments
+    /// on one account report different ids and control different services.
+    pub installation_id: String,
+    /// The resolved OS-level service name that id controls (launchd label,
+    /// systemd unit name, or HKCU `Run` value name) — the string a user or
+    /// support request needs to inspect the job by hand.
+    pub service_name: String,
     /// The definition file / registry value exists.
     pub installed: bool,
     pub definition_path: String,
@@ -189,6 +308,33 @@ pub struct ServiceStatus {
     /// status lists what uninstall will remove).
     pub owned_artifacts: Vec<String>,
     pub notes: Vec<String>,
+}
+
+/// "Nothing is known" — the shape every placeholder/fixture starts from, so
+/// a new fact added to [`ServiceStatus`] does not have to be spelled out at
+/// each construction site (and cannot be silently forgotten there).
+impl Default for ServiceStatus {
+    fn default() -> Self {
+        Self {
+            platform: "unknown",
+            installation_id: String::new(),
+            service_name: String::new(),
+            installed: false,
+            definition_path: String::new(),
+            definition: None,
+            matches_data_dir: false,
+            binary_exists: false,
+            binary_version: None,
+            registered: false,
+            running: false,
+            pid: None,
+            os_will_run: OsWillRun::Unknown {
+                why: "not determined".into(),
+            },
+            owned_artifacts: Vec::new(),
+            notes: Vec::new(),
+        }
+    }
 }
 
 /// What install did, for honest reporting.
@@ -336,20 +482,43 @@ impl Lifecycle {
     /// another vault).
     pub fn install(&self, source_binary: &Path, force: bool) -> Result<InstallReport> {
         let mut notes = Vec::new();
-        if let Some(existing) = self.manager.read_definition()? {
-            if existing.data_dir != self.data_dir && !force {
+        match self.manager.read_definition()? {
+            Some(existing) => {
+                if !same_data_dir(&existing.data_dir, &self.data_dir) && !force {
+                    return Err(CoreError::InvalidInput(format!(
+                        "a Tethra gateway service is already installed for a different data \
+                         directory ({}). Uninstall it first, or pass --force to replace it.",
+                        existing.data_dir.display()
+                    )));
+                }
+                if !same_data_dir(&existing.data_dir, &self.data_dir) {
+                    notes.push(format!(
+                        "replaced a service that pointed at {}",
+                        existing.data_dir.display()
+                    ));
+                }
+            }
+            // A definition file we cannot PARSE is not the same thing as no
+            // definition. `reclaim_legacy` already says so in as many words
+            // — "unreadable means we cannot prove it is ours, which is the
+            // same answer as someone else's: leave it" — and the same rule
+            // has to hold here, or an unparseable plist in our slot gets
+            // silently unlinked and overwritten.
+            None if self.manager.definition_path().exists() && !force => {
                 return Err(CoreError::InvalidInput(format!(
-                    "a Tethra gateway service is already installed for a different data \
-                     directory ({}). Uninstall it first, or pass --force to replace it.",
-                    existing.data_dir.display()
+                    "{} already exists but could not be parsed as a Tethra service \
+                     definition. Tethra will not overwrite a definition it cannot prove is \
+                     its own; inspect or remove the file, or pass --force.",
+                    self.manager.definition_path().display()
                 )));
             }
-            if existing.data_dir != self.data_dir {
+            None if self.manager.definition_path().exists() => {
                 notes.push(format!(
-                    "replaced a service that pointed at {}",
-                    existing.data_dir.display()
+                    "replaced an unparseable definition at {}",
+                    self.manager.definition_path().display()
                 ));
             }
+            None => {}
         }
 
         let target = self.installed_binary_path();
@@ -363,11 +532,45 @@ impl Lifecycle {
         // answer.
         let was_running = self.manager.query().running;
         self.manager.write_definition(&target)?;
-        self.manager.register()?;
-        if was_running {
-            self.manager.restart()?;
+        // Only now — probe passed, new definition on disk — do we retire a
+        // pre-namespacing service that pointed at THIS data directory.
+        // Earlier would mean a failed probe left the user with no gateway at
+        // all; later would mean two definitions racing for the same port at
+        // next login. A legacy service owned by ANOTHER data directory is
+        // never touched, and its presence is not an error (ZFT-014).
+        // Roll the new definition back if migration or registration fails.
+        // On macOS launchd loads EVERY plist in ~/Library/LaunchAgents with
+        // RunAtLoad at login, bootstrapped or not, so leaving our new plist
+        // beside an un-retired legacy one would give a single vault TWO
+        // gateways fighting over one port at the next login — with no
+        // warning and no way back.
+        let rollback = |e: CoreError| -> CoreError {
+            let _ = self.manager.remove_definition();
+            e
+        };
+        match self.manager.reclaim_legacy() {
+            Ok(Some(legacy)) => notes.push(format!(
+                "migrated the pre-namespacing service {legacy} to {}; one service per \
+                 data directory now",
+                self.manager.service_name()
+            )),
+            Ok(None) => {}
+            Err(e) => return Err(rollback(e)),
+        }
+        if let Err(e) = self.manager.register() {
+            return Err(rollback(e));
+        }
+        let started = if was_running {
+            self.manager.restart()
         } else {
-            self.manager.start()?;
+            self.manager.start()
+        };
+        if let Err(e) = started {
+            // Registration succeeded, so the definition is live; unregister
+            // before removing it, or launchd keeps a job pointing at a file
+            // that no longer exists.
+            let _ = self.manager.unregister();
+            return Err(rollback(e));
         }
         let pruned = self.prune_old_binaries(&target)?;
         Ok(InstallReport {
@@ -405,7 +608,16 @@ impl Lifecycle {
     /// Binaries and DB rows stay — this is "off", not "gone".
     pub fn disable(&self, conn: &Connection, keep_env: bool) -> Result<DisableReport> {
         let mut notes = Vec::new();
-        let stop_ok = self.manager.stop().is_ok();
+        // The stop error is the one that tells a user their environment does
+        // not own this slot; swallowing it left `service stopped: false`
+        // with no reason attached.
+        let stop_ok = match self.manager.stop() {
+            Ok(()) => true,
+            Err(e) => {
+                notes.push(format!("stop: {e}"));
+                false
+            }
+        };
         let unregister_ok = match self.manager.unregister() {
             Ok(()) => true,
             Err(e) => {
@@ -415,6 +627,17 @@ impl Lifecycle {
         };
         if let Err(e) = self.manager.remove_definition() {
             notes.push(format!("definition removal: {e}"));
+        }
+        // Uninstall must leave nothing of OURS behind and nothing of anyone
+        // else's disturbed: a pre-namespacing definition goes only if it
+        // points here.
+        match self.manager.reclaim_legacy() {
+            Ok(Some(legacy)) => notes.push(format!(
+                "also removed the pre-namespacing service {legacy}, which pointed at this \
+                 data directory"
+            )),
+            Ok(None) => {}
+            Err(e) => notes.push(format!("legacy definition removal: {e}")),
         }
 
         let mut env_restores = Vec::new();
@@ -497,7 +720,7 @@ impl Lifecycle {
         let installed = definition.is_some();
         let matches = definition
             .as_ref()
-            .map(|d| d.data_dir == self.data_dir)
+            .map(|d| same_data_dir(&d.data_dir, &self.data_dir))
             .unwrap_or(false);
         let binary_exists = definition
             .as_ref()
@@ -544,6 +767,8 @@ impl Lifecycle {
 
         ServiceStatus {
             platform: self.manager.platform(),
+            installation_id: self.manager.installation_id().to_string(),
+            service_name: self.manager.service_name(),
             installed,
             definition_path: definition_path.display().to_string(),
             definition,
@@ -576,6 +801,14 @@ impl Lifecycle {
     /// restart. Fixes moved binaries, stale definitions, and version
     /// mismatches in one pass.
     pub fn repair(&self, source_binary: &Path) -> Result<InstallReport> {
-        self.install(source_binary, true)
+        // Deliberately NOT forced. Repair means "our own installed helper
+        // drifted from this build"; it is reached automatically from the
+        // `tethra track` apply path, with no user decision behind it. A
+        // forced repair would walk straight past the different-data-dir
+        // refusal, write our definition over another installation's, and
+        // then — because the slot now reads as ours — pass the ownership
+        // proof on the way to booting that installation's gateway out.
+        // That is ZFT-014 again, reached from the automatic path.
+        self.install(source_binary, false)
     }
 }

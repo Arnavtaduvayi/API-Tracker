@@ -146,12 +146,12 @@ fn fake_source_binary(dir: &Path) -> PathBuf {
 fn mac_lifecycle(dir: &Path, runner: Arc<MockRunner>) -> Lifecycle {
     let data_dir = dir.join("data");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let agent = LaunchAgent {
-        data_dir: data_dir.clone(),
-        launch_agents_dir: dir.join("LaunchAgents"),
-        uid: "501".into(),
-        runner: runner.clone(),
-    };
+    let agent = LaunchAgent::new(
+        &data_dir,
+        dir.join("LaunchAgents"),
+        "501".into(),
+        runner.clone(),
+    );
     Lifecycle {
         data_dir,
         manager: Box::new(agent),
@@ -183,16 +183,16 @@ fn plist_renders_the_d8_shape_and_round_trips_with_xml_escaping() {
     // A data dir with XML-hostile characters.
     let data_dir = dir.path().join("da<ta>&dir");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let agent = LaunchAgent {
-        data_dir: data_dir.clone(),
-        launch_agents_dir: dir.path().join("LaunchAgents"),
-        uid: "501".into(),
+    let agent = LaunchAgent::new(
+        &data_dir,
+        dir.path().join("LaunchAgents"),
+        "501".into(),
         runner,
-    };
+    );
     let bin = data_dir.join("bin").join(binary_name("0.1.0"));
     let plist = agent.render_plist(&bin);
 
-    assert!(plist.contains("<string>dev.api-tracker.gateway</string>"));
+    assert!(plist.contains(&format!("<string>{}</string>", agent.label())));
     assert!(plist.contains("<key>RunAtLoad</key>"));
     assert!(
         plist.contains("<key>KeepAlive</key>\n\t<dict>\n\t\t<key>Crashed</key>\n\t\t<true/>"),
@@ -226,11 +226,11 @@ fn systemd_unit_renders_user_scope_and_round_trips_spaced_paths() {
     let dir = tempfile::tempdir().unwrap();
     let data_dir = dir.path().join("data dir with spaces");
     std::fs::create_dir_all(&data_dir).unwrap();
-    let unit = SystemdUser {
-        data_dir: data_dir.clone(),
-        unit_dir: dir.path().join("systemd-user"),
-        runner: Arc::new(MockRunner::default()),
-    };
+    let unit = SystemdUser::new(
+        &data_dir,
+        dir.path().join("systemd-user"),
+        Arc::new(MockRunner::default()),
+    );
     let bin = data_dir.join("bin").join(binary_name("0.1.0"));
     let text = unit.render_unit(&bin);
     assert!(text.contains("WantedBy=default.target"), "{text}");
@@ -340,15 +340,19 @@ fn install_refuses_a_definition_owned_by_a_different_data_dir_unless_forced() {
     let lc = mac_lifecycle(dir.path(), runner.clone());
     let src = fake_source_binary(dir.path());
 
-    // A plist for ANOTHER vault occupies the login slot.
-    let other = LaunchAgent {
+    // A plist for ANOTHER vault occupies THIS installation's slot: same file
+    // name and label, foreign `--data-dir`. Namespacing makes that unlikely
+    // (a moved data directory, a hand-edited plist) but never impossible, so
+    // the slot's NAME is not proof of ownership — the parsed `--data-dir` is.
+    let squatter = LaunchAgent {
         data_dir: dir.path().join("other-vault"),
+        installation_id: lc.manager.installation_id().to_string(),
         launch_agents_dir: dir.path().join("LaunchAgents"),
         uid: "501".into(),
         runner: runner.clone(),
     };
     std::fs::create_dir_all(dir.path().join("other-vault")).unwrap();
-    other
+    squatter
         .write_definition(&dir.path().join("other-vault/bin/tethra-gateway-0.0.9"))
         .unwrap();
 
@@ -411,7 +415,7 @@ fn status_reports_uninstalled_then_installed_then_stale_binary() {
     assert!(s
         .owned_artifacts
         .iter()
-        .any(|a| a.contains("dev.api-tracker.gateway.plist")));
+        .any(|a| a.ends_with(&format!("{}.plist", s.service_name))));
 
     // The binary moves away underneath the definition: stale-path note.
     std::fs::remove_file(lc.installed_binary_path()).unwrap();

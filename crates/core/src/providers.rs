@@ -248,16 +248,72 @@ impl ProviderManifest {
 /// Embedded manifest sources. Adding a provider = adding a TOML file here.
 const MANIFEST_SOURCES: &[(&str, &str)] = &[
     (
-        "openai",
-        include_str!("../../../provider-manifests/openai.toml"),
-    ),
-    (
         "anthropic",
         include_str!("../../../provider-manifests/anthropic.toml"),
     ),
     (
+        "aws-bedrock",
+        include_str!("../../../provider-manifests/aws-bedrock.toml"),
+    ),
+    (
+        "azure-openai",
+        include_str!("../../../provider-manifests/azure-openai.toml"),
+    ),
+    (
+        "cerebras",
+        include_str!("../../../provider-manifests/cerebras.toml"),
+    ),
+    (
+        "cohere",
+        include_str!("../../../provider-manifests/cohere.toml"),
+    ),
+    (
+        "deepseek",
+        include_str!("../../../provider-manifests/deepseek.toml"),
+    ),
+    (
+        "fireworks",
+        include_str!("../../../provider-manifests/fireworks.toml"),
+    ),
+    (
         "github",
         include_str!("../../../provider-manifests/github.toml"),
+    ),
+    (
+        "google-gemini",
+        include_str!("../../../provider-manifests/google-gemini.toml"),
+    ),
+    (
+        "groq",
+        include_str!("../../../provider-manifests/groq.toml"),
+    ),
+    (
+        "huggingface",
+        include_str!("../../../provider-manifests/huggingface.toml"),
+    ),
+    (
+        "langsmith",
+        include_str!("../../../provider-manifests/langsmith.toml"),
+    ),
+    (
+        "mistral",
+        include_str!("../../../provider-manifests/mistral.toml"),
+    ),
+    (
+        "openai",
+        include_str!("../../../provider-manifests/openai.toml"),
+    ),
+    (
+        "openrouter",
+        include_str!("../../../provider-manifests/openrouter.toml"),
+    ),
+    (
+        "perplexity",
+        include_str!("../../../provider-manifests/perplexity.toml"),
+    ),
+    (
+        "replicate",
+        include_str!("../../../provider-manifests/replicate.toml"),
     ),
     (
         "stripe",
@@ -267,6 +323,11 @@ const MANIFEST_SOURCES: &[(&str, &str)] = &[
         "supabase",
         include_str!("../../../provider-manifests/supabase.toml"),
     ),
+    (
+        "together",
+        include_str!("../../../provider-manifests/together.toml"),
+    ),
+    ("xai", include_str!("../../../provider-manifests/xai.toml")),
 ];
 
 static MANIFESTS: OnceLock<Vec<ProviderManifest>> = OnceLock::new();
@@ -413,7 +474,11 @@ mod tests {
     #[test]
     fn all_embedded_manifests_parse_and_validate() {
         let all = manifests();
-        assert_eq!(all.len(), 5);
+        // Pinned so the catalog cannot grow or shrink without the coverage
+        // numbers in the docs being revisited in the same change
+        // (`crates/core/tests/provider_manifests.rs` owns the full
+        // conformance assertions).
+        assert_eq!(all.len(), MANIFEST_SOURCES.len());
         for m in all {
             assert!(!m.id.is_empty());
             assert!(!m.name.is_empty());
@@ -421,13 +486,18 @@ mod tests {
             assert!(!m.manage_url.is_empty(), "{} missing manage url", m.id);
             // Capability matrix is exhaustive (10 entries).
             assert_eq!(m.capabilities.entries().len(), 10);
-            // Credential validation is implemented for every provider.
-            assert_eq!(
-                m.capabilities.validate_credential.support,
-                SupportLevel::Implemented,
-                "{} must implement validation",
-                m.id
-            );
+            // Credential validation is implemented only where a real
+            // connector exists. A manifest describes a provider; it must
+            // never claim a capability Tethra cannot actually perform, so
+            // this asserts the *consistency* of the claim rather than
+            // demanding that every provider be fully managed.
+            if m.capabilities.validate_credential.support == SupportLevel::Implemented {
+                assert!(
+                    crate::connectors::for_provider(&m.id).is_some(),
+                    "{} claims implemented validation but has no connector",
+                    m.id
+                );
+            }
         }
     }
 

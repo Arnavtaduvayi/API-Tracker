@@ -1,0 +1,42 @@
+# Mistral AI provider manifest.
+#
+# NO [gateway] SECTION — deliberately. The official mistralai Python SDK
+# overrides its endpoint with a `server_url` CONSTRUCTOR ARGUMENT (or a named
+# `server` of "global"/"eu"/"us"); its documentation names `MISTRAL_API_KEY`
+# for the key and no environment variable for the base URL. Because Tethra's
+# zero-friction linking works purely by writing a base-URL variable into
+# `.env`, there is nothing here it can set. Detection therefore lists Mistral
+# and labels it unsupported rather than pretending it can be observed.
+# (Default server: https://api.mistral.ai.)
+id = "mistral"
+name = "Mistral AI"
+description = "Mistral AI API platform (Mistral and Codestral models)."
+website = "https://mistral.ai"
+api_docs_url = "https://docs.mistral.ai/api/"
+auth_docs_url = "https://docs.mistral.ai/getting-started/quickstart/"
+manage_url = "https://console.mistral.ai/api-keys"
+pricing_url = "https://mistral.ai/pricing"
+login_url = "https://console.mistral.ai/"
+billing_url = "https://console.mistral.ai/billing"
+# Verified from the official SDK documentation: `export MISTRAL_API_KEY=...`.
+env_vars = ["MISTRAL_API_KEY"]
+credential_types = ["api_key"]
+expiration = "Keys may be given an expiration date at creation in the console; otherwise they stay valid until deleted."
+watch_docs = [
+    "https://docs.mistral.ai/api/",
+    "https://docs.mistral.ai/getting-started/changelog/",
+]
+# No detection pattern: the key format is not published in the official
+# documentation.
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/models would confirm the key; Tethra has no Mistral connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names and expiry dates are shown in the console; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Usage and spend are shown in the console; no public usage API is documented. The Local Gateway cannot observe Mistral either — the SDK has no base-URL environment variable." }
+read_permissions = { support = "unsupported", note = "Mistral API keys carry no documented per-key scopes." }
+change_permissions = { support = "unsupported", note = "There are no documented per-key scopes to change." }
+create_credential = { support = "manual_only", note = "Keys are created in the console; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the console; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the console, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }
