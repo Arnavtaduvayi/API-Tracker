@@ -65,6 +65,27 @@ can use both.
 > If you lose it, the vault is unrecoverable by design. Make encrypted backups
 > (`tethra backup create <path>` or the desktop Backup screen).
 
+## Tracking your API activity
+
+Tethra's main workflow — seeing what your APIs actually do — needs no
+extra installation. The desktop app **ships the helper it needs inside
+the app bundle**: open it, click **Track API activity**, pick your
+project folder, review one screen, and click Start tracking. No CLI
+install, no PATH changes, no terminal.
+
+If you prefer the terminal, the whole flow is one command:
+
+```bash
+tethra track .
+```
+
+Full walkthrough: [activity-onboarding/USER_GUIDE.md](activity-onboarding/USER_GUIDE.md).
+When traffic does not appear:
+[activity-onboarding/TROUBLESHOOTING.md](activity-onboarding/TROUBLESHOOTING.md).
+The low-level `tethra gateway …` commands and the Gateway internals panel
+remain available for diagnostics and expert configurations
+([gateway/USER_GUIDE.md](gateway/USER_GUIDE.md)).
+
 ## Where your data lives
 
 The vault database (`vault.db`), CLI session file, and WAL files live in the

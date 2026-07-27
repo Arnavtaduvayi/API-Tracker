@@ -1,5 +1,20 @@
 # Local Gateway — User Guide
 
+> **Most people should not need this document.** The Local Gateway is the
+> infrastructure underneath **Track API activity** (desktop) and
+> `tethra track .` (terminal), both of which install the service, create
+> routes, edit environment files, and enable credential attribution for
+> you — no route prefixes, no linking step, no separate attribution
+> command. Start with
+> `docs/activity-onboarding/USER_GUIDE.md`.
+>
+> This document is the **advanced / expert** surface: the low-level
+> commands and the Gateway internals panel, for diagnostics,
+> troubleshooting, and configurations the automatic flow does not cover.
+> Everything here still works and is fully supported — the automatic flow
+> writes through these same APIs, so hand-made and automatic
+> configuration stay interoperable.
+
 How to enable, use, inspect, and remove the Local Gateway, as it actually
 works in this build. Companion documents: `TROUBLESHOOTING.md` (when
 something is wrong), `PRIVACY.md` and `SECURITY.md` (what is recorded and
