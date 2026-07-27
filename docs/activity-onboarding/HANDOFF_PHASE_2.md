@@ -13,20 +13,23 @@ Companion records: `IMPLEMENTATION_STATUS.md` (what works, with counts),
 
 ```text
 Base commit    0e6764b  (main, PR #15 merge)
-Final head     cb8edac
+Final head     4e3cc98
 Branch         feat/zero-friction-api-tracking
 PR             #16 (open, NOT merged)
 Commits behind base  0 (branch is a fast-forward of main @ 0e6764b)
 ```
 
-Authoritative CI on `cb8edac` (run 30290195444) — all four checks pass:
+Authoritative CI passes all four checks on both the last code head and
+the final (docs-only) head:
 
 ```text
-Desktop frontend        pass    25s
-Desktop backend (macOS) pass  1m58s
-Rust (core + CLI)       pass  4m00s
-Rust core (Windows)     pass  9m44s
+cb8edac  run 30290195444  frontend / macOS backend / Rust / Rust-Windows: pass
+4e3cc98  run 30290989702  frontend / macOS backend / Rust / Rust-Windows: pass
 ```
+
+`cb8edac` is the head containing every code change; `4e3cc98` adds only
+this record. The Windows job (9m44s on `cb8edac`) is the one that
+verifies the cross-platform home-directory scan fix.
 
 Exact local counts at that head: Rust 1005 passed / 0 failed
 (core 533, gateway 269, cli 86, observe 63, tracking 54); frontend

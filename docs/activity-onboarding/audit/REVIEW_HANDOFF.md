@@ -129,10 +129,11 @@ Executed on the implementer's machine, macOS aarch64:
   `IMPLEMENTATION_STATUS.md` are read from the implemented flow, and
   every underlying operation was executed through the same commands the
   UI calls.
-* Authoritative CI on head `cb8edac` (run 30290195444) passed all four
-  checks: Desktop frontend, Desktop backend (macOS), Rust (core + CLI),
-  and Rust core (Windows). The Windows job is the one that verifies the
-  home-directory scan fix described above.
+* Authoritative CI passed all four checks (Desktop frontend, Desktop
+  backend (macOS), Rust (core + CLI), Rust core (Windows)) on head
+  `cb8edac` (run 30290195444, the last code change) and again on the
+  final head `4e3cc98` (run 30290989702, docs only). The Windows job is
+  the one that verifies the home-directory scan fix described above.
 
 ## Process notes
 
