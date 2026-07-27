@@ -179,6 +179,7 @@ code and prose:
 |---|---|---|---|---|
 | `fc55d9c` — every code change plus the documentation corrections | pass | pass | pass | pass |
 | `17b314a` — the last two peer-credential doc corrections | pass | pass | pass | pass |
+| `6d9511a` — the per-suite test breakdown table | pass | pass | pass | pass |
 
 `fc55d9c` is the important row: it contains **100% of the code** in this
 phase, including the `cfg(not(unix))` Windows session sweep and the Windows
