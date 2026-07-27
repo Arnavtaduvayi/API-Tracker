@@ -47,7 +47,8 @@ impl SystemdUser {
     }
 
     /// Render the unit. `ExecStart` uses systemd quoting (double quotes
-    /// around each argument that may carry spaces).
+    /// around each argument that may carry spaces), and every interpolated
+    /// path is escaped — see [`systemd_escape`].
     pub fn render_unit(&self, binary: &Path) -> String {
         format!(
             r#"# Written by Tethra (`tethra gateway install`). Removed by
@@ -66,8 +67,8 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 "#,
-            bin = binary.display(),
-            dir = self.data_dir.display(),
+            bin = systemd_escape(&binary.display().to_string()),
+            dir = systemd_escape(&self.data_dir.display().to_string()),
         )
     }
 
@@ -76,6 +77,56 @@ WantedBy=default.target
         full.extend_from_slice(args);
         self.runner.run("systemctl", &full)
     }
+}
+
+/// Escape a path for interpolation into a double-quoted `ExecStart` segment.
+///
+/// `--data-dir` is fully user-controlled, and the macOS renderer already
+/// routes both paths through `xml_escape` while this one interpolated them
+/// raw. Unescaped, a `"` terminates the quoted segment, a `\` starts a
+/// systemd escape sequence, a `%` is a specifier systemd EXPANDS (`%h` is the
+/// home directory), and a newline ends the directive — corrupting the unit or
+/// injecting into it. Escaping also keeps `parse_exec_start`'s round trip
+/// honest, which the install-time foreign-data-dir guard depends on.
+fn systemd_escape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '%' => out.push_str("%%"),
+            // A control character cannot survive a single-line directive in
+            // any escaped form; drop it rather than emit a broken unit.
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Reverse [`systemd_escape`] for one quoted segment.
+fn systemd_unescape(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            '%' if chars.peek() == Some(&'%') => {
+                chars.next();
+                out.push('%');
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Pull an ExecStart argument list back out of a unit this module wrote.
@@ -92,8 +143,22 @@ fn parse_exec_start(unit: &str) -> Vec<String> {
     let mut rest = line.trim();
     while !rest.is_empty() {
         if let Some(tail) = rest.strip_prefix('"') {
-            let Some(close) = tail.find('"') else { break };
-            out.push(tail[..close].to_string());
+            // Find the closing quote, skipping an ESCAPED one.
+            let mut close = None;
+            let bytes = tail.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\\' => i += 2,
+                    b'"' => {
+                        close = Some(i);
+                        break;
+                    }
+                    _ => i += 1,
+                }
+            }
+            let Some(close) = close else { break };
+            out.push(systemd_unescape(&tail[..close]));
             rest = tail[close + 1..].trim_start();
         } else {
             match rest.find(char::is_whitespace) {

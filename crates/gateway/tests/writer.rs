@@ -428,7 +428,7 @@ fn a_locked_vault_never_interrupts_forwarding_and_degrades_attribution_honestly(
             count(
                 &conn,
                 "SELECT COALESCE(SUM(count),0) FROM gateway_route_counters
-                 WHERE counter = 'attribution_unavailable_vault_locked'"
+                 WHERE counter = 'attribution_unavailable_no_key'"
             ) >= 1,
             "the locked state is recorded as itself"
         );
@@ -808,7 +808,7 @@ fn dropped_events_are_reported_not_hidden() {
 fn a_matcher_install_reports_failure_instead_of_claiming_success() {
     // The control plane must never report "key installed" when the writer
     // did not get the matcher: that combination records every exchange as
-    // `unavailable_vault_locked` while status claims attribution is on.
+    // `unavailable_no_key` while status claims attribution is on.
     let dir = tempfile::tempdir().unwrap();
     let db_path = test_db(dir.path());
     let writer = Writer::start(&db_path, "boot-test".into());

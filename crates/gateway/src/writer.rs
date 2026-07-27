@@ -17,6 +17,36 @@
 //! hold a body, header value, cookie, query, or credential; the only
 //! credential-derived thing that crosses the channel is a keyed digest.
 
+/// Clamp a provider-reported token count into the `INTEGER` column that
+/// stores it. `as i64` wraps NEGATIVE for values above `i64::MAX`, silently
+/// corrupting the daily spend aggregate (which sums these) and producing a
+/// negative cost estimate. The counts come straight from an upstream JSON
+/// body — including a user-registered custom origin's — so they are not
+/// trusted input. The extractor already saturates; only persistence did not.
+fn clamp_i64(v: u64) -> i64 {
+    i64::try_from(v).unwrap_or(i64::MAX)
+}
+
+/// A more specific last-error code than `db_error` where SQLite provides one.
+/// Disk-full is a permanent degradation the user must act on; busy is
+/// transient and self-healing; corruption needs a restore. Collapsing all
+/// three into one string made them indistinguishable in `doctor` and the
+/// desktop panel.
+fn classify_db_error(e: &CoreError) -> &'static str {
+    use rusqlite::ffi::ErrorCode;
+    if let CoreError::Db(rusqlite::Error::SqliteFailure(code, _)) = e {
+        return match code.code {
+            ErrorCode::DiskFull => "db_full",
+            ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked => "db_busy",
+            ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase => "db_corrupt",
+            ErrorCode::ReadOnly => "db_readonly",
+            ErrorCode::CannotOpen => "db_cannot_open",
+            _ => e.code(),
+        };
+    }
+    e.code()
+}
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
@@ -41,6 +71,13 @@ pub const QUEUE_CAPACITY: usize = 1024;
 pub const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(300);
 /// How long a graceful shutdown waits for the queue to drain.
 pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max time `stop` waits for the worker's post-loop tail (final batch +
+/// maintenance) after the drain. The tail runs roll-up, re-roll, and two
+/// retention sweeps, each statement carrying a 5-second `busy_timeout`
+/// against tables with no bound on row count — so an UNBOUNDED join meant a
+/// held vault.db write lock could stall `tethra gateway stop` and Ctrl-C for
+/// over an hour with no output and no explanation.
+pub const JOIN_TIMEOUT: Duration = Duration::from_secs(15);
 /// Max records written under one database connection.
 pub const BATCH_MAX: usize = 256;
 /// How long a matcher install/clear waits for a queue slot before failing.
@@ -117,7 +154,11 @@ impl WriterSink {
         self.state.clone()
     }
 
-    /// Approximate live queue depth (enqueued minus completed).
+    /// Approximate live queue depth (enqueued minus completed), counting
+    /// EVERY queued message. Counting only `Record`s reported a depth near
+    /// zero on a queue saturated by counter bumps — while records sharing
+    /// that queue were being dropped, which is exactly when the number
+    /// matters.
     pub fn queue_depth(&self) -> usize {
         self.in_flight.load(Ordering::Relaxed) as usize
     }
@@ -128,7 +169,7 @@ impl WriterSink {
     /// This is a CONTROL-plane call, not a forwarding-path one, so — unlike
     /// `record` — it may wait briefly for a queue slot and REPORTS failure.
     /// Dropping it silently would make `push-key` return success while every
-    /// subsequent exchange was recorded `unavailable_vault_locked`, and
+    /// subsequent exchange was recorded `unavailable_no_key`, and
     /// would leave a revoked matcher resident.
     pub fn set_matcher(&self, matcher: Option<Matcher>) -> bool {
         let deadline = Instant::now() + MATCHER_INSTALL_TIMEOUT;
@@ -201,6 +242,9 @@ impl ObservationSink for WriterSink {
                 route: route_prefix.to_string(),
                 counter: counter.to_string(),
             })
+            .inspect(|()| {
+                self.in_flight.fetch_add(1, Ordering::Relaxed);
+            })
             .is_err()
         {
             self.state.dropped_counters.fetch_add(1, Ordering::Relaxed);
@@ -214,6 +258,9 @@ pub struct Writer {
     state: Arc<WriterState>,
     handle: Option<std::thread::JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
+    /// Set by the worker as its very last act, so `stop` can wait for the
+    /// tail with a deadline instead of joining unconditionally.
+    finished: Arc<AtomicBool>,
 }
 
 impl Writer {
@@ -231,6 +278,7 @@ impl Writer {
             in_flight: in_flight.clone(),
         });
         let stopping = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
         let worker = WriterThread {
             db_path: db_path.to_path_buf(),
             boot_id,
@@ -241,6 +289,8 @@ impl Writer {
             batch_min: None,
             batch_max: None,
             stopping: stopping.clone(),
+            finished: finished.clone(),
+            swept_orphans: false,
         };
         let handle = std::thread::Builder::new()
             .name("tethra-gateway-writer".into())
@@ -252,6 +302,7 @@ impl Writer {
             state,
             handle,
             stopping,
+            finished,
         }
     }
 
@@ -273,6 +324,25 @@ impl Writer {
         let drained = self.sink.flush(DRAIN_TIMEOUT);
         self.stopping.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
+            // BOUNDED wait. The flush above is bounded; the worker's
+            // post-loop tail is not — it processes the remaining batch and
+            // then runs maintenance (roll-up, re-roll, two retention sweeps),
+            // each statement carrying a 5-second busy_timeout against tables
+            // with no bound on row count. Joining unconditionally meant a
+            // held vault.db write lock could stall `tethra gateway stop` and
+            // Ctrl-C for well over an hour, with no output and no reason.
+            //
+            // If the deadline passes, the thread is left to finish on its
+            // own: it writes only observability rows, every write is
+            // transactional, and the process is exiting. `stop` returning
+            // false is the caller's signal that the drain was incomplete.
+            let deadline = Instant::now() + JOIN_TIMEOUT;
+            while !self.finished.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if !self.finished.load(Ordering::Relaxed) {
+                return false;
+            }
             let _ = h.join();
         }
         drained
@@ -304,14 +374,25 @@ struct WriterThread {
     batch_min: Option<String>,
     batch_max: Option<String>,
     stopping: Arc<AtomicBool>,
+    /// Set as the very last act of `run`, so `Writer::stop` can bound its
+    /// wait on the post-loop tail instead of joining unconditionally.
+    finished: Arc<AtomicBool>,
+    /// Whether the boot-time orphan sweep has succeeded this boot. It runs
+    /// once at startup and was silently skipped forever if the database
+    /// happened to be unopenable at that instant — the exact degraded state
+    /// this writer is built to survive — so maintenance retries it.
+    swept_orphans: bool,
 }
 
 impl WriterThread {
     fn run(mut self, rx: mpsc::Receiver<Message>) {
         let mut next_maintenance = Instant::now() + MAINTENANCE_INTERVAL;
-        // Close sessions left running by a previous boot that died.
+        // Close sessions left running by a previous boot that died. A
+        // failure here is retried from `maintenance`, not abandoned.
         if let Ok(conn) = self.open() {
-            let _ = rstore::sweep_orphaned_sessions(&conn);
+            if rstore::sweep_orphaned_sessions(&conn).is_ok() {
+                self.swept_orphans = true;
+            }
         }
         loop {
             if self.stopping.load(Ordering::Relaxed) {
@@ -357,6 +438,7 @@ impl WriterThread {
         self.process_batch(tail);
         self.maintenance();
         self.finish_sessions();
+        self.finished.store(true, Ordering::Relaxed);
     }
 
     /// Process one batch under a single database connection. Returns whether
@@ -377,6 +459,7 @@ impl WriterThread {
             }
         }
         let record_count = records.len() as u64;
+        let counters_batch_len = counters_batch.len() as u64;
         match self.open() {
             Ok(conn) => {
                 let day = clock::now_rfc3339();
@@ -411,8 +494,11 @@ impl WriterThread {
                 }
             }
         }
-        if record_count > 0 {
-            self.in_flight.fetch_sub(record_count, Ordering::Relaxed);
+        // Both message kinds are counted into the depth on enqueue, so both
+        // must be released here or the reported depth ratchets upward forever.
+        let drained = record_count + counters_batch_len;
+        if drained > 0 {
+            self.in_flight.fetch_sub(drained, Ordering::Relaxed);
         }
         if !replies.is_empty() {
             self.maintenance();
@@ -449,8 +535,11 @@ impl WriterThread {
         self.state.persist_failures.fetch_add(1, Ordering::Relaxed);
         self.state.degraded.store(true, Ordering::Relaxed);
         if let Ok(mut slot) = self.state.last_error.lock() {
-            // A CODE, never wire-derived text.
-            *slot = Some(e.code().to_string());
+            // A CODE, never wire-derived text — but a more specific one
+            // than `db_error` where SQLite tells us: a permanently full disk
+            // and a transient lock are the same string otherwise, so a user
+            // cannot tell "wait" from "free some space".
+            *slot = Some(classify_db_error(e).to_string());
         }
     }
 
@@ -578,12 +667,12 @@ impl WriterThread {
     fn attribute(&self, conn: &Connection, event_id: &str, record: &ExchangeRecord) -> Result<()> {
         let attribution = match (&record.digest, &self.matcher) {
             (Some(digest), Some(matcher)) => matcher.resolve(digest),
-            (Some(_), None) => Attribution::UnavailableVaultLocked,
+            (Some(_), None) => Attribution::UnavailableNoKey,
             (None, _) => match record.attribution_input {
                 AttributionInput::NoCredentialPresent => Attribution::NoCredentialPresent,
                 AttributionInput::UnsupportedForm => Attribution::UnsupportedForm,
-                AttributionInput::UnavailableVaultLocked | AttributionInput::Digested => {
-                    Attribution::UnavailableVaultLocked
+                AttributionInput::UnavailableNoKey | AttributionInput::Digested => {
+                    Attribution::UnavailableNoKey
                 }
             },
         };
@@ -664,8 +753,8 @@ impl WriterThread {
                     &record.provider_id,
                     model,
                     &record.at,
-                    billable_input as i64,
-                    usage.output_tokens.unwrap_or(0) as i64,
+                    clamp_i64(billable_input),
+                    clamp_i64(usage.output_tokens.unwrap_or(0)),
                 )
                 .ok()
                 .flatten()
@@ -686,10 +775,10 @@ impl WriterThread {
                 record.provider_id,
                 project_id,
                 usage.model,
-                usage.input_tokens.map(|v| v as i64),
-                usage.output_tokens.map(|v| v as i64),
-                usage.total_tokens.map(|v| v as i64),
-                usage.cached_input_tokens.map(|v| v as i64),
+                usage.input_tokens.map(clamp_i64),
+                usage.output_tokens.map(clamp_i64),
+                usage.total_tokens.map(clamp_i64),
+                usage.cached_input_tokens.map(clamp_i64),
                 usage.available() as i64,
                 usage.state.as_str(),
                 cost,
@@ -717,9 +806,9 @@ impl WriterThread {
                 project_id,
                 usage.model.clone().unwrap_or_default(),
                 usage.available() as i64,
-                usage.input_tokens.unwrap_or(0) as i64,
-                usage.output_tokens.unwrap_or(0) as i64,
-                usage.cached_input_tokens.unwrap_or(0) as i64,
+                clamp_i64(usage.input_tokens.unwrap_or(0)),
+                clamp_i64(usage.output_tokens.unwrap_or(0)),
+                clamp_i64(usage.cached_input_tokens.unwrap_or(0)),
                 cost.unwrap_or(0),
                 clock::now_rfc3339(),
             ],
@@ -776,6 +865,12 @@ impl WriterThread {
         let Ok(conn) = self.open() else {
             return;
         };
+        // Retry the boot-time orphan sweep if it never succeeded: a database
+        // that was locked or at the wrong schema at startup must not mean a
+        // crashed previous boot's sessions stay `running` forever.
+        if !self.swept_orphans && rstore::sweep_orphaned_sessions(&conn).is_ok() {
+            self.swept_orphans = true;
+        }
         let now = clock::now_rfc3339();
         let _ = aggregate::roll_up(&conn, &now);
         // After a flush, re-roll the batch's own hour range: the roll-up

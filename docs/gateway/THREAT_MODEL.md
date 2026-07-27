@@ -105,7 +105,7 @@ non-password-locked projects (never vault-wide), so password-locked and
 unlinked credentials are not oracles, plus an `unmatched`-rate counter
 surfaced in status. (2) OFFLINE — key in memory + a DB/backup copy confirms
 guesses for every in-scope fingerprint. Bounded by defaulting the "match while
-locked" toggle OFF (attribution degrades to `unavailable_vault_locked`), and,
+locked" toggle OFF (attribution degrades to `unavailable_no_key`), and,
 when ON, TTL-bounding the key to the pushing session's auto-lock so it never
 outlives the vault key. The earlier "strictly weaker than reading live
 headers" claim is RETRACTED (false on lifetime, scope, and capability — the

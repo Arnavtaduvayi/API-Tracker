@@ -117,7 +117,7 @@ value-based matching, bounded as follows:
   multiple INDEPENDENT credentials — references are collapsed to their root
   first, so the vault's recommended sharing model does not force permanent
   ambiguity), `no_credential_present` (no recognized auth header),
-  `unavailable_vault_locked` (no key in memory — recorded as such, NEVER as
+  `unavailable_no_key` (no key in memory — recorded as such, NEVER as
   `unmatched`, and not retroactively rewritten: values are not retained, so
   post-unlock re-attribution of past events is impossible by design). A
   `matched` never invents provenance: the `attribution_method` column marks

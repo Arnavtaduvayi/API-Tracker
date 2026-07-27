@@ -60,13 +60,13 @@ provider-billed truth.
 ## Attribution limits
 
 - Attribution is **off** until the matching key is pushed; until then every
-  exchange honestly records `unavailable_vault_locked`.
+  exchange honestly records `unavailable_no_key`.
 - Only credentials in **linked** projects are matchable, and never
   credentials in **password-locked** projects (their traffic reports
   `unmatched` until the project is unlocked).
 - The state machine is honest: `matched`, `matched_old_version`,
   `unmatched`, `ambiguous_duplicate`, `no_credential_present`,
-  `unavailable_vault_locked` — six states, never conflated, and a
+  `unavailable_no_key` — six states, never conflated, and a
   locked-window state is never rewritten after the fact.
 
 ## Recording gaps are explicit

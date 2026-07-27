@@ -109,7 +109,7 @@ equivalents land in `crates/gateway`.
 - Forwarding with `user_version` ahead of the binary (SchemaTooNew): recording
   disabled, status degraded, forwarding unaffected.
 - Vault locked end-to-end: forward + record + attribution state
-  `unavailable_vault_locked` (toggle off) or `matched` (toggle on, key
+  `unavailable_no_key` (toggle off) or `matched` (toggle on, key
   resident); after `clear_key`, state degrades immediately.
 - Writer queue: try_send drop-counting under flood (never blocks the relay —
   spike-proven pattern), drained on shutdown, drops surfaced.
@@ -133,7 +133,7 @@ equivalents land in `crates/gateway`.
   `injected` on injection-derived rows.
 - Key lifecycle: handoff over the peer-checked Unix socket; zeroize-on-drop;
   SIGTERM handler clears the key before drain; no key → attribution is
-  `unavailable_vault_locked` and fingerprint computation is impossible.
+  `unavailable_no_key` and fingerprint computation is impossible.
 - Timing: the digest is computed on the forwarding path and the table lookup
   (`subtle::ConstantTimeEq`) runs on the writer thread, so no forwarding-path
   timing depends on a match (provable by construction).

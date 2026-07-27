@@ -21,7 +21,7 @@ PRIVACY_MODEL §4: the in-memory fingerprint key enables credential matching
 while the vault is locked; retaining it is a consented, revocable, disclosed
 weakening of ADR 0005's locked-vault posture.
 **Default:** ship the toggle default-OFF for v1 (attribution while locked
-degrades to `unavailable_vault_locked`); flip to default-ON only with user
+degrades to `unavailable_no_key`); flip to default-ON only with user
 feedback that the degraded state is confusing in practice.
 **Close at:** Stage 4 (attribution). The adversarial privacy review argued
 default-OFF is the honest reading of ADR 0005; the counterargument (the same

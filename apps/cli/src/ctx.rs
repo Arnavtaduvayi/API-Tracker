@@ -29,10 +29,23 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(data_dir: Option<PathBuf>, json: bool) -> Result<Self> {
+        // Absolutize ONCE, here, at the single point of entry. The resolved
+        // path is baked into the service argv at install time, and launchd /
+        // systemd / Task Scheduler start the service with a working directory
+        // of `/` — so `--data-dir ./vault` would silently resolve to a
+        // DIFFERENT vault in the service than in the CLI. It also breaks
+        // install's foreign-data-dir guard, which compares raw path buffers.
+        // Three documents plus the lifecycle module header already state that
+        // this resolution happens; now it does.
+        //
+        // `std::path::absolute`, not `canonicalize`: the directory may not
+        // exist yet (first run), and symlink resolution is not wanted — the
+        // user's chosen path is what should be recorded.
         let dir = match data_dir {
             Some(dir) => dir,
             None => vault::default_data_dir()?,
         };
+        let dir = std::path::absolute(&dir).unwrap_or(dir);
         Ok(Self {
             paths: VaultPaths::new(dir),
             json,

@@ -84,7 +84,7 @@ pub struct Gateway {
     /// The matching-only keyed-fingerprint key, present ONLY when an
     /// unlocked-vault session pushed it over the authenticated control
     /// channel (SI-21). Absent here means attribution degrades honestly to
-    /// `unavailable_vault_locked` — it never blocks or fails forwarding.
+    /// `unavailable_no_key` — it never blocks or fails forwarding.
     pub matching_key: Arc<RwLock<Option<SecretBytes>>>,
     /// The listener-identity probe key, derived from the per-boot nonce
     /// (`control::probe_key_from_nonce`, D11). Not a secret capability in
@@ -306,10 +306,28 @@ fn path_is_safe(path: &str) -> bool {
     if path.split('/').any(|seg| seg == "." || seg == "..") {
         return false;
     }
-    // A percent-encoded dot is the traversal primitive an upstream might
-    // decode after the gateway stripped the prefix.
     let lower = path.to_ascii_lowercase();
-    !lower.contains("%2e")
+    // Percent-encoded separators and dots are the traversal primitives an
+    // upstream might decode AFTER the gateway stripped the prefix. The
+    // earlier gate rejected only `%2e`, so `..%2f` passed: the segment is
+    // neither exactly `..` nor contains `%2e`, yet an upstream that decodes
+    // `%2f` to `/` reads it as `../`. `%25` (an encoded percent) is rejected
+    // too, since it enables the double-encoded spelling `%252e`.
+    //
+    // This is defense in depth, NOT what prevents crossing origins — the
+    // upstream origin is bound to the registered route and is never derived
+    // from the forwarded path, so none of these can reach a different
+    // provider. What they can do is confuse the provider's own routing, and
+    // no legitimate provider path needs an encoded separator in a segment.
+    if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+        return false;
+    }
+    if lower.contains("%25") {
+        return false;
+    }
+    // Belt and braces for the shapes above: no segment may contain a `..`
+    // run at all, however it is spelled around.
+    !path.split('/').any(|seg| seg.contains(".."))
 }
 
 struct Resolution<'t> {
@@ -786,7 +804,15 @@ fn forward_exchange(
             }
             Ok(HeadRead::TimedOut(partial)) => {
                 // The upstream never answered the expectation. RFC 9110 says
-                // proceed with the body; the partial bytes are preserved so
+                // proceed with the body — but a CONFORMING client is waiting
+                // for the interim before sending it, so proceeding without
+                // telling the client leaves both sides waiting until the
+                // 60-second client-body idle timeout. Synthesize the interim
+                // the upstream owed, which is exactly what RFC 9110 §10.1.1
+                // permits a proxy to do when the upstream does not respond.
+                let _ = client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+                let _ = client.flush();
+                // the partial bytes are preserved so
                 // the connection does not desynchronize.
                 resp_carry = partial;
             }
@@ -856,15 +882,22 @@ fn forward_exchange(
                 };
                 record.transport_error = TransportError::Reset;
                 if malformed {
-                    // Nothing has been written to the client yet, so a local
-                    // diagnostic is safe here.
+                    // Nothing has been written to the CLIENT yet, so a local
+                    // diagnostic is safe here. Note this says nothing about
+                    // the upstream: the head and the chunks preceding the
+                    // malformed one were already relayed, which is why the
+                    // message below does not claim the request "was not
+                    // forwarded".
                     gw.sink.count(route_prefix, counters::REJECTED_LOCALLY);
                     local_response(
                         client,
                         400,
                         "Bad Request",
                         "the chunked request body used ambiguous framing (bare LF, a \
-                         chunk extension, or a malformed terminator) and was not forwarded.",
+                         chunk extension, or a malformed terminator). The exchange was \
+                         aborted; the upstream connection is closed without a complete \
+                         body, so the request cannot have been applied as a whole — but \
+                         part of it may already have reached the provider.",
                     );
                 }
                 return Next::Close;

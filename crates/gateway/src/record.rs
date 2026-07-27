@@ -134,7 +134,7 @@ pub enum AttributionInput {
     UnsupportedForm,
     /// The matching key is not in memory (vault locked, or the toggle is
     /// off). Recorded as such — NEVER as "unmatched".
-    UnavailableVaultLocked,
+    UnavailableNoKey,
 }
 
 /// One forwarded exchange, as handed to the writer.

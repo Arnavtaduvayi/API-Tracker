@@ -503,7 +503,7 @@ pub fn diagnose_with(data_dir: &Path, service: lifecycle::ServiceStatus) -> Doct
                 "vault_locked_attribution",
                 Severity::Info,
                 "credential attribution off (no matching key)",
-                "exchanges record `unavailable_vault_locked` until a key is pushed; \
+                "exchanges record `unavailable_no_key` until a key is pushed; \
                  forwarding and metadata recording continue",
                 Some("tethra gateway push-key"),
             ));

@@ -121,7 +121,8 @@ fn chunked_response_framing_and_trailers_relay_verbatim() {
     assert!(text.contains("Retry-After: 7\r\n"));
     assert!(text.contains("x-request-id: req_abc123\r\n"));
     assert!(text.contains("Transfer-Encoding: chunked\r\n"));
-    // The body, including chunk framing and the trailer, is byte-identical.
+    // The body and its chunk framing are byte-identical, and an ordinary
+    // trailer is relayed.
     let body_start = text.find("\r\n\r\n").unwrap() + 4;
     assert_eq!(
         &got[body_start..],
@@ -133,7 +134,7 @@ fn chunked_response_framing_and_trailers_relay_verbatim() {
 }
 
 #[test]
-fn sse_streams_incrementally_with_a_bounded_first_byte_latency() {
+fn sse_streams_incrementally_rather_than_buffering_the_whole_response() {
     let up = MockUpstream::start(|sock, requests| {
         let head = read_head(sock);
         requests.lock().unwrap().push(head);
@@ -430,12 +431,113 @@ fn an_upstream_that_never_answers_the_expectation_proceeds_with_the_body() {
         &format!("POST /openai/v1/files HTTP/1.1\r\nHost: {}\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello", gw.authority()),
     );
     let resp = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    // The gateway synthesizes the interim the upstream owed (RFC 9110
+    // §10.1.1) before proceeding, so a client that WAS waiting is released.
     assert!(
-        resp.starts_with("HTTP/1.1 200 OK"),
-        "no deadlock; got: {resp}"
+        resp.starts_with("HTTP/1.1 100 Continue\r\n\r\n"),
+        "the interim must be synthesized; got: {resp}"
     );
+    assert!(resp.contains("HTTP/1.1 200 OK"), "no deadlock; got: {resp}");
     let seen = up.requests.lock().unwrap().clone();
     assert_eq!(seen[1], b"hello");
+}
+
+/// The case the test above could not reach: a CONFORMING client that
+/// withholds its body until it sees the interim. Without a synthesized
+/// `100 Continue` both sides wait — the gateway for a body the client is not
+/// sending, the client for an interim the upstream never sent — until the
+/// 60-second client-body idle timeout fires.
+#[test]
+fn a_client_waiting_for_the_interim_is_released_when_the_upstream_is_silent() {
+    let up = MockUpstream::start(|sock, requests| {
+        let head = read_head(sock);
+        requests.lock().unwrap().push(head);
+        // Never answers the expectation; reads the body once it arrives.
+        let mut body = vec![0u8; 5];
+        let _ = sock.read_exact(&mut body);
+        requests.lock().unwrap().push(body);
+        let _ =
+            sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+        let _ = sock.flush();
+    });
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    c.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    // Head only — the body is withheld, exactly as RFC 9110 says a client
+    // using Expect: 100-continue may do.
+    send(
+        &mut c,
+        &format!(
+            "POST /openai/v1/files HTTP/1.1\r\nHost: {}\r\n\
+             Expect: 100-continue\r\nContent-Length: 5\r\n\r\n",
+            gw.authority()
+        ),
+    );
+
+    // Read just the interim head, well inside the 60s body-idle timeout.
+    let mut interim = [0u8; 25];
+    let started = std::time::Instant::now();
+    let n = {
+        use std::io::Read;
+        c.read(&mut interim).unwrap()
+    };
+    let waited = started.elapsed();
+    let text = String::from_utf8_lossy(&interim[..n]).to_string();
+    assert!(
+        text.starts_with("HTTP/1.1 100 Continue"),
+        "the client must receive an interim rather than block; got: {text:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(30),
+        "the interim must arrive on the upstream-interim budget (~5s), not the \
+         60s body-idle timeout; waited {waited:?}"
+    );
+
+    // Now the client sends its body and the exchange completes.
+    send(&mut c, "hello");
+    let rest = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(rest.contains("HTTP/1.1 200 OK"), "got: {rest}");
+    let seen = up.requests.lock().unwrap().clone();
+    assert_eq!(seen[1], b"hello");
+}
+
+/// A trailer naming a header the gateway strips from the RESPONSE HEAD must
+/// not arrive through the trailer section instead. SI-4/SI-4a state the
+/// strip unconditionally; the trailer section was relayed verbatim.
+#[test]
+fn chunked_trailers_are_filtered_like_the_response_head() {
+    let raw: &[u8] = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\
+        Trailer: Set-Cookie\r\n\r\n\
+        2\r\nhi\r\n0\r\n\
+        Set-Cookie: sid=CANARY-TRAILER-COOKIE\r\n\
+        Access-Control-Allow-Origin: *\r\n\
+        X-Keep: yes\r\n\r\n";
+    let up = MockUpstream::start(canned(raw, 0));
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/models HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let text = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(
+        !text.contains("CANARY-TRAILER-COOKIE"),
+        "a Set-Cookie trailer must be stripped like a Set-Cookie header: {text}"
+    );
+    assert!(
+        !text
+            .to_ascii_lowercase()
+            .contains("access-control-allow-origin"),
+        "CORS headers must not reach the client through a trailer: {text}"
+    );
+    assert!(
+        text.contains("X-Keep: yes"),
+        "an ordinary trailer must still be relayed: {text}"
+    );
+    assert!(text.contains("hi"), "the body must still arrive: {text}");
 }
 
 #[test]
@@ -1636,4 +1738,68 @@ fn probe_without_a_wired_key_says_unavailable_rather_than_lying() {
     let resp = read_response(&mut c);
     assert!(resp.starts_with("HTTP/1.1 200 "));
     assert!(resp.contains("proof: unavailable"), "{resp}");
+}
+
+/// Ambiguous encodings of a traversal are rejected explicitly rather than
+/// forwarded and left to the provider to interpret.
+///
+/// The audit found `..%2f` passed the gate: the segment is neither exactly
+/// `..` nor contains `%2e`. It could not cross origins — the upstream origin
+/// is bound to the registered route and never derived from the path — but the
+/// documented reason for that safety was the traversal parser, which was
+/// wrong. Both are now true: the parser rejects these, AND origin binding is
+/// what actually prevents crossing.
+#[test]
+fn ambiguous_encoded_traversals_are_rejected_before_forwarding() {
+    let up = MockUpstream::start(canned(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        0,
+    ));
+    let gw = RunningGateway::start(direct_route_state(vec![("openai", "openai", up.port, "")]));
+
+    for path in [
+        "/openai/..%2fadmin",       // encoded slash after literal dots
+        "/openai/..%2Fadmin",       // uppercase spelling
+        "/openai/..%5cadmin",       // encoded backslash
+        "/openai/%2e%2e/admin",     // fully encoded dots (already rejected)
+        "/openai/%252e%252e/admin", // double-encoded
+        "/openai/a..b/%2fadmin",    // dot-run inside a longer segment
+    ] {
+        let mut c = gw.connect();
+        send(
+            &mut c,
+            &format!(
+                "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                gw.authority()
+            ),
+        );
+        let text = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+        assert!(
+            text.starts_with("HTTP/1.1 400 "),
+            "{path} must be rejected locally, got: {text}"
+        );
+    }
+    assert_eq!(
+        up.request_count(),
+        0,
+        "no ambiguous traversal may reach the upstream at all"
+    );
+
+    // A legitimate provider path with percent-encoding that is NOT a
+    // separator or dot still works — the gate must not break real traffic.
+    let mut c = gw.connect();
+    send(
+        &mut c,
+        &format!(
+            "GET /openai/v1/models/gpt%2D4o HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            gw.authority()
+        ),
+    );
+    let ok = String::from_utf8_lossy(&read_to_close(&mut c)).to_string();
+    assert!(
+        ok.starts_with("HTTP/1.1 200 "),
+        "an ordinary encoded character must still forward, got: {ok}"
+    );
+    assert_eq!(up.request_count(), 1);
+    assert!(up.first_request().contains("/v1/models/gpt%2D4o"));
 }

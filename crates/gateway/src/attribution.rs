@@ -134,10 +134,10 @@ pub fn digest_request(
     // No key in memory: the vault is locked (or the match-while-locked toggle
     // is off). Recorded as its OWN state — never as `unmatched`.
     let Some(key) = key else {
-        return (AttributionInput::UnavailableVaultLocked, None);
+        return (AttributionInput::UnavailableNoKey, None);
     };
     let Ok(key32) = <&[u8; 32]>::try_from(key.expose()) else {
-        return (AttributionInput::UnavailableVaultLocked, None);
+        return (AttributionInput::UnavailableNoKey, None);
     };
 
     let mut digests: Vec<[u8; 32]> = Vec::with_capacity(4);
@@ -230,7 +230,7 @@ pub enum Attribution {
     /// No matching key in memory. NEVER conflated with `Unmatched`, and
     /// never retroactively rewritten: values are not retained, so post-unlock
     /// re-attribution of past events is impossible by design.
-    UnavailableVaultLocked,
+    UnavailableNoKey,
 }
 
 impl Attribution {
@@ -243,7 +243,11 @@ impl Attribution {
             Attribution::Unmatched => "unmatched",
             Attribution::NoCredentialPresent => "no_credential_present",
             Attribution::UnsupportedForm => "unsupported_form",
-            Attribution::UnavailableVaultLocked => "unavailable_vault_locked",
+            // The gateway cannot see vault state: this is produced purely from
+            // "no matching key is resident", which is ALSO the default state
+            // right after startup with the vault wide open. `unavailable_no_key`
+            // is what the code can actually attest to.
+            Attribution::UnavailableNoKey => "unavailable_no_key",
         }
     }
 
@@ -611,7 +615,7 @@ mod tests {
         let head = head_with("x-api-key", a);
         assert_eq!(
             digest_request(None, &head).0,
-            AttributionInput::UnavailableVaultLocked
+            AttributionInput::UnavailableNoKey
         );
     }
 
@@ -696,8 +700,11 @@ mod tests {
         );
         assert_eq!(Attribution::UnsupportedForm.as_str(), "unsupported_form");
         assert_eq!(
-            Attribution::UnavailableVaultLocked.as_str(),
-            "unavailable_vault_locked"
+            Attribution::UnavailableNoKey.as_str(),
+            "unavailable_no_key",
+            "the gateway cannot observe vault state; the label must say what \
+             the code actually knows (no resident matching key), which is also \
+             the state right after startup with the vault wide open"
         );
 
         // Only a single confirmed match bumps last_used_at.
@@ -711,7 +718,7 @@ mod tests {
         }
         .bumps_last_used());
         assert!(!Attribution::Unmatched.bumps_last_used());
-        assert!(!Attribution::UnavailableVaultLocked.bumps_last_used());
+        assert!(!Attribution::UnavailableNoKey.bumps_last_used());
 
         // Value-derived confidence is its own label.
         assert_eq!(
@@ -841,7 +848,7 @@ mod multi_header_tests {
         ]);
         assert_eq!(
             digest_request(None, &head).0,
-            AttributionInput::UnavailableVaultLocked
+            AttributionInput::UnavailableNoKey
         );
     }
 }

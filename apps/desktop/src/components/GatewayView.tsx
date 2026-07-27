@@ -64,12 +64,22 @@ export function GatewayView() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // A failed poll must not leave the last good report rendered as if it were
+  // current: every panel below reads `report` unconditionally, so after one
+  // success the UI would show stale running/pid/port facts indefinitely with
+  // only a generic error line. Track staleness explicitly and say so.
+  const [stale, setStale] = useState(false);
+  const [asOf, setAsOf] = useState<string | null>(null);
+
   const reload = useCallback(async () => {
     try {
       setReport(await api.gatewayDoctor());
       setError(null);
+      setStale(false);
+      setAsOf(new Date().toLocaleTimeString());
     } catch (e) {
       setError(errText(e));
+      setStale(true);
     }
   }, []);
 
@@ -88,6 +98,13 @@ export function GatewayView() {
     <div>
       <h1>Local Gateway</h1>
       {error && <p className="error">{error}</p>}
+      {stale && report && (
+        <p className="error">
+          STALE — this is the last reading that succeeded
+          {asOf ? ` (as of ${asOf})` : ""}, not the gateway&apos;s current state. The service
+          may have stopped, started, or changed since.
+        </p>
+      )}
       {notice && <p className="notice">{notice}</p>}
       <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
         {(
@@ -405,7 +422,7 @@ function StatusPanel(props: {
                 : "on (matching key resident in the gateway process)"
               : g.matching_key_expired
                 ? "off — the keep-while-locked window expired; push the key again to resume"
-                : "off — exchanges record `unavailable_vault_locked` until a key is pushed"
+                : "off — exchanges record `unavailable_no_key` until a key is pushed"
             : "—"}
         </dd>
         <dt>Keep while locked</dt>

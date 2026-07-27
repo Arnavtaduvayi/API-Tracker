@@ -135,7 +135,7 @@ describe("GatewayView consent and honesty", () => {
     render(<GatewayView />);
     expect(await screen.findByText(/running v0\.1\.0 \(pid 4242\)/)).toBeInTheDocument();
     expect(screen.getByText(/identity verified/)).toBeInTheDocument();
-    expect(screen.getByText(/unavailable_vault_locked/)).toBeInTheDocument();
+    expect(screen.getByText(/unavailable_no_key/)).toBeInTheDocument();
     expect(
       screen.getByText(/absence of recorded traffic is not evidence of absence of traffic/),
     ).toBeInTheDocument();

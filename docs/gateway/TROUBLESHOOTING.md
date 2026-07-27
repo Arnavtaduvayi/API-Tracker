@@ -98,7 +98,7 @@ local record understates real traffic. Never read gateway history as
 complete while this is present.
 
 ### `vault_locked_attribution` (info)
-No matching key is resident: exchanges record `unavailable_vault_locked`
+No matching key is resident: exchanges record `unavailable_no_key`
 instead of a credential match. Forwarding and metadata recording are
 unaffected. Fix (optional): `tethra gateway push-key`.
 

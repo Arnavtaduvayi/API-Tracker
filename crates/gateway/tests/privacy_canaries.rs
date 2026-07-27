@@ -304,7 +304,7 @@ fn the_matching_key_never_reaches_disk_argv_or_environ() {
     assert!(!gw.gateway.has_matching_key());
 }
 
-/// With attribution unavailable, the state is `unavailable_vault_locked` and
+/// With attribution unavailable, the state is `unavailable_no_key` and
 /// NO credential id or method is written — never a false `unmatched`.
 #[test]
 fn a_locked_vault_records_its_own_state_and_no_credential_id() {
@@ -330,7 +330,7 @@ fn a_locked_vault_records_its_own_state_and_no_credential_id() {
     let record = &gw.wait_records(1)[0];
     assert_eq!(
         record.attribution_input,
-        api_tracker_gateway::record::AttributionInput::UnavailableVaultLocked
+        api_tracker_gateway::record::AttributionInput::UnavailableNoKey
     );
     assert!(
         record.digest.is_none(),

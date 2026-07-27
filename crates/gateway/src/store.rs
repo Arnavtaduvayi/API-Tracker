@@ -1,10 +1,16 @@
 //! Gateway configuration and counter storage (migration v13 tables).
 //!
-//! Everything in these tables is non-secret operational metadata. WRITES are
-//! performed only by the CLI/desktop flows (unlocked vault + re-auth,
-//! audited); the running service only READS, and every service-side open goes
-//! through `db::open_at_current_version` so a schema from a different build
-//! degrades recording instead of corrupting it (KNOWN_CONFLICTS C15).
+//! Everything in these tables is non-secret operational metadata.
+//!
+//! CONFIGURATION rows (`gateway_config`, `gateway_routes`,
+//! `gateway_project_links`) are written only by the CLI/desktop flows
+//! (unlocked vault + re-auth, audited). The running service reads those — but
+//! it is emphatically not read-only overall: its writer thread bumps
+//! `gateway_route_counters`, inserts `gateway_usage_events` /
+//! `gateway_usage_daily`, and deletes expired rows from all of them on its
+//! retention sweep. Every service-side open goes through
+//! `db::open_at_current_version` so a schema from a different build degrades
+//! recording instead of corrupting it (KNOWN_CONFLICTS C15).
 
 use api_tracker_core::clock;
 use api_tracker_core::error::Result;

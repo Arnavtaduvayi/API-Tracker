@@ -572,28 +572,64 @@ pub fn delete_session(conn: &Connection, session_id: &str) -> Result<()> {
 pub fn sweep_orphaned_sessions(conn: &Connection) -> Result<usize> {
     #[cfg(unix)]
     {
-        let rows: Vec<(String, Option<i64>)> = conn
-            .prepare("SELECT id, pid FROM observation_sessions WHERE status = 'running'")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut closed = 0;
-        for (id, pid) in rows {
-            let Some(pid) = pid else { continue };
-            if pid <= 0 {
-                continue;
-            }
-            if pid_is_definitely_gone(pid) {
-                interrupt_session(conn, &id, "launcher_gone")?;
-                closed += 1;
-            }
-        }
-        Ok(closed)
+        sweep_with(conn, pid_is_definitely_gone)
     }
     #[cfg(not(unix))]
     {
-        let _ = conn;
-        Ok(0)
+        sweep_with(conn, windows_pid_is_definitely_gone)
     }
+}
+
+/// The platform-independent half: scan `running` sessions and close the ones
+/// whose recorded pid a platform probe proves gone. Shared by both cfgs so
+/// the row handling, the pid sanity check, and the fail-safe convention have
+/// exactly one implementation.
+fn sweep_with(conn: &Connection, is_gone: fn(i64) -> bool) -> Result<usize> {
+    let rows: Vec<(String, Option<i64>)> = conn
+        .prepare("SELECT id, pid FROM observation_sessions WHERE status = 'running'")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut closed = 0;
+    for (id, pid) in rows {
+        let Some(pid) = pid else { continue };
+        if pid <= 0 {
+            continue;
+        }
+        if is_gone(pid) {
+            interrupt_session(conn, &id, "launcher_gone")?;
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
+/// Windows liveness probe. Same fail-safe contract as the Unix ones: only an
+/// UNAMBIGUOUS "no such task" counts as gone.
+///
+/// Without this, a crashed gateway on Windows left `observation_sessions.
+/// status = 'running'` forever — a shipped, supported foreground mode where
+/// the crash-honesty claim was simply untrue, because the sweep was a
+/// `cfg(unix)` no-op.
+#[cfg(not(unix))]
+fn windows_pid_is_definitely_gone(pid: i64) -> bool {
+    use std::process::Command;
+    let Ok(out) = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+    else {
+        // tasklist missing or unrunnable proves nothing.
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A match prints a CSV row containing the pid; no match prints the
+    // "INFO: No tasks are running..." banner (or nothing at all). Require the
+    // banner or genuinely empty output — never infer absence from a parse
+    // failure.
+    let trimmed = stdout.trim();
+    trimmed.is_empty() || trimmed.starts_with("INFO:")
 }
 
 /// True only if `pid` is DEFINITIVELY not a live process. Fail-safe: anything

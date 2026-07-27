@@ -25,6 +25,11 @@ pub const ROUTE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// enough that `tethra gateway stop` feels immediate.
 const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How many consecutive "vault.db is gone" samples must agree before the
+/// service self-unloads. The exit is terminal under both service managers, so
+/// a transient stat failure must not be able to trigger it.
+const VANISHED_VAULT_CONFIRMATIONS: u8 = 3;
+
 /// The hard cap on keep-while-locked matching-key retention (ADR 0020): even
 /// with the consented toggle ON, a locked vault keeps the resident key for at
 /// most this long (one working day away from the keyboard), then attribution
@@ -221,7 +226,7 @@ impl ControlTarget for ServiceControl {
         // SCOPED matcher table (linked, non-password-locked projects only —
         // never vault-wide). BOTH must succeed: with the key installed but
         // the matcher missing, every exchange would be recorded
-        // `unavailable_vault_locked` while status claimed attribution was on.
+        // `unavailable_no_key` while status claimed attribution was on.
         let matcher = crate::writer::load_matcher(&self.db_path)?;
         if !self.writer_sink.set_matcher(Some(matcher)) {
             return Err(CoreError::Busy);
@@ -303,6 +308,17 @@ impl Service {
         let listener = Listener::bind(port)?;
         let bound_port = listener.port();
 
+        // Claim single-instance ownership of the control socket BEFORE
+        // writing any shared file. `instance_is_live` above is a connect
+        // probe, and two concurrent first-run starts both pass it (neither
+        // has bound the socket yet) — the second then CLOBBERED gateway.nonce
+        // and gateway.pid, leaving the healthy first instance unreachable to
+        // every nonce-authenticated call, reported as a port squatter by
+        // `verify_listener`, and its runtime files deleted when the second
+        // instance exited. The socket bind is the only real mutual exclusion,
+        // so it has to come first.
+        let claim = crate::control::claim_instance(data_dir)?;
+
         let nonce = crate::control::write_nonce(data_dir)?;
         // The boot id is its OWN random value, never the control nonce: it is
         // written into the plaintext `observation_sessions.command` column and
@@ -334,7 +350,8 @@ impl Service {
         // A control channel that cannot start is a REAL degradation (no
         // status, no attribution, no graceful stop), so the reason is kept
         // and surfaced rather than swallowed.
-        let (control, control_error) = match ControlServer::start(
+        let (control, control_error) = match ControlServer::start_claimed(
+            claim,
             data_dir,
             nonce.to_string(),
             Arc::new(control_target) as Arc<dyn ControlTarget>,
@@ -489,8 +506,14 @@ impl Service {
         if let Some(mut c) = self.control.take() {
             c.stop();
         }
-        crate::control::remove_pid_file(&self.data_dir);
-        let _ = std::fs::remove_file(self.data_dir.join(crate::control::NONCE_NAME));
+        // Only the instance that OWNED the control channel removes the
+        // shared runtime files. A process whose control server never started
+        // (Windows, or a socket claim that failed) must not delete the owner's
+        // nonce and pid out from under it.
+        if self.control_error.is_none() {
+            crate::control::remove_pid_file(&self.data_dir);
+            let _ = std::fs::remove_file(self.data_dir.join(crate::control::NONCE_NAME));
+        }
     }
 }
 
@@ -545,7 +568,24 @@ pub fn run_as_service(data_dir: &Path, port: u16, mut log: impl FnMut(&str)) -> 
                     log(&format!("control channel unavailable: {why}"));
                 }
                 let dir = data_dir.to_path_buf();
-                let exit = service.run_until_stopped_or(move || !dir.join("vault.db").exists());
+                // The vanished-vault self-exit is TERMINAL: launchd's
+                // KeepAlive={Crashed:true} and systemd's Restart=on-failure
+                // both treat a clean exit as final, so a single unlucky
+                // sample permanently unloads the service until the user
+                // reinstalls. `Path::exists()` is false for any stat error —
+                // and `backup::restore` genuinely renames vault.db aside for
+                // a real window — so require the condition to hold across
+                // consecutive samples (~1s apart) before honoring it.
+                let mut misses = 0u8;
+                let exit = service.run_until_stopped_or(move || {
+                    if dir.join("vault.db").exists() {
+                        misses = 0;
+                        false
+                    } else {
+                        misses = misses.saturating_add(1);
+                        misses >= VANISHED_VAULT_CONFIRMATIONS
+                    }
+                });
                 match exit {
                     ServiceExit::StopRequested => {
                         log("stop requested; exiting cleanly");

@@ -46,16 +46,34 @@ impl RunKey {
     }
 
     /// The command line stored in the Run value. Windows command-line
-    /// quoting: each path wrapped in double quotes (backslashes need no
-    /// escaping inside quotes for CommandLineToArgvW as long as they do not
-    /// precede a quote; directory paths never end in `\"` because we render
-    /// without trailing separators).
+    /// quoting: each path wrapped in double quotes. A backslash needs no
+    /// escaping inside quotes for `CommandLineToArgvW` UNLESS it immediately
+    /// precedes the closing quote, where `\\"` escapes the quote and corrupts
+    /// the argument. The old comment asserted paths "never end in a
+    /// separator" but nothing enforced it, so `--data-dir C:\\dev\\tethra\\`
+    /// (or a bare drive root) produced a value neither Windows nor
+    /// `parse_run_value` reads correctly. A trailing separator is now
+    /// stripped; a drive root keeps one, doubled, so it survives as a literal.
     pub fn run_value(&self, binary: &Path) -> String {
         format!(
             "\"{}\" gateway serve --service --data-dir \"{}\"",
-            binary.display(),
-            self.data_dir.display()
+            Self::quote_safe_path(&binary.display().to_string()),
+            Self::quote_safe_path(&self.data_dir.display().to_string()),
         )
+    }
+
+    /// Make a path safe to sit inside a double-quoted argument: no trailing
+    /// backslash may touch the closing quote. A root path (`C:\\`, `\\`) keeps
+    /// a separator — `C:` alone means "the current directory on C:", a
+    /// different path — and doubles it, which `CommandLineToArgvW` reads as
+    /// one literal backslash.
+    fn quote_safe_path(raw: &str) -> String {
+        let trimmed = raw.trim_end_matches(['\\', '/']);
+        if trimmed.is_empty() || trimmed.ends_with(':') {
+            format!("{trimmed}\\\\")
+        } else {
+            trimmed.to_string()
+        }
     }
 
     /// Parse a stored Run value back into (binary, data_dir).

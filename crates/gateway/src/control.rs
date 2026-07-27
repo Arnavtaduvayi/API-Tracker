@@ -594,6 +594,22 @@ mod unix_impl {
     use super::*;
     use std::os::unix::net::{UnixListener, UnixStream};
 
+    /// Take the single-instance claim on this data directory (see
+    /// [`ControlServer::claim`]).
+    pub fn claim_instance(data_dir: &Path) -> Result<InstanceClaim> {
+        ControlServer::claim(data_dir)
+    }
+
+    /// An exclusive claim on this data directory's control socket, held
+    /// between `Service::start`'s single-instance check and the point where
+    /// the control server actually begins serving. Dropping it releases the
+    /// socket.
+    #[derive(Debug)]
+    pub struct InstanceClaim {
+        path: PathBuf,
+        listener: UnixListener,
+    }
+
     /// The running control listener.
     #[derive(Debug)]
     pub struct ControlServer {
@@ -648,12 +664,20 @@ mod unix_impl {
         /// with an opaque message, so it is checked up front.
         const MAX_SOCKET_PATH: usize = 100;
 
-        pub fn start(
-            data_dir: &Path,
-            nonce: String,
-            target: Arc<dyn ControlTarget>,
-        ) -> Result<Self> {
+        /// Bind the control socket and hold it, WITHOUT serving yet.
+        ///
+        /// The bind is the only real single-instance exclusion the gateway
+        /// has, so `Service::start` takes it before writing any shared
+        /// runtime file. Doing it later meant two concurrent first-run starts
+        /// both got past the connect probe and the second clobbered the
+        /// first's nonce and pid files.
+        pub fn claim(data_dir: &Path) -> Result<InstanceClaim> {
             let path = data_dir.join(SOCKET_NAME);
+            let listener = Self::bind_exclusive(&path)?;
+            Ok(InstanceClaim { path, listener })
+        }
+
+        fn bind_exclusive(path: &Path) -> Result<UnixListener> {
             if path.as_os_str().len() > Self::MAX_SOCKET_PATH {
                 return Err(CoreError::InvalidInput(format!(
                     "the control socket path is {} bytes, past this platform's ~{}-byte \
@@ -668,7 +692,7 @@ mod unix_impl {
             // Refuse to bind over a symlink: a same-uid attacker who plants
             // one could otherwise redirect the socket somewhere world-
             // reachable.
-            if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if let Ok(meta) = std::fs::symlink_metadata(path) {
                 if meta.file_type().is_symlink() {
                     return Err(CoreError::InvalidInput(format!(
                         "{} is a symlink; refusing to bind the control socket",
@@ -677,21 +701,21 @@ mod unix_impl {
                 }
                 // A stale socket from a dead instance is replaced; a LIVE one
                 // means another gateway owns this data dir.
-                if UnixStream::connect(&path).is_ok() {
+                if UnixStream::connect(path).is_ok() {
                     return Err(CoreError::InvalidInput(
                         "another Tethra gateway is already running for this data directory".into(),
                     ));
                 }
-                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path);
             }
-            let listener = UnixListener::bind(&path).map_err(CoreError::Io)?;
-            restrict(&path)?;
+            let listener = UnixListener::bind(path).map_err(CoreError::Io)?;
+            restrict(path)?;
             listener.set_nonblocking(true).map_err(CoreError::Io)?;
             // We just created this socket, so its owner IS our effective
             // uid; refuse to serve at all if the permissions are not what we
             // just set (a hostile umask, an odd filesystem, a race).
-            let Some(our_uid) = access_is_still_restricted(&path) else {
-                let _ = std::fs::remove_file(&path);
+            let Some(our_uid) = access_is_still_restricted(path) else {
+                let _ = std::fs::remove_file(path);
                 return Err(CoreError::InvalidInput(
                     "the control socket is not owner-only; refusing to serve an \
                      insufficiently protected control channel"
@@ -699,7 +723,25 @@ mod unix_impl {
                 ));
             };
             let _ = our_uid;
+            Ok(listener)
+        }
 
+        pub fn start(
+            data_dir: &Path,
+            nonce: String,
+            target: Arc<dyn ControlTarget>,
+        ) -> Result<Self> {
+            Self::start_claimed(Self::claim(data_dir)?, data_dir, nonce, target)
+        }
+
+        /// Serve on an already-claimed socket.
+        pub fn start_claimed(
+            claim: InstanceClaim,
+            _data_dir: &Path,
+            nonce: String,
+            target: Arc<dyn ControlTarget>,
+        ) -> Result<Self> {
+            let InstanceClaim { path, listener } = claim;
             let shutdown = Arc::new(AtomicBool::new(false));
             let stop = shutdown.clone();
             let nonce_for_thread = nonce;
@@ -790,7 +832,7 @@ mod unix_impl {
 }
 
 #[cfg(unix)]
-pub use unix_impl::{send, ControlServer};
+pub use unix_impl::{claim_instance, send, ControlServer, InstanceClaim};
 
 /// Best-effort "the vault locked" signal to a running gateway (ADR 0020).
 ///
@@ -907,20 +949,44 @@ mod windows_impl {
     /// D5). Attribution is simply unavailable and labeled as such.
     pub struct ControlServer;
 
+    /// No control channel means no socket to claim; the type exists so the
+    /// platform-independent `Service::start` sequence compiles unchanged.
+    #[derive(Debug)]
+    pub struct InstanceClaim;
+
+    fn unsupported<T>() -> Result<T> {
+        Err(CoreError::Unsupported {
+            provider: "gateway".into(),
+            capability: "control_channel",
+            hint: "the authenticated control channel is not implemented on Windows in \
+                   v1; credential attribution is unavailable there and the gateway \
+                   refuses to fall back to an unauthenticated TCP channel"
+                .into(),
+        })
+    }
+
+    /// Windows has no control socket, so there is nothing to claim — and no
+    /// claim to fail on. The single-instance guarantee there rests on the
+    /// listener port bind alone, which is a documented platform difference.
+    pub fn claim_instance(_data_dir: &Path) -> Result<InstanceClaim> {
+        Ok(InstanceClaim)
+    }
+
     impl ControlServer {
         pub fn start(
             _data_dir: &Path,
             _nonce: String,
             _target: Arc<dyn ControlTarget>,
         ) -> Result<Self> {
-            Err(CoreError::Unsupported {
-                provider: "gateway".into(),
-                capability: "control_channel",
-                hint: "the authenticated control channel is not implemented on Windows in \
-                       v1; credential attribution is unavailable there and the gateway \
-                       refuses to fall back to an unauthenticated TCP channel"
-                    .into(),
-            })
+            unsupported()
+        }
+        pub fn start_claimed(
+            _claim: InstanceClaim,
+            _data_dir: &Path,
+            _nonce: String,
+            _target: Arc<dyn ControlTarget>,
+        ) -> Result<Self> {
+            unsupported()
         }
         pub fn stop(&mut self) {}
     }
@@ -935,7 +1001,7 @@ mod windows_impl {
 }
 
 #[cfg(not(unix))]
-pub use windows_impl::{send, ControlServer};
+pub use windows_impl::{claim_instance, send, ControlServer, InstanceClaim};
 
 /// Single-instance / liveness marker. A stale PID file from a crashed
 /// instance must never make a fresh gateway refuse to start, and a live one

@@ -151,7 +151,7 @@ spend estimates are lower bounds (see `COVERAGE_LIMITATIONS.md`).
 ## Credential attribution (optional)
 
 By default the gateway records exchanges without knowing which vault
-credential was used (`unavailable_vault_locked`). To label traffic:
+credential was used (`unavailable_no_key`). To label traffic:
 
 ```
 tethra gateway push-key        # or desktop → Gateway → "Enable attribution…"

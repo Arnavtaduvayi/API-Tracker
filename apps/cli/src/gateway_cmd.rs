@@ -75,7 +75,7 @@ pub enum GatewayCmd {
         port: Option<u16>,
         /// Push the credential-matching key at startup so attribution works
         /// (requires an unlocked vault). Without it, attribution honestly
-        /// reports `unavailable_vault_locked`.
+        /// reports `unavailable_no_key`.
         #[arg(long)]
         with_attribution: bool,
         /// Service mode (what the installed service runs): retry a held

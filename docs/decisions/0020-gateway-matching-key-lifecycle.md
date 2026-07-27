@@ -18,7 +18,7 @@ The vault's own auto-lock exists because a user who walks away should not leave 
 
 ## The user value on the other side
 
-Attribution is why the key is pushed at all: without it every exchange records `unavailable_vault_locked` and the user sees traffic they cannot attribute to a credential. A user whose vault auto-locks after 15 minutes but whose linked project runs all afternoon has a real reason to want matching to continue. Refusing that outright would push users toward disabling auto-lock entirely — strictly worse for the vault as a whole.
+Attribution is why the key is pushed at all: without it every exchange records `unavailable_no_key` and the user sees traffic they cannot attribute to a credential. A user whose vault auto-locks after 15 minutes but whose linked project runs all afternoon has a real reason to want matching to continue. Refusing that outright would push users toward disabling auto-lock entirely — strictly worse for the vault as a whole.
 
 ## Selected policy
 

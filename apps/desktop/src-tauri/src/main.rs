@@ -3027,7 +3027,11 @@ fn gateway_recording(state: State<'_, AppState>, pause: bool) -> CmdResult<()> {
 }
 
 fn main() {
+    // Absolutize for the same reason the CLI does: this path is baked into
+    // the installed service's argv, and service managers start with a working
+    // directory of `/`.
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
+    let data_dir = std::path::absolute(&data_dir).unwrap_or(data_dir);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())

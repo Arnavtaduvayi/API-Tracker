@@ -26,6 +26,32 @@ pub const MAX_CHUNK_LINE: usize = 1024;
 /// Max trailer section size after the terminal chunk.
 pub const MAX_TRAILER: usize = 8 * 1024;
 
+/// Whether one trailer field may be relayed to the client.
+///
+/// The same rule as the response head (`head::strip_from_response`), restated
+/// here because the trailer section is relayed by this module: a field the
+/// gateway strips from the head must not arrive through the back door of a
+/// chunked trailer. Anything unparseable is dropped rather than guessed at.
+fn trailer_is_relayable(line: &[u8]) -> bool {
+    let Some(colon) = line.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    let Ok(name) = std::str::from_utf8(&line[..colon]) else {
+        return false;
+    };
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    !(lower == "set-cookie"
+        || lower.starts_with("access-control-")
+        || lower == "content-length"
+        || lower == "transfer-encoding"
+        || lower == "trailer"
+        || lower.starts_with("proxy-")
+        || crate::head::HOP_BY_HOP.contains(&lower.as_str()))
+}
+
 /// A bounded reader over `src` seeded with `initial`, tracking bytes not yet
 /// consumed so they can be handed back as carryover.
 struct Source<'a, R: Read> {
@@ -99,6 +125,7 @@ fn read_line_strict<R: Read, W: Write>(
     dst: &mut W,
     max: usize,
     counted: &mut u64,
+    echo: bool,
 ) -> Result<Vec<u8>> {
     let mut line = Vec::with_capacity(32);
     loop {
@@ -118,8 +145,10 @@ fn read_line_strict<R: Read, W: Write>(
                     "bare CR in chunk framing (strict CRLF required)".into(),
                 ));
             }
-            dst.write_all(&line).map_err(CoreError::Io)?;
-            dst.write_all(b"\r\n").map_err(CoreError::Io)?;
+            if echo {
+                dst.write_all(&line).map_err(CoreError::Io)?;
+                dst.write_all(b"\r\n").map_err(CoreError::Io)?;
+            }
             return Ok(line);
         }
         if b == b'\n' {
@@ -167,21 +196,37 @@ pub fn relay_chunked_strict<R: Read, W: Write>(
     let mut source = Source::new(src, initial);
     let mut relayed = 0u64;
     loop {
-        let line = read_line_strict(&mut source, dst, MAX_CHUNK_LINE, &mut relayed)?;
+        let line = read_line_strict(&mut source, dst, MAX_CHUNK_LINE, &mut relayed, true)?;
         let size = parse_chunk_size(&line)?;
         if size == 0 {
             // Terminal chunk: relay the (possibly empty) trailer section,
             // still requiring strict CRLF, then the final blank line.
+            // Trailers are read WITHOUT echoing, then filtered through the
+            // same predicate as the response head. Relaying them verbatim
+            // bypassed the Set-Cookie / Access-Control-* / hop-by-hop strip
+            // that SI-4 and SI-4a state unconditionally — an upstream that
+            // declares `Trailer: Set-Cookie` could set a cookie on the
+            // loopback origin despite the head-level strip.
             let mut trailer_bytes = 0usize;
             loop {
-                let trailer = read_line_strict(&mut source, dst, MAX_CHUNK_LINE, &mut relayed)?;
+                let trailer =
+                    read_line_strict(&mut source, dst, MAX_CHUNK_LINE, &mut relayed, false)?;
                 if trailer.is_empty() {
+                    // The blank line that TERMINATES the trailer section is
+                    // structural framing, not a trailer field, so it is
+                    // always written — dropping it would truncate the body.
+                    dst.write_all(b"\r\n").map_err(CoreError::Io)?;
                     break;
                 }
                 trailer_bytes += trailer.len();
                 if trailer_bytes > MAX_TRAILER {
                     return Err(CoreError::InvalidInput("chunk trailer too large".into()));
                 }
+                if !trailer_is_relayable(&trailer) {
+                    continue;
+                }
+                dst.write_all(&trailer).map_err(CoreError::Io)?;
+                dst.write_all(b"\r\n").map_err(CoreError::Io)?;
             }
             dst.flush().ok();
             return Ok((relayed, source.carryover()));
@@ -202,7 +247,7 @@ pub fn relay_chunked_strict<R: Read, W: Write>(
             relayed += piece.len() as u64;
         }
         // The CRLF that terminates the chunk data.
-        let after = read_line_strict(&mut source, dst, 1, &mut relayed)?;
+        let after = read_line_strict(&mut source, dst, 1, &mut relayed, true)?;
         if !after.is_empty() {
             return Err(CoreError::InvalidInput("malformed chunk terminator".into()));
         }
