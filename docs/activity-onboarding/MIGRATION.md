@@ -48,6 +48,20 @@ written by a newer build is still refused rather than downgraded.
 Backups pick the new table up automatically (backup v2 captures tables
 generically).
 
+**Executed upgrade evidence** (synthetic v14 database, 2026-07-27):
+
+```text
+before   user_version=14   tracking_setups absent   projects=1
+after    user_version=15   tracking_setups present  projects=1
+         idx_tracking_setups_project created
+         PRAGMA integrity_check -> ok
+```
+
+The upgrade runs on first open by the new build, in a transaction, and
+bumps the version only on full success — the existing `migrate_with`
+contract. A database written by a newer build is still refused rather
+than downgraded.
+
 `project_repos` gains no column. New rows are stored canonicalized so
 folder-first flows can match a selected directory to its project;
 **existing rows are never rewritten** — comparisons canonicalize on read
