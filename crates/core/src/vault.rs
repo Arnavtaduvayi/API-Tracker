@@ -772,7 +772,14 @@ impl UnlockedVault {
                 wrapped,
             ],
         )?;
-        let mut repos: Vec<String> = new.repo_paths;
+        // New rows are stored canonicalized so folder-first flows can
+        // match them exactly; pre-existing rows are never rewritten
+        // (comparisons canonicalize on read instead).
+        let mut repos: Vec<String> = new
+            .repo_paths
+            .iter()
+            .map(|p| canonical_repo_path(p))
+            .collect();
         repos.sort();
         repos.dedup();
         for repo in &repos {
@@ -865,14 +872,16 @@ impl UnlockedVault {
         for repo in &update.add_repo_paths {
             self.conn.execute(
                 "INSERT OR IGNORE INTO project_repos (project_id, path) VALUES (?1, ?2)",
-                params![row.id, repo],
+                params![row.id, canonical_repo_path(repo)],
             )?;
             changed.push("repos");
         }
         for repo in &update.remove_repo_paths {
+            // Remove both spellings: the literal argument (pre-existing
+            // rows were stored as typed) and the canonical form.
             self.conn.execute(
-                "DELETE FROM project_repos WHERE project_id = ?1 AND path = ?2",
-                params![row.id, repo],
+                "DELETE FROM project_repos WHERE project_id = ?1 AND path IN (?2, ?3)",
+                params![row.id, repo, canonical_repo_path(repo)],
             )?;
             changed.push("repos");
         }
@@ -9231,6 +9240,45 @@ fn parse_optional_ts_lenient(value: Option<&str>) -> (Option<time::OffsetDateTim
             Err(_) => (None, true),
         },
     }
+}
+
+/// Canonical spelling of a project repo path: symlinks and `..` resolved,
+/// falling back to the literal path when the directory does not exist (the
+/// same rule `stack_repo_key` uses, so the two path keys cannot drift).
+/// New `project_repos` rows are stored in this form; comparisons against
+/// pre-existing rows canonicalize on read instead of rewriting user data.
+pub fn canonical_repo_path(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    p.canonicalize()
+        .unwrap_or_else(|_| p.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// Reverse lookup: which projects have `folder` registered as a repo path?
+/// Both sides are canonicalized before comparison, so a stored literal path
+/// and a selected symlinked spelling of the same directory still match.
+/// Returns project ids sorted by project name (deterministic for callers
+/// that must resolve ambiguity honestly rather than pick silently).
+pub fn projects_for_folder(conn: &Connection, folder: &std::path::Path) -> Result<Vec<String>> {
+    let wanted = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf())
+        .display()
+        .to_string();
+    let mut stmt = conn.prepare(
+        "SELECT pr.project_id, pr.path FROM project_repos pr
+         JOIN projects p ON p.id = pr.project_id ORDER BY p.name, pr.path",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut ids: Vec<String> = Vec::new();
+    for row in rows {
+        let (project_id, path) = row?;
+        if canonical_repo_path(&path) == wanted && !ids.contains(&project_id) {
+            ids.push(project_id);
+        }
+    }
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------

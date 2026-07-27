@@ -1005,6 +1005,34 @@ ALTER TABLE runtime_request_events ADD COLUMN attribution_method TEXT;
 CREATE INDEX IF NOT EXISTS idx_gue_event ON gateway_usage_events(event_id);
 "#,
     },
+    Migration {
+        version: 15,
+        name: "tracking_setups (zero-friction tracking state machine)",
+        sql: r#"
+-- One row per (project, folder) tracking setup — the persisted product-level
+-- state behind "Track API activity" / `tethra track` (ADR 0022 D8). The row
+-- caches the state machine value; readers re-derive it against the
+-- observation tables on every load, so a stale row can never overclaim
+-- `traffic_observed` (SI-19). Contents are value-free: provider ids,
+-- confidence labels, evidence kinds, and file paths only — never env values,
+-- secrets, or wire data.
+CREATE TABLE tracking_setups (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    folder_path TEXT NOT NULL,            -- canonicalized at insert
+    state TEXT NOT NULL,
+    detection_json TEXT NOT NULL,
+    plan_summary_json TEXT,
+    applied_at TEXT,
+    first_traffic_at TEXT,
+    last_transition_at TEXT NOT NULL,
+    attention_reason TEXT,
+    UNIQUE(project_id, folder_path)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_tracking_setups_project
+    ON tracking_setups(project_id);
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

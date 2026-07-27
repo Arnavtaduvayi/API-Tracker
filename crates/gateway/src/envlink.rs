@@ -307,10 +307,50 @@ pub fn plan_link(conn: &Connection, req: &LinkRequest) -> Result<LinkPlan> {
             ident: req.route_prefix.clone(),
         });
     };
+    plan_link_as_provider(conn, req, &provider_id, None)
+}
+
+/// Compute the plan for a named provider whose route row may not exist yet.
+///
+/// The tracking orchestrator (ADR 0022) shows one combined review screen —
+/// including the exact `.env` diff — BEFORE it creates any route row, so the
+/// provider cannot be resolved from `gateway_routes` at that point. This is
+/// the same read-only computation as [`plan_link`] minus the route lookup;
+/// nothing that validates origins, digests, or writes is bypassed
+/// (`apply_link` still re-plans through the route row and still refuses on
+/// digest mismatch). `port_override` exists solely for dry-run previews on a
+/// vault with no persisted port yet: a plan built on an override is for
+/// display only and can never apply cleanly unless that port is persisted
+/// first, because `apply_link`'s re-plan reads the persisted port.
+pub fn plan_link_as_provider(
+    conn: &Connection,
+    req: &LinkRequest,
+    provider_id: &str,
+    port_override: Option<u16>,
+) -> Result<LinkPlan> {
+    plan_link_as_provider_projected(conn, req, provider_id, port_override, &BTreeMap::new())
+}
+
+/// Like [`plan_link_as_provider`], planning over PROJECTED file contents:
+/// entries in `projected` (path string → content) are treated as each
+/// file's current content instead of reading disk. This is how the
+/// tracking orchestrator builds one combined multi-provider diff whose
+/// digests stay honest — provider N's plan is computed over provider
+/// N−1's planned output, and apply (in the same order) re-plans against a
+/// disk state that matches exactly. Any EXTERNAL mutation between preview
+/// and apply still fails the digest check as before.
+pub fn plan_link_as_provider_projected(
+    conn: &Connection,
+    req: &LinkRequest,
+    provider_id: &str,
+    port_override: Option<u16>,
+    projected: &BTreeMap<String, String>,
+) -> Result<LinkPlan> {
+    let provider_id = provider_id.to_string();
     let vars = link_vars(&provider_id, req.var_override.as_deref())?;
 
     let config = store::load_config(conn)?;
-    let Some(port) = config.port else {
+    let Some(port) = port_override.or(config.port) else {
         return Err(err(
             "the gateway has no persisted port yet, so a stable base URL cannot be \
              written. Enable the gateway (or run `tethra gateway serve` once) first."
@@ -334,7 +374,10 @@ pub fn plan_link(conn: &Connection, req: &LinkRequest) -> Result<LinkPlan> {
     let mut plans = Vec::new();
     let mut all_warnings = Vec::new();
     for path in &files {
-        let plan = plan_file(path, req, &vars, &base_url, &marker, port)?;
+        let base = projected
+            .get(&path.display().to_string())
+            .map(String::as_str);
+        let plan = plan_file(path, req, &vars, &base_url, &marker, port, base)?;
         all_warnings.extend(plan.warnings.clone());
         plans.push(plan);
     }
@@ -450,7 +493,7 @@ pub fn plan_link_with_slug(conn: &Connection, req: &LinkRequest, slug: &str) -> 
         let mut plans = Vec::new();
         let mut warnings = Vec::new();
         for path in &files {
-            let fp = plan_file(path, req, &plan.vars, &base_url, &marker, plan.port)?;
+            let fp = plan_file(path, req, &plan.vars, &base_url, &marker, plan.port, None)?;
             warnings.extend(fp.warnings.clone());
             plans.push(fp);
         }
@@ -496,7 +539,10 @@ fn resolve_files(req: &LinkRequest) -> Result<Vec<PathBuf>> {
     Ok(vec![dir.join(".env")])
 }
 
-/// Plan the rewrite of one file, collecting warnings.
+/// Plan the rewrite of one file, collecting warnings. `projected`, when
+/// set, is used as the file's current content (the multi-provider
+/// combined-plan case); disk is read otherwise.
+#[allow(clippy::too_many_arguments)]
 fn plan_file(
     path: &Path,
     req: &LinkRequest,
@@ -504,6 +550,7 @@ fn plan_file(
     base_url: &str,
     marker: &str,
     _port: u16,
+    projected: Option<&str>,
 ) -> Result<FilePlan> {
     // Symlink policy: refuse. An atomic rename would silently REPLACE the
     // symlink with a regular file, disconnecting whatever the link pointed
@@ -518,11 +565,19 @@ fn plan_file(
         )));
     }
 
-    let exists = path.exists();
-    let old_content = if exists {
-        std::fs::read_to_string(path).map_err(CoreError::Io)?
-    } else {
-        String::new()
+    let (exists, old_content) = match projected {
+        // A projected file exists by the time this plan applies (the
+        // preceding provider's apply wrote it).
+        Some(content) => (true, content.to_string()),
+        None => {
+            let exists = path.exists();
+            let content = if exists {
+                std::fs::read_to_string(path).map_err(CoreError::Io)?
+            } else {
+                String::new()
+            };
+            (exists, content)
+        }
     };
     let mut doc = EnvDocument::parse(&old_content);
     let path_str = path.display().to_string();
