@@ -447,15 +447,21 @@ TRACKAPP="$WORK/trackapp"
 mkdir -p "$TRACKAPP"
 printf 'OPENAI_API_KEY=sk-proj-SMOKE-FAKE-TRACK-NOT-A-REAL-KEY-01\n' > "$TRACKAPP/.env"
 printf '{ "dependencies": { "openai": "^4.0.0", "dotenv": "^16.0.0" } }\n' > "$TRACKAPP/package.json"
-ENV_BEFORE=$(cat "$TRACKAPP/.env")
+# A real byte snapshot, not a shell string. `[ "$(cat a)" = "$b" ]` strips
+# trailing newlines from BOTH sides, so it cannot see a dry run that added or
+# removed one — the same defect the audit found in the packaged harness
+# (ZFT-VAL-10). The `.snapshot` suffix keeps it out of the earlier
+# "no plaintext .env file is ever created" sweep, which matches *.env/.env.
+ENV_BEFORE="$WORK/trackapp-env-before.snapshot"
+cp "$TRACKAPP/.env" "$ENV_BEFORE"
 TRACK_OUT=$("$BIN" track "$TRACKAPP" --dry-run 2>&1)
 check $? "track --dry-run succeeds on a detectable project"
 echo "$TRACK_OUT" | grep -q "openai" && echo "$TRACK_OUT" | grep -q "OPENAI_BASE_URL"
 check $? "the dry run shows the detection and the exact env diff"
 echo "$TRACK_OUT" | grep -q "Dry run: nothing was changed."
 check $? "the dry run says it changed nothing"
-[ "$(cat "$TRACKAPP/.env")" = "$ENV_BEFORE" ]
-check $? "the dry run really changed nothing on disk"
+cmp -s "$ENV_BEFORE" "$TRACKAPP/.env"
+check $? "the dry run really changed nothing on disk (cmp, not string equality)"
 echo "$TRACK_OUT" | grep -q "sk-proj-SMOKE-FAKE-TRACK" && bad "track output leaked a key value" || ok "no key value appears in track output"
 echo "$TRACK_OUT" | grep -q "print-export" && bad "track printed shell-export choreography" || ok "track never prints shell-export choreography"
 "$BIN" project list 2>/dev/null | grep -q "trackapp" && bad "dry-run created a project" || ok "the dry run created no project"

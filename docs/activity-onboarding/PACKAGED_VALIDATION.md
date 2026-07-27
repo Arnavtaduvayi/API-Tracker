@@ -1,109 +1,146 @@
-# Packaged validation results
+# Packaged validation
 
-Executed evidence for the packaged desktop application. Anything not
-listed as executed here is explicitly labeled as not executed.
+What is executed against the real `Tethra.app`, where it is executed, and —
+stated at least as prominently — what is **not**.
 
-## macOS — executed 2026-07-27
+The audit's `ZFT-VAL-1`, `ZFT-VAL-4`, `ZFT-VAL-7`, `ZFT-VAL-8` and
+`ZFT-VAL-9` were all one failure: a headline number that did not correspond
+to executed assertions. This page is written so that every number on it can
+be re-derived by running the command beside it.
 
-Machine: macOS 25.5.0 (Darwin), aarch64. Build:
-`npx tauri build --bundles app` at branch
-`feat/zero-friction-api-tracking`. Script:
-`scripts/tracking_validate_macos.sh`.
+Harness: `scripts/tracking_validate_macos.sh`. Its own anti-tautology tests:
+`scripts/validation_harness_mutants.sh`.
 
-### The bundle now carries its helper
+---
+
+## The scopes, and their exact counts
+
+The totals **differ by construction**, and the script enforces
+`total == expected` for the scope it ran. A foreground run therefore cannot
+be mistaken for, or quoted as, a service run — which is precisely what
+`ZFT-VAL-4` described, where both modes reported 42.
+
+| Scope | Checks | Groups | Runs in CI? |
+|---|---|---|---|
+| `--scope selfcheck` | **5** | HARNESS 5 | **yes** |
+| `--scope offline` | **22** | HARNESS 5 · BUNDLE 7 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
+| `--scope full --foreground` | **59** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
+| `--scope full --require-service` | **61** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
+
+### Measured on this machine (macOS 25.5.0, aarch64)
 
 ```text
-target/release/bundle/macos/Tethra.app/Contents/MacOS/
-  api-tracker-desktop   16580864 bytes
-  tethra                11935184 bytes
+$ bash scripts/tracking_validate_macos.sh --scope selfcheck
+=== PACKAGED TRACKING VALIDATION (scope=selfcheck, mode=none): 5 passed, 0 failed (5/5 checks) ===
+
+$ bash scripts/tracking_validate_macos.sh --scope offline
+    HARNESS        5 checks  (5 passed, 0 failed)
+    BUNDLE         7 checks  (7 passed, 0 failed)
+    FIXTURE        3 checks  (3 passed, 0 failed)
+    DRYRUN         6 checks  (6 passed, 0 failed)
+    OFFLINE        1 checks  (1 passed, 0 failed)
+    TOTAL         22 checks  (22 passed, 0 failed)
+
+$ bash scripts/validation_harness_mutants.sh
+=== HARNESS MUTATION RESULT: 7 killed, 0 survived ===
+
+$ bash scripts/tracking_validate_macos.sh --scope full --foreground
+=== PACKAGED TRACKING VALIDATION: ABORTED (a precondition failed) ===
+$ echo $?
+1
 ```
 
-Before this milestone the bundle contained only `api-tracker-desktop`, so
-a fresh install could not perform the product's primary function. It now
-ships the helper the tracking service runs.
+The abort is the correct outcome **on this machine** and is explained below.
+It exits **non-zero**, so a CI job cannot mistake "we refused to run" for a
+pass.
 
-### Result
+---
 
-```text
-=== PACKAGED TRACKING VALIDATION (foreground mode): 42 passed, 0 failed (42 checks) ===
-```
+## Why `--scope full` did not run here
 
-Preconditions enforced by the script itself, not assumed:
+This machine has a Tethra gateway installed and running
+(`~/Library/LaunchAgents/dev.api-tracker.gateway.plist`, pid 65270). The
+script refuses `--scope full` when **any** Tethra LaunchAgent is present.
 
-* `PATH` stripped to `/usr/bin:/bin:/usr/sbin:/sbin`, then asserted that
-  no `tethra` is resolvable — so only the bundled helper can satisfy the
-  run.
-* A throwaway `TETHRA_DIR` under `/tmp`, a fresh vault, fake credentials
-  only.
+Service names are namespaced per data directory now (ADR 0026) and every
+destructive verb proves ownership first, so a current helper would hard-stop
+rather than damage anything. The interlock exists anyway, for three reasons:
 
-What passed, grouped:
+* a **pre-namespacing** helper under test would boot that gateway out of its
+  slot — which is exactly what happened during the audit, to this machine;
+* a legacy agent pointing at the same data directory would be silently
+  migrated by the takeover path;
+* a run that succeeds only because the machine happened to be clean is not
+  evidence. Awarding a pass for that is the shape `ZFT-VAL-7` objected to,
+  so the interlock **aborts** rather than being tallied as a check.
 
-| Group | Checks | What it proves |
+`--scope full` therefore needs a machine with no installed Tethra gateway.
+That has not been run for this branch, and nothing on this page claims it
+has.
+
+---
+
+## What CI executes
+
+`.github/workflows/ci.yml`, job **`packaged-macos`** (`macos-latest`), on
+every PR:
+
+1. `tracking_validate_macos.sh --scope selfcheck` — before anything it
+   certifies, prove the harness reports a deliberately-broken control as a
+   **failure**;
+2. `validation_harness_mutants.sh` — and prove that gate is not itself
+   decorative: seven mutants that weaken the harness into "always ok",
+   including the literal `ZFT-VAL-7` and `ZFT-VAL-10` defects, must each be
+   killed;
+3. `npm ci`, `scripts/bundle_cli.sh`, `tauri build --bundles app` — a **real
+   `.app`**, which is what the validation then inspects;
+4. `tracking_validate_macos.sh --scope offline` — 22 required checks;
+5. `scripts/smoke.sh`.
+
+Every one of those fails the build.
+
+### What a green CI build does NOT claim
+
+* **LaunchAgent registration.** A hosted runner has no login session to
+  register into, and `launchctl bootstrap gui/<uid>` behaves differently
+  under Actions than on a desktop, so a green result there would not be
+  evidence about the path a real user gets. `--scope offline` starts no
+  gateway at all.
+* **Traffic observation, verification, privacy-at-rest, undo.** These need a
+  running gateway and a real request. They live in `--scope full`, and in
+  the in-process suites the `rust` job already runs
+  (`crates/tracking/tests/verification_freshness.rs`,
+  `crates/gateway/tests/privacy_canaries.rs`,
+  `crates/tracking/tests/undo_ground_truth.rs`).
+* **Windows and Linux packaging.** Not covered by this harness at all.
+
+The script prints its own `NOT RUN HERE` block for whichever scope it ran,
+so the CI log states the boundary rather than relying on this page.
+
+---
+
+## The specific things the audit found unverified
+
+| Finding | What was wrong | What it does now |
 |---|---|---|
-| Preconditions | 5 | the app carries an executable helper; it answers the exec probe and reports a version; no CLI on PATH |
-| Dry run | 5 | detection works; the exact diff is shown; **no file, service, or project is created**; no key value printed |
-| One-command setup | 10 | routes created automatically; `.env` repointed; comments preserved; `NO_PROXY` added; one link row; one setup row; no shell-export choreography |
-| Negative control | 4 | **not** `traffic_observed` before any request; no first-traffic timestamp; `track status` exits 2 |
-| Real traffic | 2 | a keyless-then-keyed request reached the real provider through the gateway (401) and was recorded as a gateway observation |
-| Verification | 3 | `track status` exits 0, state becomes `traffic_observed`, first-traffic timestamp set — **only after** the observation |
-| Privacy canaries | 5 | no API-key value in `vault.db`, `-wal`, `-shm`, or logs; no authorization header stored |
-| Idempotence | 3 | a second run changes no file and creates no duplicate link or setup row |
-| Undo | 3 | `.env` restored byte for byte; link row removed; recorded history kept |
+| `ZFT-VAL-3` | "version-matched helper" was `[ -n "$APP_VER" ]` | the helper is **run** and its `--version` compared to the bundle's `Info.plist` |
+| `ZFT-VAL-5` | a variable named `CANARY` was planted, advertised, and never searched for | searched for across the DB, WAL, SHM, logs and desktop storage |
+| `ZFT-VAL-7` | 4 of 42 checks were unconditional passes | every unconditional pass removed or replaced; the count-equality gate and the harness mutation suite are the guards |
+| `ZFT-VAL-8` | the advertised forged-old-event negative control did not exist | implemented, and its SQL verified against the real schema |
+| `ZFT-VAL-9` | the group table summed to 40, not 42 | the table above is printed by the script and the script enforces the sum |
+| `ZFT-VAL-10` | "byte for byte" used `[ "$(cat a)" = "$b" ]`, stripping trailing newlines | `cmp(1)` on the real files; a mutant that reverts it is killed |
 
-The observed path, verbatim from the run:
+### The defect found while fixing them
 
-```text
-base URL: http://127.0.0.1:63649/p/57ba2d21…/openai/v1
-provider answered: 401
-```
+The first version of the anti-tautology guard **did not work**. `ok()` and
+`bad()` began with an early return for the self-check mode, so the guard
+exercised a code path the real checks never take. Mutating `bad()` into an
+unconditional pass — the literal `ZFT-VAL-7` defect — left the harness
+reporting *5 passed, 0 failed, exit 0*.
 
-A 401 from `api.openai.com` to a request carrying a fake key proves
-DNS → gateway → TLS → provider end to end. Provider acceptance is not
-required and is not claimed.
-
-### Mode, and what was not exercised
-
-This run used **foreground mode**. The machine already had a gateway
-LaunchAgent installed for the user, and the shipping label
-(`dev.api-tracker.gateway`) is fixed — installing another would have
-booted out and overwritten the user's own service. The script detects
-this and starts the bundled helper's own `gateway serve` instead, which
-is exactly the unsigned-build fallback path.
-
-Consequently **LaunchAgent registration was not exercised in this run**.
-It remains covered by:
-
-* the mock-runner lifecycle suite (`crates/gateway/tests/lifecycle.rs`),
-  which exercises install/register/start/repair/uninstall against a
-  recorded command runner;
-* `scripts/gateway_validate_macos.sh`, the pre-existing service-mode
-  validation.
-
-On a machine with no pre-existing agent the same script runs in service
-mode and asserts the LaunchAgent was installed. Set
-`TETHRA_VALIDATE_FOREGROUND=1` to force foreground mode deliberately.
-
-### Signing
-
-Builds are unsigned. Gatekeeper may refuse the background service on a
-fresh download; the app detects that specific failure and offers
-foreground tracking with its honest limitation ("tracking pauses when
-Tethra closes"). Signing and notarization remain a release blocker for
-public builds and the one genuinely external dependency — Apple
-Developer ID credentials are not configured in this repository.
-
-## Linux — not executed
-
-systemd-user lifecycle is implemented and unit-tested against the mock
-runner. No packaged Linux end-to-end run has been performed, here or
-previously. Sidecar bundling is configured identically (the helper lands
-beside the executable in AppImage/deb), but that is a configuration
-claim, not an executed one.
-
-## Windows — not executed
-
-Unchanged from the previous milestone: the HKCU Run-key lifecycle is
-compile-validated only on a real Windows runner in CI, and has never been
-executed. Credential attribution is structurally unavailable on Windows
-(no control channel; SI-21 refuses a TCP fallback). The supported mode is
-foreground tracking, and the app says so.
+`ok()`/`bad()` are now unconditional, the self-check runs its controls
+through the **unmodified** reporting path and reads back both the printed
+verdict and the counter deltas, and a mismatch **aborts** rather than being
+reported through `bad()` — a weakened `bad()` cannot be trusted to report
+its own weakening. `validation_harness_mutants.sh` makes that repeatable:
+7 mutants, 7 killed.

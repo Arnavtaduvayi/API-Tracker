@@ -118,3 +118,89 @@ jobs:
         run: bash scripts/bundle_cli.sh
       - name: Clippy (desktop backend)
         run: cargo clippy -p api-tracker-desktop -- -D warnings
+
+  packaged-macos:
+    name: Packaged app + validation (macOS)
+    runs-on: macos-latest
+    # A full bundle build plus the smoke suite (production Argon2id, no fast-KDF
+    # escape hatch) is the slowest job here; the cap is a guard against a hang,
+    # not a budget.
+    timeout-minutes: 60
+    # WHAT THIS JOB IS FOR, AND WHAT IT DELIBERATELY DOES NOT CLAIM
+    # -------------------------------------------------------------
+    # ZFT-VAL-1 found that CI ran NEITHER scripts/tracking_validate_macos.sh
+    # NOR scripts/smoke.sh, and never built a packaged app on any platform —
+    # so the "packaged validation" evidence was one developer-machine run.
+    # This job builds the real .app and runs both scripts on every PR.
+    #
+    # It runs the packaged validation at `--scope offline`, which is the
+    # largest scope a hosted runner can execute HONESTLY:
+    #
+    #   REQUIRED here (22 checks, every one of them fails the build):
+    #     - the bundle carries a runnable native helper at Contents/MacOS
+    #     - the helper's MEASURED --version equals the bundle's Info.plist
+    #       version, and its bytes equal the sidecar staged from this source
+    #     - the helper answers the exec probe with every developer CLI
+    #       stripped off PATH
+    #     - `track --dry-run` detects, prints the exact env diff, leaks
+    #       neither the key nor an unrelated env value, and changes the .env
+    #       not one byte
+    #     - the harness mutation test: deliberately-false controls must be
+    #       reported as FAILURES (a harness that always says "ok" fails here)
+    #
+    #   NOT run here, and therefore NOT claimed by a green build:
+    #     - LaunchAgent registration. Service names ARE now namespaced per
+    #       data directory (ADR 0026), so a second environment no longer
+    #       collides with a first — but a hosted runner has no login session
+    #       to register into, `launchctl bootstrap gui/<uid>` behaves
+    #       differently under Actions than on a real desktop, and a green
+    #       result there would not be evidence about the path a user gets.
+    #       So this job never installs one: `--scope offline` starts no
+    #       gateway at all. The LaunchAgent lifecycle is validated manually
+    #       on macOS and recorded in PACKAGED_VALIDATION.md, which is the
+    #       honest split ZFT-VAL-1 asked for.
+    #     - traffic observation, verification, privacy-at-rest and undo, which
+    #       need a running gateway and a real provider request. Those live in
+    #       `--scope full` on a machine with no installed Tethra gateway, and
+    #       in the in-process suites the `rust` job already runs.
+    #
+    # The script prints its own "NOT RUN HERE" block for the scope it ran, so
+    # the log states the boundary rather than relying on this comment.
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      # First, and before anything it certifies: prove the harness can report a
+      # failure. This mode needs no app bundle, so it fails in seconds rather
+      # than after a bundle build.
+      - name: Validation harness self-check (anti-tautology gate)
+        run: bash scripts/tracking_validate_macos.sh --scope selfcheck
+      # ...and prove that gate is not itself decorative: seven mutants that
+      # weaken the harness into "always ok" (including the literal ZFT-VAL-7
+      # and ZFT-VAL-10 defects) must each be killed by the self-check. Runs on
+      # copies under mktemp; starts no service and touches no repository file.
+      - name: Validation harness mutation test (the gate must kill its mutants)
+        run: bash scripts/validation_harness_mutants.sh
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+      - name: Stage the bundled CLI sidecar (externalBin — the app ships its helper)
+        run: bash scripts/bundle_cli.sh
+      # `--bundles app` builds the real .app (the artifact the validation
+      # inspects) and skips the .dmg, which adds minutes and proves nothing the
+      # .app does not. Unsigned: no signing identity exists on a hosted runner,
+      # and the alpha ships unsigned (docs/PACKAGING.md).
+      - name: Build the real macOS app bundle
+        working-directory: apps/desktop
+        run: npm run tauri build -- --bundles app
+      - name: Packaged validation (offline scope — REQUIRED)
+        run: bash scripts/tracking_validate_macos.sh --scope offline
+      - name: Smoke suite (release binary, throwaway vault, no network)
+        run: bash scripts/smoke.sh
