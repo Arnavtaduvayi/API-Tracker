@@ -25,13 +25,29 @@ fn try_detect(
 fn refuses_the_filesystem_root() {
     let (_db, conn) = test_conn();
     let err = try_detect(&conn, Path::new("/")).unwrap_err();
-    assert!(err.to_string().contains("refusing to scan"), "{err}");
+    // The root must never be scanned. Either honest refusal counts: the
+    // bound itself ("refusing to scan"), or an inability to open it at
+    // all on a platform where "/" is not a real directory. What must
+    // NOT happen is a successful scan.
+    let text = err.to_string();
+    assert!(
+        text.contains("refusing to scan") || text.contains("cannot access"),
+        "{text}"
+    );
 }
 
 #[test]
 fn refuses_the_home_directory_and_its_container() {
     let (_db, conn) = test_conn();
-    let home = std::env::var("HOME").expect("HOME set in test env");
+    let Some(home) = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+    else {
+        // No home variable in this environment: the refusal cannot be
+        // exercised, and pretending otherwise would be a vacuous pass.
+        eprintln!("skipped: neither HOME nor USERPROFILE is set");
+        return;
+    };
     let err = try_detect(&conn, Path::new(&home)).unwrap_err();
     assert!(err.to_string().contains("refusing to scan"), "{err}");
     // The container of home directories, via a path that canonicalizes to
@@ -48,6 +64,11 @@ fn refuses_the_home_directory_and_its_container() {
     }
 }
 
+/// Unix-only: `std::os::unix::fs::symlink` has no portable equivalent, and
+/// creating a symlink on Windows needs elevation or developer mode. The
+/// bound it proves (never read through a symlink out of the folder) is
+/// enforced by the same `symlink_metadata` check on every platform.
+#[cfg(unix)]
 #[test]
 fn a_symlink_out_of_the_folder_is_never_followed() {
     let (_db, conn) = test_conn();
