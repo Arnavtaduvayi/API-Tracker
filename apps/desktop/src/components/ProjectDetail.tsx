@@ -233,7 +233,7 @@ export function ProjectDetail(props: {
               <th>Environment</th>
               <th>Value</th>
               <th>Status</th>
-              <th>Last used</th>
+              <th>Marked used</th>
             </tr>
           </thead>
           <tbody>

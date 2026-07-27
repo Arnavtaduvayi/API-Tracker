@@ -123,6 +123,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "api-tracker-core",
+ "api-tracker-gateway",
  "api-tracker-observe",
  "assert_cmd",
  "clap",
@@ -132,6 +133,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "zeroize",
 ]
 
 [[package]]
@@ -169,6 +171,7 @@ name = "api-tracker-desktop"
 version = "0.1.0"
 dependencies = [
  "api-tracker-core",
+ "api-tracker-gateway",
  "api-tracker-observe",
  "arboard",
  "serde",
@@ -177,6 +180,27 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-notification",
  "tauri-plugin-opener",
+ "zeroize",
+]
+
+[[package]]
+name = "api-tracker-gateway"
+version = "0.1.0"
+dependencies = [
+ "api-tracker-core",
+ "api-tracker-observe",
+ "blake3",
+ "httparse",
+ "rusqlite",
+ "rustls",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "socket2",
+ "subtle",
+ "tempfile",
+ "time",
+ "uuid",
  "zeroize",
 ]
 

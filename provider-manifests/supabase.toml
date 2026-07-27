@@ -21,6 +21,18 @@ watch_docs = [
     "https://supabase.com/docs/reference/api/introduction",
 ]
 
+# Local Gateway routing (ADR 0019 D10, KNOWN_CONFLICTS C11). Supabase has NO
+# fixed data-plane origin — every project gets its own `<ref>.supabase.co`
+# host — so `origins` is empty (custom-only): routes must be registered
+# through the MAC'd custom-origin flow with the project's own origin. The
+# `.env` metadata below still drives link-time rewriting; the Supabase SDK
+# takes the full project URL, so base_path stays empty.
+[gateway]
+origins = []
+base_path = ""
+env_vars = ["SUPABASE_URL"]
+usage_shape = ""
+
 [[detection]]
 name = "supabase-personal-access-token"
 regex = "sbp_[A-Za-z0-9]{40,}"

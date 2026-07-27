@@ -13,6 +13,14 @@ use crate::secret::SecretString;
 use serde::Serialize;
 use std::collections::HashMap;
 
+/// The substring that identifies a comment line as a Tethra gateway
+/// ownership marker. Ownership is expressed as a COMMENT rather than a
+/// variable because `tethra run` scrubs `TETHRA_*` names from child
+/// environments (KNOWN_CONFLICTS C10) and a comment survives every dotenv
+/// loader untouched. Shared by the `.env` link writer (which composes the
+/// full marker text) and `.env.example` generation (which skips marked keys).
+pub const GATEWAY_MARKER_TAG: &str = "tethra-gateway";
+
 /// The line ending used when rendering new or modified lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Newline {
@@ -401,6 +409,28 @@ impl EnvDocument {
         }
     }
 
+    /// Restore each occurrence of `key` to its own recorded value, in file
+    /// order. [`set`] deliberately writes ONE value to every occurrence, which
+    /// is right for linking (all occurrences must point at the gateway) and
+    /// wrong for restoring (each occurrence had its own prior value). Extra
+    /// occurrences beyond `values` keep the last supplied value, so the
+    /// method is total even if the file gained a duplicate after linking.
+    pub fn set_each_occurrence(&mut self, key: &str, values: &[String]) {
+        if values.is_empty() {
+            return;
+        }
+        let mut i = 0usize;
+        for line in &mut self.lines {
+            if let EnvLine::Entry(entry) = line {
+                if entry.key == key {
+                    let v = values.get(i).unwrap_or(&values[values.len() - 1]);
+                    entry.set_value(SecretString::new(v.clone()));
+                    i += 1;
+                }
+            }
+        }
+    }
+
     /// Remove every occurrence of `key`. Returns whether anything was removed.
     pub fn remove(&mut self, key: &str) -> bool {
         let before = self.lines.len();
@@ -409,6 +439,110 @@ impl EnvDocument {
             _ => true,
         });
         self.lines.len() != before
+    }
+
+    /// Set `key` to `value` and keep exactly one ownership marker comment
+    /// directly above its first occurrence (TEST_PLAN §10). The comment must
+    /// contain [`GATEWAY_MARKER_TAG`]; a stale marker already there is
+    /// replaced, an identical one is left alone, and any other line above the
+    /// entry is preserved — the marker is inserted, never overwritten onto
+    /// user content. Ownership is a comment, never a variable, because
+    /// `tethra run` scrubs `TETHRA_*` names from child environments
+    /// (KNOWN_CONFLICTS C10).
+    pub fn set_with_comment(&mut self, key: &str, value: SecretString, comment: &str) {
+        debug_assert!(
+            comment.contains(GATEWAY_MARKER_TAG),
+            "marker comments must carry the ownership tag"
+        );
+        self.set(key, value);
+        let rendered = if comment.trim_start().starts_with('#') {
+            comment.to_string()
+        } else {
+            format!("# {comment}")
+        };
+        let idx = self
+            .lines
+            .iter()
+            .position(|l| matches!(l, EnvLine::Entry(e) if e.key == key))
+            .expect("set() guarantees the entry exists");
+        if idx > 0 {
+            if let EnvLine::Comment(existing) = &self.lines[idx - 1] {
+                if existing.trim() == rendered.trim() {
+                    return;
+                }
+                if existing.contains(GATEWAY_MARKER_TAG) {
+                    self.lines[idx - 1] = EnvLine::Comment(rendered);
+                    return;
+                }
+            }
+        }
+        self.lines.insert(idx, EnvLine::Comment(rendered));
+    }
+
+    /// Remove every occurrence of `key` AND any marker comment directly above
+    /// one. Returns whether anything was removed. Non-marker comments are
+    /// never touched.
+    pub fn remove_with_comment(&mut self, key: &str) -> bool {
+        let mut removed = false;
+        while let Some(idx) = self
+            .lines
+            .iter()
+            .position(|l| matches!(l, EnvLine::Entry(e) if e.key == key))
+        {
+            self.lines.remove(idx);
+            removed = true;
+            if idx > 0 {
+                if let EnvLine::Comment(c) = &self.lines[idx - 1] {
+                    if c.contains(GATEWAY_MARKER_TAG) {
+                        self.lines.remove(idx - 1);
+                    }
+                }
+            }
+        }
+        removed
+    }
+
+    /// Remove the marker comment directly above the first occurrence of
+    /// `key`, leaving the entry itself in place (unlink restores a prior
+    /// value but drops Tethra's ownership claim). Returns whether a marker
+    /// was removed.
+    pub fn remove_marker_above(&mut self, key: &str) -> bool {
+        let Some(idx) = self
+            .lines
+            .iter()
+            .position(|l| matches!(l, EnvLine::Entry(e) if e.key == key))
+        else {
+            return false;
+        };
+        if idx > 0 {
+            if let EnvLine::Comment(c) = &self.lines[idx - 1] {
+                if c.contains(GATEWAY_MARKER_TAG) {
+                    self.lines.remove(idx - 1);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Keys whose first occurrence sits directly under a gateway marker
+    /// comment — i.e. lines Tethra wrote and owns. `.env.example` generation
+    /// skips these (a gateway base URL is machine-local wiring, not a
+    /// variable collaborators should copy).
+    pub fn keys_with_gateway_marker(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (i, line) in self.lines.iter().enumerate() {
+            if let EnvLine::Entry(e) = line {
+                if i > 0 && !out.contains(&e.key) {
+                    if let EnvLine::Comment(c) = &self.lines[i - 1] {
+                        if c.contains(GATEWAY_MARKER_TAG) {
+                            out.push(e.key.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Parse problems: malformed lines and duplicate keys.
@@ -584,5 +718,93 @@ mod tests {
         let doc = EnvDocument::parse("SECRET_KEY=sk-test-FAKE-abcdef1234567890\n");
         let debugged = format!("{:?}", doc.get("SECRET_KEY").unwrap());
         assert!(!debugged.contains("abcdef1234567890"));
+    }
+
+    const MARKER: &str =
+        "tethra-gateway route: openai (project: app) — remove this line if 127.0.0.1 \
+         refuses connections, or run: tethra gateway status";
+
+    #[test]
+    fn set_with_comment_inserts_one_marker_and_is_idempotent() {
+        let mut doc = EnvDocument::parse("EXISTING=1\n");
+        doc.set_with_comment(
+            "OPENAI_BASE_URL",
+            SecretString::from("http://127.0.0.1:49723/p/abc/openai/v1"),
+            MARKER,
+        );
+        let first = doc.render();
+        assert!(first.contains(&format!("# {MARKER}\nOPENAI_BASE_URL=")));
+
+        // Applying the identical link again must not duplicate the marker.
+        doc.set_with_comment(
+            "OPENAI_BASE_URL",
+            SecretString::from("http://127.0.0.1:49723/p/abc/openai/v1"),
+            MARKER,
+        );
+        assert_eq!(doc.render(), first, "idempotent re-link");
+        assert_eq!(doc.render().matches(GATEWAY_MARKER_TAG).count(), 1);
+    }
+
+    #[test]
+    fn set_with_comment_replaces_a_stale_marker_but_never_user_comments() {
+        // A stale marker (old port / renamed project) is replaced in place.
+        let mut doc =
+            EnvDocument::parse("# tethra-gateway route: openai (project: old)\nOPENAI_BASE_URL=http://127.0.0.1:1/p/x/openai/v1\n");
+        doc.set_with_comment("OPENAI_BASE_URL", SecretString::from("new"), MARKER);
+        let rendered = doc.render();
+        assert_eq!(rendered.matches(GATEWAY_MARKER_TAG).count(), 1);
+        assert!(rendered.contains("project: app"));
+
+        // A user's own comment above the key is preserved, marker inserted
+        // between it and the entry.
+        let mut doc = EnvDocument::parse("# my own note\nOPENAI_BASE_URL=x\n");
+        doc.set_with_comment("OPENAI_BASE_URL", SecretString::from("new"), MARKER);
+        let rendered = doc.render();
+        assert!(rendered.contains("# my own note\n"));
+        assert!(rendered.contains(&format!("# {MARKER}\nOPENAI_BASE_URL=")));
+    }
+
+    #[test]
+    fn remove_with_comment_takes_the_marker_but_spares_user_comments() {
+        let mut doc = EnvDocument::parse(
+            "# my own note\n# tethra-gateway route: openai (project: app)\nOPENAI_BASE_URL=x\nOTHER=1\n",
+        );
+        assert!(doc.remove_with_comment("OPENAI_BASE_URL"));
+        let rendered = doc.render();
+        assert_eq!(rendered, "# my own note\nOTHER=1\n");
+        assert!(
+            !doc.remove_with_comment("OPENAI_BASE_URL"),
+            "second removal is a no-op"
+        );
+    }
+
+    #[test]
+    fn remove_marker_above_leaves_the_entry_for_prior_value_restore() {
+        let mut doc = EnvDocument::parse(
+            "# tethra-gateway route: openai (project: app)\nOPENAI_BASE_URL=https://corp-proxy.example/v1\n",
+        );
+        assert!(doc.remove_marker_above("OPENAI_BASE_URL"));
+        assert_eq!(
+            doc.render(),
+            "OPENAI_BASE_URL=https://corp-proxy.example/v1\n"
+        );
+        assert!(!doc.remove_marker_above("OPENAI_BASE_URL"));
+    }
+
+    #[test]
+    fn keys_with_gateway_marker_reports_only_marked_keys() {
+        let doc = EnvDocument::parse(
+            "OPENAI_API_KEY=sk-test-FAKE\n# tethra-gateway route: openai (project: app)\nOPENAI_BASE_URL=x\n# unrelated comment\nOTHER=1\n",
+        );
+        assert_eq!(doc.keys_with_gateway_marker(), vec!["OPENAI_BASE_URL"]);
+    }
+
+    #[test]
+    fn set_with_comment_preserves_crlf_and_surrounding_content() {
+        let mut doc = EnvDocument::parse("A=1\r\n\r\n# note\r\nB=2\r\n");
+        doc.set_with_comment("OPENAI_BASE_URL", SecretString::from("v"), MARKER);
+        let rendered = doc.render();
+        assert!(rendered.starts_with("A=1\r\n\r\n# note\r\nB=2\r\n"));
+        assert!(rendered.ends_with(&format!("# {MARKER}\r\nOPENAI_BASE_URL=v\r\n")));
     }
 }

@@ -262,11 +262,18 @@ impl DriftKind {
 /// Generate or update a `.env.example` document from a values document:
 /// names and comments only, never values. Existing example entries are
 /// preserved verbatim; missing keys are appended with empty values.
+/// Keys under a `tethra-gateway` marker comment are skipped — a gateway base
+/// URL is machine-local wiring (port and link slug are specific to one
+/// machine), not a variable collaborators should copy (TEST_PLAN §10).
 pub fn generate_example(values: &EnvDocument, existing_example: Option<&EnvDocument>) -> String {
     let mut example = existing_example.cloned().unwrap_or_else(|| {
         EnvDocument::parse("# Environment variables for this project.\n# Copy to .env and fill in values, or use `tethra run`.\n")
     });
+    let gateway_owned = values.keys_with_gateway_marker();
     for entry in values.entries() {
+        if gateway_owned.contains(&entry.key) {
+            continue;
+        }
         if example.get(&entry.key).is_none() {
             example.set(&entry.key, SecretString::new(String::new()));
         }
@@ -277,9 +284,40 @@ pub fn generate_example(values: &EnvDocument, existing_example: Option<&EnvDocum
 /// A unified-style diff of two small text files, with values masked on
 /// changed lines that look like assignments carrying secrets. Safe to print.
 pub fn render_diff(label: &str, old: &str, new: &str) -> String {
+    render_diff_with_unmasked(label, old, new, &[])
+}
+
+/// [`render_diff`] with an allowlist of keys whose values print VERBATIM
+/// **on added lines only**.
+///
+/// The gateway `.env` writer must show the lines it is ADDING unmasked (ADR
+/// 0019 D9: the user is approving an exact base URL, and a masked loopback
+/// URL would hide the very thing being consented to). Removed and context
+/// lines are always masked, whatever their key: the allowlist says "I am
+/// about to write this value", not "whatever was previously under this name
+/// is safe to print". A prior value under an allowlisted key is arbitrary
+/// user content — `--var OPENAI_API_KEY`, or a base URL with embedded
+/// credentials — and printing it unmasked would leak a secret to the
+/// terminal and its scrollback.
+pub fn render_diff_with_unmasked(
+    label: &str,
+    old: &str,
+    new: &str,
+    unmasked_keys: &[&str],
+) -> String {
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut out = format!("--- {label} (current)\n+++ {label} (proposed)\n");
+    let masked = |line: &str| -> String { mask_assignment(line) };
+    let unmasked_if_allowed = |line: &str| -> String {
+        if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim().trim_start_matches("export ").trim();
+            if unmasked_keys.contains(&key) {
+                return line.to_string();
+            }
+        }
+        mask_assignment(line)
+    };
     // Simple LCS-free diff: show removed lines then added lines for each
     // hunk of consecutive difference. Fine for the small files involved.
     let common_prefix = old_lines
@@ -296,16 +334,16 @@ pub fn render_diff(label: &str, old: &str, new: &str) -> String {
         .min(old_lines.len().saturating_sub(common_prefix))
         .min(new_lines.len().saturating_sub(common_prefix));
     for line in &old_lines[..common_prefix] {
-        out.push_str(&format!("  {}\n", mask_assignment(line)));
+        out.push_str(&format!("  {}\n", masked(line)));
     }
     for line in &old_lines[common_prefix..old_lines.len() - common_suffix] {
-        out.push_str(&format!("- {}\n", mask_assignment(line)));
+        out.push_str(&format!("- {}\n", masked(line)));
     }
     for line in &new_lines[common_prefix..new_lines.len() - common_suffix] {
-        out.push_str(&format!("+ {}\n", mask_assignment(line)));
+        out.push_str(&format!("+ {}\n", unmasked_if_allowed(line)));
     }
     for line in &old_lines[old_lines.len() - common_suffix..] {
-        out.push_str(&format!("  {}\n", mask_assignment(line)));
+        out.push_str(&format!("  {}\n", masked(line)));
     }
     out
 }
@@ -599,6 +637,38 @@ pub fn gitignore_protects(repo_dir: &Path, rel: &str) -> GitStatus {
 
 #[cfg(test)]
 mod tests {
+    /// The allowlist means "show what I am about to WRITE", never "whatever
+    /// was previously under this name is safe to print". `--var` accepts any
+    /// variable name, so a prior value under an allowlisted key can be an API
+    /// key — and a declared base-URL variable can hold a URL with userinfo.
+    #[test]
+    fn unmasked_keys_never_unmask_the_removed_side_of_the_diff() {
+        let old = "OPENAI_BASE_URL=https://user:SUPERSECRET-CANARY@api.openai.com/v1\n";
+        let new = "OPENAI_BASE_URL=http://127.0.0.1:49723/openai\n";
+        let diff = render_diff_with_unmasked("/p/.env", old, new, &["OPENAI_BASE_URL"]);
+        assert!(
+            !diff.contains("SUPERSECRET-CANARY"),
+            "a prior value must never print verbatim: {diff}"
+        );
+        assert!(
+            diff.contains("+ OPENAI_BASE_URL=http://127.0.0.1:49723/openai"),
+            "the value being WRITTEN must print verbatim so consent is exact: {diff}"
+        );
+    }
+
+    /// Context (unchanged) lines are masked too — an allowlisted key that is
+    /// not being changed is not being consented to.
+    #[test]
+    fn unmasked_keys_do_not_unmask_context_lines() {
+        let old = "NO_PROXY=CANARY-NOT-A-PROXY-LIST\nA=1\n";
+        let new = "NO_PROXY=CANARY-NOT-A-PROXY-LIST\nA=2\n";
+        let diff = render_diff_with_unmasked("/p/.env", old, new, &["NO_PROXY"]);
+        assert!(
+            !diff.contains("CANARY-NOT-A-PROXY-LIST"),
+            "unchanged lines stay masked: {diff}"
+        );
+    }
+
     use super::*;
     use std::process::Command;
 
@@ -725,6 +795,27 @@ mod tests {
         let fresh = generate_example(&values, None);
         assert!(!fresh.contains("supersecret"));
         assert!(fresh.contains("DB_URL=\n") || fresh.contains("DB_URL="));
+    }
+
+    #[test]
+    fn example_generation_skips_gateway_marked_lines() {
+        // A gateway base URL is machine-local wiring (port + link slug are
+        // specific to one machine); .env.example must not propagate it
+        // (TEST_PLAN §10).
+        let values = EnvDocument::parse(
+            "API_KEY=sk-test-FAKE-1234567890abcdef\n\
+             # tethra-gateway route: openai (project: app) — remove this line if 127.0.0.1 refuses connections\n\
+             OPENAI_BASE_URL=http://127.0.0.1:49723/p/0123abcd/openai/v1\n",
+        );
+        let out = generate_example(&values, None);
+        assert!(out.contains("API_KEY="));
+        assert!(!out.contains("OPENAI_BASE_URL"), "{out}");
+        assert!(!out.contains("tethra-gateway"), "{out}");
+
+        // ...but a base URL the USER wrote (no marker) still propagates.
+        let user_values = EnvDocument::parse("OPENAI_BASE_URL=https://corp.example/v1\n");
+        let out = generate_example(&user_values, None);
+        assert!(out.contains("OPENAI_BASE_URL="));
     }
 
     #[test]

@@ -68,6 +68,51 @@ impl AppState {
     }
 }
 
+/// Install the custom-origin route verification key into a running gateway
+/// (ADR 0021).
+///
+/// Without this a custom-origin route (a Supabase per-project host, say)
+/// loads but cannot be verified, so it answers 503 forever — and the 503 text
+/// told the user to unlock the vault, which did nothing because nothing
+/// installed the key. Called on unlock, on route add/enable, and when the
+/// routes panel loads.
+///
+/// Not reauth-gated: this key verifies route integrity only. It is not
+/// derived from the fingerprint key, cannot decrypt anything, and cannot
+/// confirm a guess about a credential. Best-effort — a stopped gateway is
+/// the normal case. `mint` creates the key when the vault has never had one;
+/// pass false so an unrelated command never mints route-signing material.
+fn install_gateway_route_key(state: &AppState, vault: &mut UnlockedVault, mint: bool) {
+    if !gw_control::instance_is_live(&state.data_dir) {
+        return;
+    }
+    if !mint && !gw_routes::route_key_exists(vault.connection()).unwrap_or(false) {
+        return;
+    }
+    if let Ok(key) = vault.gateway_route_mac_key() {
+        let _ = gw_control::push_route_key(&state.data_dir, &key);
+    }
+}
+
+/// Signal a running gateway that the vault locked (ADR 0020, SI-9).
+///
+/// The matching key is a vault-derived guess-confirmation oracle over every
+/// in-scope fingerprint (THREAT_MODEL GW-6); the push-key consent copy
+/// promises it is "dropped on stop, revoke, or lock". Every desktop lock
+/// path — explicit lock, both inactivity auto-lock paths, backup restore,
+/// and app exit — must send this signal.
+///
+/// The POLICY lives in the gateway service (`service::lock_disposition`), so
+/// the frontend only reports the event plus the locking session's auto-lock
+/// duration (`None` when it could not be read — the service then applies the
+/// 8-hour retention cap, or revokes immediately when the consented
+/// keep-while-locked toggle is OFF, which is the default). Best-effort by
+/// construction: no running gateway, no control socket, or a Windows build
+/// (no control channel, hence no resident key) must never make locking fail.
+fn notify_gateway_vault_locked(data_dir: &std::path::Path, ttl_minutes: Option<u32>) {
+    let _ = gw_control::notify_vault_locked(data_dir, ttl_minutes);
+}
+
 /// Run `f` against the unlocked vault, enforcing inactivity auto-lock.
 fn with_vault<T>(
     state: &AppState,
@@ -106,6 +151,7 @@ fn with_vault_impl<T>(
         let expired = slot.vault.take(); // drop -> keys zeroized
         drop(slot);
         drop(expired);
+        notify_gateway_vault_locked(&state.data_dir, Some(auto_lock_minutes));
         return Err(locked_err());
     }
     if touch_activity {
@@ -126,13 +172,18 @@ struct VaultStatusDto {
 fn vault_status(state: State<'_, AppState>) -> CmdResult<VaultStatusDto> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     // Apply auto-lock on status polls too, so the UI locks visibly.
+    let mut auto_locked_minutes = None;
     if let Some(vault) = slot.vault.as_ref() {
         let minutes = vault.settings().auto_lock_minutes;
         if minutes > 0
             && slot.last_activity.elapsed() >= Duration::from_secs(u64::from(minutes) * 60)
         {
             slot.vault = None;
+            auto_locked_minutes = Some(minutes);
         }
+    }
+    if let Some(minutes) = auto_locked_minutes {
+        notify_gateway_vault_locked(&state.data_dir, Some(minutes));
     }
     Ok(VaultStatusDto {
         exists: state.paths().vault_exists(),
@@ -158,6 +209,19 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     slot.vault = Some(vault);
     slot.last_activity = Instant::now();
+    drop(slot);
+    // A re-authorized session cancels any pending keep-while-locked
+    // retention deadline in a running gateway (ADR 0020). No credential-
+    // bearing key material moves: the matching key stays revoked until the
+    // user explicitly re-pushes it through the reauth-gated flow.
+    let _ = gw_control::notify_vault_unlocked(&state.data_dir);
+    // Custom-origin routes, by contrast, become forwardable again here
+    // (ADR 0021) — the user already consented to them, and the key involved
+    // verifies route integrity only.
+    let _ = with_vault(&state, |vault| {
+        install_gateway_route_key(&state, vault, false);
+        Ok(())
+    });
     Ok(())
 }
 
@@ -166,9 +230,11 @@ fn vault_lock(state: State<'_, AppState>) -> CmdResult<()> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     // Drop after releasing the mutex — the drop checkpoints the WAL and can
     // briefly wait for a concurrent reader.
+    let minutes = slot.vault.as_ref().map(|v| v.settings().auto_lock_minutes);
     let vault = slot.vault.take();
     drop(slot);
     drop(vault);
+    notify_gateway_vault_locked(&state.data_dir, minutes);
     Ok(())
 }
 
@@ -910,10 +976,16 @@ fn backup_restore(
     // restored vault requires a fresh unlock with its own master password.
     // (On failure we leave the current session intact so the user is not
     // bounced to the unlock screen for a restore that never happened.)
-    {
+    let minutes = {
         let mut slot = state.slot.lock().expect("vault state mutex poisoned");
+        let minutes = slot.vault.as_ref().map(|v| v.settings().auto_lock_minutes);
         slot.vault = None;
-    }
+        minutes
+    };
+    // This is a lock event too — and the OLD vault's matching key must not
+    // stay resident in the gateway to attribute traffic against a vault that
+    // may no longer even exist (ADR 0020).
+    notify_gateway_vault_locked(&state.data_dir, minutes);
     Ok(info)
 }
 
@@ -2372,8 +2444,594 @@ fn observe_allowlist_remove(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Local Gateway (ADR 0019, Phase 3)
+//
+// Status/doctor/start/stop/restart/repair are deliberately LOCK-FREE: they
+// never touch the vault slot, so a locked desktop still sees and controls
+// the gateway (PRODUCT_BEHAVIOR — the lock screen carries a status strip).
+// Everything that writes configuration, route rows, or project .env files
+// goes through with_vault. The desktop performs no silent install: the
+// consent dialog in the UI calls gateway_install only after an explicit
+// user action.
+// ---------------------------------------------------------------------------
+
+use api_tracker_gateway::{
+    control as gw_control, doctor as gw_doctor, envlink, lifecycle as gw_lifecycle,
+    routes as gw_routes, store as gw_store,
+};
+
+#[tauri::command]
+fn gateway_doctor(state: State<'_, AppState>) -> CmdResult<gw_doctor::Doctor> {
+    Ok(gw_doctor::diagnose(&state.data_dir))
+}
+
+/// Locate a `tethra` CLI binary this machine can run, verified by its
+/// service-probe output. The desktop bundles no CLI (externalBin is
+/// deferred until signing exists — OPEN_DECISIONS O10), so enable depends
+/// on the separately installed CLI and says so honestly when it is absent.
+fn locate_cli(data_dir: &std::path::Path) -> Option<PathBuf> {
+    let exe = format!("tethra{}", std::env::consts::EXE_SUFFIX);
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // An already-installed service binary works too (repair path).
+    if let Ok(entries) = std::fs::read_dir(gw_lifecycle::bin_dir(data_dir)) {
+        for e in entries.flatten() {
+            candidates.push(e.path());
+        }
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            candidates.push(dir.join(&exe));
+        }
+    }
+    // Finder-launched apps see a minimal PATH; check the usual homes.
+    for fixed in ["/usr/local/bin", "/opt/homebrew/bin"] {
+        candidates.push(PathBuf::from(fixed).join(&exe));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for rel in [".local/bin", "bin", ".cargo/bin"] {
+            candidates.push(home.join(rel).join(&exe));
+        }
+    }
+    candidates.into_iter().find(|c| {
+        c.is_file()
+            && std::process::Command::new(c)
+                .args(["gateway", "service-probe"])
+                .output()
+                .map(|o| {
+                    o.status.success()
+                        && String::from_utf8_lossy(&o.stdout).contains(gw_lifecycle::PROBE_MARKER)
+                })
+                .unwrap_or(false)
+    })
+}
+
+#[tauri::command]
+fn gateway_locate_cli(state: State<'_, AppState>) -> CmdResult<Option<String>> {
+    Ok(locate_cli(&state.data_dir).map(|p| p.display().to_string()))
+}
+
+#[tauri::command]
+fn gateway_install(
+    state: State<'_, AppState>,
+    force: bool,
+) -> CmdResult<gw_lifecycle::InstallReport> {
+    let Some(source) = locate_cli(&state.data_dir) else {
+        return Err(ErrDto {
+            code: "cli_not_found".into(),
+            message: "the Tethra CLI is not installed (or not executable) on this \
+                      machine. The gateway service runs the CLI binary; install the \
+                      tethra CLI archive first, then enable the gateway again."
+                .into(),
+        });
+    };
+    // The stable port is chosen and persisted BEFORE the service starts
+    // (the service reads it from the database at boot — ADR 0019 O3).
+    with_vault(&state, |vault| {
+        let mut config = gw_store::load_config(vault.connection())?;
+        if config.port.is_none() {
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(CoreError::Io)?;
+            config.port = Some(listener.local_addr().map_err(CoreError::Io)?.port());
+        }
+        gw_store::save_config(vault.connection(), &config)
+    })?;
+
+    // The slow OS work happens OUTSIDE the vault mutex.
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    let report = lc.install(&source, force).map_err(ErrDto::from)?;
+
+    with_vault(&state, |vault| {
+        let mut config = gw_store::load_config(vault.connection())?;
+        config.enabled = true;
+        config.service_version = Some(env!("CARGO_PKG_VERSION").to_string());
+        gw_store::save_config(vault.connection(), &config)?;
+        api_tracker_core::audit::record(
+            vault.connection(),
+            "gateway_service_installed",
+            None,
+            None,
+            &format!("definition={}", report.definition),
+        )
+    })?;
+    Ok(report)
+}
+
+#[tauri::command]
+fn gateway_disable(
+    state: State<'_, AppState>,
+    keep_env: bool,
+) -> CmdResult<gw_lifecycle::DisableReport> {
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    with_vault(&state, |vault| lc.disable(vault.connection(), keep_env))
+}
+
+#[tauri::command]
+fn gateway_uninstall(
+    state: State<'_, AppState>,
+    keep_env: bool,
+) -> CmdResult<gw_lifecycle::UninstallReport> {
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    with_vault(&state, |vault| lc.uninstall(vault.connection(), keep_env))
+}
+
+#[tauri::command]
+fn gateway_start(state: State<'_, AppState>) -> CmdResult<()> {
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    if !lc.status().installed {
+        return Err(ErrDto {
+            code: "not_installed".into(),
+            message: "no gateway service is installed".into(),
+        });
+    }
+    lc.start().map_err(ErrDto::from)
+}
+
+#[tauri::command]
+fn gateway_stop(state: State<'_, AppState>) -> CmdResult<()> {
+    // Prefer the graceful control-plane drain (clean exit = not respawned);
+    // fall back to the service manager.
+    if gw_control::instance_is_live(&state.data_dir) {
+        if let Ok(nonce) = gw_control::read_nonce(&state.data_dir) {
+            if let Ok(gw_control::Response::Ok) = gw_control::send(
+                &state.data_dir,
+                &gw_control::Request::Shutdown {
+                    nonce: nonce.to_string(),
+                },
+            ) {
+                return Ok(());
+            }
+        }
+    }
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    if !lc.status().installed {
+        return Ok(()); // nothing to stop
+    }
+    lc.stop().map_err(ErrDto::from)
+}
+
+#[tauri::command]
+fn gateway_restart(state: State<'_, AppState>) -> CmdResult<()> {
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    lc.restart().map_err(ErrDto::from)
+}
+
+#[tauri::command]
+fn gateway_repair(state: State<'_, AppState>) -> CmdResult<gw_lifecycle::InstallReport> {
+    let Some(source) = locate_cli(&state.data_dir) else {
+        return Err(ErrDto {
+            code: "cli_not_found".into(),
+            message: "repair needs a runnable tethra CLI binary and none was found".into(),
+        });
+    };
+    let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
+    lc.repair(&source).map_err(ErrDto::from)
+}
+
+#[derive(Serialize)]
+struct GatewayRouteDto {
+    prefix: String,
+    provider_id: String,
+    origin: Option<String>,
+    custom: bool,
+    enabled: bool,
+    available: bool,
+    unavailable_reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GatewayRouteListDto {
+    routes: Vec<GatewayRouteDto>,
+    skipped: Vec<(String, String)>,
+}
+
+#[tauri::command]
+fn gateway_route_list(state: State<'_, AppState>) -> CmdResult<GatewayRouteListDto> {
+    // Lock-free: routes are non-secret configuration, and the panel must
+    // render while the vault is locked.
+    let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .map_err(ErrDto::from)?;
+    // Verify custom routes with the real key when a vault session exists.
+    // Loading with `None` unconditionally — what shipped before — made a
+    // just-added custom route always display "unavailable", contradicting a
+    // running gateway that was forwarding it perfectly well.
+    let key = with_vault(&state, |vault| vault.gateway_route_mac_key()).ok();
+    let table = gw_routes::load_route_table(&conn, key.as_ref()).map_err(ErrDto::from)?;
+    let verifiable = key.is_some();
+    let mut routes: Vec<GatewayRouteDto> = table
+        .iter_routes()
+        .map(|r| {
+            let (available, origin, why) = match &r.target {
+                gw_routes::RouteTarget::Ready(o) => (true, Some(o.host.clone()), None),
+                gw_routes::RouteTarget::Unforwardable(
+                    gw_routes::Unforwardable::MacKeyUnavailable,
+                ) if !verifiable => (
+                    false,
+                    None,
+                    Some(
+                        "cannot be verified from this view while the vault is locked —                          a running gateway may still be forwarding it; check Status"
+                            .to_string(),
+                    ),
+                ),
+                gw_routes::RouteTarget::Unforwardable(w) => (false, None, Some(format!("{w:?}"))),
+            };
+            GatewayRouteDto {
+                prefix: r.prefix.clone(),
+                provider_id: r.provider_id.clone(),
+                origin,
+                custom: r.custom,
+                enabled: true,
+                available,
+                unavailable_reason: why,
+            }
+        })
+        .collect();
+    let mut stmt = conn
+        .prepare("SELECT route_prefix, provider_id FROM gateway_routes WHERE enabled = 0")
+        .map_err(|e| ErrDto::from(CoreError::from(e)))?;
+    let disabled: Vec<(String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| ErrDto::from(CoreError::from(e)))?
+        .collect::<Result<_, _>>()
+        .map_err(|e| ErrDto::from(CoreError::from(e)))?;
+    for (prefix, provider_id) in disabled {
+        routes.push(GatewayRouteDto {
+            prefix,
+            provider_id,
+            origin: None,
+            custom: false,
+            enabled: false,
+            available: false,
+            unavailable_reason: Some("disabled".into()),
+        });
+    }
+    routes.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+    Ok(GatewayRouteListDto {
+        routes,
+        skipped: table.skipped.clone(),
+    })
+}
+
+/// Ask a running gateway to re-read routes now (best-effort).
+fn gateway_nudge(data_dir: &std::path::Path) {
+    if !gw_control::instance_is_live(data_dir) {
+        return;
+    }
+    if let Ok(nonce) = gw_control::read_nonce(data_dir) {
+        let _ = gw_control::send(
+            data_dir,
+            &gw_control::Request::ReloadRoutes {
+                nonce: nonce.to_string(),
+            },
+        );
+    }
+}
+
+#[tauri::command]
+fn gateway_route_add(
+    state: State<'_, AppState>,
+    provider: String,
+    prefix: Option<String>,
+    origin: Option<String>,
+) -> CmdResult<()> {
+    let prefix = prefix.unwrap_or_else(|| provider.clone());
+    let custom = origin.is_some();
+    with_vault(&state, |vault| {
+        match &origin {
+            Some(origin) => {
+                let key = vault.gateway_route_mac_key()?;
+                gw_routes::add_custom_route(vault.connection(), &prefix, &provider, origin, &key)?;
+            }
+            None => gw_routes::add_manifest_route(vault.connection(), &prefix, &provider)?,
+        }
+        // The route the user just created must be usable NOW, not after a
+        // future unlock (ADR 0021). Minting is correct here: adding a custom
+        // route is the moment the route key legitimately comes into being.
+        if custom {
+            install_gateway_route_key(&state, vault, true);
+        }
+        Ok(())
+    })?;
+    gateway_nudge(&state.data_dir);
+    Ok(())
+}
+
+#[tauri::command]
+fn gateway_route_remove(state: State<'_, AppState>, prefix: String) -> CmdResult<bool> {
+    let removed = with_vault(&state, |vault| {
+        gw_routes::remove_route(vault.connection(), &prefix)
+    })?;
+    gateway_nudge(&state.data_dir);
+    Ok(removed)
+}
+
+#[tauri::command]
+fn gateway_route_set_enabled(
+    state: State<'_, AppState>,
+    prefix: String,
+    enabled: bool,
+) -> CmdResult<bool> {
+    let changed = with_vault(&state, |vault| {
+        let changed = gw_routes::set_route_enabled(vault.connection(), &prefix, enabled)?;
+        if enabled {
+            install_gateway_route_key(&state, vault, false);
+        }
+        Ok(changed)
+    })?;
+    gateway_nudge(&state.data_dir);
+    Ok(changed)
+}
+
+fn link_request(
+    vault: &UnlockedVault,
+    project: &str,
+    route: &str,
+    env_files: &[String],
+    dir: &Option<String>,
+    var: &Option<String>,
+) -> Result<envlink::LinkRequest, CoreError> {
+    let proj = vault.get_project(project)?;
+    let project_dir = dir.as_ref().map(PathBuf::from).or_else(|| {
+        if env_files.is_empty() && proj.repo_paths.len() == 1 {
+            Some(PathBuf::from(&proj.repo_paths[0]))
+        } else {
+            None
+        }
+    });
+    Ok(envlink::LinkRequest {
+        project_id: proj.id,
+        project_name: proj.name,
+        route_prefix: route.to_string(),
+        project_dir,
+        files: env_files.iter().map(PathBuf::from).collect(),
+        var_override: var.clone(),
+    })
+}
+
+#[tauri::command]
+fn gateway_link_plan(
+    state: State<'_, AppState>,
+    project: String,
+    route: String,
+    env_files: Vec<String>,
+    dir: Option<String>,
+    var: Option<String>,
+) -> CmdResult<envlink::LinkPlan> {
+    with_vault(&state, |vault| {
+        let req = link_request(vault, &project, &route, &env_files, &dir, &var)?;
+        envlink::plan_link(vault.connection(), &req)
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn gateway_link_apply(
+    state: State<'_, AppState>,
+    project: String,
+    route: String,
+    env_files: Vec<String>,
+    dir: Option<String>,
+    var: Option<String>,
+    slug: String,
+    digest: String,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        let req = link_request(vault, &project, &route, &env_files, &dir, &var)?;
+        // Re-plan with the previewed slug and refuse if anything changed
+        // underneath the dialog the user confirmed.
+        let plan = envlink::plan_link_with_slug(vault.connection(), &req, &slug)?;
+        if plan.digest != digest {
+            return Err(CoreError::InvalidInput(
+                "the environment files changed since the preview; re-open the link \
+                 dialog to see the current diff"
+                    .into(),
+            ));
+        }
+        envlink::apply_link(vault.connection(), &req, &plan)?;
+        Ok(())
+    })?;
+    // The running gateway must resolve the new link slug immediately, not
+    // after its 5s poll — otherwise the just-linked SDK gets a 404.
+    gateway_nudge(&state.data_dir);
+    Ok(())
+}
+
+#[tauri::command]
+fn gateway_unlink(
+    state: State<'_, AppState>,
+    project: String,
+    route: String,
+) -> CmdResult<envlink::UnlinkReport> {
+    let report = with_vault(&state, |vault| {
+        let proj = vault.get_project(&project)?;
+        let link = gw_routes::find_project_link(vault.connection(), &proj.id, &route)?;
+        match link {
+            Some(row) if row.prior_env_json.is_some() => {
+                envlink::unlink(vault.connection(), &proj.id, &route)
+            }
+            Some(_) => {
+                gw_routes::remove_project_link(vault.connection(), &proj.id, &route)?;
+                Ok(envlink::UnlinkReport {
+                    route_prefix: route.clone(),
+                    project_id: proj.id,
+                    outcomes: vec![],
+                    complete: true,
+                })
+            }
+            None => Err(CoreError::NotFound {
+                kind: "gateway project link",
+                ident: format!("{project}:{route}"),
+            }),
+        }
+    });
+    // Drop the removed link slug from a running gateway's snapshot now.
+    gateway_nudge(&state.data_dir);
+    report
+}
+
+#[tauri::command]
+fn gateway_push_key(state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    let password = SecretString::new(password);
+    // Reauth is enforced by core: gateway_matching_key verifies the master
+    // password itself (the dialog is UX, not authorization — IPC-02).
+    let key = with_vault(&state, |vault| vault.gateway_matching_key(&password))?;
+    let nonce = gw_control::read_nonce(&state.data_dir).map_err(ErrDto::from)?;
+    let hex = Zeroizing::new(
+        key.expose()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>(),
+    );
+    match gw_control::send(
+        &state.data_dir,
+        &gw_control::Request::PushKey {
+            nonce: nonce.to_string(),
+            key_hex: hex.to_string(),
+        },
+    )
+    .map_err(ErrDto::from)?
+    {
+        gw_control::Response::Ok => Ok(()),
+        gw_control::Response::Error { code, message } => Err(ErrDto { code, message }),
+        other => Err(ErrDto {
+            code: "protocol".into(),
+            message: format!("unexpected control response: {other:?}"),
+        }),
+    }
+}
+
+#[tauri::command]
+fn gateway_match_while_locked_get(state: State<'_, AppState>) -> CmdResult<bool> {
+    with_vault(&state, |vault| {
+        gw_store::load_config(vault.connection()).map(|c| c.match_while_locked)
+    })
+}
+
+/// Flip the consented keep-matching-while-locked toggle (ADR 0020).
+///
+/// Enabling grants a RETAINED capability (the matching key survives vault
+/// lock, bounded by the auto-lock duration capped at 8 hours), so it is
+/// reauth-gated exactly like the key push itself. Disabling needs no reauth
+/// and, per SI-9 ("dropped on ... toggle-off"), immediately revokes any
+/// resident key best-effort.
+#[tauri::command]
+fn gateway_match_while_locked_set(
+    state: State<'_, AppState>,
+    enabled: bool,
+    password: Option<String>,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        if enabled {
+            let Some(password) = password.as_deref() else {
+                return Err(CoreError::InvalidInput(
+                    "enabling keep-while-locked requires the master password".into(),
+                ));
+            };
+            let password = SecretString::new(password.to_string());
+            vault.verify_master_password(&password)?;
+        }
+        gw_store::set_match_while_locked(vault.connection(), enabled)
+    })?;
+    if !enabled {
+        let _ = gw_control::send_revoke_key(&state.data_dir);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn gateway_revoke_key(state: State<'_, AppState>) -> CmdResult<()> {
+    let nonce = gw_control::read_nonce(&state.data_dir).map_err(ErrDto::from)?;
+    match gw_control::send(
+        &state.data_dir,
+        &gw_control::Request::RevokeKey {
+            nonce: nonce.to_string(),
+        },
+    )
+    .map_err(ErrDto::from)?
+    {
+        gw_control::Response::Ok => Ok(()),
+        gw_control::Response::Error { code, message } => Err(ErrDto { code, message }),
+        other => Err(ErrDto {
+            code: "protocol".into(),
+            message: format!("unexpected control response: {other:?}"),
+        }),
+    }
+}
+
+#[tauri::command]
+fn gateway_activity(
+    state: State<'_, AppState>,
+    since: Option<String>,
+) -> CmdResult<gw_store::GatewayActivitySummary> {
+    // Lock-free: gateway activity is non-secret metadata, and the panel
+    // must render while the vault is locked.
+    let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .map_err(ErrDto::from)?;
+    gw_store::gateway_activity_summary(&conn, since.as_deref()).map_err(ErrDto::from)
+}
+
+#[tauri::command]
+fn credential_activity_sources(
+    state: State<'_, AppState>,
+    selector: String,
+) -> CmdResult<api_tracker_core::runtime::store::CredentialActivitySources> {
+    with_vault(&state, |vault| {
+        let credential = vault.get_credential(&selector)?;
+        api_tracker_core::runtime::store::credential_activity_sources(
+            vault.connection(),
+            &credential.id,
+        )
+    })
+}
+
+#[tauri::command]
+fn gateway_recording(state: State<'_, AppState>, pause: bool) -> CmdResult<()> {
+    let nonce = gw_control::read_nonce(&state.data_dir).map_err(ErrDto::from)?;
+    let request = if pause {
+        gw_control::Request::PauseRecording {
+            nonce: nonce.to_string(),
+        }
+    } else {
+        gw_control::Request::ResumeRecording {
+            nonce: nonce.to_string(),
+        }
+    };
+    match gw_control::send(&state.data_dir, &request).map_err(ErrDto::from)? {
+        gw_control::Response::Ok => Ok(()),
+        gw_control::Response::Error { code, message } => Err(ErrDto { code, message }),
+        other => Err(ErrDto {
+            code: "protocol".into(),
+            message: format!("unexpected control response: {other:?}"),
+        }),
+    }
+}
+
 fn main() {
+    // Absolutize for the same reason the CLI does: this path is baked into
+    // the installed service's argv, and service managers start with a working
+    // directory of `/`.
     let data_dir = vault::default_data_dir().expect("could not determine the data directory");
+    let data_dir = std::path::absolute(&data_dir).unwrap_or(data_dir);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
@@ -2548,7 +3206,48 @@ fn main() {
             observe_allowlist,
             observe_allowlist_add,
             observe_allowlist_remove,
+            gateway_doctor,
+            gateway_locate_cli,
+            gateway_install,
+            gateway_disable,
+            gateway_uninstall,
+            gateway_start,
+            gateway_stop,
+            gateway_restart,
+            gateway_repair,
+            gateway_route_list,
+            gateway_route_add,
+            gateway_route_remove,
+            gateway_route_set_enabled,
+            gateway_link_plan,
+            gateway_link_apply,
+            gateway_unlink,
+            gateway_push_key,
+            gateway_revoke_key,
+            gateway_match_while_locked_get,
+            gateway_match_while_locked_set,
+            gateway_recording,
+            gateway_activity,
+            credential_activity_sources,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Tethra desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while running the Tethra desktop app")
+        .run(|app_handle, event| {
+            // Quitting the app ends the in-memory vault session — a lock
+            // event like any other (ADR 0020). Without this, a resident
+            // matching key would outlive the session that authorized it
+            // whenever the user simply closes Tethra. Best-effort; a
+            // crashed/killed process skips this (THREAT_MODEL GW-6).
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager as _;
+                let state: State<'_, AppState> = app_handle.state();
+                let minutes = {
+                    let mut slot = state.slot.lock().expect("vault state mutex poisoned");
+                    let minutes = slot.vault.as_ref().map(|v| v.settings().auto_lock_minutes);
+                    slot.vault = None;
+                    minutes
+                };
+                notify_gateway_vault_locked(&state.data_dir, minutes);
+            }
+        });
 }

@@ -385,7 +385,7 @@ check $? "notify history records the delivery"
 { kill "$WEBHOOK_SERVER_PID" && wait "$WEBHOOK_SERVER_PID"; } >/dev/null 2>&1
 
 echo "-- migration/data-safety and mocked provider-sync suites --"
-(cd "$REPO_ROOT" && cargo test --release --quiet -p api-tracker-core --test migration_safety 2>&1 | grep -q "test result: ok. 8")
+(cd "$REPO_ROOT" && cargo test --release --quiet -p api-tracker-core --test migration_safety 2>&1 | grep -q "test result: ok. 9")
 check $? "migration + backup-completeness suite passes against the release core"
 (cd "$REPO_ROOT" && API_TRACKER_INSECURE_FAST_KDF=1 cargo test --quiet -p api-tracker-core \
     --test openai_sync --test anthropic_sync --test env_destinations --test rotation_access 2>&1 | \

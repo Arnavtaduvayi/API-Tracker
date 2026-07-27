@@ -71,6 +71,12 @@ pub enum CoreError {
     )]
     SchemaTooNew { found: i64, supported: i64 },
 
+    #[error(
+        "the vault database is at schema v{found}, but this component requires v{supported}; \
+         unlock the vault with the app or CLI once to apply pending migrations"
+    )]
+    SchemaNotCurrent { found: i64, supported: i64 },
+
     #[error("{provider} does not support '{capability}' this way: {hint}")]
     Unsupported {
         provider: String,
@@ -130,6 +136,7 @@ impl CoreError {
             CoreError::BackupInvalid(_) => "backup_invalid",
             CoreError::VaultCorrupted(_) => "vault_corrupted",
             CoreError::SchemaTooNew { .. } => "schema_too_new",
+            CoreError::SchemaNotCurrent { .. } => "schema_not_current",
             CoreError::Unsupported { .. } => "unsupported",
             CoreError::Provider(_) => "provider_error",
             CoreError::ProviderAuth { .. } => "provider_auth_error",

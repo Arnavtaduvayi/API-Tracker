@@ -860,6 +860,151 @@ CREATE TABLE observe_internal_allowlist (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 13,
+        name: "local gateway (loopback reverse gateway, metadata-only)",
+        sql: r#"
+-- Local Gateway (ADR 0019). These tables store ONLY non-secret routing
+-- configuration and sanitized usage metadata. Like the runtime observability
+-- tables, no column can hold a body, header value, cookie, query string,
+-- credential value, or raw URL. Gateway usage is kept out of usage_snapshots
+-- so locally observed consumption is never summed with provider-reported
+-- usage (double-count guard, KNOWN_CONFLICTS C8).
+
+-- Singleton gateway configuration. The bind address is deliberately NOT a
+-- column: the listener is hard-coded to loopback (SECURITY_INVARIANTS SI-1;
+-- a host-configuration surface would be an invariant violation, so the
+-- ARCHITECTURE.md sketch's `bind` field was dropped). `port` is a random
+-- persisted high port chosen at enable time (ADR 0019 D8/O3), NULL until
+-- then. `match_while_locked` is the consented, default-OFF fingerprint-key
+-- retention toggle (ADR 0019 D5, OPEN_DECISIONS O2).
+CREATE TABLE gateway_config (
+    id                         TEXT PRIMARY KEY CHECK (id = 'gateway'),
+    enabled                    INTEGER NOT NULL DEFAULT 0,
+    port                       INTEGER,
+    match_while_locked         INTEGER NOT NULL DEFAULT 0,
+    service_version            TEXT,
+    usage_event_retention_days INTEGER,
+    usage_daily_retention_days INTEGER,
+    created_at                 TEXT NOT NULL,
+    updated_at                 TEXT NOT NULL
+) STRICT;
+
+-- Registered routes, keyed by the first path segment. Manifest routes store
+-- NO origin at all — the upstream is resolved from the compiled-in provider
+-- manifest at forward time, so a direct UPDATE of this same-uid-writable
+-- table cannot redirect a live pass-through credential (ADR 0019 D3, the
+-- route-row-tampering blocker). Custom-origin routes store the origin string
+-- ONLY next to a MAC over (vault_id, provider_id, origin, port, consent_ts)
+-- computed under a vault-derived key at consent time; the gateway verifies
+-- the MAC before forwarding and never obeys the bare DB value.
+CREATE TABLE gateway_routes (
+    route_prefix             TEXT PRIMARY KEY,
+    provider_id              TEXT NOT NULL,
+    enabled                  INTEGER NOT NULL DEFAULT 1,
+    custom_origin            TEXT,
+    custom_origin_port       INTEGER,
+    custom_origin_mac        BLOB,
+    custom_origin_consent_at TEXT,
+    created_at               TEXT NOT NULL,
+    updated_at               TEXT NOT NULL,
+    CHECK ((custom_origin IS NULL) = (custom_origin_mac IS NULL)),
+    CHECK ((custom_origin IS NULL) = (custom_origin_port IS NULL)),
+    CHECK ((custom_origin IS NULL) = (custom_origin_consent_at IS NULL))
+) STRICT;
+
+-- Project links. `link_slug` is a >=128-bit CSPRNG value (never name-derived,
+-- SI-4) that scopes /p/<slug>/<route> traffic to a project. `env_path` and
+-- `prior_env_json` record what the .env onboarding rewrote so disable/unlink
+-- can restore the exact prior state (ADR 0019 D9).
+CREATE TABLE gateway_project_links (
+    link_slug      TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    route_prefix   TEXT NOT NULL REFERENCES gateway_routes(route_prefix) ON DELETE CASCADE,
+    env_path       TEXT,
+    prior_env_json TEXT,
+    created_at     TEXT NOT NULL,
+    UNIQUE (project_id, route_prefix)
+) STRICT;
+CREATE INDEX idx_gpl_project ON gateway_project_links(project_id);
+
+-- Best-effort usage extracted in flight from provider responses (bounded
+-- extractor, PRIVACY_MODEL gateway §3). Raw events ride the short retention
+-- window; gateway_usage_daily keeps the long series. `usage_state` records
+-- WHY usage may be absent (absent | extracted | unsupported_shape |
+-- oversized_dropped | malformed) so a missing number is never a silent zero.
+-- `model` is length-capped and charset-filtered before insert; a hostile
+-- model value stores NULL plus a model_rejected counter, never a truncated
+-- attacker string.
+CREATE TABLE gateway_usage_events (
+    id                    TEXT PRIMARY KEY,
+    event_id              TEXT REFERENCES runtime_request_events(id) ON DELETE SET NULL,
+    at                    TEXT NOT NULL,
+    route_prefix          TEXT NOT NULL,
+    provider_id           TEXT NOT NULL,
+    project_id            TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    model                 TEXT,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    total_tokens          INTEGER,
+    cached_input_tokens   INTEGER,
+    usage_available       INTEGER NOT NULL DEFAULT 0,
+    usage_state           TEXT NOT NULL DEFAULT 'absent',
+    estimated_cost_micros INTEGER,
+    was_streamed          INTEGER NOT NULL DEFAULT 0
+) STRICT;
+CREATE INDEX idx_gue_at ON gateway_usage_events(at);
+CREATE INDEX idx_gue_project ON gateway_usage_events(project_id);
+
+-- ~90-day daily rollup of gateway usage (raw events expire sooner). '' is
+-- the "all" sentinel for project_id/model, mirroring runtime_metric_buckets.
+CREATE TABLE gateway_usage_daily (
+    day                   TEXT NOT NULL,
+    provider_id           TEXT NOT NULL,
+    project_id            TEXT NOT NULL DEFAULT '',
+    model                 TEXT NOT NULL DEFAULT '',
+    request_count         INTEGER NOT NULL DEFAULT 0,
+    usage_event_count     INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (day, provider_id, project_id, model)
+) STRICT;
+
+-- Route-level daily counters: unlinked traffic, rejected browser writes
+-- (the ONLY record a rejected request produces, THREAT_MODEL GW-2), dropped
+-- observation events, and extraction/attribution accounting. route_prefix ''
+-- holds gateway-global counters that have no route.
+CREATE TABLE gateway_route_counters (
+    route_prefix TEXT NOT NULL DEFAULT '',
+    day          TEXT NOT NULL,
+    counter      TEXT NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (route_prefix, day, counter)
+) STRICT;
+
+-- Distinguishes value-derived attribution (gateway keyed-fingerprint match,
+-- 'observed_fingerprint') from injection-derived attribution ('injected'),
+-- preserving the truth of attribution.rs's "never reads an Authorization
+-- value" for the injection path (ADR 0019 D5). NULL on pre-v13 rows.
+ALTER TABLE runtime_request_events ADD COLUMN attribution_method TEXT;
+"#,
+    },
+    Migration {
+        version: 14,
+        name: "index gateway_usage_events.event_id (FK-scan cost)",
+        sql: r#"
+-- `gateway_usage_events.event_id` REFERENCES runtime_request_events(id) with
+-- ON DELETE SET NULL, and foreign keys are enforced on every connection — so
+-- with no index on the child key, SQLite full-scans gateway_usage_events once
+-- PER deleted parent row. That fires on the hot path: the gateway's own
+-- writer runs `retention::sweep` every 5 minutes, deleting a whole cohort of
+-- expired runtime events at a time.
+CREATE INDEX IF NOT EXISTS idx_gue_event ON gateway_usage_events(event_id);
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.
@@ -945,6 +1090,31 @@ pub fn migrate_with(conn: &mut Connection, migrations: &[Migration]) -> Result<(
 /// The schema version this build reads and writes.
 pub fn current_schema_version() -> i64 {
     MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
+}
+
+/// Open the database ONLY if its schema is exactly this build's version.
+///
+/// `open()` performs no schema check at all, and `migrate()` mutates the
+/// schema — neither is safe for a long-lived background process (the gateway
+/// service) that may outlive an app upgrade in either direction
+/// (KNOWN_CONFLICTS C15). A newer schema returns `SchemaTooNew`; an older
+/// (not-yet-migrated) schema returns `SchemaNotCurrent` — migration v13+ is
+/// applied only by the enable/unlock flow, never by a background service.
+/// Callers treat both as "persistence degraded, keep forwarding".
+pub fn open_at_current_version(path: &Path) -> Result<Connection> {
+    if !path.exists() {
+        return Err(crate::error::CoreError::VaultNotFound(path.to_path_buf()));
+    }
+    let conn = open(path)?;
+    let found = user_version(&conn)?;
+    let supported = current_schema_version();
+    if found > supported {
+        return Err(crate::error::CoreError::SchemaTooNew { found, supported });
+    }
+    if found < supported {
+        return Err(crate::error::CoreError::SchemaNotCurrent { found, supported });
+    }
+    Ok(conn)
 }
 
 #[cfg(test)]

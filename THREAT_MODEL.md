@@ -42,18 +42,24 @@ integrations land.
   findings, alerts, and suppressions store no secret values (findings keep a
   redacted preview and a non-secret suppression key; the raw value lives only
   in a `#[serde(skip)]` in-memory buffer used for vault matching). ADR 0008.
-- Outbound network use is limited to three things, all direct from the device:
+- Outbound network use is limited to four things, all direct from the device:
   the **documentation watcher** (explicit user-selected official URLs,
   conditional GETs, 8 MiB body cap, stores only validators/hash/timestamps,
   no crawling); **provider connectors** (validation, metadata, permission
   reads, and usage/cost sync) that send the credential only in a request
-  header to the provider's own official API endpoint; and, when the user
+  header to the provider's own official API endpoint; when the user
   explicitly opts in, the **loopback observation proxy** (`observe` /
   `run --observe`), which relays the user's own application traffic onward
   to the API hosts that application was already contacting — it originates
-  no requests of its own. No secret is ever sent to a Tethra-operated
-  server. Connectors are built to the documented API shapes and tested
-  offline against fixtures.
+  no requests of its own; and, when the user explicitly enables it, the
+  **Local Gateway** — a loopback-only reverse gateway that relays traffic
+  from explicitly linked projects to their REGISTERED provider origins
+  (compiled-in manifest or MAC-verified custom origins; never a
+  client-chosen host). Once enabled it runs as a per-user login service —
+  a standing local egress relay to those registered providers, disclosed
+  as such at consent time (`docs/gateway/`). No secret is ever sent to a
+  Tethra-operated server. Connectors are built to the documented API
+  shapes and tested offline against fixtures.
 - The **OpenAI administrative connection** stores an Admin API key encrypted
   under the vault key (AAD binds it to this vault + provider). It is
   write-only after storage (replace/remove, never reveal); replacing,

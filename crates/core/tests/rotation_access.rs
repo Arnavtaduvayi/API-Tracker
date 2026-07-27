@@ -560,7 +560,6 @@ fn manual_required_completion_needs_validation_and_reauth() {
         )
         .unwrap();
     assert_eq!(waiting.rotation.state, "manual_required");
-    assert!(waiting.rotation.manual_instructions.is_empty() || true);
 
     // Wrong password is refused; the right one completes.
     let wrong = SecretString::from("not-the-master-password");

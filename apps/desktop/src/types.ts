@@ -184,7 +184,18 @@ export interface ProviderManifest {
   billing_url: string;
   watch_docs: string[];
   detection: DetectionPattern[];
+  /** Local Gateway routing declaration; absent for providers without one. */
+  gateway: GatewayManifestSection | null;
   capabilities: Capabilities;
+}
+
+/** providers::GatewaySection — the compiled-in gateway declaration. */
+export interface GatewayManifestSection {
+  /** Upstream origins; EMPTY means custom-only (per-project hosts). */
+  origins: string[];
+  base_path: string;
+  env_vars: string[];
+  usage_shape: string;
 }
 
 export interface VaultMatch {
@@ -1113,4 +1124,220 @@ export interface DiagnosticCheck {
   name: string;
   status: string;
   detail: string;
+}
+
+// ---------------------------------------------------------------------------
+// Local Gateway (ADR 0019, Phase 3)
+// ---------------------------------------------------------------------------
+
+export type GatewaySeverity = "ok" | "info" | "warn" | "error";
+
+export interface GatewayFinding {
+  id: string;
+  severity: GatewaySeverity;
+  title: string;
+  detail: string;
+  repair: string | null;
+}
+
+export interface GatewayServiceDefinition {
+  binary: string;
+  data_dir: string;
+}
+
+export type GatewayOsWillRun =
+  | { state: "yes" }
+  | { state: "only_while_logged_in" }
+  | { state: "registered_but_never_validated" }
+  | { state: "no" }
+  | { state: "unknown"; why: string };
+
+export interface GatewayServiceStatus {
+  platform: string;
+  installed: boolean;
+  definition_path: string;
+  definition: GatewayServiceDefinition | null;
+  matches_data_dir: boolean;
+  binary_exists: boolean;
+  binary_version: string | null;
+  registered: boolean;
+  running: boolean;
+  pid: number | null;
+  os_will_run: GatewayOsWillRun;
+  owned_artifacts: string[];
+  notes: string[];
+}
+
+/** Live status over the control channel (control::Status). */
+export interface GatewayLiveStatus {
+  version: string;
+  port: number;
+  uptime_secs: number;
+  routes: number;
+  routes_unavailable: number;
+  connections_in_flight: number;
+  queue_depth: number;
+  dropped_events: number;
+  written_events: number;
+  persist_failures: number;
+  routes_degraded: boolean;
+  recording_degraded: boolean;
+  recording_paused: boolean;
+  matching_key_present: boolean;
+  last_observation_at: string | null;
+  last_error: string | null;
+  routes_disabled: number;
+  routes_skipped: [string, string][];
+  pid: number;
+  /** Seconds until the keep-while-locked window revokes the resident
+   *  matching key (ADR 0020); null when no window is armed. */
+  matching_key_deadline_secs: number | null;
+  /** The last key was dropped by window expiry (cleared on the next push). */
+  matching_key_expired: boolean;
+}
+
+export type GatewayListenerIdentity =
+  | { verdict: "verified"; version: string }
+  | { verdict: "not_ours" }
+  | { verdict: "no_listener" }
+  | { verdict: "no_nonce" };
+
+export interface GatewayLinkHealth {
+  project_id: string;
+  route_prefix: string;
+  env_path: string | null;
+  env_file_exists: boolean;
+  env_points_at_gateway: boolean;
+  issues: string[];
+}
+
+export interface GatewayDoctor {
+  overall: GatewaySeverity;
+  findings: GatewayFinding[];
+  service: GatewayServiceStatus;
+  gateway: GatewayLiveStatus | null;
+  listener: GatewayListenerIdentity | null;
+  configured_port: number | null;
+  enabled: boolean;
+  links: GatewayLinkHealth[];
+  cli_version: string;
+}
+
+export interface GatewayInstallReport {
+  binary: string;
+  definition: string;
+  started: boolean;
+  pruned_binaries: string[];
+  notes: string[];
+}
+
+export interface GatewayUnlinkReport {
+  route_prefix: string;
+  project_id: string;
+  outcomes: Record<string, unknown>[];
+  complete: boolean;
+}
+
+export interface GatewayDisableReport {
+  stopped: boolean;
+  unregistered: boolean;
+  env_restores: GatewayUnlinkReport[];
+  incomplete_restores: number;
+  notes: string[];
+}
+
+export interface GatewayUninstallReport {
+  disable: GatewayDisableReport;
+  removed_paths: string[];
+  notes: string[];
+}
+
+export interface GatewayRoute {
+  prefix: string;
+  provider_id: string;
+  origin: string | null;
+  custom: boolean;
+  enabled: boolean;
+  available: boolean;
+  unavailable_reason: string | null;
+}
+
+export interface GatewayRouteList {
+  routes: GatewayRoute[];
+  skipped: [string, string][];
+}
+
+/** One warning attached to a link plan (envlink::LinkWarning). */
+export interface GatewayLinkWarning {
+  kind: string;
+  path?: string;
+  key?: string;
+  count?: number;
+}
+
+export interface GatewayLinkFilePlan {
+  path: string;
+  exists: boolean;
+  changed: boolean;
+  diff: string;
+  warnings: GatewayLinkWarning[];
+}
+
+export interface GatewayLinkPlan {
+  project_id: string;
+  project_name: string;
+  route_prefix: string;
+  provider_id: string;
+  link_slug: string;
+  existing_link: boolean;
+  port: number;
+  base_url: string;
+  vars: string[];
+  files: GatewayLinkFilePlan[];
+  warnings: GatewayLinkWarning[];
+  digest: string;
+}
+
+/** runtime::store::ActivitySample — a timestamp with its evidence source. */
+export interface ActivitySample {
+  at: string;
+  source:
+    | "local_gateway"
+    | "interception_proxy"
+    | "provider_reported"
+    | "manually_marked"
+    | "validated";
+}
+
+/** runtime::store::CredentialActivitySources — last activity, per source. */
+export interface CredentialActivitySources {
+  last_gateway_observed: string | null;
+  last_proxy_observed: string | null;
+  last_provider_reported: string | null;
+  last_marked_used: string | null;
+  last_validated: string | null;
+  most_recent: ActivitySample | null;
+}
+
+/** gateway store::GatewayActivitySummary — locally observed only. */
+export interface GatewayActivitySummary {
+  since: string | null;
+  total_requests: number;
+  success_count: number;
+  error_count: number;
+  transport_error_count: number;
+  p50_latency_ms: number | null;
+  p95_latency_ms: number | null;
+  p99_latency_ms: number | null;
+  request_bytes: number;
+  response_bytes: number;
+  top_endpoints: [string, number][];
+  attribution: [string, number][];
+  input_tokens: number;
+  output_tokens: number;
+  usage_event_count: number;
+  top_models: [string, number][];
+  estimated_cost_micros: number;
+  first_event_at: string | null;
+  last_event_at: string | null;
 }

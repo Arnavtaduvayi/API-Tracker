@@ -1,0 +1,550 @@
+//! Per-user OS service lifecycle for the Local Gateway (ADR 0019 D8,
+//! TEST_PLAN §9).
+//!
+//! One engine, three platform managers:
+//! - macOS: a LaunchAgent under `~/Library/LaunchAgents` (`bootstrap` /
+//!   `bootout` / `kickstart -k`, never `launchctl disable`);
+//! - Linux: a systemd USER unit (`WantedBy=default.target`, honest linger
+//!   reporting, never a system-wide service);
+//! - Windows: an HKCU `Run` registry value (per-user login start; no admin,
+//!   no Service Control Manager). Windows support is COMPILE-VALIDATED ONLY
+//!   — it has never been executed on a real Windows machine, and every
+//!   status surface says so.
+//!
+//! Install strategy (D8): the service binary is a FRESH BYTE-WRITE of the
+//! running CLI binary into `<data-dir>/bin/tethra-gateway-<version>` —
+//! never `fs::copy`, which on macOS propagates `com.apple.quarantine` and
+//! produces a launchd crash loop with no interactive Gatekeeper bypass
+//! (KNOWN_CONFLICTS C12). After the write the quarantine attribute is
+//! removed and the binary is EXEC-PROBED before any service definition is
+//! written: if Gatekeeper kills the probe, enable fails honestly toward
+//! foreground mode instead of installing a service that can never run.
+//!
+//! The resolved data directory is baked into the service argv
+//! (`--data-dir`): service managers inherit no shell environment, and a
+//! `TETHRA_DIR` that resolves differently at login would silently split the
+//! vault. No secret ever appears in argv, the definition file, or the
+//! registry.
+//!
+//! Every OS interaction goes through [`CommandRunner`], so unit tests run
+//! against a mock in temporary directories — `cargo test` never installs,
+//! starts, or stops a real service.
+
+pub mod linux;
+pub mod macos;
+pub mod windows;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use api_tracker_core::error::{CoreError, Result};
+use rusqlite::Connection;
+use serde::Serialize;
+
+use crate::envlink;
+use crate::routes;
+use crate::store;
+
+/// What the exec probe must print (the CLI's hidden `gateway service-probe`
+/// subcommand). Proves the copied binary actually executes under this OS
+/// before a service definition points at it.
+pub const PROBE_MARKER: &str = "tethra-gateway-service-probe";
+
+/// Runs external commands. The host implementation shells out; tests
+/// substitute a recorder so no real `launchctl`/`systemctl`/`reg` runs.
+pub trait CommandRunner: Send + Sync {
+    fn run(&self, program: &str, args: &[&str]) -> Result<RunOutput>;
+    /// Spawn without waiting (Windows manual start). The child must outlive
+    /// the caller.
+    fn spawn_detached(&self, program: &str, args: &[&str]) -> Result<()>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RunOutput {
+    pub status: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl RunOutput {
+    pub fn ok(&self) -> bool {
+        self.status == 0
+    }
+}
+
+/// The real runner.
+pub struct HostRunner;
+
+impl CommandRunner for HostRunner {
+    fn run(&self, program: &str, args: &[&str]) -> Result<RunOutput> {
+        let out = std::process::Command::new(program)
+            .args(args)
+            .output()
+            .map_err(CoreError::Io)?;
+        Ok(RunOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn spawn_detached(&self, program: &str, args: &[&str]) -> Result<()> {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(CoreError::Io)?;
+        Ok(())
+    }
+}
+
+/// A parsed service definition: where it points.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Definition {
+    pub binary: PathBuf,
+    pub data_dir: PathBuf,
+}
+
+/// Whether the OS will actually run the service, reported honestly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum OsWillRun {
+    /// Registered with the OS start mechanism.
+    Yes,
+    /// Linux: the unit starts at LOGIN only; without lingering it stops at
+    /// logout. Reported, never auto-"fixed" (no `loginctl enable-linger`).
+    OnlyWhileLoggedIn,
+    /// Registered, but the platform has never executed this code path
+    /// (Windows: compile-validated only).
+    RegisteredButNeverValidated,
+    /// Not registered.
+    No,
+    /// Could not determine (the query command failed).
+    Unknown { why: String },
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RegistrationState {
+    pub registered: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub detail: Option<String>,
+}
+
+/// One platform's service mechanics. Everything is same-user; nothing here
+/// ever requires or requests elevation.
+pub trait ServiceManager: Send + Sync {
+    fn platform(&self) -> &'static str;
+    fn definition_path(&self) -> PathBuf;
+    /// Render + write the definition (0600 where the platform has modes).
+    fn write_definition(&self, binary: &Path) -> Result<()>;
+    /// Parse the existing definition, if any.
+    fn read_definition(&self) -> Result<Option<Definition>>;
+    fn remove_definition(&self) -> Result<()>;
+    /// Make the OS start it at login/boot-of-session.
+    fn register(&self) -> Result<()>;
+    fn unregister(&self) -> Result<()>;
+    fn start(&self) -> Result<()>;
+    fn stop(&self) -> Result<()>;
+    fn restart(&self) -> Result<()>;
+    fn query(&self) -> RegistrationState;
+    fn os_will_run(&self, reg: &RegistrationState) -> OsWillRun;
+    /// Platform preparation after the byte-write: de-quarantine + exec
+    /// probe on macOS, exec probe elsewhere. MUST run before any
+    /// definition is written.
+    fn prepare_binary(&self, binary: &Path) -> Result<()>;
+}
+
+/// The engine: shared orchestration over a platform manager.
+pub struct Lifecycle {
+    pub data_dir: PathBuf,
+    pub manager: Box<dyn ServiceManager>,
+    pub runner: Arc<dyn CommandRunner>,
+    /// The version stamped into the installed binary's file name.
+    pub version: String,
+}
+
+/// The service status every frontend (CLI status/doctor, desktop panel)
+/// renders from. All facts, no interpretation.
+#[derive(Debug, Clone, Serialize)]
+pub struct ServiceStatus {
+    pub platform: &'static str,
+    /// The definition file / registry value exists.
+    pub installed: bool,
+    pub definition_path: String,
+    pub definition: Option<Definition>,
+    /// The definition's `--data-dir` equals ours. False means a stale or
+    /// foreign install owns the login slot.
+    pub matches_data_dir: bool,
+    pub binary_exists: bool,
+    /// Version parsed from the installed binary's file name.
+    pub binary_version: Option<String>,
+    pub registered: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub os_will_run: OsWillRun,
+    /// Every artifact the feature owns on this machine (PRODUCT_BEHAVIOR:
+    /// status lists what uninstall will remove).
+    pub owned_artifacts: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// What install did, for honest reporting.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallReport {
+    pub binary: String,
+    pub definition: String,
+    pub started: bool,
+    pub pruned_binaries: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// Per-project result of the disable/uninstall `.env` restore pass.
+#[derive(Debug, Clone, Serialize)]
+pub struct DisableReport {
+    pub stopped: bool,
+    pub unregistered: bool,
+    pub env_restores: Vec<envlink::UnlinkReport>,
+    /// Links that could not be restored (kept for retry).
+    pub incomplete_restores: usize,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UninstallReport {
+    pub disable: DisableReport,
+    pub removed_paths: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+pub fn bin_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("bin")
+}
+
+pub fn logs_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("logs")
+}
+
+pub fn binary_name(version: &str) -> String {
+    format!("tethra-gateway-{version}{}", std::env::consts::EXE_SUFFIX)
+}
+
+/// Parse the version back out of an installed binary file name.
+pub fn version_of_binary_name(name: &str) -> Option<String> {
+    let stem = name
+        .strip_suffix(std::env::consts::EXE_SUFFIX)
+        .unwrap_or(name);
+    stem.strip_prefix("tethra-gateway-").map(|v| v.to_string())
+}
+
+/// Fresh byte-write of `src` to `dst` (never `fs::copy`: quarantine and
+/// other metadata must NOT propagate — C12). Creates the parent, replaces
+/// any previous file, sets 0755 on Unix.
+pub fn fresh_byte_write(src: &Path, dst: &Path) -> Result<()> {
+    use std::io::Write;
+    let bytes = std::fs::read(src).map_err(CoreError::Io)?;
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(CoreError::Io)?;
+    }
+    // Remove first: overwriting an executing binary fails on some
+    // platforms, and a symlink at the target must never be followed.
+    if std::fs::symlink_metadata(dst).is_ok() {
+        std::fs::remove_file(dst).map_err(CoreError::Io)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o755);
+    }
+    let mut f = options.open(dst).map_err(CoreError::Io)?;
+    f.write_all(&bytes).map_err(CoreError::Io)?;
+    f.sync_all().map_err(CoreError::Io)?;
+    Ok(())
+}
+
+impl Lifecycle {
+    /// The engine for THIS host platform, with the real runner.
+    pub fn for_host(data_dir: &Path) -> Result<Self> {
+        let runner: Arc<dyn CommandRunner> = Arc::new(HostRunner);
+        let version = env!("CARGO_PKG_VERSION").to_string();
+        let manager: Box<dyn ServiceManager> = {
+            #[cfg(target_os = "macos")]
+            {
+                Box::new(macos::LaunchAgent::for_host(data_dir, runner.clone())?)
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                Box::new(linux::SystemdUser::for_host(data_dir, runner.clone())?)
+            }
+            #[cfg(windows)]
+            {
+                Box::new(windows::RunKey::new(data_dir.to_path_buf(), runner.clone()))
+            }
+        };
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            manager,
+            runner,
+            version,
+        })
+    }
+
+    pub fn installed_binary_path(&self) -> PathBuf {
+        bin_dir(&self.data_dir).join(binary_name(&self.version))
+    }
+
+    /// Install (or re-install) and start the service from `source_binary`
+    /// (normally the running CLI binary). Steps, in the D8 order:
+    /// byte-write → prepare (de-quarantine + exec probe) → definition →
+    /// register → start. Refuses when an existing definition points at a
+    /// DIFFERENT data directory unless `force` (that slot belongs to
+    /// another vault).
+    pub fn install(&self, source_binary: &Path, force: bool) -> Result<InstallReport> {
+        let mut notes = Vec::new();
+        if let Some(existing) = self.manager.read_definition()? {
+            if existing.data_dir != self.data_dir && !force {
+                return Err(CoreError::InvalidInput(format!(
+                    "a Tethra gateway service is already installed for a different data \
+                     directory ({}). Uninstall it first, or pass --force to replace it.",
+                    existing.data_dir.display()
+                )));
+            }
+            if existing.data_dir != self.data_dir {
+                notes.push(format!(
+                    "replaced a service that pointed at {}",
+                    existing.data_dir.display()
+                ));
+            }
+        }
+
+        let target = self.installed_binary_path();
+        fresh_byte_write(source_binary, &target)?;
+        self.manager.prepare_binary(&target)?;
+        std::fs::create_dir_all(logs_dir(&self.data_dir)).map_err(CoreError::Io)?;
+        // Whether a service is ALREADY running decides start vs restart: on
+        // an upgrade, `start` leaves the old process alive against the old
+        // binary — which `prune_old_binaries` is about to delete. Query
+        // before re-registering, since registering can itself change the
+        // answer.
+        let was_running = self.manager.query().running;
+        self.manager.write_definition(&target)?;
+        self.manager.register()?;
+        if was_running {
+            self.manager.restart()?;
+        } else {
+            self.manager.start()?;
+        }
+        let pruned = self.prune_old_binaries(&target)?;
+        Ok(InstallReport {
+            binary: target.display().to_string(),
+            definition: self.manager.definition_path().display().to_string(),
+            started: true,
+            pruned_binaries: pruned,
+            notes,
+        })
+    }
+
+    /// Remove every OTHER version's binary once the new one is installed
+    /// and started (upgrade hygiene; the running old process keeps its
+    /// unlinked inode on Unix until it exits).
+    fn prune_old_binaries(&self, keep: &Path) -> Result<Vec<String>> {
+        let mut pruned = Vec::new();
+        let dir = bin_dir(&self.data_dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Ok(pruned);
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if path != keep
+                && version_of_binary_name(&name).is_some()
+                && std::fs::remove_file(&path).is_ok()
+            {
+                pruned.push(name);
+            }
+        }
+        Ok(pruned)
+    }
+
+    /// Stop + unregister + restore linked `.env` files (unless `keep_env`).
+    /// Binaries and DB rows stay — this is "off", not "gone".
+    pub fn disable(&self, conn: &Connection, keep_env: bool) -> Result<DisableReport> {
+        let mut notes = Vec::new();
+        let stop_ok = self.manager.stop().is_ok();
+        let unregister_ok = match self.manager.unregister() {
+            Ok(()) => true,
+            Err(e) => {
+                notes.push(format!("unregister: {e}"));
+                false
+            }
+        };
+        if let Err(e) = self.manager.remove_definition() {
+            notes.push(format!("definition removal: {e}"));
+        }
+
+        let mut env_restores = Vec::new();
+        let mut incomplete = 0usize;
+        if keep_env {
+            notes.push("linked .env files left in place (--keep-env)".into());
+        } else {
+            for link in routes::list_project_links(conn)? {
+                if link.prior_env_json.is_none() {
+                    continue; // nothing was ever written for this link
+                }
+                match envlink::unlink(conn, &link.project_id, &link.route_prefix) {
+                    Ok(report) => {
+                        if !report.complete {
+                            incomplete += 1;
+                        }
+                        env_restores.push(report);
+                    }
+                    Err(e) => {
+                        incomplete += 1;
+                        notes.push(format!(
+                            "restore failed for project {} route {}: {e}",
+                            link.project_id, link.route_prefix
+                        ));
+                    }
+                }
+            }
+        }
+
+        let mut config = store::load_config(conn)?;
+        config.enabled = false;
+        store::save_config(conn, &config)?;
+
+        Ok(DisableReport {
+            stopped: stop_ok,
+            unregistered: unregister_ok,
+            env_restores,
+            incomplete_restores: incomplete,
+            notes,
+        })
+    }
+
+    /// The full ordered uninstall (PRODUCT_BEHAVIOR): disable (with `.env`
+    /// restore) → delete `<data-dir>/bin` (all versions) → delete logs →
+    /// delete stale runtime files. Database rows are KEPT — observed
+    /// history is user data; a separate purge exists for that.
+    pub fn uninstall(&self, conn: &Connection, keep_env: bool) -> Result<UninstallReport> {
+        let disable = self.disable(conn, keep_env)?;
+        let mut removed = Vec::new();
+        let mut notes = Vec::new();
+        for dir in [bin_dir(&self.data_dir), logs_dir(&self.data_dir)] {
+            if dir.exists() {
+                match std::fs::remove_dir_all(&dir) {
+                    Ok(()) => removed.push(dir.display().to_string()),
+                    Err(e) => notes.push(format!("could not remove {}: {e}", dir.display())),
+                }
+            }
+        }
+        for file in [
+            crate::control::SOCKET_NAME,
+            crate::control::NONCE_NAME,
+            crate::control::PID_NAME,
+        ] {
+            let p = self.data_dir.join(file);
+            if p.exists() && std::fs::remove_file(&p).is_ok() {
+                removed.push(p.display().to_string());
+            }
+        }
+        Ok(UninstallReport {
+            disable,
+            removed_paths: removed,
+            notes,
+        })
+    }
+
+    /// Facts for status/doctor.
+    pub fn status(&self) -> ServiceStatus {
+        let definition_path = self.manager.definition_path();
+        let definition = self.manager.read_definition().ok().flatten();
+        let installed = definition.is_some();
+        let matches = definition
+            .as_ref()
+            .map(|d| d.data_dir == self.data_dir)
+            .unwrap_or(false);
+        let binary_exists = definition
+            .as_ref()
+            .map(|d| d.binary.exists())
+            .unwrap_or(false);
+        let binary_version = definition.as_ref().and_then(|d| {
+            d.binary
+                .file_name()
+                .and_then(|n| version_of_binary_name(&n.to_string_lossy()))
+        });
+        let reg = self.manager.query();
+        let os_will_run = if installed {
+            self.manager.os_will_run(&reg)
+        } else {
+            OsWillRun::No
+        };
+
+        let mut owned = vec![definition_path.display().to_string()];
+        if let Ok(entries) = std::fs::read_dir(bin_dir(&self.data_dir)) {
+            for e in entries.flatten() {
+                owned.push(e.path().display().to_string());
+            }
+        }
+        let logs = logs_dir(&self.data_dir);
+        if logs.exists() {
+            owned.push(logs.display().to_string());
+        }
+
+        let mut notes = Vec::new();
+        if installed && !matches {
+            notes.push(
+                "the installed service points at a DIFFERENT data directory; this vault's \
+                 gateway will not start at login"
+                    .into(),
+            );
+        }
+        if installed && !binary_exists {
+            notes.push(
+                "the service definition points at a binary that no longer exists (moved or \
+                 cleaned); run `tethra gateway repair`"
+                    .into(),
+            );
+        }
+
+        ServiceStatus {
+            platform: self.manager.platform(),
+            installed,
+            definition_path: definition_path.display().to_string(),
+            definition,
+            matches_data_dir: matches,
+            binary_exists,
+            binary_version,
+            registered: reg.registered,
+            running: reg.running,
+            pid: reg.pid,
+            os_will_run,
+            owned_artifacts: owned,
+            notes,
+        }
+    }
+
+    pub fn start(&self) -> Result<()> {
+        self.manager.start()
+    }
+
+    pub fn stop(&self) -> Result<()> {
+        self.manager.stop()
+    }
+
+    pub fn restart(&self) -> Result<()> {
+        self.manager.restart()
+    }
+
+    /// Re-align everything with THIS binary and THIS data directory:
+    /// re-byte-write, re-prepare, rewrite the definition, re-register, and
+    /// restart. Fixes moved binaries, stale definitions, and version
+    /// mismatches in one pass.
+    pub fn repair(&self, source_binary: &Path) -> Result<InstallReport> {
+        self.install(source_binary, true)
+    }
+}
