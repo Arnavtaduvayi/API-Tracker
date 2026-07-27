@@ -306,9 +306,26 @@ function StatusPanel(props: {
   const g = report.gateway;
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState<
-    null | "repair" | "disable" | "uninstall" | "push-key" | "change-port"
+    null | "repair" | "disable" | "uninstall" | "push-key" | "keep-locked-on" | "change-port"
   >(null);
   const [keepEnv, setKeepEnv] = useState(false);
+  // null = unknown (vault locked or not yet loaded). Reading the toggle needs
+  // an unlocked vault; the rest of this panel stays lock-free.
+  const [keepWhileLocked, setKeepWhileLocked] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .gatewayMatchWhileLockedGet()
+      .then((v) => {
+        if (!cancelled) setKeepWhileLocked(v);
+      })
+      .catch(() => {
+        if (!cancelled) setKeepWhileLocked(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [report]);
 
   const act = async (label: string, f: () => Promise<unknown>) => {
     setBusy(true);
@@ -381,9 +398,43 @@ function StatusPanel(props: {
         <dd>
           {g
             ? g.matching_key_present
-              ? "on (matching key resident in the gateway process)"
-              : "off — exchanges record `unavailable_vault_locked` until a key is pushed"
+              ? g.matching_key_deadline_secs != null
+                ? `on — vault locked, keep-while-locked window: key drops in ` +
+                  `${Math.max(1, Math.round(g.matching_key_deadline_secs / 60))} min ` +
+                  `unless you unlock`
+                : "on (matching key resident in the gateway process)"
+              : g.matching_key_expired
+                ? "off — the keep-while-locked window expired; push the key again to resume"
+                : "off — exchanges record `unavailable_vault_locked` until a key is pushed"
             : "—"}
+        </dd>
+        <dt>Keep while locked</dt>
+        <dd>
+          {keepWhileLocked == null ? (
+            "unavailable while the vault is locked"
+          ) : (
+            <label className="field">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={keepWhileLocked}
+                  disabled={busy}
+                  onChange={(e) => {
+                    if (e.target.checked) {
+                      setDialog("keep-locked-on");
+                    } else {
+                      void act("keep-while-locked disabled; resident key dropped", async () => {
+                        await api.gatewayMatchWhileLockedSet(false);
+                        setKeepWhileLocked(false);
+                      });
+                    }
+                  }}
+                />{" "}
+                Keep matching while the vault is locked (bounded by your auto-lock duration,
+                capped at 8 h; default off)
+              </span>
+            </label>
+          )}
         </dd>
         <dt>Queue</dt>
         <dd>{g ? `${g.queue_depth} queued, ${g.dropped_events} dropped ever` : "—"}</dd>
@@ -519,11 +570,37 @@ function StatusPanel(props: {
             "decrypt anything, but while it is resident, a process that can read the " +
             "gateway's memory (or its database) gains an oracle for testing whether a " +
             "value matches one of your credentials. The key is dropped on stop, " +
-            "revoke, or lock (keep-while-locked defaults OFF)."
+            "revoke, or lock (keep-while-locked defaults OFF). If you enable " +
+            "keep-while-locked, a locked vault keeps matching for at most your " +
+            "auto-lock duration (8 h cap), then attribution pauses until you push " +
+            "the key again."
           }
           onConfirm={async (password) => {
             await api.gatewayPushKey(password);
             onChanged("credential attribution enabled");
+            setDialog(null);
+          }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog === "keep-locked-on" && (
+        <ReauthDialog
+          title="Keep matching while the vault is locked?"
+          actionLabel="Keep matching while locked"
+          body={
+            "By default, locking the vault immediately drops the gateway's " +
+            "matching key. With this ON, a pushed key stays resident after a lock " +
+            "for at most your auto-lock duration (8 h cap when auto-lock is " +
+            "disabled), then attribution pauses until you push it again. While it " +
+            "is resident, a process that can read the gateway's memory (or its " +
+            "database) gains an oracle for testing whether a value matches one of " +
+            "your credentials — enabling this extends that exposure into the " +
+            "locked state."
+          }
+          onConfirm={async (password) => {
+            await api.gatewayMatchWhileLockedSet(true, password);
+            setKeepWhileLocked(true);
+            onChanged("keep-while-locked enabled");
             setDialog(null);
           }}
           onClose={() => setDialog(null)}

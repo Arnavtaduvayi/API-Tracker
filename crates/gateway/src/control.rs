@@ -5,12 +5,16 @@
 //! anything privileged must arrive somewhere else:
 //!
 //! - a Unix-domain socket at `<data-dir>/gateway.sock`, mode 0600 inside the
-//!   0700 data directory;
-//! - with a peer-credential check that the caller's euid is OUR euid, so
-//!   another local user cannot drive it even if the mode were wrong;
-//! - plus a server nonce the caller must echo, so the CALLER also
-//!   authenticates the server and cannot be tricked into pushing a key to a
-//!   squatter that got the path first;
+//!   0700 data directory — FILESYSTEM permissions (re-checked on every
+//!   accept) are what keep other local users out; there is no SO_PEERCRED /
+//!   getpeereid peer check (same-uid processes are in the accepted local
+//!   trust model, THREAT_MODEL GW-8);
+//! - plus a per-boot server nonce the caller must echo. The nonce authorizes
+//!   the CALLER to the server (only a process that could read the 0600 nonce
+//!   file is accepted). It does NOT let the caller authenticate the server
+//!   before disclosing: a PushKey carries nonce and key in one message, so a
+//!   same-uid process that squatted the socket path first would receive
+//!   both — same-uid squatting is inside the accepted trust model;
 //! - write-only for key material: the fingerprint key can be pushed and
 //!   revoked, never read back.
 //!
@@ -43,10 +47,11 @@ pub const NONCE_NAME: &str = "gateway.nonce";
 /// The single-instance lock / liveness file.
 pub const PID_NAME: &str = "gateway.pid";
 
-/// A control request. `nonce` authenticates the SERVER to the caller: only a
-/// process that could read the 0600 nonce file is talking to the right
-/// gateway.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A control request. `nonce` proves the caller read the 0600 nonce file —
+/// i.e. that a same-user process authorized by file permissions is driving
+/// THIS gateway (see the module doc for what the nonce does and does not
+/// authenticate).
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// Liveness only. Deliberately requires no nonce so a health check is
@@ -61,8 +66,24 @@ pub enum Request {
         nonce: String,
         key_hex: String,
     },
-    /// Drop the key immediately (lock, toggle-off, revoke).
+    /// Drop the key immediately (explicit revoke, or toggle-off).
     RevokeKey {
+        nonce: String,
+    },
+    /// The vault session that authorized the resident matching key has
+    /// locked. The SERVICE decides what that means (fail toward revocation):
+    /// default — revoke now; with the consented `match_while_locked` toggle
+    /// ON — retain, bounded by `ttl_minutes` clamped to the 8-hour cap
+    /// (ADR 0020). `None`/`0` means the caller could not determine its
+    /// auto-lock duration and the cap applies.
+    VaultLocked {
+        nonce: String,
+        #[serde(default)]
+        ttl_minutes: Option<u32>,
+    },
+    /// A vault session re-authorized (unlock): cancel any pending bounded
+    /// retention. Carries no key material; the key itself is untouched.
+    VaultUnlocked {
         nonce: String,
     },
     /// Reload the route snapshot from the database.
@@ -79,6 +100,30 @@ pub enum Request {
     Shutdown {
         nonce: String,
     },
+}
+
+/// Manual `Debug` so that Debug-formatting a request can never print key
+/// material: `PushKey.key_hex` is redacted. (A derived `Debug` would print
+/// the full matching key hex from any `{:?}` in logs or error paths.)
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Request::Health => f.write_str("Health"),
+            Request::Version => f.write_str("Version"),
+            Request::Status { .. } => f.write_str("Status"),
+            Request::PushKey { .. } => f.write_str("PushKey { key_hex: <redacted> }"),
+            Request::RevokeKey { .. } => f.write_str("RevokeKey"),
+            Request::VaultLocked { ttl_minutes, .. } => f
+                .debug_struct("VaultLocked")
+                .field("ttl_minutes", ttl_minutes)
+                .finish(),
+            Request::VaultUnlocked { .. } => f.write_str("VaultUnlocked"),
+            Request::ReloadRoutes { .. } => f.write_str("ReloadRoutes"),
+            Request::PauseRecording { .. } => f.write_str("PauseRecording"),
+            Request::ResumeRecording { .. } => f.write_str("ResumeRecording"),
+            Request::Shutdown { .. } => f.write_str("Shutdown"),
+        }
+    }
 }
 
 /// A control response. Nothing here ever carries key material: there is no
@@ -138,6 +183,17 @@ pub struct Status {
     /// nonce probe, never by a pid).
     #[serde(default)]
     pub pid: u32,
+    /// Seconds until the resident matching key is revoked by the bounded
+    /// keep-while-locked retention window (ADR 0020). `None` when no window
+    /// is armed (vault unlocked, or no key resident).
+    #[serde(default)]
+    pub matching_key_deadline_secs: Option<u64>,
+    /// The last resident matching key was dropped because its
+    /// keep-while-locked retention window expired; cleared on the next
+    /// successful key push. Lets the UI say "expired" instead of a bare
+    /// "off".
+    #[serde(default)]
+    pub matching_key_expired: bool,
 }
 
 /// What the control plane is allowed to do to a running gateway.
@@ -145,6 +201,12 @@ pub trait ControlTarget: Send + Sync {
     fn status(&self) -> Status;
     fn push_key(&self, key: SecretBytes) -> Result<()>;
     fn revoke_key(&self);
+    /// A vault-lock event. Deliberately a REQUIRED method (no default no-op):
+    /// forgetting to wire it in a real target would silently recreate the
+    /// key-survives-lock defect this hook exists to fix (ADR 0020).
+    fn vault_locked(&self, ttl_minutes: Option<u32>);
+    /// A vault-unlock event: cancel pending bounded retention, if any.
+    fn vault_unlocked(&self);
     fn reload_routes(&self);
     fn set_recording_paused(&self, paused: bool);
     fn shutdown(&self);
@@ -394,6 +456,20 @@ pub fn dispatch(target: &dyn ControlTarget, expected_nonce: &str, request: Reque
                 return denied();
             }
             target.revoke_key();
+            Response::Ok
+        }
+        Request::VaultLocked { nonce, ttl_minutes } => {
+            if !authorized(&nonce) {
+                return denied();
+            }
+            target.vault_locked(ttl_minutes);
+            Response::Ok
+        }
+        Request::VaultUnlocked { nonce } => {
+            if !authorized(&nonce) {
+                return denied();
+            }
+            target.vault_unlocked();
             Response::Ok
         }
         Request::ReloadRoutes { nonce } => {
@@ -661,6 +737,66 @@ mod unix_impl {
 #[cfg(unix)]
 pub use unix_impl::{send, ControlServer};
 
+/// Best-effort "the vault locked" signal to a running gateway (ADR 0020).
+///
+/// The POLICY (revoke vs. bounded retention) lives in the service, which
+/// re-reads `gateway_config.match_while_locked` itself and fails toward
+/// revocation — the caller only reports the event and, when it knows it, the
+/// locking session's auto-lock duration. Best-effort by construction: no
+/// running gateway, no control socket, or a Windows build (no control
+/// channel, hence no resident key) must never make locking the vault fail.
+/// Returns whether the signal was actually delivered.
+pub fn notify_vault_locked(data_dir: &Path, ttl_minutes: Option<u32>) -> bool {
+    let Ok(nonce) = read_nonce(data_dir) else {
+        return false;
+    };
+    matches!(
+        send(
+            data_dir,
+            &Request::VaultLocked {
+                nonce: nonce.to_string(),
+                ttl_minutes,
+            },
+        ),
+        Ok(Response::Ok)
+    )
+}
+
+/// Best-effort "a vault session re-authorized" signal: cancels a pending
+/// bounded retention deadline in the running gateway, if any (ADR 0020).
+pub fn notify_vault_unlocked(data_dir: &Path) -> bool {
+    let Ok(nonce) = read_nonce(data_dir) else {
+        return false;
+    };
+    matches!(
+        send(
+            data_dir,
+            &Request::VaultUnlocked {
+                nonce: nonce.to_string(),
+            },
+        ),
+        Ok(Response::Ok)
+    )
+}
+
+/// Best-effort immediate key revocation (toggle-off, explicit revoke paths
+/// that must not fail when no gateway is running). Returns whether a revoke
+/// was actually delivered.
+pub fn send_revoke_key(data_dir: &Path) -> bool {
+    let Ok(nonce) = read_nonce(data_dir) else {
+        return false;
+    };
+    matches!(
+        send(
+            data_dir,
+            &Request::RevokeKey {
+                nonce: nonce.to_string(),
+            },
+        ),
+        Ok(Response::Ok)
+    )
+}
+
 #[cfg(not(unix))]
 mod windows_impl {
     use super::*;
@@ -740,6 +876,8 @@ mod tests {
         pub reloads: Mutex<u32>,
         pub paused: AtomicBool,
         pub stopped: AtomicBool,
+        pub locks: Mutex<Vec<Option<u32>>>,
+        pub unlocks: Mutex<u32>,
     }
 
     impl ControlTarget for FakeTarget {
@@ -758,6 +896,12 @@ mod tests {
         }
         fn revoke_key(&self) {
             *self.key.lock().unwrap() = None;
+        }
+        fn vault_locked(&self, ttl_minutes: Option<u32>) {
+            self.locks.lock().unwrap().push(ttl_minutes);
+        }
+        fn vault_unlocked(&self) {
+            *self.unlocks.lock().unwrap() += 1;
         }
         fn reload_routes(&self) {
             *self.reloads.lock().unwrap() += 1;
@@ -797,6 +941,13 @@ mod tests {
             Request::ResumeRecording {
                 nonce: wrong.clone(),
             },
+            Request::VaultLocked {
+                nonce: wrong.clone(),
+                ttl_minutes: None,
+            },
+            Request::VaultUnlocked {
+                nonce: wrong.clone(),
+            },
             Request::Shutdown { nonce: wrong },
         ];
         for req in privileged {
@@ -811,6 +962,72 @@ mod tests {
         assert_eq!(*t.reloads.lock().unwrap(), 0);
         assert!(!t.paused.load(Ordering::Relaxed));
         assert!(!t.stopped.load(Ordering::Relaxed));
+        assert!(t.locks.lock().unwrap().is_empty());
+        assert_eq!(*t.unlocks.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn debug_formatting_a_push_key_request_never_prints_the_key() {
+        let printed = format!(
+            "{:?}",
+            Request::PushKey {
+                nonce: NONCE.into(),
+                key_hex: KEY_HEX.into(),
+            }
+        );
+        assert!(
+            !printed.contains(KEY_HEX),
+            "Debug must not print key material, got: {printed}"
+        );
+        // Not even a prefix of it: a partial key is still key material.
+        assert!(
+            !printed.contains(&KEY_HEX[..8]),
+            "Debug must not print any part of the key, got: {printed}"
+        );
+        assert!(printed.contains("redacted"), "got: {printed}");
+        // The nonce is a live capability too; it must not leak either.
+        assert!(!printed.contains(NONCE), "got: {printed}");
+    }
+
+    #[test]
+    fn a_vault_lock_signal_reaches_the_target_with_its_ttl() {
+        let t = FakeTarget::default();
+        assert_eq!(
+            dispatch(
+                &t,
+                NONCE,
+                Request::VaultLocked {
+                    nonce: NONCE.into(),
+                    ttl_minutes: Some(15),
+                }
+            ),
+            Response::Ok
+        );
+        assert_eq!(*t.locks.lock().unwrap(), vec![Some(15)]);
+        assert_eq!(
+            dispatch(
+                &t,
+                NONCE,
+                Request::VaultUnlocked {
+                    nonce: NONCE.into(),
+                }
+            ),
+            Response::Ok
+        );
+        assert_eq!(*t.unlocks.lock().unwrap(), 1);
+    }
+
+    /// Wire-compatibility: a lock signal from a build that predates the TTL
+    /// field must still parse (the version handshake must not fail on the
+    /// very mismatch it exists to detect).
+    #[test]
+    fn a_vault_locked_request_without_a_ttl_field_parses() {
+        let req: Request =
+            serde_json::from_str(r#"{"op":"vault_locked","nonce":"abc"}"#).expect("parses");
+        match req {
+            Request::VaultLocked { ttl_minutes, .. } => assert_eq!(ttl_minutes, None),
+            other => panic!("got {other:?}"),
+        }
     }
 
     #[test]

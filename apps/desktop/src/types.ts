@@ -1189,6 +1189,11 @@ export interface GatewayLiveStatus {
   routes_disabled: number;
   routes_skipped: [string, string][];
   pid: number;
+  /** Seconds until the keep-while-locked window revokes the resident
+   *  matching key (ADR 0020); null when no window is armed. */
+  matching_key_deadline_secs: number | null;
+  /** The last key was dropped by window expiry (cleared on the next push). */
+  matching_key_expired: boolean;
 }
 
 export type GatewayListenerIdentity =

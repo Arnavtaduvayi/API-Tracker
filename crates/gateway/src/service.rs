@@ -6,9 +6,9 @@
 //! live gateway.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 use api_tracker_core::error::{CoreError, Result};
 use api_tracker_core::secret::SecretBytes;
@@ -25,6 +25,135 @@ pub const ROUTE_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// enough that `tethra gateway stop` feels immediate.
 const SHUTDOWN_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 
+/// The hard cap on keep-while-locked matching-key retention (ADR 0020): even
+/// with the consented toggle ON, a locked vault keeps the resident key for at
+/// most this long (one working day away from the keyboard), then attribution
+/// pauses honestly until the user pushes the key again.
+pub const MATCH_WHILE_LOCKED_TTL_CAP_MINUTES: u32 = 480;
+
+/// What a vault-lock event does to the resident matching key (ADR 0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockDisposition {
+    /// Drop the key now: the vault session that authorized it has ended and
+    /// the user has not consented to locked-vault matching.
+    RevokeNow,
+    /// The consented, default-OFF `match_while_locked` toggle is ON: retain
+    /// the key for at most this many minutes, then revoke.
+    Retain { ttl_minutes: u32 },
+}
+
+/// Clamp a caller-supplied retention request to the consented bound.
+/// `None` and `0` both mean "the locking session had no auto-lock duration"
+/// (auto-lock disabled, or a caller that could not read the setting) — the
+/// cap applies. Pure, so the clamp itself is unit-testable.
+pub fn effective_retention_minutes(requested: Option<u32>) -> u32 {
+    match requested {
+        None | Some(0) => MATCH_WHILE_LOCKED_TTL_CAP_MINUTES,
+        Some(v) => v.min(MATCH_WHILE_LOCKED_TTL_CAP_MINUTES),
+    }
+}
+
+/// Decide what a vault-lock event does, from the plaintext config alone.
+///
+/// The policy lives HERE, in the service, not in the frontends: every lock
+/// path (desktop manual/auto-lock/backup-restore, CLI lock, app exit) sends
+/// the same `VaultLocked` signal and this one function decides. Reading the
+/// toggle needs no vault — `gateway_config` is a plaintext table.
+///
+/// Fails toward revocation: a database that cannot be opened, a missing or
+/// malformed config row, or a toggle that reads OFF all yield `RevokeNow`.
+/// Retention never happens by accident (SI-9).
+pub fn lock_disposition(db_path: &Path, requested_ttl_minutes: Option<u32>) -> LockDisposition {
+    let keep = api_tracker_core::db::open_at_current_version(db_path)
+        .ok()
+        .and_then(|conn| crate::store::load_config(&conn).ok())
+        .is_some_and(|c| c.match_while_locked);
+    if keep {
+        LockDisposition::Retain {
+            ttl_minutes: effective_retention_minutes(requested_ttl_minutes),
+        }
+    } else {
+        LockDisposition::RevokeNow
+    }
+}
+
+/// The bounded keep-while-locked retention window for the resident matching
+/// key (ADR 0020). Armed by a `VaultLocked` signal when the consented toggle
+/// is ON; disarmed by unlock, re-push, revoke, or stop; enforced by the
+/// service's poller thread.
+///
+/// The deadline is tracked on BOTH the monotonic and the wall clock and
+/// expires when EITHER passes: monotonic clocks can pause across system
+/// sleep (which would silently stretch the window), and a wall clock can be
+/// set backwards (which would too). Taking the earlier of the two fails
+/// toward revocation.
+#[derive(Default)]
+pub struct KeyRetention {
+    deadline: Mutex<Option<(Instant, SystemTime)>>,
+    expired: AtomicBool,
+}
+
+impl KeyRetention {
+    /// Arm the window, never extending one that is already running: repeated
+    /// lock events (auto-lock poll + explicit lock + app exit) must only ever
+    /// tighten the deadline.
+    pub fn arm_no_later_than(&self, ttl: Duration) {
+        let candidate = (Instant::now() + ttl, SystemTime::now() + ttl);
+        let mut guard = self.deadline.lock().expect("key retention lock");
+        match &*guard {
+            Some((existing, _)) if *existing <= candidate.0 => {}
+            _ => *guard = Some(candidate),
+        }
+    }
+
+    /// Cancel the window (unlock, fresh push, revoke, stop).
+    pub fn disarm(&self) {
+        *self.deadline.lock().expect("key retention lock") = None;
+    }
+
+    /// Whether a window is armed, and how long remains (for status honesty).
+    pub fn remaining_secs(&self) -> Option<u64> {
+        let guard = self.deadline.lock().expect("key retention lock");
+        guard
+            .as_ref()
+            .map(|(instant, _)| instant.saturating_duration_since(Instant::now()).as_secs())
+    }
+
+    /// If the window has expired (on either clock), disarm it, record the
+    /// expiry for status, and return true — the caller must then drop the
+    /// key and matcher. Called from the poller loop.
+    pub fn expire_if_due(&self) -> bool {
+        let mut guard = self.deadline.lock().expect("key retention lock");
+        let due = match &*guard {
+            None => false,
+            Some((instant, wall)) => Instant::now() >= *instant || SystemTime::now() >= *wall,
+        };
+        if due {
+            *guard = None;
+            self.expired.store(true, Ordering::Relaxed);
+        }
+        due
+    }
+
+    /// The last resident key was dropped by window expiry (cleared on the
+    /// next successful push).
+    pub fn expired(&self) -> bool {
+        self.expired.load(Ordering::Relaxed)
+    }
+
+    pub fn clear_expired(&self) {
+        self.expired.store(false, Ordering::Relaxed);
+    }
+
+    /// Test hook: arm an already-expired window so expiry enforcement can be
+    /// exercised without sleeping through a real TTL.
+    #[doc(hidden)]
+    pub fn arm_already_expired_for_test(&self) {
+        *self.deadline.lock().expect("key retention lock") =
+            Some((Instant::now(), SystemTime::now()));
+    }
+}
+
 /// A fully assembled, running gateway.
 pub struct Service {
     gateway: Gateway,
@@ -35,6 +164,7 @@ pub struct Service {
     data_dir: PathBuf,
     started: Instant,
     control_error: Option<String>,
+    retention: Arc<KeyRetention>,
     listener_handle: Option<std::thread::JoinHandle<()>>,
     poller_handle: Option<std::thread::JoinHandle<()>>,
 }
@@ -49,6 +179,7 @@ pub struct ServiceControl {
     writer_sink: Arc<crate::writer::WriterSink>,
     db_path: PathBuf,
     started: Instant,
+    retention: Arc<KeyRetention>,
 }
 
 impl ControlTarget for ServiceControl {
@@ -78,6 +209,8 @@ impl ControlTarget for ServiceControl {
             routes_disabled: table.disabled,
             routes_skipped: table.skipped.clone(),
             pid: std::process::id(),
+            matching_key_deadline_secs: self.retention.remaining_secs(),
+            matching_key_expired: self.retention.expired(),
         }
     }
 
@@ -93,6 +226,10 @@ impl ControlTarget for ServiceControl {
             return Err(CoreError::Busy);
         }
         self.gateway.set_matching_key(Some(key));
+        // A fresh push is a fresh authorization: any pending keep-while-
+        // locked deadline belongs to the previous session (ADR 0020).
+        self.retention.disarm();
+        self.retention.clear_expired();
         Ok(())
     }
 
@@ -102,6 +239,27 @@ impl ControlTarget for ServiceControl {
         // not be cleared is never consulted again.
         self.gateway.set_matching_key(None);
         self.writer_sink.set_matcher(None);
+        self.retention.disarm();
+    }
+
+    fn vault_locked(&self, ttl_minutes: Option<u32>) {
+        // SI-9 / ADR 0020: the default answer to a lock is revocation, and
+        // an unreadable policy fails toward revocation too. Only the
+        // consented, default-OFF toggle earns bounded retention.
+        if !self.gateway.has_matching_key() {
+            self.retention.disarm();
+            return;
+        }
+        match lock_disposition(&self.db_path, ttl_minutes) {
+            LockDisposition::RevokeNow => self.revoke_key(),
+            LockDisposition::Retain { ttl_minutes } => self
+                .retention
+                .arm_no_later_than(Duration::from_secs(u64::from(ttl_minutes) * 60)),
+        }
+    }
+
+    fn vault_unlocked(&self) {
+        self.retention.disarm();
     }
 
     fn reload_routes(&self) {
@@ -156,6 +314,7 @@ impl Service {
         gateway.set_probe_key(Some(crate::control::probe_key_from_nonce(&nonce)));
         crate::control::write_pid_file(data_dir)?;
 
+        let retention = Arc::new(KeyRetention::default());
         let control_target = ServiceControl {
             gateway: gateway.clone(),
             routes: routes.clone(),
@@ -163,6 +322,7 @@ impl Service {
             writer_sink: sink.clone(),
             db_path: db_path.clone(),
             started: Instant::now(),
+            retention: retention.clone(),
         };
         // A control channel that cannot start is a REAL degradation (no
         // status, no attribution, no graceful stop), so the reason is kept
@@ -184,12 +344,25 @@ impl Service {
             .ok();
 
         // Route changes are picked up by polling SQLite's data_version, which
-        // is cheap and needs no vault.
+        // is cheap and needs no vault. The same loop enforces the bounded
+        // keep-while-locked retention window (ADR 0020): every slice it
+        // checks the deadline, so an expiry drops the key within
+        // SHUTDOWN_CHECK_INTERVAL of falling due.
         let poll_routes = routes.clone();
         let poll_gw = gateway.clone();
+        let poll_sink = sink.clone();
+        let poll_retention = retention.clone();
         let poller_handle = std::thread::Builder::new()
             .name("tethra-gateway-routes".into())
             .spawn(move || {
+                let enforce = || {
+                    if poll_retention.expire_if_due() {
+                        // Same order as an explicit revoke: key first, so no
+                        // new digests are produced, then the matcher.
+                        poll_gw.set_matching_key(None);
+                        poll_sink.set_matcher(None);
+                    }
+                };
                 while !poll_gw.shutdown.load(Ordering::Relaxed) {
                     poll_routes.reload_if_changed();
                     // Sleep in small slices so a stop is observed promptly:
@@ -197,6 +370,7 @@ impl Service {
                     // wait up to ROUTE_POLL_INTERVAL for no reason.
                     let mut slept = Duration::ZERO;
                     while slept < ROUTE_POLL_INTERVAL && !poll_gw.shutdown.load(Ordering::Relaxed) {
+                        enforce();
                         std::thread::sleep(SHUTDOWN_CHECK_INTERVAL);
                         slept += SHUTDOWN_CHECK_INTERVAL;
                     }
@@ -213,9 +387,15 @@ impl Service {
             data_dir: data_dir.to_path_buf(),
             started: Instant::now(),
             control_error,
+            retention,
             listener_handle,
             poller_handle,
         })
+    }
+
+    /// The keep-while-locked retention state (status honesty + tests).
+    pub fn key_retention(&self) -> &Arc<KeyRetention> {
+        &self.retention
     }
 
     pub fn port(&self) -> u16 {
@@ -284,9 +464,12 @@ impl Service {
     /// control artifacts.
     pub fn stop(&mut self) {
         self.gateway.shutdown.store(true, Ordering::Relaxed);
-        // Clear the matching key promptly: it must not outlive the process's
-        // usefulness (SIGTERM handler equivalent).
+        // Clear the matching key promptly on a GRACEFUL stop: it must not
+        // outlive the process's usefulness. (This is not a signal handler —
+        // SIGTERM/SIGKILL/crash skip this path entirely; see THREAT_MODEL
+        // GW-6 for the honest statement of that limitation.)
         self.gateway.set_matching_key(None);
+        self.retention.disarm();
         if let Some(h) = self.listener_handle.take() {
             let _ = h.join();
         }

@@ -68,6 +68,25 @@ impl AppState {
     }
 }
 
+/// Signal a running gateway that the vault locked (ADR 0020, SI-9).
+///
+/// The matching key is a vault-derived guess-confirmation oracle over every
+/// in-scope fingerprint (THREAT_MODEL GW-6); the push-key consent copy
+/// promises it is "dropped on stop, revoke, or lock". Every desktop lock
+/// path — explicit lock, both inactivity auto-lock paths, backup restore,
+/// and app exit — must send this signal.
+///
+/// The POLICY lives in the gateway service (`service::lock_disposition`), so
+/// the frontend only reports the event plus the locking session's auto-lock
+/// duration (`None` when it could not be read — the service then applies the
+/// 8-hour retention cap, or revokes immediately when the consented
+/// keep-while-locked toggle is OFF, which is the default). Best-effort by
+/// construction: no running gateway, no control socket, or a Windows build
+/// (no control channel, hence no resident key) must never make locking fail.
+fn notify_gateway_vault_locked(data_dir: &std::path::Path, ttl_minutes: Option<u32>) {
+    let _ = gw_control::notify_vault_locked(data_dir, ttl_minutes);
+}
+
 /// Run `f` against the unlocked vault, enforcing inactivity auto-lock.
 fn with_vault<T>(
     state: &AppState,
@@ -106,6 +125,7 @@ fn with_vault_impl<T>(
         let expired = slot.vault.take(); // drop -> keys zeroized
         drop(slot);
         drop(expired);
+        notify_gateway_vault_locked(&state.data_dir, Some(auto_lock_minutes));
         return Err(locked_err());
     }
     if touch_activity {
@@ -126,13 +146,18 @@ struct VaultStatusDto {
 fn vault_status(state: State<'_, AppState>) -> CmdResult<VaultStatusDto> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     // Apply auto-lock on status polls too, so the UI locks visibly.
+    let mut auto_locked_minutes = None;
     if let Some(vault) = slot.vault.as_ref() {
         let minutes = vault.settings().auto_lock_minutes;
         if minutes > 0
             && slot.last_activity.elapsed() >= Duration::from_secs(u64::from(minutes) * 60)
         {
             slot.vault = None;
+            auto_locked_minutes = Some(minutes);
         }
+    }
+    if let Some(minutes) = auto_locked_minutes {
+        notify_gateway_vault_locked(&state.data_dir, Some(minutes));
     }
     Ok(VaultStatusDto {
         exists: state.paths().vault_exists(),
@@ -158,6 +183,11 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     slot.vault = Some(vault);
     slot.last_activity = Instant::now();
+    drop(slot);
+    // A re-authorized session cancels any pending keep-while-locked
+    // retention deadline in a running gateway (ADR 0020). No key material
+    // moves; a key that already expired stays gone until re-pushed.
+    let _ = gw_control::notify_vault_unlocked(&state.data_dir);
     Ok(())
 }
 
@@ -166,9 +196,11 @@ fn vault_lock(state: State<'_, AppState>) -> CmdResult<()> {
     let mut slot = state.slot.lock().expect("vault state mutex poisoned");
     // Drop after releasing the mutex — the drop checkpoints the WAL and can
     // briefly wait for a concurrent reader.
+    let minutes = slot.vault.as_ref().map(|v| v.settings().auto_lock_minutes);
     let vault = slot.vault.take();
     drop(slot);
     drop(vault);
+    notify_gateway_vault_locked(&state.data_dir, minutes);
     Ok(())
 }
 
@@ -910,10 +942,16 @@ fn backup_restore(
     // restored vault requires a fresh unlock with its own master password.
     // (On failure we leave the current session intact so the user is not
     // bounced to the unlock screen for a restore that never happened.)
-    {
+    let minutes = {
         let mut slot = state.slot.lock().expect("vault state mutex poisoned");
+        let minutes = slot.vault.as_ref().map(|v| v.settings().auto_lock_minutes);
         slot.vault = None;
-    }
+        minutes
+    };
+    // This is a lock event too — and the OLD vault's matching key must not
+    // stay resident in the gateway to attribute traffic against a vault that
+    // may no longer even exist (ADR 0020).
+    notify_gateway_vault_locked(&state.data_dir, minutes);
     Ok(info)
 }
 
@@ -2819,6 +2857,44 @@ fn gateway_push_key(state: State<'_, AppState>, password: String) -> CmdResult<(
 }
 
 #[tauri::command]
+fn gateway_match_while_locked_get(state: State<'_, AppState>) -> CmdResult<bool> {
+    with_vault(&state, |vault| {
+        gw_store::load_config(vault.connection()).map(|c| c.match_while_locked)
+    })
+}
+
+/// Flip the consented keep-matching-while-locked toggle (ADR 0020).
+///
+/// Enabling grants a RETAINED capability (the matching key survives vault
+/// lock, bounded by the auto-lock duration capped at 8 hours), so it is
+/// reauth-gated exactly like the key push itself. Disabling needs no reauth
+/// and, per SI-9 ("dropped on ... toggle-off"), immediately revokes any
+/// resident key best-effort.
+#[tauri::command]
+fn gateway_match_while_locked_set(
+    state: State<'_, AppState>,
+    enabled: bool,
+    password: Option<String>,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        if enabled {
+            let Some(password) = password.as_deref() else {
+                return Err(CoreError::InvalidInput(
+                    "enabling keep-while-locked requires the master password".into(),
+                ));
+            };
+            let password = SecretString::new(password.to_string());
+            vault.verify_master_password(&password)?;
+        }
+        gw_store::set_match_while_locked(vault.connection(), enabled)
+    })?;
+    if !enabled {
+        let _ = gw_control::send_revoke_key(&state.data_dir);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn gateway_revoke_key(state: State<'_, AppState>) -> CmdResult<()> {
     let nonce = gw_control::read_nonce(&state.data_dir).map_err(ErrDto::from)?;
     match gw_control::send(
@@ -3080,10 +3156,30 @@ fn main() {
             gateway_unlink,
             gateway_push_key,
             gateway_revoke_key,
+            gateway_match_while_locked_get,
+            gateway_match_while_locked_set,
             gateway_recording,
             gateway_activity,
             credential_activity_sources,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Tethra desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while running the Tethra desktop app")
+        .run(|app_handle, event| {
+            // Quitting the app ends the in-memory vault session — a lock
+            // event like any other (ADR 0020). Without this, a resident
+            // matching key would outlive the session that authorized it
+            // whenever the user simply closes Tethra. Best-effort; a
+            // crashed/killed process skips this (THREAT_MODEL GW-6).
+            if let tauri::RunEvent::Exit = event {
+                use tauri::Manager as _;
+                let state: State<'_, AppState> = app_handle.state();
+                let minutes = {
+                    let mut slot = state.slot.lock().expect("vault state mutex poisoned");
+                    let minutes = slot.vault.as_ref().map(|v| v.settings().auto_lock_minutes);
+                    slot.vault = None;
+                    minutes
+                };
+                notify_gateway_vault_locked(&state.data_dir, minutes);
+            }
+        });
 }

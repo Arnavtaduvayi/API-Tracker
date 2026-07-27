@@ -15,6 +15,8 @@ vi.mock("../api", async () => {
       gatewayLocateCli: vi.fn(),
       gatewayInstall: vi.fn(),
       gatewayRouteList: vi.fn().mockResolvedValue({ routes: [], skipped: [] }),
+      gatewayMatchWhileLockedGet: vi.fn().mockResolvedValue(false),
+      gatewayMatchWhileLockedSet: vi.fn().mockResolvedValue(undefined),
       providersList: vi.fn().mockResolvedValue([]),
       projectList: vi.fn().mockResolvedValue([]),
     },
@@ -26,6 +28,8 @@ import { GatewayView } from "./GatewayView";
 
 const mockApi = api as unknown as {
   gatewayDoctor: ReturnType<typeof vi.fn>;
+  gatewayMatchWhileLockedGet: ReturnType<typeof vi.fn>;
+  gatewayMatchWhileLockedSet: ReturnType<typeof vi.fn>;
   gatewayLocateCli: ReturnType<typeof vi.fn>;
   gatewayInstall: ReturnType<typeof vi.fn>;
 };
@@ -91,6 +95,8 @@ function running(): GatewayDoctor {
     routes_disabled: 0,
     routes_skipped: [],
     pid: 4242,
+    matching_key_deadline_secs: null,
+    matching_key_expired: false,
   };
   d.listener = { verdict: "verified", version: "0.1.0" };
   return d;
@@ -133,5 +139,53 @@ describe("GatewayView consent and honesty", () => {
     expect(
       screen.getByText(/absence of recorded traffic is not evidence of absence of traffic/),
     ).toBeInTheDocument();
+  });
+
+  it("states the drop-on-lock promise the implementation actually keeps", async () => {
+    mockApi.gatewayDoctor.mockResolvedValue(running());
+    render(<GatewayView />);
+    await userEvent.click(await screen.findByRole("button", { name: "Enable attribution…" }));
+    const body = await screen.findByText(/dropped on stop, revoke, or lock/);
+    expect(body).toBeInTheDocument();
+    // The consent copy must name the bound, not just the default.
+    expect(body.textContent).toMatch(/keep-while-locked defaults OFF/);
+    expect(body.textContent).toMatch(/at most your auto-lock duration \(8 h cap\)/);
+  });
+
+  it("shows the keep-while-locked countdown rather than a bare 'on'", async () => {
+    const d = running();
+    d.gateway!.matching_key_present = true;
+    d.gateway!.matching_key_deadline_secs = 25 * 60;
+    mockApi.gatewayDoctor.mockResolvedValue(d);
+    render(<GatewayView />);
+    expect(
+      await screen.findByText(/key drops in 25 min unless you unlock/),
+    ).toBeInTheDocument();
+  });
+
+  it("distinguishes an expired keep-while-locked window from a key never pushed", async () => {
+    const d = running();
+    d.gateway!.matching_key_present = false;
+    d.gateway!.matching_key_expired = true;
+    mockApi.gatewayDoctor.mockResolvedValue(d);
+    render(<GatewayView />);
+    expect(
+      await screen.findByText(/keep-while-locked window expired; push the key again/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/until a key is pushed/)).not.toBeInTheDocument();
+  });
+
+  it("requires reauthentication to turn keep-while-locked on", async () => {
+    mockApi.gatewayMatchWhileLockedGet.mockResolvedValue(false);
+    mockApi.gatewayDoctor.mockResolvedValue(running());
+    render(<GatewayView />);
+    await userEvent.click(
+      await screen.findByRole("checkbox", { name: /Keep matching while the vault is locked/ }),
+    );
+    expect(
+      await screen.findByText(/locking the vault immediately drops the gateway's matching key/),
+    ).toBeInTheDocument();
+    // Nothing is written until the password is supplied and confirmed.
+    expect(mockApi.gatewayMatchWhileLockedSet).not.toHaveBeenCalled();
   });
 });

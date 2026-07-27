@@ -126,6 +126,14 @@ pub enum GatewayCmd {
     PushKey,
     /// Drop the matching key from a running gateway immediately.
     RevokeKey,
+    /// Keep credential matching available while the vault is locked
+    /// (consented, default OFF; retention after a lock is bounded by your
+    /// auto-lock duration, capped at 8 hours — ADR 0020). Turning it off
+    /// drops any resident key immediately.
+    MatchWhileLocked {
+        #[arg(value_parser = ["on", "off"])]
+        state: String,
+    },
     /// Reload the route table in a running gateway.
     Reload,
     /// Pause or resume observation recording (forwarding is unaffected).
@@ -207,6 +215,7 @@ pub fn run(ctx: &Ctx, cmd: GatewayCmd) -> Result<()> {
         } => unlink(ctx, &project, &route, yes),
         GatewayCmd::PushKey => push_key(ctx),
         GatewayCmd::RevokeKey => simple(ctx, |nonce| control::Request::RevokeKey { nonce }),
+        GatewayCmd::MatchWhileLocked { state } => match_while_locked(ctx, state == "on"),
         GatewayCmd::Reload => simple(ctx, |nonce| control::Request::ReloadRoutes { nonce }),
         GatewayCmd::Recording { state } => {
             let pause = state == "pause";
@@ -868,6 +877,39 @@ fn install_key(ctx: &Ctx, data_dir: &std::path::Path) -> Result<()> {
 fn push_key(ctx: &Ctx) -> Result<()> {
     install_key(ctx, &ctx.paths.data_dir)?;
     println!("credential-matching key installed");
+    Ok(())
+}
+
+/// Flip the consented keep-matching-while-locked toggle (ADR 0020).
+/// Enabling grants a retained capability, so it is reauth-gated exactly like
+/// the key push; disabling drops any resident key immediately (SI-9).
+fn match_while_locked(ctx: &Ctx, enabled: bool) -> Result<()> {
+    let (vault, token) = ctx.unlocked()?;
+    if enabled {
+        let master = crate::ctx::prompt_secret("Master password")?;
+        vault
+            .verify_master_password(&master)
+            .context("enabling keep-while-locked requires the master password")?;
+    }
+    store::set_match_while_locked(vault.connection(), enabled)?;
+    ctx.persist_session(&vault, &token)?;
+    if enabled {
+        println!(
+            "keep-while-locked is ON: after the vault locks, a pushed matching key \
+             stays resident for up to your auto-lock duration (8 h cap), then \
+             attribution pauses until you push it again."
+        );
+    } else {
+        let revoked = control::send_revoke_key(&ctx.paths.data_dir);
+        println!(
+            "keep-while-locked is OFF: locking the vault drops the matching key{}",
+            if revoked {
+                "; the resident key was dropped now"
+            } else {
+                ""
+            }
+        );
+    }
     Ok(())
 }
 

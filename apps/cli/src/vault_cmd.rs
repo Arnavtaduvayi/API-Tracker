@@ -55,6 +55,9 @@ pub fn unlock(ctx: &Ctx, args: UnlockArgs) -> Result<()> {
     let token = SessionToken::generate();
     vault.save_session(&token)?;
     let auto_lock = vault.settings().auto_lock_minutes;
+    // A re-authorized session cancels any pending keep-while-locked
+    // matching-key retention deadline in a running gateway (ADR 0020).
+    let _ = api_tracker_gateway::control::notify_vault_unlocked(&ctx.paths.data_dir);
     if args.print_export {
         print_session_exports(&token);
     } else {
@@ -93,6 +96,17 @@ pub fn lock(ctx: &Ctx) -> Result<()> {
         println!("Session ended; the vault is locked for the CLI.");
     } else {
         println!("No active session; the vault was already locked.");
+    }
+    // Any lock event drops the gateway's resident matching key (default;
+    // ADR 0020 / SI-9) — including a CLI lock while the desktop still holds
+    // a session, which errs toward revocation: the desktop can re-push. The
+    // CLI cannot read auto_lock_minutes without a password, so it sends no
+    // TTL; with keep-while-locked ON the service applies the 8-hour cap.
+    if api_tracker_gateway::control::notify_vault_locked(&ctx.paths.data_dir, None) {
+        println!(
+            "A running gateway was notified; credential matching pauses unless \
+             keep-while-locked is enabled."
+        );
     }
     println!(
         "(If you exported {new} or {old}, unset them: `unset {new} {old}`.)",

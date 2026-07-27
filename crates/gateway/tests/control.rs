@@ -24,6 +24,8 @@ struct TestTarget {
     reloads: Mutex<u32>,
     paused: AtomicBool,
     stopped: AtomicBool,
+    locks: Mutex<Vec<Option<u32>>>,
+    unlocks: Mutex<u32>,
 }
 
 impl ControlTarget for TestTarget {
@@ -48,6 +50,12 @@ impl ControlTarget for TestTarget {
     }
     fn revoke_key(&self) {
         *self.key.lock().unwrap() = None;
+    }
+    fn vault_locked(&self, ttl_minutes: Option<u32>) {
+        self.locks.lock().unwrap().push(ttl_minutes);
+    }
+    fn vault_unlocked(&self) {
+        *self.unlocks.lock().unwrap() += 1;
     }
     fn reload_routes(&self) {
         *self.reloads.lock().unwrap() += 1;
@@ -646,4 +654,405 @@ fn a_service_refuses_to_start_twice_against_one_data_directory() {
     // After a clean stop, a fresh instance starts normally.
     let mut third = Service::start(dir.path(), 0).expect("start after a clean stop");
     third.stop();
+}
+
+// ---------------------------------------------------------------------------
+// Matching-key lock lifecycle (ADR 0020, SI-9)
+// ---------------------------------------------------------------------------
+
+/// Give the poller thread time to observe an expired retention window.
+#[cfg(unix)]
+fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..200 {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    false
+}
+
+#[cfg(unix)]
+fn service_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    dir
+}
+
+#[cfg(unix)]
+fn set_keep_while_locked(db: &std::path::Path, enabled: bool) {
+    let conn = open_db(db);
+    api_tracker_gateway::store::set_match_while_locked(&conn, enabled).unwrap();
+}
+
+/// Push a key into a running service the way the frontends do, over the
+/// authenticated channel, and assert it landed.
+#[cfg(unix)]
+fn push_key_into(data_dir: &std::path::Path) {
+    let nonce = control::read_nonce(data_dir).unwrap();
+    let response = control::send(
+        data_dir,
+        &Request::PushKey {
+            nonce: nonce.to_string(),
+            key_hex: KEY_HEX.into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(response, Response::Ok, "the key must install");
+}
+
+#[cfg(unix)]
+fn status_of(data_dir: &std::path::Path) -> Status {
+    let nonce = control::read_nonce(data_dir).unwrap();
+    match control::send(
+        data_dir,
+        &Request::Status {
+            nonce: nonce.to_string(),
+        },
+    )
+    .unwrap()
+    {
+        Response::Status(s) => *s,
+        other => panic!("expected status, got {other:?}"),
+    }
+}
+
+/// THE regression test for the audited blocker: by default, locking the
+/// vault drops the resident matching key. Mutation check — deleting the
+/// `vault_locked` wiring in `ServiceControl` (or the `notify_vault_locked`
+/// call in either frontend's lock path) fails this.
+#[cfg(unix)]
+#[test]
+fn locking_the_vault_revokes_the_resident_matching_key_by_default() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let _db = test_db(dir.path());
+    let mut service = Service::start(dir.path(), 0).unwrap();
+
+    push_key_into(dir.path());
+    assert!(
+        status_of(dir.path()).matching_key_present,
+        "precondition: the key is resident"
+    );
+
+    // The frontend-facing helper every lock path calls.
+    assert!(
+        control::notify_vault_locked(dir.path(), Some(15)),
+        "the lock signal must be delivered"
+    );
+
+    let after = status_of(dir.path());
+    assert!(
+        !after.matching_key_present,
+        "SI-9: locking the vault must drop the matching key when \
+         keep-while-locked is OFF (the shipped default)"
+    );
+    assert_eq!(
+        after.matching_key_deadline_secs, None,
+        "a revoked key must not leave a retention window armed"
+    );
+    service.stop();
+}
+
+/// Forwarding is untouched by a lock: the listener keeps serving and the
+/// route table is unaffected. (SI-12's lock twin — attribution degrades,
+/// forwarding does not.)
+#[cfg(unix)]
+#[test]
+fn forwarding_continues_after_the_lock_revokes_the_key() {
+    use api_tracker_gateway::service::Service;
+    use std::io::{Read, Write};
+    let dir = service_dir();
+    let _db = test_db(dir.path());
+    let mut service = Service::start(dir.path(), 0).unwrap();
+    let port = service.port();
+
+    push_key_into(dir.path());
+    assert!(control::notify_vault_locked(dir.path(), None));
+    assert!(!status_of(dir.path()).matching_key_present);
+
+    // The listener still answers. No route is registered, so the honest
+    // answer is a 404 — what matters is that the port is still served and
+    // the connection is not refused.
+    let mut sock = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    write!(
+        sock,
+        "GET /openai/v1/models HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut got = String::new();
+    sock.read_to_string(&mut got).unwrap();
+    assert!(
+        got.starts_with("HTTP/1.1 "),
+        "the gateway must keep serving after a vault lock, got: {got:?}"
+    );
+    assert!(
+        !got.starts_with("HTTP/1.1 5"),
+        "a lock must not turn forwarding into a server error, got: {got:?}"
+    );
+    service.stop();
+}
+
+/// An unreadable / malformed policy configuration fails TOWARD revocation.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_policy_config_fails_toward_revoking_the_key() {
+    use api_tracker_gateway::service::{lock_disposition, LockDisposition};
+    let dir = service_dir();
+
+    // No database at all.
+    assert_eq!(
+        lock_disposition(&dir.path().join("vault.db"), Some(60)),
+        LockDisposition::RevokeNow,
+        "a missing database must not be read as consent to retain the key"
+    );
+
+    // A file that is not a database.
+    let junk = dir.path().join("junk.db");
+    std::fs::write(&junk, b"this is not a sqlite database").unwrap();
+    assert_eq!(
+        lock_disposition(&junk, Some(60)),
+        LockDisposition::RevokeNow,
+        "a malformed database must fail toward revocation"
+    );
+
+    // A real database whose toggle is OFF (the default).
+    let db = test_db(dir.path());
+    assert_eq!(
+        lock_disposition(&db, Some(60)),
+        LockDisposition::RevokeNow,
+        "the toggle defaults OFF, so a lock revokes"
+    );
+}
+
+/// With the consented toggle ON the key survives the lock — but only inside
+/// a bounded window, and the window is visible in status.
+#[cfg(unix)]
+#[test]
+fn keep_while_locked_retains_the_key_within_a_bounded_window() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    set_keep_while_locked(&db, true);
+    let mut service = Service::start(dir.path(), 0).unwrap();
+
+    push_key_into(dir.path());
+    assert!(control::notify_vault_locked(dir.path(), Some(30)));
+
+    let after = status_of(dir.path());
+    assert!(
+        after.matching_key_present,
+        "the consented opt-out must be honored"
+    );
+    let remaining = after
+        .matching_key_deadline_secs
+        .expect("retention must be bounded, never indefinite");
+    assert!(
+        remaining > 0 && remaining <= 30 * 60,
+        "the window must be bounded by the requested 30 minutes, got {remaining}s"
+    );
+    service.stop();
+}
+
+/// The TTL is a CAP, not a suggestion: a caller asking for longer than the
+/// documented maximum gets the maximum.
+#[test]
+fn the_retention_request_is_clamped_to_the_documented_cap() {
+    use api_tracker_gateway::service::{
+        effective_retention_minutes, MATCH_WHILE_LOCKED_TTL_CAP_MINUTES,
+    };
+    assert_eq!(effective_retention_minutes(Some(15)), 15, "under the cap");
+    assert_eq!(
+        effective_retention_minutes(Some(100_000)),
+        MATCH_WHILE_LOCKED_TTL_CAP_MINUTES,
+        "a caller cannot ask for more than the cap"
+    );
+    assert_eq!(
+        effective_retention_minutes(None),
+        MATCH_WHILE_LOCKED_TTL_CAP_MINUTES,
+        "no stated duration (auto-lock disabled) still expires at the cap"
+    );
+    assert_eq!(
+        effective_retention_minutes(Some(0)),
+        MATCH_WHILE_LOCKED_TTL_CAP_MINUTES,
+        "auto-lock disabled (0) must not mean 'forever'"
+    );
+    assert_eq!(
+        MATCH_WHILE_LOCKED_TTL_CAP_MINUTES, 480,
+        "the documented cap is 8 hours (ADR 0020); changing it is a product \
+         decision that must update the ADR and the consent copy"
+    );
+}
+
+/// When the bounded window expires, the key is actually dropped by the
+/// running service — and status says so honestly.
+#[cfg(unix)]
+#[test]
+fn an_expired_keep_while_locked_window_drops_the_key() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    set_keep_while_locked(&db, true);
+    let mut service = Service::start(dir.path(), 0).unwrap();
+
+    push_key_into(dir.path());
+    assert!(control::notify_vault_locked(dir.path(), Some(30)));
+    assert!(status_of(dir.path()).matching_key_present);
+
+    // Arm an already-elapsed deadline rather than sleeping 30 minutes.
+    service.key_retention().arm_already_expired_for_test();
+
+    assert!(
+        wait_until(|| !status_of(dir.path()).matching_key_present),
+        "the service must enforce its own retention window"
+    );
+    let after = status_of(dir.path());
+    assert!(
+        after.matching_key_expired,
+        "expiry must be distinguishable from 'never pushed'"
+    );
+    assert_eq!(after.matching_key_deadline_secs, None);
+    service.stop();
+}
+
+/// Unlocking cancels a pending window; a fresh push clears the expired flag.
+#[cfg(unix)]
+#[test]
+fn unlocking_cancels_the_window_and_a_fresh_push_clears_the_expiry() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    set_keep_while_locked(&db, true);
+    let mut service = Service::start(dir.path(), 0).unwrap();
+
+    push_key_into(dir.path());
+    assert!(control::notify_vault_locked(dir.path(), Some(30)));
+    assert!(status_of(dir.path()).matching_key_deadline_secs.is_some());
+
+    assert!(control::notify_vault_unlocked(dir.path()));
+    let after = status_of(dir.path());
+    assert!(
+        after.matching_key_deadline_secs.is_none(),
+        "a re-authorized session cancels the countdown"
+    );
+    assert!(
+        after.matching_key_present,
+        "unlocking must not drop a key the user still wants"
+    );
+
+    // Expire it, then re-push: the expired marker must clear.
+    service.key_retention().arm_already_expired_for_test();
+    assert!(wait_until(|| !status_of(dir.path()).matching_key_present));
+    assert!(status_of(dir.path()).matching_key_expired);
+    push_key_into(dir.path());
+    let after = status_of(dir.path());
+    assert!(after.matching_key_present);
+    assert!(
+        !after.matching_key_expired,
+        "a fresh authorization clears the expiry marker"
+    );
+    service.stop();
+}
+
+/// Restart behavior: a service that starts (or restarts) never reconstructs
+/// a resident key from anything on disk. Attribution stays off until a
+/// vault session pushes it again.
+#[cfg(unix)]
+#[test]
+fn a_restarted_service_never_reconstructs_the_matching_key() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    // Even with the consented toggle ON, which is the strongest case for
+    // "the user wants matching to persist".
+    set_keep_while_locked(&db, true);
+
+    let mut first = Service::start(dir.path(), 0).unwrap();
+    push_key_into(dir.path());
+    assert!(status_of(dir.path()).matching_key_present);
+    first.stop();
+
+    let mut second = Service::start(dir.path(), 0).unwrap();
+    let after = status_of(dir.path());
+    assert!(
+        !after.matching_key_present,
+        "a restart must not resurrect the key: nothing persists it, and \
+         keep-while-locked bounds residency WITHIN a process, never across one"
+    );
+    assert_eq!(after.matching_key_deadline_secs, None);
+    second.stop();
+}
+
+/// Turning the toggle OFF drops a resident key immediately (SI-9
+/// "toggle-off"), without waiting for a lock.
+#[cfg(unix)]
+#[test]
+fn disabling_keep_while_locked_drops_the_resident_key_now() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    set_keep_while_locked(&db, true);
+    let mut service = Service::start(dir.path(), 0).unwrap();
+    push_key_into(dir.path());
+    assert!(status_of(dir.path()).matching_key_present);
+
+    // What the CLI/desktop toggle-off path does.
+    set_keep_while_locked(&db, false);
+    assert!(control::send_revoke_key(dir.path()));
+
+    assert!(
+        !status_of(dir.path()).matching_key_present,
+        "turning the opt-out off must not wait for the next lock"
+    );
+    service.stop();
+}
+
+/// A lock signal that arrives with no key resident is a no-op, not a way to
+/// arm a window that would later be honored against a future key.
+#[cfg(unix)]
+#[test]
+fn a_lock_with_no_resident_key_arms_nothing() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    set_keep_while_locked(&db, true);
+    let mut service = Service::start(dir.path(), 0).unwrap();
+
+    assert!(control::notify_vault_locked(dir.path(), Some(30)));
+    let after = status_of(dir.path());
+    assert!(!after.matching_key_present);
+    assert_eq!(
+        after.matching_key_deadline_secs, None,
+        "no key, no window — a later push must start from a clean slate"
+    );
+    service.stop();
+}
+
+/// Repeated lock events only ever TIGHTEN the deadline. Otherwise the
+/// desktop's 10-second status poll would refresh the window forever while
+/// the vault stayed locked, making the bound meaningless.
+#[cfg(unix)]
+#[test]
+fn repeated_lock_signals_never_extend_the_window() {
+    use api_tracker_gateway::service::Service;
+    let dir = service_dir();
+    let db = test_db(dir.path());
+    set_keep_while_locked(&db, true);
+    let mut service = Service::start(dir.path(), 0).unwrap();
+    push_key_into(dir.path());
+
+    assert!(control::notify_vault_locked(dir.path(), Some(5)));
+    let first = status_of(dir.path()).matching_key_deadline_secs.unwrap();
+    // A later, LONGER request (e.g. a poll that reports the 8-hour cap).
+    assert!(control::notify_vault_locked(dir.path(), Some(480)));
+    let second = status_of(dir.path()).matching_key_deadline_secs.unwrap();
+    assert!(
+        second <= first,
+        "a repeated lock must not extend the window: {first}s -> {second}s"
+    );
+    service.stop();
 }

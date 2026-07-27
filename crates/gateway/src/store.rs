@@ -70,6 +70,29 @@ pub fn load_config(conn: &Connection) -> Result<GatewayConfig> {
     Ok(row.unwrap_or_default())
 }
 
+/// Flip the consented keep-matching-while-locked toggle (ADR 0020). One
+/// implementation for both frontends so the audit trail and the read-modify-
+/// write cannot drift apart. Callers are responsible for reauth on enable
+/// (it grants a retained capability) and for the best-effort immediate key
+/// revoke on disable (SI-9: toggle-off drops the key).
+pub fn set_match_while_locked(conn: &Connection, enabled: bool) -> Result<()> {
+    let mut config = load_config(conn)?;
+    config.match_while_locked = enabled;
+    save_config(conn, &config)?;
+    api_tracker_core::audit::record(
+        conn,
+        if enabled {
+            "gateway_match_while_locked_enabled"
+        } else {
+            "gateway_match_while_locked_disabled"
+        },
+        None,
+        None,
+        "",
+    )?;
+    Ok(())
+}
+
 pub fn save_config(conn: &Connection, config: &GatewayConfig) -> Result<()> {
     let now = clock::now_rfc3339();
     conn.execute(

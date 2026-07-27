@@ -587,6 +587,9 @@ export const api = {
     call<GatewayUnlinkReport>("gateway_unlink", { project, route }),
   gatewayPushKey: (password: string) => call<void>("gateway_push_key", { password }),
   gatewayRevokeKey: () => call<void>("gateway_revoke_key"),
+  gatewayMatchWhileLockedGet: () => call<boolean>("gateway_match_while_locked_get"),
+  gatewayMatchWhileLockedSet: (enabled: boolean, password?: string) =>
+    call<void>("gateway_match_while_locked_set", { enabled, password: password ?? null }),
   gatewayRecording: (pause: boolean) => call<void>("gateway_recording", { pause }),
   gatewayActivity: (since: string | null) =>
     call<GatewayActivitySummary>("gateway_activity", { since }),
