@@ -202,8 +202,24 @@ fn refuse_dangerous_roots(canonical: &Path) -> Result<()> {
     if canonical.parent().is_none() {
         return refuse("it is the filesystem root");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
+    // Every spelling of "the user's home directory" this platform uses.
+    // `HOME` alone is Unix-biased: Windows sets `USERPROFILE` (and
+    // `HOMEDRIVE`+`HOMEPATH`) instead, so checking only `HOME` let a
+    // Windows home directory through and scanned it — caught by CI, not
+    // by inspection.
+    let mut homes: Vec<PathBuf> = Vec::new();
+    for var in ["HOME", "USERPROFILE"] {
+        if let Some(value) = std::env::var_os(var) {
+            homes.push(PathBuf::from(value));
+        }
+    }
+    if let (Some(drive), Some(path)) = (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH"))
+    {
+        let mut joined = drive;
+        joined.push(path);
+        homes.push(PathBuf::from(joined));
+    }
+    for home in homes {
         let home = home.canonicalize().unwrap_or(home);
         if canonical == home {
             return refuse("it is your home directory");

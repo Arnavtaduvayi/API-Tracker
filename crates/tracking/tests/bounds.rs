@@ -48,7 +48,11 @@ fn refuses_the_home_directory_and_its_container() {
         eprintln!("skipped: neither HOME nor USERPROFILE is set");
         return;
     };
-    let err = try_detect(&conn, Path::new(&home)).unwrap_err();
+    let err = try_detect(&conn, Path::new(&home)).expect_err(
+        "the home directory must be refused. On Windows this fails when the \
+         refusal only consults HOME — USERPROFILE (and HOMEDRIVE+HOMEPATH) \
+         name the home directory there.",
+    );
     assert!(err.to_string().contains("refusing to scan"), "{err}");
     // The container of home directories, via a path that canonicalizes to
     // it (bounds must hold post-canonicalization).
@@ -61,6 +65,46 @@ fn refuses_the_home_directory_and_its_container() {
         let dodged = users.join("..").join(users.file_name().unwrap());
         let err = try_detect(&conn, &dodged).unwrap_err();
         assert!(err.to_string().contains("refusing to scan"), "{err}");
+    }
+}
+
+/// Whichever variable names the home directory on THIS platform, the
+/// refusal must fire. Pins the Windows regression CI caught: the check
+/// consulted only `HOME`, which Windows does not set, so a Windows home
+/// directory was scanned in full.
+#[test]
+fn the_home_refusal_covers_this_platforms_home_variable() {
+    let (_db, conn) = test_conn();
+    let mut checked = 0;
+    for var in ["HOME", "USERPROFILE"] {
+        let Ok(value) = std::env::var(var) else {
+            continue;
+        };
+        if value.trim().is_empty() {
+            continue;
+        }
+        checked += 1;
+        let err = try_detect(&conn, Path::new(&value))
+            .unwrap_err_or_else_msg(&format!("${var} ({value}) was scanned instead of refused"));
+        assert!(err.contains("refusing to scan"), "${var}: {err}");
+    }
+    assert!(
+        checked > 0,
+        "no home variable was set, so this bound was never exercised"
+    );
+}
+
+/// Small helper so the failure message names the variable that leaked.
+trait UnwrapErrMsg {
+    fn unwrap_err_or_else_msg(self, msg: &str) -> String;
+}
+
+impl UnwrapErrMsg for api_tracker_core::Result<api_tracker_tracking::detect::ProjectDetection> {
+    fn unwrap_err_or_else_msg(self, msg: &str) -> String {
+        match self {
+            Ok(_) => panic!("{msg}"),
+            Err(e) => e.to_string(),
+        }
     }
 }
 
