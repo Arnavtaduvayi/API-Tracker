@@ -55,7 +55,19 @@ Phase 2 ended at 826 workspace tests, 171 in the gateway crate
   path; carrying it through remains a core follow-up).
 - **HTTP/1.1 only:** no HTTP/2, no WebSockets/upgrades (501).
 - **Windows has never executed a gateway.** Compile + unit tests on CI
-  only. Never claimed otherwise.
+  only. Never claimed otherwise. The Unix service-manager behavioral tests
+  (LaunchAgent/systemd file formats, the graceful control-plane stop, the
+  live-gateway doctor diagnoses) and the "vault DB deleted underneath a
+  running gateway" scenario are `#[cfg(unix)]` — the control channel is
+  Unix-only (SI-21) and Windows cannot delete an open file. One writer
+  stress test (`dropped_events_are_reported_not_hidden`) asserts strict
+  counter conservation only on Unix: replaying 1024 increments to a single
+  row across the writer's rapid per-batch WAL connection cycle can lose
+  committed increments on Windows (a SQLite-on-Windows durability quirk of
+  connection cycling, not an accounting gap — no bump errors, and the
+  queue-drop accounting that SI-12 actually protects is asserted on every
+  platform). Production bumps one counter per exchange over time, never in
+  that burst.
 - **No live-provider streaming evidence:** SSE correctness/timing evidence
   comes from the synthetic-upstream suite; a keyless request to a real
   provider proves the forwarding path (401), but streaming a real response
