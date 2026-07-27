@@ -3937,7 +3937,9 @@ struct TrackingHealthDto {
 #[derive(Serialize)]
 struct TrackingHistoryDto {
     first_verified_at: Option<String>,
-    last_observed_at: Option<String>,
+    /// The FIRST observation of the current configuration. The most recent
+    /// observation is per-provider, in the `providers` list.
+    session_first_observed_at: Option<String>,
     verification_session: Option<String>,
     config_generation: i64,
     /// The one-line history sentence, or `None` when this setup has never
@@ -3973,20 +3975,30 @@ fn health_dto(health: &tracking_state::CurrentHealth) -> TrackingHealthDto {
 }
 
 fn history_dto(history: &tracking_state::VerificationHistory) -> TrackingHistoryDto {
-    let sentence = match (&history.first_verified_at, &history.last_observed_at) {
-        (Some(first), Some(last)) => Some(format!(
-            "First verified {first}. Most recent observation in this configuration: {last}."
+    // `session_first_observed_at` is the FIRST observation of the current
+    // configuration, not the most recent one. Calling it "most recent" put
+    // an older timestamp directly above the per-provider "last seen", which
+    // is newer — one card contradicting itself.
+    let sentence = match (
+        &history.first_verified_at,
+        &history.session_first_observed_at,
+    ) {
+        (Some(first), Some(session_first)) => Some(format!(
+            "First verified {first}. First observation since the configuration last changed: \
+             {session_first}. Per-provider timings below are the most recent."
         )),
         (Some(first), None) => Some(format!(
             "First verified {first}. Nothing has been observed since the configuration last \
              changed."
         )),
-        (None, Some(last)) => Some(format!("Last observed {last}.")),
+        (None, Some(session_first)) => Some(format!(
+            "First observed {session_first}. Per-provider timings below are the most recent."
+        )),
         (None, None) => None,
     };
     TrackingHistoryDto {
         first_verified_at: history.first_verified_at.clone(),
-        last_observed_at: history.last_observed_at.clone(),
+        session_first_observed_at: history.session_first_observed_at.clone(),
         verification_session: history.verification_session.clone(),
         config_generation: history.config_generation,
         sentence,

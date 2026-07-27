@@ -92,7 +92,7 @@ function setup(over: Partial<TrackingStatus> = {}): TrackingStatus {
     health: activeHealth,
     history: {
       first_verified_at: "2026-07-20T08:00:00Z",
-      last_observed_at: "2026-07-27T10:00:00Z",
+      session_first_observed_at: "2026-07-27T10:00:00Z",
       verification_session: "sess-1",
       config_generation: 1,
       sentence:
@@ -253,7 +253,7 @@ describe("DashboardView current vs historical status (ZFT-005)", () => {
         },
         history: {
           first_verified_at: null,
-          last_observed_at: null,
+          session_first_observed_at: null,
           verification_session: null,
           config_generation: 1,
           sentence: null,

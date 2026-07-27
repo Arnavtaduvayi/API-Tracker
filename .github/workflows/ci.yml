@@ -136,7 +136,7 @@ jobs:
     # It runs the packaged validation at `--scope offline`, which is the
     # largest scope a hosted runner can execute HONESTLY:
     #
-    #   REQUIRED here (22 checks, every one of them fails the build):
+    #   REQUIRED here (20 checks, every one of them fails the build):
     #     - the bundle carries a runnable native helper at Contents/MacOS
     #     - the helper's MEASURED --version equals the bundle's Info.plist
     #       version, and its bytes equal the sidecar staged from this source

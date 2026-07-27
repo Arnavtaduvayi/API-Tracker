@@ -584,24 +584,127 @@ fn mask_assignment(line: &str) -> String {
     // "example" was printed verbatim, credentials and all, to stdout and
     // across IPC (ZFT-017).
     //
-    // The diff exists so the user can see what is about to change, so
-    // masking everything would damage the consent surface it serves —
-    // `A=1` and `NODE_ENV=production` have to stay legible. The rule is
-    // therefore structural rather than lexical: a value stays legible only
-    // when it is SHORT and carries nothing that could be key material.
-    // Length alone bounds what a mistake can disclose; `looks_like_key_material`
-    // catches userinfo, query strings and high-entropy runs regardless of
-    // any word that happens to appear in them.
+    // The first replacement for it was worse. "Short AND not key-shaped"
+    // is a DENYLIST wearing a length limit, and it let `DB_PASSWORD=Tr0ub4dor3`
+    // and `SHORT_KEY=9f2c8a71e45b30d6` through — values the ORIGINAL code
+    // masked. A rule that leaks more than the defect it replaces is not a
+    // fix, and it was caught by an adversarial reviewer running the two
+    // trees side by side, not by any test written for it.
     //
-    // The failure directions are deliberately asymmetric: an over-masked
-    // configuration value costs a reader one glance at the file, while an
-    // under-masked one prints a credential.
-    const MAX_LEGIBLE_VALUE: usize = 16;
-    if value.chars().count() <= MAX_LEGIBLE_VALUE && !crate::scanner::looks_like_key_material(value)
-    {
+    // So: mask by DEFAULT, and exempt only values that are structurally
+    // incapable of carrying a secret. That is an allowlist, and an
+    // allowlist is the only shape that fails safe when someone invents a
+    // new secret format.
+    let name = line[..eq].trim();
+    if name_suggests_a_credential(name) {
+        // A variable NAMED for a secret is masked whatever its value looks
+        // like. No allowlist entry can override this.
+        return format!("{}={}", &line[..eq], mask_value(value));
+    }
+    if value_is_structurally_not_a_secret(value) {
         return line.to_string();
     }
     format!("{}={}", &line[..eq], mask_value(value))
+}
+
+/// Whether a variable NAME is one whose value must always be masked,
+/// regardless of shape.
+fn name_suggests_a_credential(name: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "TOKEN",
+        "API_KEY",
+        "APIKEY",
+        "CREDENTIAL",
+        "PRIVATE",
+        "AUTH",
+        "SIGNING",
+        "CERT",
+        "SALT",
+        "SESSION",
+        "COOKIE",
+    ];
+    let upper = name.to_ascii_uppercase();
+    upper.ends_with("_KEY") || NEEDLES.iter().any(|n| upper.contains(n))
+}
+
+/// Whether a value belongs to one of the few shapes that cannot be a
+/// credential, and may therefore stay legible in a diff.
+///
+/// The diff exists so a user can see what is about to change, so masking
+/// literally everything would damage the consent surface it serves —
+/// `NODE_ENV=production` and `PORT=3000` have to stay readable. This is
+/// the whole exemption, and it is deliberately tiny: an over-masked
+/// configuration value costs a reader one glance at the file, while an
+/// under-masked one prints a credential.
+fn value_is_structurally_not_a_secret(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return true;
+    }
+    // A number, with optional sign, decimal point or unit-ish suffix.
+    if v.len() <= 12
+        && v.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.'))
+    {
+        return true;
+    }
+    // A boolean or a common single-word setting. Compared WHOLE, never as
+    // a substring — a substring test is what produced ZFT-017.
+    const WORDS: &[&str] = &[
+        "true",
+        "false",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "none",
+        "null",
+        "development",
+        "dev",
+        "production",
+        "prod",
+        "staging",
+        "stage",
+        "test",
+        "testing",
+        "local",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "trace",
+        "silent",
+        "verbose",
+    ];
+    let lower = v.to_ascii_lowercase();
+    if WORDS.contains(&lower.as_str()) {
+        return true;
+    }
+    // A bare origin or base URL: scheme + host + optional port + a path of
+    // ordinary path words. No userinfo, no query, no fragment, and no
+    // segment that could be key material — all of which
+    // `looks_like_key_material` already rejects.
+    if (v.starts_with("https://") || v.starts_with("http://"))
+        && !crate::scanner::looks_like_key_material(v)
+    {
+        let rest = v.split_once("://").map(|(_, r)| r).unwrap_or(v);
+        let ordinary = rest
+            .split(['/', ':'])
+            .filter(|seg| !seg.is_empty())
+            .all(|seg| {
+                seg.len() <= 24
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            });
+        if ordinary {
+            return true;
+        }
+    }
+    false
 }
 
 /// Create `path` fresh with owner-only permissions, failing if it already

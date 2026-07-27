@@ -344,6 +344,14 @@ export function TrackFlow({
       try {
         const status = await api.trackingStatus(setupId);
         setWaitedMs(Date.now() - started);
+        // An observation ends the wait either way — polling again cannot
+        // help a gateway that is down, and the user needs to know now. But
+        // what the screen then SAYS is decided by `health`, not by `watch`:
+        // `watch` comes from `check_traffic`, which is liveness-blind by
+        // construction (it passes `GatewayLiveness::Unknown`), so gating
+        // the headline on it let "verified previously, gateway down" render
+        // as an unqualified "Tracking verified" — ZFT-005 closed on the
+        // dashboard but still open on this screen.
         if (status.watch === "observed" || status.watch === "partial") {
           stopPolling();
           setPhase({ name: "verified", status });
@@ -1005,8 +1013,15 @@ export function TrackFlow({
     const unseen = status.providers.filter((p) => !p.last_observed_at);
     return (
       <section className="stack">
-        <h1>Tracking verified</h1>
-        <p>{status.health.sentence}</p>
+        <h1>
+          {status.health.currently_working ? "Tracking verified" : "Tracking needs attention"}
+        </h1>
+        <p
+          className={status.health.currently_working ? undefined : "warnbox"}
+          role={status.health.currently_working ? undefined : "alert"}
+        >
+          {status.health.sentence}
+        </p>
         {status.observed_provider && (
           <p>
             Observed {status.observed_provider} from {status.folder}

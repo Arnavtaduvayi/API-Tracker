@@ -146,10 +146,15 @@ esac
 #       + IDEMPOTENCE 4 + UNDO 4                        = 56 common to scope=full
 #   ... + FOREGROUND 3 = 59      |      ... + SERVICE 5 = 61
 case "$SCOPE:$MODE" in
+  # These totals are enforced at the end of the run, so a check that is
+  # added, removed or silently skipped fails the script rather than shifting
+  # the number quietly. Two former BUNDLE "checks" became uncounted
+  # PRECONDITIONS (a `check` followed by `die` on the failing branch can
+  # never be reported as a failure), which is why offline is 20 and not 22.
   selfcheck:*)     EXPECTED=5  ;;
-  offline:*)       EXPECTED=22 ;;
-  full:foreground) EXPECTED=59 ;;
-  full:service)    EXPECTED=61 ;;
+  offline:*)       EXPECTED=20 ;;
+  full:foreground) EXPECTED=57 ;;
+  full:service)    EXPECTED=60 ;;
   *) echo "internal error: no expected count for $SCOPE:$MODE" >&2; exit 2 ;;
 esac
 
@@ -268,10 +273,15 @@ cleanup() {
     echo "  stopped the foreground gateway (pid $SERVE_PID)"
   fi
   # Only ever remove a LaunchAgent this run actually installed.
+  # SERVICE_INSTALLED holds the resolved path of the plist THIS run
+  # installed, so cleanup removes exactly that and nothing else. It used to
+  # boot out `$LABEL` — a variable that no longer exists — and delete the
+  # LEGACY path, so a real namespaced agent would have been orphaned.
   if [ "$MODE" = "service" ] && [ -n "${SERVICE_INSTALLED:-}" ]; then
     "$HELPER" gateway uninstall --yes >/dev/null 2>&1
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1
-    rm -f "$PLIST"
+    launchctl bootout "gui/$(id -u)/$(basename "$SERVICE_INSTALLED" .plist)" >/dev/null 2>&1
+    rm -f "$SERVICE_INSTALLED"
+    echo "  removed the LaunchAgent this run installed: $SERVICE_INSTALLED"
   fi
   rm -rf "$DIR" "$COPIES"
   echo "  cleaned $DIR"
@@ -352,7 +362,9 @@ check: a weakened bad() cannot be trusted to report its own weakening. No
 number from this run is quotable."
   fi
 }
-sc_false_condition() { [ 1 -eq 2 ]; check $? "control: 1 equals 2"; }
+# Each control writes a sentinel first, so the gate above can prove it was
+# actually invoked rather than merely reported on.
+sc_false_condition() { : > "$DIR/.gate-ran"; [ 1 -eq 2 ]; check $? "control: 1 equals 2"; }
 sc_true_condition()  { [ 1 -eq 1 ]; check $? "control: 1 equals 1"; }
 sc_newline_drift()   { assert_same_bytes "$DIR/.sc-a" "$DIR/.sc-b" "control: trailing-newline drift"; }
 sc_false_db()        { assert_db "SELECT 1=0" "control: a query returning 0"; }
@@ -361,6 +373,48 @@ sc_true_db()         { assert_db "SELECT 1=1" "control: a query returning 1"; }
 group HARNESS
 step "harness self-check (a harness that cannot fail is caught here)"
 mkdir -p "$DIR"
+
+# THE GUARD'S OWN GUARD.
+#
+# An adversarial reviewer replaced `selfcheck()` with `selfcheck() { ok "$2"; }`
+# and the script still reported "5 passed, 0 failed (5/5 checks), exit 0" —
+# the count-equality gate cannot see it, because the count is preserved. So
+# the gate that certifies every other check could be disabled by one line,
+# which is the same class of defect it exists to catch.
+#
+# The FIRST attempt at this guard was itself vacuous: it required the
+# counters to move by +1 pass / +0 fail, which is exactly what BOTH the real
+# `selfcheck` and the `ok "$2"` bypass produce (the real one runs its control
+# in a subshell, so the control's own tally never reaches the parent). It is
+# recorded here because it is the same mistake twice, and the lesson is that
+# a guard must be tested against the mutation it claims to catch.
+#
+# Two properties actually discriminate:
+#
+#   1. the gate must RUN the control — a bypass never invokes it at all;
+#   2. the gate must REJECT a mismatch — asked to certify a KNOWN-FAILING
+#      control as passing, it must abort. A bypass reports success.
+#
+# The second runs in a subshell so its deliberate abort cannot end this run.
+__probe="$DIR/.gate-ran"
+rm -f "$__probe"
+if ( selfcheck pass "gate probe (must not be reported)" sc_false_condition ) >/dev/null 2>&1
+then
+  die "the harness self-check gate ACCEPTED a known-failing control as a pass.
+That means the gate is not evaluating verdicts at all — a selfcheck()
+replaced by a bare ok() produces exactly this, and the count-equality gate
+cannot see it because the count is preserved.
+No number from this run is quotable."
+fi
+if [ ! -f "$__probe" ]; then
+  die "the harness self-check gate did not RUN its control (the sentinel
+$__probe was never created). A gate that does not execute what it certifies
+certifies nothing.
+No number from this run is quotable."
+fi
+rm -f "$__probe"
+unset __probe
+
 selfcheck fail "a known-false shell condition is reported as a FAILURE" sc_false_condition
 selfcheck pass "a known-true shell condition is reported as a PASS"     sc_true_condition
 
@@ -388,8 +442,11 @@ if [ "$SCOPE" != "selfcheck" ]; then
 group BUNDLE
 step "preconditions (a clean machine, packaged app only)"
 
-[ -x "$HELPER" ]
-check $? "the packaged app contains an executable helper at Contents/MacOS/tethra"
+# PRECONDITION, not a check. This used to `check` and then `die` on the
+# failing branch, so it was a pass with probability 1 in any run that got as
+# far as printing a total — a counted check that could never be reported as
+# a failure is the ZFT-VAL-7 shape wearing a label. It aborts instead, and
+# is not tallied.
 [ -x "$HELPER" ] || die "no runnable helper inside the app bundle at $HELPER.
 The packaged app MUST ship its helper (scripts/bundle_cli.sh + externalBin)."
 
@@ -420,8 +477,7 @@ assert_same_bytes "$SIDECAR" "$HELPER" \
 # Deliberately strip every place a developer CLI could hide, so nothing but
 # the bundled helper can satisfy the run.
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
-! command -v tethra >/dev/null 2>&1
-check $? "no tethra CLI is reachable on the stripped PATH"
+# PRECONDITION, not a check — same reason as the helper check above.
 command -v tethra >/dev/null 2>&1 && \
   die "a tethra CLI is still on PATH ($(command -v tethra)); this run would not prove bundling."
 
@@ -479,14 +535,27 @@ if [ "$MODE" = "service" ]; then
   # ZFT-VAL-4: the old script silently switched to foreground here and kept
   # the same total, so the evidence could be quieter than its label. This
   # aborts instead.
-  [ ! -f "$PLIST" ]
-  check $? "no pre-existing gateway LaunchAgent for $LABEL"
-  [ -f "$PLIST" ] && die "a gateway LaunchAgent already exists at $PLIST.
+  #
+  # The interlock is a PRECONDITION, not a check: awarding a counted pass
+  # for "the machine happened to be clean" is the shape ZFT-VAL-7 objected
+  # to, and this branch used to do exactly that ten lines from the
+  # foreground branch that refuses to. It globs for the namespaced names as
+  # well as the legacy one — the product writes
+  # `dev.api-tracker.gateway.<installation-id>.plist` now (ADR 0026), so
+  # checking only the legacy path would wave through the machine most
+  # likely to have one.
+  EXISTING_AGENTS=""
+  for candidate in "$PLIST" "$LA_DIR/$LEGACY_LABEL".*.plist; do
+    [ -f "$candidate" ] && EXISTING_AGENTS="$EXISTING_AGENTS
+  $candidate"
+  done
+  [ -z "$EXISTING_AGENTS" ] || die "a gateway LaunchAgent already exists:$EXISTING_AGENTS
+
 --require-service will not overwrite it and will not downgrade to foreground.
 Run this on a machine with no installed Tethra gateway. Passing --foreground
-is NOT a workaround here: --scope full applies a real configuration whose
-service step targets the same global label, so it refuses on this machine
-too. Use --scope offline (22 checks) instead."
+is NOT a workaround: --scope full applies a real configuration whose service
+step reaches the same login slot, so it refuses there too.
+Use --scope offline (20 checks) instead."
 elif [ "$MODE" = "foreground" ]; then
   group FOREGROUND
   step "foreground gateway (the unsigned-build fallback path)"
@@ -524,7 +593,7 @@ hard-stop rather than damage anything — but a pre-namespacing helper under
 test would boot that gateway out of its slot (ZFT-014), and a legacy agent
 pointing at this data directory would be migrated. A run that succeeds only
 because the machine happened to be clean is not evidence either.
-Run '--scope offline' on this machine (22 checks: packaging, helper
+Run '--scope offline' on this machine (20 checks: packaging, helper
 execution, PATH isolation and dry-run inertness), or run '--scope full' on a
 machine with no installed Tethra gateway."
   fi
@@ -624,12 +693,27 @@ if [ "$MODE" = "foreground" ]; then
   check $? "the apply left ~/Library/LaunchAgents byte-identical (no login item was touched)"
 elif [ "$MODE" = "service" ]; then
   group SERVICE
-  [ -f "$PLIST" ] && SERVICE_INSTALLED=1
-  [ -f "$PLIST" ]
-  check $? "the apply installed a real LaunchAgent at $PLIST"
-  grep -q "$LABEL" "$PLIST" 2>/dev/null
-  check $? "the installed LaunchAgent declares the expected label"
-  grep -qF "$HELPER" "$PLIST" 2>/dev/null
+  # Service names are namespaced per data directory (ADR 0026), so the
+  # installed file is `dev.api-tracker.gateway.<installation-id>.plist` and
+  # its exact name is not knowable here. Resolve it by asking the product —
+  # `gateway status --json` reports `service_name` and `definition_path` —
+  # and fall back to a glob. Hard-coding the legacy path made this assertion
+  # unable to fire AND left cleanup unable to remove what the run installed.
+  INSTALLED_PLIST="$("$HELPER" gateway status --json 2>/dev/null \
+    | sed -n 's/.*"definition_path":"\([^"]*\)".*/\1/p' | head -1)"
+  if [ -z "$INSTALLED_PLIST" ] || [ ! -f "$INSTALLED_PLIST" ]; then
+    INSTALLED_PLIST="$(ls -1 "$LA_DIR/$LEGACY_LABEL".*.plist 2>/dev/null | head -1)"
+  fi
+  [ -n "$INSTALLED_PLIST" ] && [ -f "$INSTALLED_PLIST" ] && SERVICE_INSTALLED="$INSTALLED_PLIST"
+  [ -n "${SERVICE_INSTALLED:-}" ]
+  check $? "the apply installed a real LaunchAgent (resolved: ${SERVICE_INSTALLED:-none})"
+  INSTALLED_LABEL="$(basename "${SERVICE_INSTALLED:-none}" .plist)"
+  grep -q "$INSTALLED_LABEL" "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null
+  check $? "the installed LaunchAgent declares its own namespaced label"
+  # ADR 0026: the label must be namespaced, not the pre-namespacing global.
+  [ "$INSTALLED_LABEL" != "$LEGACY_LABEL" ]
+  check $? "the label is namespaced per data directory, not the global one"
+  grep -qF "$HELPER" "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null
   check $? "the installed LaunchAgent runs the bundled helper, not a developer CLI"
 fi
 
@@ -770,11 +854,22 @@ check $? "no authorization header line and no bearer token is stored${HITS_HDR:+
 # The isolated run must also leave nothing behind in the shared desktop/CLI
 # data directory. Both needles are unique to this PID, so a hit here means a
 # TETHRA_DIR escape.
+# The absent-directory branch used to award a counted `ok`. That is a
+# property of the MACHINE, not of the product — the exact shape this script
+# declares out of bounds a few hundred lines up ("awarding a pass for 'the
+# machine happened to be clean' is the shape ZFT-VAL-7 objected to"). It was
+# the last unconditional pass in the file, and it was found by an
+# adversarial reviewer, not by the anti-vacuity gate.
+#
+# The assertion is now the same either way: the needles are absent from the
+# shared directory. An absent directory trivially satisfies that, and the
+# label says which case held, so the check is real in both branches.
 if [ -d "$SHARED_DIR" ]; then
   ! found_in "$SHARED_DIR" "$FAKE_KEY" && ! found_in "$SHARED_DIR" "$CANARY"
   check $? "neither needle reached the shared desktop/CLI data directory"
 else
-  ok "the shared desktop/CLI data directory does not exist, so nothing was written to it"
+  [ ! -e "$SHARED_DIR" ]
+  check $? "neither needle reached the shared desktop/CLI data directory (it does not exist)"
 fi
 
 # --- 10. idempotence -------------------------------------------------------

@@ -167,7 +167,7 @@ requires the suite to fail.
 
 ## Mutation testing
 
-`bash scripts/mutation_checks.sh` — **20 checks, 20 killed, 0 survivors, 0
+`bash scripts/mutation_checks.sh` — **21 checks, 21 killed, 0 survivors, 0
 skipped.**
 
 It rewrites production source to remove each protection, requires the test
@@ -182,19 +182,20 @@ the hardened runner left the canary correctly quiet, so the mutant survived
 *for the right reason*, which made the check meaningless. It now injects a
 raw unhardened `Command::new("git")`.
 
-`bash scripts/validation_harness_mutants.sh` — **7 mutants, 7 killed.** The
+`bash scripts/validation_harness_mutants.sh` — **8 mutants, 8 killed.** The
 validation harness's own anti-tautology gate, which was itself decorative
 when first written (see PACKAGED_VALIDATION.md).
 
 ## Measured totals at the final commit
 
 ```text
-Rust workspace           1131 passed, 0 failed  (72 suites)
-Desktop vitest             90 passed, 0 failed  (11 files)
-Packaged validation        22 passed, 0 failed  (--scope offline)
+Rust workspace           1133 passed, 0 failed  (72 suites)
+Desktop vitest             91 passed, 0 failed  (11 files)
+Smoke suite               140 passed, 0 failed
+Packaged validation        20 passed, 0 failed  (--scope offline)
 Harness self-check          5 passed, 0 failed  (--scope selfcheck)
-Product mutants            20 killed, 0 survived
-Harness mutants             7 killed, 0 survived
+Product mutants            21 killed, 0 survived
+Harness mutants             8 killed, 0 survived
 ```
 
 No count on this page is carried over from an earlier run.

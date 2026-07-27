@@ -259,8 +259,10 @@ impl CurrentHealth {
 pub struct VerificationHistory {
     /// The first time this setup was ever verified, across all sessions.
     pub first_verified_at: Option<String>,
-    /// The newest qualifying observation of the current session.
-    pub last_observed_at: Option<String>,
+    /// The FIRST qualifying observation of the current session. The
+    /// newest one is per-provider, in `ProviderFreshness.last_observed_at`
+    /// — there is no single "newest" across providers worth naming here.
+    pub session_first_observed_at: Option<String>,
     /// The current session's id, for support and diagnostics.
     pub verification_session: Option<String>,
     pub config_generation: i64,
@@ -815,7 +817,13 @@ fn write_derived(
 fn history_of(setup: &TrackingSetup) -> VerificationHistory {
     VerificationHistory {
         first_verified_at: setup.first_verified_at.clone(),
-        last_observed_at: setup.first_traffic_at.clone(),
+        // `first_traffic_at` is the OLDEST qualifying observation of this
+        // session and is written once. Surfacing it under a field named
+        // `last_observed_at` made one card say "most recent observation:
+        // <old>" directly above a per-provider "last seen: <newer>".
+        // Renamed to what it is; the newest observation is already carried
+        // per provider in `freshness`.
+        session_first_observed_at: setup.first_traffic_at.clone(),
         verification_session: setup.verification_session.clone(),
         config_generation: setup.config_generation,
     }

@@ -264,11 +264,23 @@ if i != -1 and j != -1:
 
 # Put the placeholder exemption back into the masker: the ZFT-017 defect,
 # where a host containing "example" printed the whole line.
-mutate "diff-masking-has-no-placeholder-exemption" \
+# Put the ZFT-017 defect back at its source: `is_placeholder_value` becomes
+# a bare substring test again, so a host containing "example" satisfies it.
+mutate "placeholder-test-is-not-a-bare-substring-match" \
+  "crates/core/src/scanner.rs" \
+  's = s.replace(
+      "    if looks_like_key_material(v) {\n        return false;\n    }",
+      "")' \
+  -p api-tracker-core --test scanning
+
+# And the regression an adversarial reviewer caught in the FIRST fix: a
+# length-based denylist that printed short credentials the original code
+# masked.
+mutate "diff-masking-is-not-a-length-denylist" \
   "crates/core/src/envgov.rs" \
   's = s.replace(
-      "    if value.chars().count() <= MAX_LEGIBLE_VALUE && !crate::scanner::looks_like_key_material(value)\n    {\n        return line.to_string();\n    }",
-      "    if crate::scanner::is_placeholder_value(value) {\n        return line.to_string();\n    }")' \
+      "    if name_suggests_a_credential(name) {",
+      "    if value.chars().count() <= 16 && !crate::scanner::looks_like_key_material(value) {\n        return line.to_string();\n    }\n    if name_suggests_a_credential(name) {")' \
   -p api-tracker-core --test scanning
 
 # ---------------------------------------------------------------------------

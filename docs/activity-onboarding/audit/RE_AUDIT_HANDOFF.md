@@ -169,6 +169,87 @@ closed) and look for any verb reaching the OS without `ensure_ours`.
 
 ---
 
+## Found by adversarial review of the remediation, and NOT closed
+
+Three independent verifiers were run against this remediation and all three
+returned **DEFECTIVE**. Everything they found that is closed is listed in
+`REMEDIATION_EVIDENCE.md` §4 and in the matrix. These are the ones that are
+**still open**, recorded here rather than left for you to rediscover:
+
+### Validation harness
+
+* **`--scope full` (57 checks) and `--scope full --require-service` (60)
+  have NEVER BEEN EXECUTED, on any machine.** The `$LABEL`-unbound crash and
+  the legacy-`PLIST` path that would have orphaned a real LaunchAgent are
+  fixed, and the resolution now asks the product for its own
+  `definition_path` — but the fixes are *reviewed, not run*, because this
+  machine has a Tethra gateway and the interlock (correctly) refuses. So the
+  remediation code for `ZFT-VAL-5` (the canary sweep), `ZFT-VAL-8` (the
+  forged-event control), and the traffic / idempotence / undo / service
+  groups is unexecuted source. **A re-auditor with a clean macOS machine
+  should run `--scope full --require-service` first.**
+* **The mutation suite only exercises `--scope selfcheck`,** so it
+  structurally cannot cover `found_in`, the recursive privacy sweep,
+  `isolated_files`, `la_digest` or the EXPECTED table. A weakening of the
+  privacy sweep — the assertions carrying the `ZFT-VAL-5` remediation — is
+  invisible to both the mutation suite and CI.
+* **The privacy sweep's falsifiability control tests a different pipeline
+  than the sweep itself.** The control calls `found_in` (single file, `-q`);
+  the sweep is `grep -rlF … | grep -v "^$PROJECT/"`. Recursion and the
+  path-prefix filter are never positively exercised, so a broken `-r`
+  traversal would pass silently.
+* **Seven checks have labels stronger than their assertions** — e.g. "the
+  dry run showed the exact env diff" matches only the variable NAME, and
+  `[ -n "$BUNDLE_VER" ]` is the literal `ZFT-VAL-3` shape still counted.
+* **`--help` truncates the last five header lines** (a hard-coded `sed -n
+  '1,89p'` against a file whose `set -uo pipefail` has moved) — the same
+  class of drift as the `LABEL` rename.
+
+### Desktop
+
+* **The typed-destination (`NeedsOriginInput`) consent path has no test
+  coverage and no disclosure.** `toggleTypedOrigin` discards the
+  `OriginApprovalRequest` that `tracking_origin_approve` returns, so its
+  disclosure lines are never shown: the whole consent is one bare label.
+  The checkbox-based `NeedsOriginConfirm` path — the one the audit's fixture
+  exercises — is covered.
+* **The ~770 lines of new Tauri command code have no automated test.**
+  `apps/desktop/src-tauri/` has no `#[cfg(test)]` module and no `tests/`
+  directory; every vitest case mocks `../api` wholesale. So the structural
+  guarantee this remediation headlines — `tracking_plan_build` refusing an
+  unapproved `NeedsOriginConfirm` provider — is verified by reading, not by
+  running. **This is the single highest-value place to point a re-audit.**
+* **The ZFT-015 re-arm test cannot detect loss of the recurring interval.**
+  Deleting the `setInterval` and keeping the immediate `tick()` leaves every
+  TrackFlow test passing. Only the dependency-array half is pinned.
+* **A `Possible`-confidence `NeedsOriginConfirm` provider is counted in the
+  headline but rendered as no row anywhere** — the same unnameable-count
+  shape `ZFT-010` objected to, at a smaller scale.
+* **The "Advanced" escape hatch cannot help an unrecognised credential:**
+  the Add-a-route form's provider field is a `<select>` of manifest
+  providers, and `add_custom_route` rejects any id outside the catalog. The
+  screen does not say so.
+
+### Privacy
+
+* **A secret in a URL PATH SEGMENT shorter than 20 characters, or with no
+  digits, is still recorded in plaintext `prior_env_json`.** Verified live:
+  `https://llm.corp.example/9f2c8a71e45b30d6/v1` is recoverable from
+  `vault.db`. The query-string and userinfo cases are closed; the path case
+  rests on a heuristic that raising further would start refusing ordinary
+  paths.
+* **`scrub_stored_prior_env_once` is called only from the CLI.** A
+  GUI-only user — the persona this PR exists for — never runs it, so a leak
+  written by an earlier build persists until that link is re-linked.
+* **The `NO_PROXY` recordability branch admits secret-shaped values** that
+  contain a dot: `sk-proj-AbCdEf123456.xyz789` is recordable.
+* **`tethra gateway unlink` still prints raw Rust `Debug`** for restore
+  outcomes (the `ZFT-034` shape at a second site), and reports `complete`
+  even when a `PriorNotRecorded` left the `.env` pointing at the gateway.
+* **`ZFT-023`: the digest binds file CONTENT but not `FilePlan.exists`,**
+  so deleting an empty previewed `.env` between preview and apply yields the
+  same digest while flipping whether undo deletes the file.
+
 ## Known follow-ups the remediation did NOT close
 
 Recorded so they are found by reading rather than by discovery:

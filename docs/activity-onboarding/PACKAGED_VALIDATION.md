@@ -23,9 +23,9 @@ be mistaken for, or quoted as, a service run — which is precisely what
 | Scope | Checks | Groups | Runs in CI? |
 |---|---|---|---|
 | `--scope selfcheck` | **5** | HARNESS 5 | **yes** |
-| `--scope offline` | **22** | HARNESS 5 · BUNDLE 7 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
-| `--scope full --foreground` | **59** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
-| `--scope full --require-service` | **61** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
+| `--scope offline` | **20** | HARNESS 5 · BUNDLE 5 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
+| `--scope full --foreground` | **57** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
+| `--scope full --require-service` | **60** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
 
 ### Measured on this machine (macOS 25.5.0, aarch64)
 
@@ -35,14 +35,14 @@ $ bash scripts/tracking_validate_macos.sh --scope selfcheck
 
 $ bash scripts/tracking_validate_macos.sh --scope offline
     HARNESS        5 checks  (5 passed, 0 failed)
-    BUNDLE         7 checks  (7 passed, 0 failed)
+    BUNDLE         5 checks  (5 passed, 0 failed)
     FIXTURE        3 checks  (3 passed, 0 failed)
     DRYRUN         6 checks  (6 passed, 0 failed)
     OFFLINE        1 checks  (1 passed, 0 failed)
-    TOTAL         22 checks  (22 passed, 0 failed)
+    TOTAL         20 checks  (20 passed, 0 failed)
 
 $ bash scripts/validation_harness_mutants.sh
-=== HARNESS MUTATION RESULT: 7 killed, 0 survived ===
+=== HARNESS MUTATION RESULT: 8 killed, 0 survived ===
 
 $ bash scripts/tracking_validate_macos.sh --scope full --foreground
 === PACKAGED TRACKING VALIDATION: ABORTED (a precondition failed) ===
@@ -94,7 +94,7 @@ every PR:
    killed;
 3. `npm ci`, `scripts/bundle_cli.sh`, `tauri build --bundles app` — a **real
    `.app`**, which is what the validation then inspects;
-4. `tracking_validate_macos.sh --scope offline` — 22 required checks;
+4. `tracking_validate_macos.sh --scope offline` — 20 required checks;
 5. `scripts/smoke.sh`.
 
 Every one of those fails the build.
@@ -143,4 +143,4 @@ through the **unmodified** reporting path and reads back both the printed
 verdict and the counter deltas, and a mismatch **aborts** rather than being
 reported through `bad()` — a weakened `bad()` cannot be trusted to report
 its own weakening. `validation_harness_mutants.sh` makes that repeatable:
-7 mutants, 7 killed.
+8 mutants, 8 killed.

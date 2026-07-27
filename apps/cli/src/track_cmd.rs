@@ -911,13 +911,15 @@ fn status(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
         println!("Now: {}", render::sanitize(&report.current.describe()));
         // History is printed under its own heading so "first verified" can
         // never be mistaken for "working right now".
-        if report.history.first_verified_at.is_some() || report.history.last_observed_at.is_some() {
+        if report.history.first_verified_at.is_some()
+            || report.history.session_first_observed_at.is_some()
+        {
             println!("History:");
             if let Some(at) = &report.history.first_verified_at {
                 println!("  first verified   {}", render::sanitize(at));
             }
-            if let Some(at) = &report.history.last_observed_at {
-                println!("  last observed    {}", render::sanitize(at));
+            if let Some(at) = &report.history.session_first_observed_at {
+                println!("  first seen here  {}", render::sanitize(at));
             }
         }
         if !freshness.is_empty() {

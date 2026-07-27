@@ -206,7 +206,7 @@ function waitingStatus() {
     },
     history: {
       first_verified_at: null,
-      last_observed_at: null,
+      session_first_observed_at: null,
       verification_session: null,
       config_generation: 1,
       sentence: null,
@@ -583,6 +583,33 @@ describe("TrackFlow apply and verification", () => {
       screen.getByText(/Observed anthropic from \/Users\/dev\/my-app/),
     ).toBeInTheDocument();
     expect(screen.getByText(/201 ms/)).toBeInTheDocument();
+  });
+
+  it("never claims verified when the gateway is down, even with an observation", async () => {
+    // ZFT-005 was closed on the dashboard but left open HERE. `watch` comes
+    // from `check_traffic`, which is liveness-blind by construction, so a
+    // setup whose gateway had died still reached the terminal phase and
+    // rendered the unqualified headline "Tracking verified". Found by an
+    // adversarial reviewer, not by the test written for the finding.
+    mockApi.trackingStatus.mockResolvedValue({
+      ...waitingStatus(),
+      state: "traffic_observed",
+      watch: "observed",
+      observed_provider: "anthropic",
+      providers: [{ provider_id: "anthropic", last_observed_at: "2026-07-27T00:00:00Z" }],
+      health: {
+        kind: "verified_previously_gateway_down",
+        sentence:
+          "verified previously — the local tracking service is not running, so requests are not reaching your APIs",
+        currently_working: false,
+      },
+    });
+    await reachReview();
+    await userEvent.click(screen.getByRole("button", { name: "Start tracking" }));
+    // Whatever it shows, it must carry the reason...
+    expect(await screen.findByText(/not reaching your APIs/)).toBeInTheDocument();
+    // ...and it must not be an unqualified success headline.
+    expect(screen.queryByText("Tracking verified")).not.toBeInTheDocument();
   });
 
   it("reports a partial apply honestly and never silently rolls back", async () => {

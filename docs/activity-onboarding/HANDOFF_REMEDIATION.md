@@ -77,7 +77,7 @@ confident documentation is where defects hide.
    This is why the path that matters spawns nothing at all.
 3. **`--scope full` packaged validation has not been run for this branch.**
    It refuses to run on a machine with a Tethra gateway installed, and this
-   one has one. CI runs `--scope offline` (22 checks) against a real `.app`
+   one has one. CI runs `--scope offline` (20 checks) against a real `.app`
    and says exactly that.
 4. **Windows service support is compile-validated only** — as it was before.
 5. **Three ZFT-009 desktop actions were deliberately not built** rather than
@@ -95,11 +95,12 @@ confident documentation is where defects hide.
 Every one is measured from the final commit; none is carried over.
 
 ```text
-Rust workspace tests           1131 passed, 0 failed
-Desktop vitest                   90 passed, 0 failed (11 files)
-Mutation checks (product)        18 killed, 0 survivors, 0 skipped
-Mutation checks (harness)         7 killed, 0 survived
-Packaged validation (offline)    22 passed, 0 failed
+Rust workspace tests           1133 passed, 0 failed
+Desktop vitest                   91 passed, 0 failed (11 files)
+Smoke suite                     140 passed, 0 failed
+Mutation checks (product)        21 killed, 0 survivors, 0 skipped
+Mutation checks (harness)         8 killed, 0 survived
+Packaged validation (offline)    20 passed, 0 failed
 Packaged validation (selfcheck)   5 passed, 0 failed
 Provider manifests                21 total, 13 trackable, 8 unsupported
 clippy +1.97.0 --all-targets -D warnings   clean
@@ -107,7 +108,7 @@ cargo fmt --all --check                    clean
 eslint / tsc / vite build                  clean
 ```
 
-`--scope full` (59 or 61 checks) was NOT run — see above.
+`--scope full` (57 or 60 checks) was NOT run — see above.
 
 ---
 

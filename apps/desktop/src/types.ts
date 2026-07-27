@@ -1480,7 +1480,9 @@ export interface TrackingHealth {
 /** state::VerificationHistory — what was true before, never instead of now. */
 export interface TrackingHistory {
   first_verified_at: string | null;
-  last_observed_at: string | null;
+  /** The FIRST observation of the current configuration — NOT the most
+   * recent one, which is per-provider in `TrackingStatus.providers`. */
+  session_first_observed_at: string | null;
   verification_session: string | null;
   config_generation: number;
   sentence: string | null;

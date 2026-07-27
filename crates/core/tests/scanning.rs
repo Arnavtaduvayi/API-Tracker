@@ -497,3 +497,59 @@ fn ordinary_configuration_stays_legible_in_the_diff() {
         );
     }
 }
+
+/// The regression an adversarial reviewer caught, and the shape of rule
+/// that caused it.
+///
+/// The first replacement for the ZFT-017 needle bypass was "short AND not
+/// key-shaped" — a denylist wearing a length limit. It printed
+/// `DB_PASSWORD=Tr0ub4dor3` and `SHORT_KEY=9f2c8a71e45b30d6` in full, both
+/// of which the ORIGINAL code masked. A fix that leaks more than the defect
+/// it replaces is not a fix, and no test written for the fix caught it —
+/// only running the two trees side by side did.
+///
+/// So this test asserts the property directly: a value stays legible only
+/// if it is on the tiny allowlist of shapes that cannot be a credential.
+#[test]
+fn a_short_credential_is_still_masked_in_the_diff() {
+    for line in [
+        "DB_PASSWORD=Tr0ub4dor3",
+        "SHORT_KEY=9f2c8a71e45b30d6",
+        "REDIS_PASSWORD=hunter2xyz",
+        "API_TOKEN=abc123XYZ789def",
+        "SESSION_SECRET=s3cr3t",
+        "SIGNING_KEY=deadbeef",
+    ] {
+        let value = line.split_once('=').unwrap().1;
+        let diff = api_tracker_core::envgov::render_diff(".env", &format!("{line}\n"), "");
+        assert!(
+            !diff.contains(value),
+            "a short credential printed in full — the exact regression an \
+             adversarial reviewer caught: {line}\n{diff}"
+        );
+    }
+}
+
+#[test]
+fn the_legible_allowlist_is_the_whole_exemption() {
+    // Everything on the allowlist stays readable...
+    for line in [
+        "NODE_ENV=production",
+        "PORT=3000",
+        "DEBUG=true",
+        "A=1",
+        "LOG_LEVEL=info",
+        "TIMEOUT=30.5",
+        "OPENAI_BASE_URL=https://api.openai.com/v1",
+    ] {
+        let diff = api_tracker_core::envgov::render_diff(".env", &format!("{line}\n"), "");
+        assert!(
+            diff.contains(line),
+            "the diff must stay usable as a consent surface: {line}\n{diff}"
+        );
+    }
+    // ...and a value that merely LOOKS like one of them does not. A
+    // variable named for a secret is masked whatever its value looks like.
+    let diff = api_tracker_core::envgov::render_diff(".env", "API_SECRET=true-ish-value\n", "");
+    assert!(!diff.contains("true-ish-value"), "{diff}");
+}

@@ -110,6 +110,17 @@ mutate "MG — the self-check group is deleted outright" \
   '/^selfcheck fail /d; /^selfcheck pass /d; /^  selfcheck fail /d; /^  selfcheck pass /d' \
   "removing the guard must not be a quiet way to pass; the count-equality gate catches it."
 
+# MH is the mutation an adversarial reviewer found and this suite did not:
+# gut the GATE rather than the primitives it guards. The count is preserved,
+# so the count-equality gate cannot see it, and the first guard written
+# against it was itself vacuous (it required counter movement that BOTH the
+# real gate and the bypass produce). What discriminates is that the real
+# gate RUNS its control and REJECTS a mismatched expectation.
+mutate "MH — selfcheck() is replaced by a bare ok()" \
+  '/^selfcheck() {   # selfcheck/,/^}$/c\
+selfcheck() { ok "$2"; }' \
+  "the gate that certifies every other check, disabled by one line, with the count preserved."
+
 echo
 echo "=== HARNESS MUTATION RESULT: $KILLED killed, $SURVIVED survived ==="
 if [ "$SURVIVED" -ne 0 ]; then
