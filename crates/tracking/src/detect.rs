@@ -504,6 +504,26 @@ fn name_hint(var: &str) -> Option<String> {
     None
 }
 
+/// The authority of a base-URL value, whatever its scheme: everything
+/// between `scheme://` and the first `/`, `?` or `#`.
+///
+/// The single place a base-URL value is split, so the origin policy and the
+/// "is this Tethra's own writing?" guard cannot disagree about where the
+/// host ends. Returns `None` when the value carries no real scheme, so a
+/// `://` that appears inside a path or query cannot manufacture an
+/// authority out of the text after it.
+fn authority_of(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once("://")?;
+    if !scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        || !scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+    {
+        return None;
+    }
+    Some(rest.split(['/', '?', '#']).next().unwrap_or_default())
+}
+
 /// The bare authority of a base URL, for the origin policy.
 ///
 /// SDK base URLs carry a path (`https://litellm.corp.example/v1`), but
@@ -512,17 +532,49 @@ fn name_hint(var: &str) -> Option<String> {
 /// chose. Trimming here keeps that rule intact while still letting a real
 /// SDK value be understood.
 fn origin_authority(value: &str) -> String {
-    let Some(rest) = value.strip_prefix("https://") else {
-        // Anything that is not https fails `validate_origin` anyway; return
-        // it unchanged so the refusal names what was actually configured.
+    // Anything that is not https fails `validate_origin` anyway; return it
+    // unchanged so the refusal names what was actually configured.
+    if !value.starts_with("https://") {
         return value.to_string();
+    }
+    match authority_of(value) {
+        Some(authority) => format!("https://{authority}"),
+        None => value.to_string(),
+    }
+}
+
+/// Whether this base-URL value is TETHRA'S OWN writing: `.env` linking
+/// writes `http://127.0.0.1:<port>/p/<slug>/…`, so a value whose AUTHORITY
+/// is `127.0.0.1` with a numeric port is a previous link, not a destination
+/// the project chose.
+///
+/// The guard used to be `value.contains("127.0.0.1:")` over the whole value,
+/// path, query and fragment included, so a committed
+/// `OPENAI_BASE_URL=https://attacker.example.com/#127.0.0.1:1` matched it.
+/// Both ZFT-012 sites then treated the attacker's host as Tethra's own
+/// writing: the re-point warning and the origin-approval prompt disappeared
+/// and the provider fell back to `Automatic`, so repository content
+/// suppressed its own consent prompt (RA-010). The test is now anchored on
+/// the parsed host.
+///
+/// Deliberately NOT widened to `::1`, `localhost`, or 127/8 without a port.
+/// This predicate SUPPRESSES the prompt, so every spelling it gains is a
+/// destination Tethra would silently re-point instead of asking about — a
+/// developer's own local proxy must stay a customisation. It matches
+/// strictly less than the old substring did, never more.
+fn is_gateway_link_value(value: &str) -> bool {
+    let Some(authority) = authority_of(value.trim()) else {
+        return false;
     };
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    format!("https://{authority}")
+    // Userinfo can spell anything before '@'; the host is what follows it.
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    matches!(
+        host_port.split_once(':'),
+        Some((host, port))
+            if host == "127.0.0.1"
+                && !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+    )
 }
 
 /// Provider id → stack template id, mirroring `stackdetect`'s private map,
@@ -746,8 +798,10 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
             // Confirmed — so Tethra's output became Tethra's evidence
             // (ZFT-025). The value was already excluded from ORIGIN
             // inference for this reason; excluding it from the SIGNAL too is
-            // the same rule applied consistently.
-            let is_our_own_writing = entry.value.expose().trim().contains("127.0.0.1:");
+            // the same rule applied consistently. All three exclusion sites
+            // share `is_gateway_link_value`, so no spelling can be our own
+            // writing for one of them and a project value for another.
+            let is_our_own_writing = is_gateway_link_value(entry.value.expose());
             if let Some(manifests) = base_url_vars
                 .get(&entry.key)
                 .filter(|_| !is_our_own_writing)
@@ -783,7 +837,7 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
                         // traffic should go, so it is surfaced for the same
                         // explicit approval a custom-origin provider gets.
                         let value = entry.value.expose().trim();
-                        if !value.is_empty() && !value.contains("127.0.0.1:") {
+                        if !value.is_empty() && !is_gateway_link_value(value) {
                             let manifest_origins: Vec<String> = gw
                                 .map(|g| g.origins.clone())
                                 .unwrap_or_default()
@@ -812,8 +866,8 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
                     }
                     {
                         let value = entry.value.expose().trim();
-                        if value.is_empty() || value.contains("127.0.0.1:") {
-                            // Empty, or already pointing at a local
+                        if value.is_empty() || is_gateway_link_value(value) {
+                            // Empty, or already pointing at Tethra's own
                             // gateway (a previous link) — not an origin.
                             continue;
                         }

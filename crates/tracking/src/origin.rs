@@ -78,9 +78,15 @@ impl OriginTrust {
 pub enum NetworkClass {
     /// A public, routable host.
     Public,
-    /// Loopback, private, link-local or cloud-metadata. The gateway refuses
-    /// these outright; the classification exists so a refusal can explain
-    /// itself instead of just failing.
+    /// Loopback, private, link-local or cloud-metadata.
+    ///
+    /// [`describe`] never returns a request carrying this: the gateway's
+    /// destination policy refuses such a host and `describe` fails, so the
+    /// user is never asked to approve something that could not work. The
+    /// variant exists so a caller that wants to EXPLAIN a refusal has a
+    /// name for it, and so this enum stays a total description of the
+    /// classification rather than a one-value type that silently becomes
+    /// wrong the day the policy changes.
     Restricted,
 }
 
@@ -175,8 +181,25 @@ pub fn describe(
         scheme: "https".to_string(),
         host,
         port,
-        // `validate_origin` already refused everything non-public, so
-        // reaching here means the host passed the destination policy.
+        // Reaching here means the authority passed the gateway's pre-DNS
+        // destination policy, which is the ONLY thing this line may claim.
+        //
+        // It used to claim more — "validate_origin already refused
+        // everything non-public" — and that was false, because the policy
+        // recognised IP literals only in their four-dotted-decimal
+        // spelling. `https://127.1`, `https://0x7f.0.0.1` and
+        // `https://2130706433` all reach 127.0.0.1 through the platform
+        // resolver, all passed `validate_origin`, and the user was shown
+        // "The host is a public internet address" about loopback (RA-011).
+        // `observe::policy` now canonicalises those spellings before
+        // classifying, so the claim holds for every way an address can be
+        // written.
+        //
+        // What it still does NOT cover is a DNS name that RESOLVES to a
+        // restricted address: no pre-DNS check can judge that, which is why
+        // the gateway re-checks every resolved address before dialing
+        // (`upstream::resolve_validated`) and why approving an origin here
+        // is not the same as it being reachable.
         network_class: NetworkClass::Public,
         source_file: source_file.map(str::to_string),
         source_var: source_var.map(str::to_string),

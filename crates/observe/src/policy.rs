@@ -15,6 +15,12 @@
 //! [`AllowList`], which bypass the private-range denial for exactly those
 //! destinations (and are surfaced with a warning elsewhere).
 //!
+//! Addresses are classified by VALUE, not by spelling: the IPv4 shorthand
+//! forms `inet_aton` accepts (`127.1`, `0x7f.0.0.1`, `0177.0.0.1`,
+//! `2130706433`) are canonicalised before classification, because the
+//! resolver every SDK ends up in accepts them too. Treating them as ordinary
+//! hostnames let loopback be described to the user as public (RA-011).
+//!
 //! Note: several range predicates (CGNAT `100.64/10`, reserved `240/4`,
 //! benchmarking `198.18/15`, IPv6 unique-local/link-local) are implemented by
 //! hand because the corresponding `std::net` predicates are unstable on the
@@ -155,11 +161,30 @@ pub fn check_authority(host: &str, port: u16, allow: &AllowList) -> Verdict {
     let allowlisted = allow.contains(&host_l, port);
 
     // IP literal? classify now (unwrapping IPv4-mapped IPv6 and brackets).
-    if let Some(ip) = parse_ip_literal(&host_l) {
-        if allowlisted {
-            return Verdict::Allow;
+    match parse_ip_literal(&host_l) {
+        Some(IpLiteral::Canonical(ip)) => {
+            if allowlisted {
+                return Verdict::Allow;
+            }
+            return classify_ip(ip);
         }
-        return classify_ip(ip);
+        Some(IpLiteral::Shorthand(v4)) => {
+            if allowlisted {
+                return Verdict::Allow;
+            }
+            let verdict = classify_v4(v4);
+            if !verdict.is_allowed() {
+                return verdict;
+            }
+            // A shorthand that canonicalises to a PUBLIC address deliberately
+            // falls through to the hostname path below instead of returning
+            // this Allow. Teaching the parser more spellings must only ever
+            // TIGHTEN the policy: `134744072` is 8.8.8.8, and returning Allow
+            // here would hand a bare integer the pass that the single-label
+            // guard denies `localhost`. Restricted shorthands are denied
+            // above; public-looking ones keep the verdict they already had.
+        }
+        None => {}
     }
 
     // Otherwise it's a DNS name — validate syntax; the resolved addresses are
@@ -302,13 +327,97 @@ fn embedded_v4(hi: u16, lo: u16) -> Ipv4Addr {
     )
 }
 
-/// Parse an IP literal, accepting bracketed IPv6 (`[::1]`).
-fn parse_ip_literal(host: &str) -> Option<IpAddr> {
+/// How an authority string spelled an IP address.
+enum IpLiteral {
+    /// The canonical, unambiguous spelling: four-dotted-decimal IPv4, or
+    /// IPv6 (optionally bracketed). What `IpAddr::from_str` accepts.
+    Canonical(IpAddr),
+    /// An IPv4 SHORTHAND — `127.1`, `0x7f.0.0.1`, `0177.0.0.1`,
+    /// `2130706433`. `IpAddr::from_str` rejects all of these; `inet_aton`
+    /// (and therefore `getaddrinfo`, and therefore every SDK) accepts them
+    /// and reaches the address carried here.
+    Shorthand(Ipv4Addr),
+}
+
+/// Parse an IP literal, accepting bracketed IPv6 (`[::1]`) and the IPv4
+/// shorthand spellings the platform resolver also accepts.
+///
+/// The strict `IpAddr::from_str` parse alone meant `127.1`, `0x7f.0.0.1`,
+/// `0177.0.0.1` and `2130706433` were not recognised as addresses at all:
+/// they fell through to [`is_valid_hostname`], were accepted as ordinary DNS
+/// names, and a committed `SUPABASE_URL=https://127.1` was therefore
+/// DISCLOSED to the user as "a public internet address" (RA-011). No
+/// credential ever reached loopback — the gateway resolves and re-checks
+/// every address before dialing — but the consent surface told the user the
+/// opposite of the truth about what they were approving.
+///
+/// The two cases are kept apart because widening this parser changes which
+/// hosts [`check_authority`] denies BEFORE DNS, and that must only ever
+/// tighten. See the `Shorthand` arm there.
+fn parse_ip_literal(host: &str) -> Option<IpLiteral> {
     let trimmed = host
         .strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
-    trimmed.parse::<IpAddr>().ok()
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return Some(IpLiteral::Canonical(ip));
+    }
+    parse_ipv4_shorthand(trimmed).map(IpLiteral::Shorthand)
+}
+
+/// Canonicalise the `inet_aton` IPv4 forms: 1..=4 parts, each decimal,
+/// octal (`0…`) or hexadecimal (`0x…`), where the LAST part fills all the
+/// octets the leading parts did not.
+///
+/// Returns `None` for anything `inet_aton` itself would reject (an empty or
+/// non-numeric part, a leading part above 255, a trailing part too wide for
+/// the octets it must fill, more than four parts), so ordinary hostnames
+/// stay hostnames.
+fn parse_ipv4_shorthand(host: &str) -> Option<Ipv4Addr> {
+    let mut values: Vec<u32> = Vec::with_capacity(4);
+    for part in host.split('.') {
+        if values.len() == 4 {
+            return None;
+        }
+        values.push(parse_inet_part(part)?);
+    }
+    let tail = values.pop()?;
+    // Every leading part is exactly one octet…
+    if values.iter().any(|&v| v > 0xff) {
+        return None;
+    }
+    // …and the last part fills the rest, so `127.1` is 127.0.0.1 and
+    // `2130706433` is the whole address.
+    let filled = 4 - values.len();
+    let max = if filled == 4 {
+        u32::MAX
+    } else {
+        (1u32 << (8 * filled)) - 1
+    };
+    if tail > max {
+        return None;
+    }
+    let mut addr = tail;
+    for (i, v) in values.iter().enumerate() {
+        addr |= v << (8 * (3 - i));
+    }
+    Some(Ipv4Addr::from(addr))
+}
+
+/// One `inet_aton` part: `0x`/`0X` prefixed hexadecimal, `0` prefixed octal,
+/// otherwise decimal. Rejects an empty part and any digit outside the radix
+/// (so `08.0.0.1` and `0x1g.0.0.1` are names, not addresses — exactly as
+/// `inet_aton` treats them).
+fn parse_inet_part(part: &str) -> Option<u32> {
+    let (radix, digits) = match part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
+        Some(hex) => (16u32, hex),
+        None if part.len() > 1 && part.starts_with('0') => (8, &part[1..]),
+        None => (10, part),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    u32::from_str_radix(digits, radix).ok()
 }
 
 /// RFC-1123-ish hostname validation: 1..=253 bytes, labels 1..=63 bytes of
@@ -583,6 +692,116 @@ mod tests {
                 "{bad:?} should be denied"
             );
         }
+    }
+
+    #[test]
+    fn ipv4_shorthand_spellings_are_canonicalised_before_classification() {
+        // `IpAddr::from_str` takes only the four-dotted-decimal form, so
+        // `127.1`, `0x7f.0.0.1`, `0177.0.0.1` and `2130706433` fell through to
+        // `is_valid_hostname`, were accepted as ordinary DNS names, and were
+        // classified — and DISCLOSED to the user — as public internet
+        // addresses (RA-011). Every one of them reaches 127.0.0.1 through
+        // `inet_aton`, which is what `getaddrinfo` (and therefore every SDK)
+        // uses.
+        let allow = AllowList::new();
+        for spelling in [
+            "127.0.0.1",    // the ordinary dotted quad, for contrast
+            "127.1",        // 2-part: last part fills three octets
+            "127.0.1",      // 3-part: last part fills two octets
+            "0x7f.0.0.1",   // hexadecimal first part
+            "0177.0.0.1",   // octal first part
+            "2130706433",   // bare 32-bit decimal
+            "0x7f000001",   // bare 32-bit hexadecimal
+            "017700000001", // bare 32-bit octal
+        ] {
+            assert_eq!(
+                check_authority(spelling, 443, &allow),
+                Verdict::Deny(DenyReason::Loopback),
+                "{spelling} resolves to 127.0.0.1 and must be denied as loopback"
+            );
+        }
+    }
+
+    #[test]
+    fn ipv4_shorthand_is_canonicalised_for_every_restricted_range() {
+        // Not just loopback: the shorthand spellings hid the whole private
+        // address space behind `is_valid_hostname`. The link-local case is
+        // the cloud-metadata address in octal.
+        let allow = AllowList::new();
+        for (spelling, reason) in [
+            ("10.1", DenyReason::Private),                  // 10.0.0.1
+            ("192.168.1", DenyReason::Private),             // 192.168.0.1
+            ("0xc0a80101", DenyReason::Private),            // 192.168.1.1
+            ("0251.0376.0251.0376", DenyReason::LinkLocal), // 169.254.169.254
+            ("0xa9fea9fe", DenyReason::LinkLocal),          // 169.254.169.254
+            ("0.0", DenyReason::Unspecified),               // 0.0.0.0
+        ] {
+            assert_eq!(
+                check_authority(spelling, 443, &allow),
+                Verdict::Deny(reason),
+                "{spelling} must be denied as {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn widening_the_literal_parser_never_turns_a_deny_into_an_allow() {
+        // The safety property for RA-011's fix. `parse_ip_literal` sits on the
+        // LIVE proxy path (`check_authority`), so teaching it more spellings
+        // changes which hosts are denied pre-DNS. It must only ever tighten.
+        //
+        // The direction that could loosen it: a shorthand that canonicalises
+        // to a PUBLIC address. `134744072` is 8.8.8.8, and before the change
+        // the single-label guard denied it as internal. Returning the
+        // classifier's `Allow` for it would have handed a bare integer the
+        // pass that `localhost` is refused, so a public-looking shorthand
+        // falls through to the hostname path that judged it before.
+        let allow = AllowList::new();
+        for public_shorthand in [
+            "134744072",  // 8.8.8.8 in decimal
+            "0x8080808",  // 8.8.8.8 in hexadecimal
+            "0xdeadbeef", // 222.173.190.239
+        ] {
+            assert_eq!(
+                check_authority(public_shorthand, 443, &allow),
+                Verdict::Deny(DenyReason::Private),
+                "{public_shorthand} is a single label and must stay denied as internal"
+            );
+        }
+        // And the ordinary spellings are untouched in both directions.
+        assert_eq!(check_authority("8.8.8.8", 443, &allow), Verdict::Allow);
+        assert_eq!(
+            check_authority("api.openai.com", 443, &allow),
+            Verdict::Allow
+        );
+        assert_eq!(
+            check_authority("[2606:4700:4700::1111]", 443, &allow),
+            Verdict::Allow,
+            "a bracketed public IPv6 literal must still be allowed"
+        );
+        // A dotted shorthand for a public address keeps the verdict the
+        // hostname path already gave it (`8.0.0.1` here, from octal `010`).
+        assert_eq!(check_authority("010.0.0.1", 443, &allow), Verdict::Allow);
+    }
+
+    #[test]
+    fn shorthand_that_is_not_an_address_is_still_a_hostname() {
+        // The negative control for the shorthand parser: it must not swallow
+        // ordinary names, over-long parts, or empty labels.
+        let allow = AllowList::new();
+        assert_eq!(check_authority("1.2.3.4.5", 443, &allow), Verdict::Allow);
+        assert_eq!(check_authority("999.1", 443, &allow), Verdict::Allow);
+        assert_eq!(check_authority("0x1g.0.0.1", 443, &allow), Verdict::Allow);
+        assert_eq!(check_authority("08.0.0.1", 443, &allow), Verdict::Allow);
+        assert_eq!(
+            check_authority("127.0.0.1.example.com", 443, &allow),
+            Verdict::Allow,
+            "a real DNS name that merely starts with a dotted quad is not an address"
+        );
+        assert_eq!(
+            check_authority("a..b.com", 443, &allow),
+            Verdict::Deny(DenyReason::BadHostname)
+        );
     }
 
     #[test]

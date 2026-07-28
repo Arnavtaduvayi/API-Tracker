@@ -478,6 +478,103 @@ fn a_restricted_destination_is_refused_before_it_is_ever_offered() {
 }
 
 #[test]
+fn loopback_shorthand_spellings_are_refused_rather_than_disclosed_as_public() {
+    // RA-011. `describe` reports the network class the user reads on the
+    // consent screen, and it can only be honest if the destination policy
+    // recognises the address. The policy parsed IP literals with
+    // `IpAddr::from_str`, which takes ONLY the four-dotted-decimal form, so
+    // `127.1`, `0x7f.0.0.1`, `0177.0.0.1` and `2130706433` were accepted as
+    // ordinary hostnames and the screen said "The host is a public internet
+    // address" about loopback. No credential ever reached loopback — the
+    // gateway's post-DNS check refuses the resolved address — but the user
+    // was told the opposite of the truth about what they were approving.
+    for spelling in [
+        "https://127.0.0.1",
+        "https://127.1",
+        "https://127.0.1",
+        "https://0x7f.0.0.1",
+        "https://0177.0.0.1",
+        "https://2130706433",
+        "https://0x7f000001",
+        "https://0251.0376.0251.0376", // 169.254.169.254, cloud metadata
+        "https://0xc0a80101",          // 192.168.1.1, RFC1918
+    ] {
+        assert!(
+            origin::describe(
+                "supabase",
+                "Supabase",
+                spelling,
+                None,
+                None,
+                true,
+                origin::OriginTrust::RepositoryDiscovered
+            )
+            .is_err(),
+            "{spelling} is a restricted address and must be refused, not described"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_public_destination_is_still_described_as_public() {
+    // The negative control for the test above: the shorthand fix must not
+    // have turned "refuse everything numeric" into the new rule. A real
+    // public address, spelled as a literal or as a name, still reaches the
+    // consent surface and is still disclosed as public.
+    for good in ["https://93.184.216.34", "https://abc.supabase.co"] {
+        let request = origin::describe(
+            "supabase",
+            "Supabase",
+            good,
+            None,
+            None,
+            true,
+            origin::OriginTrust::RepositoryDiscovered,
+        )
+        .unwrap_or_else(|e| panic!("{good} must still be describable: {e}"));
+        assert_eq!(request.network_class, origin::NetworkClass::Public);
+        assert!(request
+            .disclosure()
+            .join("\n")
+            .contains("public internet address"));
+    }
+}
+
+#[test]
+fn a_committed_loopback_shorthand_never_reaches_the_consent_surface() {
+    // RA-011 end to end, as the audit reproduced it: a committed `.env` with
+    // a shorthand loopback `SUPABASE_URL` plus a committed dependency. The
+    // origin must not be offered for approval at all — and must certainly
+    // not be offered while being described as a public internet address.
+    let tmp = tempfile::tempdir().unwrap();
+    write_project(
+        tmp.path(),
+        &[
+            (
+                "package.json",
+                r#"{"dependencies":{"@supabase/supabase-js":"^2.39.0"}}"#,
+            ),
+            (".env.development", "SUPABASE_URL=https://127.1\n"),
+        ],
+    );
+    let detection = detect_folder(tmp.path());
+    let supabase = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "supabase")
+        .expect("supabase is still detected from the dependency");
+    let pending = Selections::pending_origin_approvals(&detection);
+    assert!(
+        pending.is_empty(),
+        "no loopback destination may be offered for approval; got {pending:?}"
+    );
+    assert!(
+        !supabase.limitations.is_empty(),
+        "the refused origin must be stated, not silently dropped"
+    );
+}
+
+#[test]
 fn thirty_detected_apis_do_not_make_origin_review_unusable() {
     // The scale property from the audit brief: many integrations must not
     // become many prompts. Only genuinely custom destinations are asked

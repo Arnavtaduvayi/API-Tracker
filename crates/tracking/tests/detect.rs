@@ -264,6 +264,206 @@ fn supabase_origin_is_inferred_and_needs_confirmation() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// RA-010: the ZFT-012 loopback guard must be anchored on the parsed host
+// ---------------------------------------------------------------------------
+
+/// A fixed-origin provider (OpenAI) whose base URL the project has set to
+/// `value`, with enough other evidence to be `Confirmed`.
+fn openai_with_base_url(dir: &std::path::Path, value: &str) {
+    write_project(
+        dir,
+        &[
+            (
+                ".env",
+                &format!("OPENAI_API_KEY={FAKE_OPENAI_KEY}\nOPENAI_BASE_URL={value}\n"),
+            ),
+            (
+                "package.json",
+                r#"{ "dependencies": { "openai": "^4.0.0" } }"#,
+            ),
+        ],
+    );
+}
+
+#[test]
+fn a_path_query_or_fragment_cannot_disguise_a_base_url_as_tethras_own_writing() {
+    // The ZFT-012 guard asked `value.contains("127.0.0.1:")` over the WHOLE
+    // base-URL value — path, query and fragment included — so a committed
+    // `OPENAI_BASE_URL=https://attacker.example.com/#127.0.0.1:1` matched it.
+    // Tethra then treated the attacker's host as its own previous writing:
+    // the re-point warning and the origin-approval prompt both disappeared,
+    // the provider fell back to `Automatic`, and repository content had
+    // suppressed its own consent prompt (RA-010).
+    let (_db, conn) = test_conn();
+    for value in [
+        "https://attacker.example.com/#127.0.0.1:1",
+        "https://attacker.example.com/?redirect=127.0.0.1:1",
+        "https://attacker.example.com/127.0.0.1:1/v1",
+        "https://attacker.example.com/v1#127.0.0.1:8788",
+        "https://127.0.0.1:1@attacker.example.com/v1",
+        "https://127.0.0.1:443.attacker.example.com/v1",
+    ] {
+        let dir = TempDir::new().unwrap();
+        openai_with_base_url(dir.path(), value);
+        let detection = run(&dir, &conn);
+        let openai = detection
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "openai")
+            .expect("openai detected");
+        assert_ne!(
+            openai.configurability,
+            Configurability::Automatic,
+            "{value}: an already-customised base URL must not be silently re-pointed"
+        );
+        assert!(
+            !openai.limitations.is_empty(),
+            "{value}: the customisation must be stated on screen"
+        );
+        assert!(
+            !api_tracker_tracking::plan::Selections::defaults(&detection)
+                .include
+                .contains("openai"),
+            "{value}: and it must not be auto-selected"
+        );
+    }
+}
+
+#[test]
+fn a_disguised_base_url_is_surfaced_for_approval_at_its_real_host() {
+    // The same defect from the other side: the destination the user is asked
+    // about must be the one the value actually names, not the loopback the
+    // fragment spelled.
+    let (_db, conn) = test_conn();
+    let dir = TempDir::new().unwrap();
+    openai_with_base_url(dir.path(), "https://attacker.example.com/v1#127.0.0.1:1");
+    let detection = run(&dir, &conn);
+    let openai = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "openai")
+        .expect("openai detected");
+    match &openai.configurability {
+        Configurability::NeedsOriginConfirm { inferred_origin } => {
+            assert_eq!(inferred_origin, "https://attacker.example.com:443");
+        }
+        other => panic!("expected NeedsOriginConfirm, got {other:?}"),
+    }
+    assert!(openai
+        .limitations
+        .iter()
+        .any(|l| l.contains("attacker.example.com")));
+}
+
+#[test]
+fn a_custom_origin_provider_reads_the_real_host_out_of_a_disguised_value() {
+    // The second guard site (the custom-origin branch) had the same
+    // unanchored test, and skipped the value entirely — so the origin the
+    // user would be asked to approve never got built.
+    let (_db, conn) = test_conn();
+    let dir = TempDir::new().unwrap();
+    write_project(
+        dir.path(),
+        &[
+            (
+                ".env",
+                "SUPABASE_URL=https://attacker.example.com/#127.0.0.1:1\nSUPABASE_SERVICE_ROLE_KEY=sb_secret_FAKE-TEST-NOT-REAL-0001\n",
+            ),
+        ],
+    );
+    let detection = run(&dir, &conn);
+    let supabase = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "supabase")
+        .expect("supabase detected");
+    match &supabase.configurability {
+        Configurability::NeedsOriginConfirm { inferred_origin } => {
+            assert_eq!(inferred_origin, "https://attacker.example.com:443");
+        }
+        other => panic!("expected NeedsOriginConfirm, got {other:?}"),
+    }
+}
+
+#[test]
+fn tethras_own_written_base_url_is_still_recognised_as_its_own() {
+    // The negative control for the anchoring above: `.env` linking writes
+    // `http://127.0.0.1:<port>/p/<slug>/…`, and that value must keep being
+    // read as a previous link rather than as a destination the project
+    // chose. If it were not, every re-scan after a link would ask the user
+    // to approve Tethra's own gateway.
+    let (_db, conn) = test_conn();
+    let dir = TempDir::new().unwrap();
+    openai_with_base_url(dir.path(), "http://127.0.0.1:49723/p/abc123/openai/v1");
+    let detection = run(&dir, &conn);
+    let openai = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "openai")
+        .expect("openai detected");
+    assert_eq!(openai.configurability, Configurability::Automatic);
+    assert!(
+        openai.limitations.is_empty(),
+        "Tethra's own writing is not a customisation: {:?}",
+        openai.limitations
+    );
+    assert!(api_tracker_tracking::plan::Selections::defaults(&detection)
+        .include
+        .contains("openai"));
+}
+
+#[test]
+fn tethras_own_writing_is_still_not_its_own_evidence_but_a_real_value_is() {
+    // ZFT-025 must survive the anchoring: after the first link, Tethra's own
+    // `OPENAI_BASE_URL` sat in the file and its mere presence counted as the
+    // second independent signal class that promotes a detection to
+    // `Confirmed`. The key here holds a value of no published shape, so the
+    // S3 base-URL signal is exactly what decides Possible vs Confirmed.
+    let (_db, conn) = test_conn();
+
+    let ours = TempDir::new().unwrap();
+    write_project(
+        ours.path(),
+        &[(
+            ".env",
+            "OPENAI_API_KEY=abcdefgh12345678\n\
+             OPENAI_BASE_URL=http://127.0.0.1:49723/p/abc123/openai/v1\n",
+        )],
+    );
+    let detection = run(&ours, &conn);
+    let openai = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "openai")
+        .expect("openai detected");
+    assert_eq!(
+        openai.confidence,
+        DetectionConfidence::Possible,
+        "Tethra's own writing must not be Tethra's evidence"
+    );
+
+    // The control: a base URL the PROJECT chose is real, independent
+    // evidence and still promotes the detection — the fragment must not
+    // buy an attacker the suppression either.
+    let theirs = TempDir::new().unwrap();
+    write_project(
+        theirs.path(),
+        &[(
+            ".env",
+            "OPENAI_API_KEY=abcdefgh12345678\n\
+             OPENAI_BASE_URL=https://litellm.corp.example/v1#127.0.0.1:1\n",
+        )],
+    );
+    let detection = run(&theirs, &conn);
+    let openai = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "openai")
+        .expect("openai detected");
+    assert_eq!(openai.confidence, DetectionConfidence::Confirmed);
+}
+
 #[test]
 fn conflicting_supabase_origins_need_input() {
     let (_db, conn) = test_conn();
