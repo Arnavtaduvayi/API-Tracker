@@ -7,15 +7,67 @@
 #![cfg(unix)]
 
 use api_tracker_gateway::lifecycle::{
-    bundled_helper_candidate, helper_answers_probe, HostRunner, PROBE_MARKER,
+    bundled_helper_candidate, helper_answers_probe, CommandRunner, HostRunner, PROBE_MARKER,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use tempfile::TempDir;
 
 fn write_stub(path: &Path, body: &str, mode: u32) {
-    std::fs::write(path, body).unwrap();
+    // Written, flushed and CLOSED before the mode is set, so no writable
+    // descriptor to this file outlives this call in THIS thread. See
+    // `probe_expecting_success` for why that is not sufficient on its own.
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+    }
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Probe a stub that MUST answer, tolerating the write-then-exec race.
+///
+/// `a_genuine_helper_passes_the_probe` failed once in CI (run 30327166597) on
+/// code identical to a green run — a flake, not a regression. The mechanism is
+/// `ETXTBSY`: these tests run as threads in ONE process, and `fork`/`posix_spawn`
+/// gives the child a copy of every descriptor open at that instant. While
+/// thread A sits between creating its stub and closing it, thread B can spawn;
+/// B's child then holds a writable descriptor to A's file until it execs, and
+/// A's own exec in that window returns "Text file busy". Closing the file
+/// promptly (above) narrows the window; it cannot close it, because the race is
+/// between threads.
+///
+/// So a negative result is retried briefly, and ONLY where the expected answer
+/// is `true`. The negative cases below must never retry: a "must be refused"
+/// assertion that retries until it agrees is not an assertion.
+///
+/// The retry does not weaken the test. A genuinely broken helper returns false
+/// on every attempt and still fails, one second later. What it removes is a
+/// required check that goes red for a reason unrelated to the product — which,
+/// on a branch whose entire subject is evidence integrity, is worth more than
+/// the second it costs.
+fn probe_expecting_success(candidate: &Path) -> bool {
+    for _ in 0..20 {
+        if helper_answers_probe(&HostRunner, candidate) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Surface WHY, once, instead of a bare `assertion failed`. The product's
+    // `helper_answers_probe` deliberately collapses every failure to `false`
+    // (`unwrap_or(false)`), which is right for a discovery predicate and
+    // useless for a post-mortem — the CI failure above reported nothing but
+    // the assertion line.
+    let direct = HostRunner.run(
+        &candidate.display().to_string(),
+        &["gateway", "service-probe"],
+    );
+    eprintln!(
+        "probe never succeeded for {}; last direct result: {direct:?}",
+        candidate.display()
+    );
+    false
 }
 
 #[test]
@@ -46,7 +98,7 @@ fn a_genuine_helper_passes_the_probe() {
         &format!("#!/bin/sh\necho '{PROBE_MARKER} 0.1.0'\n"),
         0o755,
     );
-    assert!(helper_answers_probe(&HostRunner, &candidate));
+    assert!(probe_expecting_success(&candidate));
 }
 
 #[test]
@@ -93,5 +145,5 @@ fn a_version_drifted_helper_still_passes_discovery() {
         &format!("#!/bin/sh\necho '{PROBE_MARKER} 0.0.1-ancient'\n"),
         0o755,
     );
-    assert!(helper_answers_probe(&HostRunner, &stale));
+    assert!(probe_expecting_success(&stale));
 }
