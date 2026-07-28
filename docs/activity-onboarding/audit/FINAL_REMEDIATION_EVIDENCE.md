@@ -112,8 +112,8 @@ target). Copying is also the safer shape.
 |---|---|
 | `cargo fmt --all --check` | **pass** (clean) |
 | `cargo +1.97.0 clippy --workspace --all-targets -- -D warnings` | **pass** (no warnings) |
-| `cargo test --workspace --all-targets` | see §6 |
-| `cargo build --workspace --release` | see §6 |
+| `cargo test --workspace --all-targets` | **1212 passed, 0 failed, 9 ignored** (81 binaries; was 1133) |
+| `cargo build --workspace --release` | **pass** |
 
 ### Frontend (`apps/desktop`)
 
@@ -552,3 +552,45 @@ Stated plainly rather than folded into a pass.
   item in the required validation list that could not be completed here, and it
   is an environment constraint rather than a code one. Do not quote this scope
   as passing until someone runs it somewhere clean.
+
+
+---
+
+## 6. Final counts, on the exact pushed head
+
+```text
+Final head:        6a1d88598d4fc18f9f8f8467724f7015dfc3775e
+PR state:          OPEN, not a draft, NOT merged
+Mergeability:      MERGEABLE  (stated as a fact about the branch, not a recommendation)
+Commits behind:    0
+Worktree:          clean
+Local == remote:   yes
+
+Rust tests:        1212 passed, 0 failed, 9 ignored   (81 binaries; was 1133)
+Frontend tests:    102 passed, 0 failed  (11 files; was 91)
+Smoke tests:       140 passed, 0 failed
+Packaged offline:  20 / 20      (app copied outside the repository)
+Packaged full:     57 / 57      (first passing run of this scope on any machine)
+Packaged service:  NOT RUN CLEANLY — see §4b / §5
+Gateway security:  adversarial_blackbox 17, control 24, custom_routes 13,
+                   forwarding 44, service_namespace, lifecycle 15 — all pass
+Privacy canaries:  10 passed (gateway) + 5 restore-record + 6 envrestore unit
+Product mutants:   24 killed, 0 survived, 0 skipped
+Harness mutants:   8 killed, 0 survived
+CI:                all 5 checks SUCCESS on 6a1d885
+                     Desktop backend (macOS)            success
+                     Desktop frontend                   success
+                     Packaged app + validation (macOS)  success
+                     Rust (core + CLI)                  success
+                     Rust core (Windows)                success
+```
+
+Two CI iterations were needed before green, both on the same test file and both
+my own doing: the runner's rustfmt wrapped a line mine did not, and the wrapped
+form then made a borrow redundant under clippy 1.97.0. Recorded because "CI
+passed" is worth less without knowing what it took.
+
+`cargo fmt --all --check` and CI's exact clippy invocation
+(`-p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p
+api-tracker-gateway -p api-tracker-tracking --all-targets -- -D warnings`,
+toolchain 1.97.0) were both run locally against the final head and are clean.
