@@ -68,14 +68,39 @@ is a machine that never had Tethra on it.
 
 ## 3. The authoritative run
 
+Two runs are recorded. The second is the one that matters for PR #16, because
+it ran on the **exact PR head**; the first is kept because it is the run whose
+numbers §4 quotes and because deleting the working history would be the same
+dishonesty this page exists to avoid.
+
 ```text
 Workflow:   Packaged macOS service lifecycle
             .github/workflows/packaged-service-macos.yml
+
+--- on the exact PR head -------------------------------------------------
+Run ID:     30326526816     duration 11m52s
+Commit:     bf421b9f83100ecd17df6ab83a892fc09ce5370c
+Branch:     feat/zero-friction-api-tracking   (PR #16)
+Label:      dev.api-tracker.gateway.6c7a0d0c85df
+Result:     tracking  63 passed, 0 failed (63/63)  verdict PASS, 0 skipped
+            lifecycle 51 passed, 0 failed
+            cleanup   VERIFIED — the machine is as clean after as before
+            all 6 required PR checks green
+
+--- the development run whose detail §4 quotes ---------------------------
 Run ID:     30325704492
-Commit:     b92c8e09  (branch ci/service-lifecycle-dev, identical tree to the
-                       PR head this evidence is filed against — see §9)
-Result:     every step success
+Commit:     b92c8e09        (branch ci/service-lifecycle-dev)
+Label:      dev.api-tracker.gateway.39d11f8db375
+Result:     identical: 63/63, 51/51, cleanup verified
 ```
+
+Note the two labels differ (`6c7a0d0c85df` vs `39d11f8db375`) and neither is
+the production label. They are derived from each run's own data directory
+(`/tmp/tethra-track-val-<pid>`), which is what makes the namespace
+run-specific rather than merely test-specific.
+
+The detail in the rest of this section is quoted from `30325704492`; the
+PR-head run reproduces every number.
 
 ### Clean-runner preconditions — asserted, never remediated
 
@@ -487,7 +512,9 @@ absent service label. A job asserting `grep "0 failed"` would have accepted it.
 ## 9. Reproducing this
 
 ```bash
-gh run view 30325704492 --log
+gh run view     30326526816 --log          # the PR-head run
+gh run download 30326526816 -n packaged-macos-service-lifecycle
+gh run view     30325704492 --log          # the run §4 quotes in detail
 gh run download 30325704492 -n packaged-macos-service-lifecycle
 ```
 
