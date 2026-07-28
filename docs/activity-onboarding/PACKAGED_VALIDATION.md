@@ -27,6 +27,21 @@ foreground run therefore cannot be mistaken for, or quoted as, a service run
 | `--scope full --foreground` | **57** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
 | `--scope full --require-service` | **59** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
 
+> **`--scope full --require-service` has never been observed passing.** The
+> structural defect (`RA-003`) is fixed — the run now reaches the count gate and
+> reports `59/59` instead of INCONCLUSIVE — but a clean pass needs a machine
+> with **no installed Tethra gateway**, which is this mode's own documented
+> precondition. Do not quote it as passing until someone runs it somewhere
+> clean.
+>
+> Running it on a machine that *does* have one is how `REM-001` was found: the
+> interlock globbed `$HOME/Library/LaunchAgents`, but `launchctl` addresses
+> `gui/<uid>`, which `$HOME` does not isolate — so redirecting `HOME` walked
+> past the interlock while every `launchctl` call still landed on the live
+> service, and it stopped a real production gateway. The interlock now asks
+> launchd as well as the filesystem. **Shim `launchctl` anyway if you are
+> experimenting with this mode.**
+
 None of those four totals is written down in the script. Each is **summed**
 from one number per group, and the group table is **proved against the
 script's own source** by `--scope selfcheck` before any check runs: an
