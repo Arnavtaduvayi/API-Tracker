@@ -139,14 +139,29 @@ mutate "scan-uses-gitsafe-not-git" \
       "    let _ = std::process::Command::new(\"git\").current_dir(std::env::temp_dir()).arg(\"-C\").arg(&root).args([\"ls-files\", \"--error-unmatch\", \"--\", \".env\"]).output();\n    let repo = crate::gitsafe::RepoView::open(&root);")' \
   -p api-tracker-core --test git_execution_canaries scanning_never_executes
 
-# Remove the `-c core.fsmonitor=false` override from the hardened runner:
-# the deliberate secret-scanner path must then execute the canary.
-mutate "hardened-git-disables-fsmonitor" \
+# Point Git back at the REAL repository instead of the sealed directory
+# (ADR 0027). This is the whole of RA-001 in one line: the repository's own
+# `.git/config` becomes part of the repository Git is reading, and
+# `log.showSignature` + `gpg.program` execute its chosen binary.
+#
+# This mutant replaced "hardened-git-disables-fsmonitor", which removed
+# `-c core.fsmonitor=false` from the enumeration. That mutant now SURVIVES,
+# and correctly so: the enumeration is no longer the control. Deleting it
+# without replacement would have quietly reduced this suite's coverage of
+# the very defect the re-audit found, so it is repointed at the protection
+# that actually holds the property today.
+# Both layers are removed together, deliberately. Removing either ALONE
+# leaves the other holding, which is the point of defence in depth and is
+# not something to mutate away one at a time; a single-layer mutant would
+# survive and read as "unpinned" when the property is in fact intact.
+# `sealing_alone_closes_every_vector` is what proves layer 1 carries its own
+# weight, with no `-c` override in play.
+mutate "sealed-gitdir-isolates-repository-config" \
   "crates/core/src/gitrepo.rs" \
   's = s.replace(
-      "        \"core.fsmonitor=false\".to_string(),\n",
-      "")' \
-  -p api-tracker-core --test git_execution_canaries the_hardened_git_path
+      "    cmd.args(hardened_leading_args());\n    cmd.arg(\"--git-dir\").arg(sealed.git_dir());",
+      "    cmd.arg(\"--no-pager\");\n    cmd.arg(\"-C\").arg(sealed.work_tree());")' \
+  -p api-tracker-core --test git_isolation_canaries no_product_path_executes
 
 # Remove the symlink refusal from the manifest reader (ZFT-002).
 mutate "stackdetect-refuses-symlinks" \
@@ -198,13 +213,49 @@ mutate "liveness-gates-verified-and-active" \
       "    match GatewayLiveness::Verified {\n        GatewayLiveness::Down => {")' \
   -p api-tracker-tracking --test verification_freshness
 
-# Drop the freshness bound: any observation, however old, proves health.
+# Drop the freshness bounds entirely: any observation, however old and
+# however implausibly dated, proves health.
 mutate "observation-freshness-window" \
   "crates/tracking/src/state.rs" \
   's = s.replace(
-      "            fresh: last_observed_at\n                .as_deref()\n                .is_some_and(|at| at >= stale_before.as_str()),",
+      "            fresh: last_observed_at\n                .as_deref()\n                .is_some_and(|at| at >= stale_before.as_str() && at <= future_after.as_str()),",
       "            fresh: last_observed_at.is_some(),")' \
   -p api-tracker-tracking --test verification_freshness
+
+# Drop ONLY the upper bound, leaving the lower one: exactly the audited-head
+# predicate, which read a year-ahead observation as a present-tense success
+# and let it erase a failure recorded now (RA-005).
+# Both upper bounds go together, for the same reason as the sealed-gitdir
+# mutant above: the SQL bound and the `fresh` predicate are independent
+# layers, and removing one alone leaves the other holding.
+mutate "observation-freshness-upper-bound" \
+  "crates/tracking/src/state.rs" \
+  's = s.replace(
+      "                .is_some_and(|at| at >= stale_before.as_str() && at <= future_after.as_str()),",
+      "                .is_some_and(|at| at >= stale_before.as_str()),")
+s = s.replace(
+      "               AND rowid > ?2 AND at >= ?3 AND at <= ?4",
+      "               AND rowid > ?2 AND at >= ?3 AND ?4 IS NOT NULL")' \
+  -p api-tracker-tracking --test verification_clock
+
+# Drop the insertion-ordered watermark from the admissibility query, leaving
+# only the wall-clock conditions (RA-005). A row recorded BEFORE the apply
+# then verifies it, however it is dated.
+mutate "observation-insertion-watermark" \
+  "crates/tracking/src/state.rs" \
+  's = s.replace(
+      "               AND rowid > ?2 AND at >= ?3 AND at <= ?4",
+      "               AND rowid > -1 AND at >= ?3 AND at <= ?4")' \
+  -p api-tracker-tracking --test verification_clock
+
+# Compare failure and observation timestamps as BYTES again rather than as
+# parsed instants (RA-005): `12:00:00.5Z` sorts before `12:00:00Z`.
+mutate "failure-ordering-uses-parsed-instants" \
+  "crates/tracking/src/state.rs" \
+  's = s.replace(
+      "        (Some(failed), Some(seen)) => instant_is_after(failed, seen),",
+      "        (Some(failed), Some(seen)) => failed.as_str() > seen.as_str(),")' \
+  -p api-tracker-tracking --test verification_clock
 
 # Stop clearing the previous attempt'"'"'s apply artifacts on re-run (ZFT-006).
 mutate "re-apply-clears-previous-session" \
@@ -250,17 +301,21 @@ mutate "undo-refuses-when-the-plan-is-unknown" \
 # Privacy — nothing secret reaches plaintext storage or stdout
 # ---------------------------------------------------------------------------
 
-# Revert the recordability check to authority-only: the ZFT-016 defect
-# exactly, where everything after the host was waved through into
-# `prior_env_json`.
-mutate "prior-env-refuses-query-material" \
+# Stop sealing recorded prior values (ADR 0028): they go into
+# `prior_env_json` — a plaintext column of an unencrypted database — exactly
+# as RA-006 found them.
+#
+# This mutant replaced "prior-env-refuses-query-material", which neutered
+# `prior_value_is_recordable`. That mutant now SURVIVES, and correctly so:
+# the predicate no longer gates storage, because deciding secrecy from a
+# value's shape is what RA-006 proved unsound. Repointed rather than
+# deleted, so the privacy property stays pinned by something.
+mutate "prior-env-values-are-sealed" \
   "crates/gateway/src/envlink.rs" \
-  'import re
-i = s.find("fn prior_value_is_recordable")
-j = s.find("\n}\n", i)
-if i != -1 and j != -1:
-    s = s[:i] + "fn prior_value_is_recordable(_value: &str) -> bool {\n    true" + s[j:]' \
-  -p api-tracker-gateway --test privacy_canaries no_env_value_canary
+  's = s.replace(
+      "            let plaintext = var.prior.take();",
+      "            let plaintext = var.prior.clone();")' \
+  -p api-tracker-gateway --test restore_record_privacy no_recorded_prior_value
 
 # Put the placeholder exemption back into the masker: the ZFT-017 defect,
 # where a host containing "example" printed the whole line.

@@ -16,21 +16,41 @@ Harness: `scripts/tracking_validate_macos.sh`. Its own anti-tautology tests:
 ## The scopes, and their exact counts
 
 The totals **differ by construction**, and the script enforces
-`total == expected` for the scope it ran. A foreground run therefore cannot
-be mistaken for, or quoted as, a service run — which is precisely what
-`ZFT-VAL-4` described, where both modes reported 42.
+`total == expected` — per group as well as in total — for the scope it ran. A
+foreground run therefore cannot be mistaken for, or quoted as, a service run
+— which is precisely what `ZFT-VAL-4` described, where both modes reported 42.
 
 | Scope | Checks | Groups | Runs in CI? |
 |---|---|---|---|
 | `--scope selfcheck` | **5** | HARNESS 5 | **yes** |
 | `--scope offline` | **20** | HARNESS 5 · BUNDLE 5 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
 | `--scope full --foreground` | **57** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
-| `--scope full --require-service` | **60** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
+| `--scope full --require-service` | **59** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
+
+None of those four totals is written down in the script. Each is **summed**
+from one number per group, and the group table is **proved against the
+script's own source** by `--scope selfcheck` before any check runs: an
+enumerator walks the `$SCOPE`/`$MODE` conditionals and reports what each of
+the four combinations can actually execute, and a disagreement aborts the run.
+
+That exists because the hand-maintained version of this table was wrong.
+`full:service` was declared to run **60** checks while the groups it runs sum
+to **59** (`57 − FOREGROUND 3 + SERVICE 5`), so the strongest mode was
+unpassable by construction: all 59 of its assertions could pass and the gate
+would still print `INCONCLUSIVE` and exit 1. The entry that drifted was the
+one nobody can run on a machine that already has Tethra installed, which is
+why the check is now mechanical and runs in CI on every PR rather than
+depending on a human recounting 59 call sites.
 
 ### Measured on this machine (macOS 25.5.0, aarch64)
 
 ```text
 $ bash scripts/tracking_validate_macos.sh --scope selfcheck
+  check inventory (summed from the group table, proved against this file):
+    selfcheck:none    5 checks
+    offline:none     20 checks
+    full:foreground  57 checks
+    full:service     59 checks
 === PACKAGED TRACKING VALIDATION (scope=selfcheck, mode=none): 5 passed, 0 failed (5/5 checks) ===
 
 $ bash scripts/tracking_validate_macos.sh --scope offline
@@ -49,6 +69,13 @@ $ bash scripts/tracking_validate_macos.sh --scope full --foreground
 $ echo $?
 1
 ```
+
+The `--scope selfcheck` and mutation lines were re-measured after the
+`RA-002` / `RA-003` / `RA-015` repairs below. The `--scope offline` breakdown
+is the run recorded earlier on this machine: those five group counts are
+unchanged by the repairs, and the enumerator now derives the same 20 from the
+script's source on every `--scope selfcheck`, but the offline scope needs a
+built `.app` and has not been re-run since.
 
 The abort is the correct outcome **on this machine** and is explained below.
 It exits **non-zero**, so a CI job cannot mistake "we refused to run" for a
@@ -87,9 +114,12 @@ every PR:
 
 1. `tracking_validate_macos.sh --scope selfcheck` — before anything it
    certifies, prove the harness reports a deliberately-broken control as a
-   **failure**;
+   **failure**, and prove the check inventory still describes the script:
+   the four scope+mode totals are enumerated from the source and must match
+   the declared group table, for the combinations CI cannot run as well as
+   the one it can;
 2. `validation_harness_mutants.sh` — and prove that gate is not itself
-   decorative: seven mutants that weaken the harness into "always ok",
+   decorative: eight mutants that weaken the harness into "always ok",
    including the literal `ZFT-VAL-7` and `ZFT-VAL-10` defects, must each be
    killed;
 3. `npm ci`, `scripts/bundle_cli.sh`, `tauri build --bundles app` — a **real
@@ -129,6 +159,17 @@ so the CI log states the boundary rather than relying on this page.
 | `ZFT-VAL-8` | the advertised forged-old-event negative control did not exist | implemented, and its SQL verified against the real schema |
 | `ZFT-VAL-9` | the group table summed to 40, not 42 | the table above is printed by the script and the script enforces the sum |
 | `ZFT-VAL-10` | "byte for byte" used `[ "$(cat a)" = "$b" ]`, stripping trailing newlines | `cmp(1)` on the real files; a mutant that reverts it is killed |
+
+### What the follow-up audit found in the harness itself
+
+All three were found by running the harness, not by reading it — the first
+`--scope full` run that reached the end.
+
+| Finding | What was wrong | What it does now |
+|---|---|---|
+| `RA-002` | the forged-event control ended by asserting `COUNT(*) FROM runtime_request_events WHERE at < applied_at = 0` — a premise the product's own apply contradicts, because the apply's keyless path check records a **real** gateway observation ~0.3s before `applied_at` is stamped. The forged row was deleted correctly; the assertion failed anyway | the pre-apply population is counted **before** the forgery, and the assertion is the delta: every planted row is gone by id and by session, and the observations the product recorded itself are still there. Verified both ways against a fixture reproducing the measured state |
+| `RA-003` | `full:service` was defined to run 60 checks while its groups sum to 59, so the mode could not pass with every assertion green | no per-mode total exists; totals are summed from one number per group, and `--scope selfcheck` enumerates the script and aborts unless the table matches the source. The group counts are enforced individually at the end of a run, so two drifts that cancel out no longer hide in the sum |
+| `RA-015` | `--help` printed a fixed `1,89p` slice of a header that had grown to 94 lines, so it dropped the isolation/cleanup disclosure, and its stated totals were stale | the cut point is computed (print until the first non-comment line), and every total it states is one of the four the script enforces |
 
 ### The defect found while fixing them
 

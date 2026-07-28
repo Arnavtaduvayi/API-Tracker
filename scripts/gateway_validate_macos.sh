@@ -12,22 +12,51 @@
 # those behaviors are covered by the in-process test suite instead; this
 # script says so where it applies.
 #
-# Isolated: a short TETHRA_DIR under /tmp (the control socket needs a
-# sun_path under ~104 bytes), a throwaway fake vault, fake credentials,
-# and a LaunchAgent label unique to this run is NOT used — the real label
-# dev.api-tracker.gateway is used because that is what ships, but the
-# script refuses to run if a gateway is already installed for the user,
-# and always cleans up.
+# ISOLATED, and isolated the way the product is (RA-004). Every identifier
+# this script touches belongs to THIS run: a short data directory under
+# /private/tmp (the control socket needs a sun_path under ~104 bytes), a
+# throwaway fake vault, fake credentials, and the PER-INSTALLATION
+# LaunchAgent label the product derives from that data directory
+# (lifecycle::installation_id → macos::label_for). The production label
+# dev.api-tracker.gateway is never installed, never bootstrapped, never
+# booted out and never deleted here.
+#
+# The revision this replaces hardcoded the production label and plist path
+# and armed an `rm -f "$PLIST"` EXIT trap BEFORE its own safety guard ran,
+# so on a machine that already had a gateway the guard's `exit 2` fired the
+# trap and permanently deleted the user's live LaunchAgent — the refusal
+# path was the destructive one. Two independent properties now prevent
+# that: every refusal happens before any trap exists (so a refusal writes
+# nothing at all), and teardown removes only what an explicit ownership
+# ledger records this run creating, re-proving each record before acting.
+# This mirrors lifecycle::ServiceManager::ensure_ours, which refuses to
+# touch any definition it cannot prove points at its own data directory;
+# read the two together.
 set -uo pipefail
 
+# --- identity: everything below names THIS run, and only this run ----------
+
+# The PRODUCTION label. Named here once so every refusal below can compare
+# against it by name; nothing in this script ever installs, starts, stops or
+# removes it. Matches lifecycle::macos::LEGACY_LABEL.
+LEGACY_LABEL="dev.api-tracker.gateway"
+
 CLI="$(pwd)/target/release/tethra"
-DIR="/tmp/tethra-gw-val-$$"
+UID_N="$(id -u)"
+
+# /private/tmp, not /tmp. `installation_id` CANONICALIZES the data directory,
+# so a path reached through the /tmp symlink hashes to one label while the
+# directory is absent and a different one once it exists — deriving our label
+# from an already-canonical path keeps it stable, which is what lets every
+# refusal below run before anything is created. The assertion after mkdir
+# proves the derivation did not move rather than assuming it.
+TMPBASE="$(cd /tmp 2>/dev/null && pwd -P)" || TMPBASE="/tmp"
+RUN_ID="$$-$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')"
+DIR="$TMPBASE/tethra-gw-val-$RUN_ID"
+LEDGER="$TMPBASE/tethra-gw-val-$RUN_ID.ledger"
 export TETHRA_DIR="$DIR"
 export TETHRA_PASSWORD="packaged-validation-password-123"
 export API_TRACKER_INSECURE_FAST_KDF=1   # test vault only; never a real one
-LABEL="dev.api-tracker.gateway"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-UID_N="$(id -u)"
 
 pass=0; fail=0
 ok()   { echo "  PASS  $1"; pass=$((pass+1)); }
@@ -62,21 +91,269 @@ sys.exit(0 if bool(eval(sys.argv[1], {}, {"g": g})) else 1)
 ' "$expr"; then ok "$label"; else bad "$label"; fi
 }
 
-cleanup() {
-  "$CLI" gateway uninstall --keep-env --yes >/dev/null 2>&1 || true
-  launchctl bootout "gui/$UID_N/$LABEL" >/dev/null 2>&1 || true
-  rm -f "$PLIST" 2>/dev/null || true
-  rm -rf "$DIR" 2>/dev/null || true
+# =====================================================================
+# Ownership ledger
+# =====================================================================
+# What the old teardown got wrong was not WHICH paths it deleted but that it
+# ASSUMED it owned them: it deleted a hardcoded plist whether or not this run
+# had ever written one. Nothing is assumed here. An artifact is recorded the
+# moment this run is observed to have created it, together with the evidence
+# teardown needs to re-prove ownership later:
+#
+#   dir    <path>                    a directory we created (preflight proved
+#                                    it absent, so its existence is ours)
+#   plist  <path>   <label>          a definition we created; removed only
+#                                    while it still names <label> AND bakes
+#                                    --data-dir $DIR into its argv
+#   label  <label>                   a launchd job we bootstrapped
+#   pid    <pid>    <binary-prefix>  a process we started; signalled only if
+#                                    that pid still runs that binary
+#
+# A file rather than shell variables: every record then survives subshells and
+# pipelines, so a record written inside one cannot silently fail to reach
+# teardown. Anything the ledger does not name is, by construction, something
+# this run found already on the machine — and is never a removal candidate.
+ledger_add() { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "$LEDGER"; }
+ledger_values() {
+  [ -f "$LEDGER" ] || return 0
+  awk -F'\t' -v k="$1" '$1 == k { print $2 "\t" $3 }' "$LEDGER"
 }
+
+# Does the definition at $1 still prove it is the one we wrote under label $2?
+# Both facts are required: the label alone is just a string anyone can put in
+# a file, while --data-dir names a directory that did not exist before this
+# run started. Our paths contain no XML metacharacters, so the plist's
+# escaping (macos::xml_escape) cannot change how they appear here.
+plist_is_ours() {
+  local p="$1" lbl="$2"
+  [ -L "$p" ] && return 1          # a symlink is not the file we wrote
+  [ -f "$p" ] || return 1
+  grep -q "<string>$lbl</string>" "$p" 2>/dev/null || return 1
+  grep -q "<string>$DIR</string>" "$p" 2>/dev/null || return 1
+  return 0
+}
+
+# Is pid $1 still the process we started from $2? IDENTITY, never a pattern.
+# `pkill -f tethra` or `killall` would have matched the user's production
+# gateway — a live service holding their real vault — which is the same class
+# of mistake as deleting their plist. `ps -o comm=` reports the executable
+# PATH on macOS, and ours lives under a directory unique to this run.
+proc_is_ours() {
+  local pid="$1" prefix="$2" cmd
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -p "$pid" -o comm= 2>/dev/null)" || return 1
+  case "$cmd" in "$prefix"*) return 0 ;; *) return 1 ;; esac
+}
+
+# Teardown. Ledger-driven, ownership-checked, and idempotent: every action is
+# guarded by "does this still exist and is it still ours", so a second run
+# finds nothing left to prove and does nothing. It is armed only after every
+# refusal below has passed.
+cleanup() {
+  local value extra
+
+  # 1. Let the PRODUCT tear down its own installation first — the same path a
+  #    user runs, and one that applies ensure_ours against $TETHRA_DIR, so it
+  #    can only act on this run's service. Skipped entirely when we never got
+  #    as far as registering one.
+  if [ -n "$(ledger_values label)" ]; then
+    "$CLI" gateway uninstall --keep-env --yes >/dev/null 2>&1 || true
+  fi
+
+  # 2. Stop only processes this run started, proven by pid AND binary.
+  while IFS=$'\t' read -r value extra; do
+    if proc_is_ours "$value" "$extra"; then
+      kill -TERM "$value" 2>/dev/null || true
+    fi
+  done < <(ledger_values pid)
+
+  # 3. Unload only labels this run bootstrapped. `bootout` addresses the LIVE
+  #    gui/<uid> domain no matter which $HOME the plist came from (ZFT-014),
+  #    so it gets the strictest guard: never the production label, and — while
+  #    the definition is still on disk — only when that definition proves ours.
+  #    Once step 1 has removed the plist there is nothing left to re-read; the
+  #    record itself is then the proof, because the label is derived from a
+  #    data directory that did not exist until this run created it.
+  while IFS=$'\t' read -r value extra; do
+    [ -n "$value" ] || continue
+    [ "$value" = "$LEGACY_LABEL" ] && continue
+    if [ -e "$LA_DIR/$value.plist" ] && ! plist_is_ours "$LA_DIR/$value.plist" "$value"; then
+      echo "  cleanup: leaving $LA_DIR/$value.plist alone (it no longer proves it is ours)" >&2
+      continue
+    fi
+    launchctl bootout "gui/$UID_N/$value" >/dev/null 2>&1 || true
+  done < <(ledger_values label)
+
+  # 4. Remove only definitions this run created, and only while they still
+  #    prove it. A recorded plist whose contents stopped matching is LEFT IN
+  #    PLACE and reported: a visible stray file under a label nothing else
+  #    uses is a far smaller harm than deleting a file we can no longer prove
+  #    we wrote, which is precisely the harm being fixed here.
+  while IFS=$'\t' read -r value extra; do
+    [ -n "$value" ] || continue
+    [ "$value" = "$PROD_PLIST" ] && continue
+    if [ -e "$value" ] && ! plist_is_ours "$value" "$extra"; then
+      echo "  cleanup: NOT removing $value (it no longer proves it is ours)" >&2
+      continue
+    fi
+    rm -f "$value" 2>/dev/null || true
+  done < <(ledger_values plist)
+
+  # 5. Our scratch directory. The prefix test is belt-and-braces: a truncated
+  #    or corrupted ledger must not be able to widen an `rm -rf`.
+  while IFS=$'\t' read -r value extra; do
+    case "$value" in
+      "$TMPBASE"/tethra-gw-val-*) rm -rf "$value" 2>/dev/null || true ;;
+      *) [ -n "$value" ] && echo "  cleanup: refusing to remove unexpected directory $value" >&2 ;;
+    esac
+  done < <(ledger_values dir)
+
+  rm -f "$LEDGER" 2>/dev/null || true
+}
+
+# =====================================================================
+# Preflight
+# =====================================================================
+# EVERY refusal lives here, above the `trap` line, and writes nothing: no
+# directory, no ledger, no trap. A refusal therefore leaves the machine
+# byte-identical to how it was found — which is the property the old script
+# advertised and inverted.
+refuse() { echo "REFUSING: $*" >&2; exit 2; }
+
+if [ ! -x "$CLI" ]; then
+  refuse "no release CLI at $CLI (build it first: cargo build --release)"
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+  refuse "python3 is required to read the CLI's JSON service identity"
+fi
+if [ -z "${HOME:-}" ]; then
+  refuse "HOME is not set; cannot locate ~/Library/LaunchAgents"
+fi
+# $DIR and $LEDGER are built from $TMPBASE and teardown's prefix guard trusts
+# it, so a scratch base that did not resolve must stop the run rather than
+# quietly relocate both to /.
+if [ -z "$TMPBASE" ] || [ ! -d "$TMPBASE" ]; then
+  refuse "could not resolve a scratch base directory (got '${TMPBASE}')"
+fi
+LA_DIR="$HOME/Library/LaunchAgents"
+PROD_PLIST="$LA_DIR/$LEGACY_LABEL.plist"
+
+if [ -e "$DIR" ]; then
+  refuse "scratch data directory $DIR already exists; this run will not adopt a directory it did not create"
+fi
+if [ -e "$LEDGER" ]; then
+  refuse "ownership ledger $LEDGER already exists"
+fi
+
+# This script drives install → bootstrap → stop → restart → uninstall. It will
+# not do that beside a live production gateway: `gateway install` also runs
+# the legacy-agent reclaim (lifecycle::reclaim_legacy), and a validation
+# harness has no business standing next to the user's real service to find out
+# whether the product's ownership proof holds. Read-only checks — a stat, a
+# glob and a `launchctl print` — and the plist named here is NEVER removed by
+# this script under any exit path.
+if [ -e "$PROD_PLIST" ]; then
+  refuse "a production gateway LaunchAgent already exists at $PROD_PLIST. This run will not proceed beside it, and will never delete it. Uninstall it yourself first (\`tethra gateway uninstall\`) if you want this validation."
+fi
+for existing in "$LA_DIR/$LEGACY_LABEL".*.plist; do
+  [ -e "$existing" ] || continue
+  refuse "a Tethra gateway LaunchAgent already exists at $existing. This run will not proceed beside it, and will never delete it."
+done
+if launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1; then
+  refuse "launchd already runs the production job gui/$UID_N/$LEGACY_LABEL"
+fi
+
+# The label is the PRODUCT's to decide, not ours to invent: ask the CLI which
+# service this data directory owns. Re-deriving blake3 over a canonicalized
+# path in shell would be a second implementation, free to drift from the one
+# that actually writes the plist — and drift here means acting on a job that
+# is not the one we installed.
+svc_field() {
+  "$CLI" --json gateway status 2>/dev/null | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+if not raw.strip():
+    sys.exit(1)
+s = (json.loads(raw) or {}).get("service") or {}
+v = s.get(sys.argv[1])
+if not v:
+    sys.exit(1)
+print(v)
+' "$1"
+}
+LABEL="$(svc_field service_name)" || refuse "could not read the LaunchAgent label the CLI derives for $DIR"
+PLIST="$(svc_field definition_path)" || refuse "could not read the plist path the CLI derives for $DIR"
+
+# Refuse the production identifiers outright. Whatever else drifts — the
+# derivation, the CLI, this script — the run must be unable to NAME the user's
+# live service, so the checks are on the resolved strings rather than on the
+# reasoning that produced them.
+if [ "$LABEL" = "$LEGACY_LABEL" ]; then
+  refuse "the CLI resolved the PRODUCTION label $LEGACY_LABEL for $DIR; this run installs only per-installation labels"
+fi
+case "$LABEL" in
+  "$LEGACY_LABEL".*) ;;
+  *) refuse "resolved label '$LABEL' is outside the $LEGACY_LABEL.* family" ;;
+esac
+if ! printf '%s' "${LABEL#"$LEGACY_LABEL".}" | grep -qE '^[0-9a-f]{12}$'; then
+  refuse "resolved label '$LABEL' is not a per-installation label (expected $LEGACY_LABEL.<12 hex>)"
+fi
+if [ "$PLIST" = "$PROD_PLIST" ]; then
+  refuse "the CLI resolved the PRODUCTION plist path $PROD_PLIST for $DIR"
+fi
+if [ "$PLIST" != "$LA_DIR/$LABEL.plist" ]; then
+  refuse "resolved plist $PLIST does not sit at $LA_DIR/$LABEL.plist; refusing to act on an unexpected path"
+fi
+if [ -e "$PLIST" ]; then
+  refuse "$PLIST already exists — this run neither adopts nor deletes a file it did not create"
+fi
+if launchctl print "gui/$UID_N/$LABEL" >/dev/null 2>&1; then
+  refuse "launchd already knows gui/$UID_N/$LABEL; refusing to take over a job this run did not create"
+fi
+
+# Read-only snapshot of the production definition, for the invariant asserted
+# at the end. The refusal above means this is normally `absent`; the assertion
+# then fails if this run ever CREATES, moves or replaces that file — which is
+# the check that would have caught RA-004 from inside the script.
+prod_sig() {
+  if [ -e "$PROD_PLIST" ]; then
+    stat -f '%z-bytes mtime=%m mode=%Lp' "$PROD_PLIST" 2>/dev/null || echo "present-unreadable"
+  else
+    echo absent
+  fi
+}
+PROD_SIG_BEFORE="$(prod_sig)"
+
+# =====================================================================
+# Create the isolated namespace. Only now does a teardown trap exist.
+# =====================================================================
+if ! : > "$LEDGER"; then
+  refuse "could not create the ownership ledger at $LEDGER"
+fi
+if ! mkdir "$DIR"; then          # plain mkdir: a second guard against adoption
+  rm -f "$LEDGER"
+  refuse "could not create the scratch data directory $DIR"
+fi
+chmod 700 "$DIR"
+ledger_add dir "$DIR"
 trap cleanup EXIT
 
-if [ -e "$PLIST" ]; then
-  echo "REFUSING: a gateway LaunchAgent already exists at $PLIST"; exit 2
+# `installation_id` canonicalizes, so creating the directory could in
+# principle move the label the preflight checks just vetted (it does for a
+# /tmp-symlinked path — the reason $TMPBASE is resolved with `pwd -P`). Prove
+# it did not, before anything is installed under either name.
+LABEL_AFTER="$(svc_field service_name)" || LABEL_AFTER=""
+if [ "$LABEL_AFTER" != "$LABEL" ]; then
+  echo "ABORT: the service label moved when $DIR was created ($LABEL -> ${LABEL_AFTER:-<unreadable>})." >&2
+  echo "       Refusing to install under a label no preflight check vetted." >&2
+  exit 2
 fi
-mkdir -p "$DIR"; chmod 700 "$DIR"
 
 echo "CLI: $("$CLI" --version)"
 echo "TETHRA_DIR: $DIR"
+echo "LaunchAgent: $LABEL"
+echo "  plist:     $PLIST"
 
 # --- vault + fake data ---
 "$CLI" init >/dev/null 2>&1 && ok "init a fresh isolated vault" || bad "init"
@@ -96,7 +373,17 @@ step "1-3. Enable gateway (desktop-equivalent), approve, confirm LaunchAgent"
 # the programmatic consent; the desktop shows the consent card first.
 "$CLI" gateway install --yes > "$DIR/install.log" 2>&1
 if [ $? -eq 0 ]; then ok "gateway install succeeded"; else bad "gateway install (see install.log)"; cat "$DIR/install.log"; fi
-[ -f "$PLIST" ] && ok "LaunchAgent plist written at $PLIST" || bad "no plist"
+# Record BEFORE asserting anything about the contents: preflight proved this
+# path absent, so a file here now is this run's doing, and a plist that is
+# present but malformed must still be cleaned up rather than leaked. What the
+# record permits is bounded separately, by plist_is_ours at teardown.
+if [ -e "$PLIST" ]; then
+  ledger_add plist "$PLIST" "$LABEL"
+  ledger_add label "$LABEL"
+  ok "LaunchAgent plist written at $PLIST"
+else
+  bad "no plist"
+fi
 grep -q "KeepAlive" "$PLIST" && grep -q "Crashed" "$PLIST" && ok "plist has KeepAlive={Crashed:true}" || bad "plist KeepAlive"
 grep -q -- "--data-dir" "$PLIST" && grep -q "$DIR" "$PLIST" && ok "plist bakes --data-dir into argv" || bad "plist data-dir"
 launchctl print "gui/$UID_N/$LABEL" >/dev/null 2>&1 && ok "launchctl knows the service (bootstrapped)" || bad "not bootstrapped"
@@ -116,7 +403,15 @@ step "4. Service survives the enabling process exiting"
 sleep 1
 "$CLI" gateway status >/dev/null 2>&1 && ok "service still running after installer exited" || bad "service died with installer"
 SVC_PID="$(launchctl print "gui/$UID_N/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')"
-[ -n "$SVC_PID" ] && ok "launchd owns the service process (pid $SVC_PID)" || bad "no service pid"
+if [ -n "$SVC_PID" ]; then
+  # Recorded with the binary it must still be running: teardown signals this
+  # pid only after re-proving both facts, so a pid that has since been reused
+  # by an unrelated process is left alone.
+  ledger_add pid "$SVC_PID" "$DIR/bin/"
+  ok "launchd owns the service process (pid $SVC_PID)"
+else
+  bad "no service pid"
+fi
 
 step "5. Add a route (real provider origin; fake keys → 401)"
 "$CLI" gateway route add openai >/dev/null 2>&1 && ok "route 'openai' added" || bad "route add"
@@ -372,13 +667,35 @@ else
   ok "assert_status rejects a stopped gateway (an empty response is a failure)"
 fi
 
+step "31. Isolation invariant: the user's production service was never touched"
+# RA-004 was a teardown that deleted the PRODUCTION LaunchAgent
+# ($HOME/Library/LaunchAgents/dev.api-tracker.gateway.plist) — a live service
+# holding the user's real vault — from the REFUSAL path. Preflight refuses to
+# run at all when that agent is present, so both signatures below are normally
+# the absent state; these assertions fail if this run created, replaced or
+# registered the production identifiers at any point.
+PROD_SIG_AFTER="$(prod_sig)"
+if [ "$PROD_SIG_AFTER" = "$PROD_SIG_BEFORE" ]; then
+  ok "the production plist is exactly as this run found it ($PROD_SIG_AFTER)"
+else
+  bad "the production plist CHANGED during this run ($PROD_SIG_BEFORE -> $PROD_SIG_AFTER)"
+fi
+if launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1; then
+  bad "gui/$UID_N/$LEGACY_LABEL is loaded; preflight refused to run beside one, so this run registered the production label"
+else
+  ok "the production label was never registered in gui/$UID_N by this run"
+fi
+
 echo
 echo "=== PACKAGED MACOS RESULT: $pass passed, $fail failed ==="
 # A run that asserted almost nothing must not read as success. This floor is
 # the structural guard against the vacuity the final audit found: if steps are
 # skipped or helpers silently stop asserting, the count drops below it and the
 # script fails even with zero recorded failures.
-MIN_CHECKS=30
+# 30 → 32 because step 31 adds exactly two UNCONDITIONAL checks; any run that
+# used to reach 30 now reaches 32, so the floor is neither tightened nor
+# loosened relative to the vacuity it was calibrated to catch.
+MIN_CHECKS=32
 if [ "$pass" -lt "$MIN_CHECKS" ]; then
   echo "FAIL: only $pass checks ran; at least $MIN_CHECKS are expected."
   echo "      A low count means checks were SKIPPED, not that all is well."

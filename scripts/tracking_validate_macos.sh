@@ -53,9 +53,12 @@
 #     legacy agent would trigger the takeover migration, and a run that
 #     succeeds only because the machine happened to be clean is not evidence.
 #     Use `--scope offline` there.
-#   * the totals for the modes DIFFER BY CONSTRUCTION (foreground 59,
-#     service 61, offline 22, selfcheck 5). A foreground run therefore can
-#     never be mistaken for, or quoted as, a service run.
+#   * the totals for the modes DIFFER BY CONSTRUCTION (foreground 57,
+#     service 59, offline 20, selfcheck 5). A foreground run therefore can
+#     never be mistaken for, or quoted as, a service run. Those four numbers
+#     are SUMMED from the group table below, never typed in: `full:service`
+#     was once typed as 60 while its groups sum to 59, which made the mode
+#     unpassable with every one of its assertions green (RA-003).
 #   * this is a macOS harness. Windows and Linux packaging are not covered.
 #
 # ANTI-VACUITY MECHANICS:
@@ -79,9 +82,18 @@
 #       `[ "$(cat a)" = "$(cat b)" ]` (the literal ZFT-VAL-10 defect).
 #     Deleting the group itself is killed by the count-equality gate below.
 #   * the final gate asserts that the executed check count EQUALS the count
-#     this scope+mode is defined to run. A floor catches only truncation;
-#     equality also catches a check disappearing into a conditional, which is
-#     how a mode downgrade used to keep the same total (ZFT-VAL-4).
+#     this scope+mode is defined to run, PER GROUP as well as in total. A
+#     floor catches only truncation; equality also catches a check
+#     disappearing into a conditional, which is how a mode downgrade used to
+#     keep the same total (ZFT-VAL-4), and the per-group form also catches
+#     two drifts that cancel out in the sum.
+#   * the count a run is measured against is not a number a human maintains.
+#     `--scope selfcheck` ENUMERATES this file — it walks the scope/mode
+#     conditionals and counts the checks each of the four scope+mode
+#     combinations can actually execute — and aborts unless the group table
+#     matches the source. That runs in CI, so the drift that made
+#     `full:service` unpassable (RA-003) is now caught mechanically on every
+#     PR instead of by a human recounting a comment.
 #
 # Routes point at REAL provider origins with FAKE keys: a 401 proves
 # DNS -> gateway -> TLS -> provider. Synthetic local upstreams are
@@ -120,9 +132,13 @@ while [ $# -gt 0 ]; do
     --foreground)      MODE="foreground"; shift ;;
     --require-service) MODE="service"; shift ;;
     --self-check|--selfcheck) SCOPE="selfcheck"; shift ;;
-    # The whole header, up to (not including) `set -uo pipefail` on line 90 —
-    # the mode/scope table and the proves/does-not-prove list are the help.
-    -h|--help)         sed -n '1,89p' "$0"; exit 0 ;;
+    # The whole header — the mode/scope table and the proves/does-not-prove
+    # list ARE the help — up to (not including) the first line of code. The
+    # cut point is COMPUTED rather than written down: `sed -n '1,89p'` kept
+    # printing 89 lines after the header grew past 89, so it silently dropped
+    # the isolation/cleanup disclosure (RA-015). A help text that truncates
+    # itself stops disclosing exactly what a reader opened it for.
+    -h|--help)         awk '!/^#/ { exit } { print }' "$0"; exit 0 ;;
     -*)                echo "unknown option: $1" >&2; exit 2 ;;
     *)                 APP="$1"; shift ;;
   esac
@@ -135,28 +151,304 @@ esac
 # offline and selfcheck start no gateway at all, so neither mode word applies.
 [ "$SCOPE" = "full" ] || MODE="none"
 
-# How many checks this exact scope+mode is DEFINED to execute. The summary
-# refuses to report a quotable result unless the measured count matches, so a
-# check that quietly stops running is a hard failure rather than a smaller
-# number nobody notices. Update this table in the same commit that adds or
-# removes a check.
+# --- the check inventory ---------------------------------------------------
+# How many checks each scope+mode is DEFINED to execute. The summary refuses
+# to report a quotable result unless the measured count matches, so a check
+# that quietly stops running is a hard failure rather than a smaller number
+# nobody notices.
 #
-#   HARNESS 5 + BUNDLE 7 + FIXTURE 3 + DRYRUN 6 = 21 (+ OFFLINE 1 = 22)
-#   ... + APPLY 9 + NEGATIVE 8 + TRAFFIC 5 + PRIVACY 5
-#       + IDEMPOTENCE 4 + UNDO 4                        = 56 common to scope=full
-#   ... + FOREGROUND 3 = 59      |      ... + SERVICE 5 = 61
-case "$SCOPE:$MODE" in
-  # These totals are enforced at the end of the run, so a check that is
-  # added, removed or silently skipped fails the script rather than shifting
-  # the number quietly. Two former BUNDLE "checks" became uncounted
-  # PRECONDITIONS (a `check` followed by `die` on the failing branch can
-  # never be reported as a failure), which is why offline is 20 and not 22.
-  selfcheck:*)     EXPECTED=5  ;;
-  offline:*)       EXPECTED=20 ;;
-  full:foreground) EXPECTED=57 ;;
-  full:service)    EXPECTED=60 ;;
-  *) echo "internal error: no expected count for $SCOPE:$MODE" >&2; exit 2 ;;
-esac
+# ONE number per group lives here, and every total is SUMMED from it. No
+# per-mode total is written down any more: `full:service` was written down as
+# 60 while the groups it runs sum to 59, so that mode was unpassable BY
+# CONSTRUCTION — all 59 of its assertions could pass and the gate would still
+# print INCONCLUSIVE and exit 1 (RA-003). The mode that drifted is precisely
+# the mode that cannot be run on a machine that already has Tethra installed,
+# which is why a hand-maintained total is the wrong instrument: the arithmetic
+# is done below, and verify_check_inventory() proves this table against the
+# conditionals in this file before any check runs.
+#
+# Two former BUNDLE "checks" are uncounted PRECONDITIONS (a `check` followed
+# by `die` on the failing branch can never be reported as a failure), which is
+# why BUNDLE is 5 and offline is 20 rather than 22.
+group_size() {   # group_size <GROUP> -> the number of checks that group runs
+  case "$1" in
+    HARNESS)     echo 5 ;;
+    BUNDLE)      echo 5 ;;
+    FIXTURE)     echo 3 ;;
+    DRYRUN)      echo 6 ;;
+    OFFLINE)     echo 1 ;;
+    FOREGROUND)  echo 3 ;;
+    SERVICE)     echo 5 ;;
+    APPLY)       echo 9 ;;
+    NEGATIVE)    echo 8 ;;
+    TRAFFIC)     echo 5 ;;
+    PRIVACY)     echo 5 ;;
+    IDEMPOTENCE) echo 4 ;;
+    UNDO)        echo 4 ;;
+    *) echo "internal error: no declared size for group '$1'" >&2; return 2 ;;
+  esac
+}
+# Which groups each scope+mode is defined to run. This is the OTHER half of
+# the arithmetic, and it is verified the same way — enumerate_checks() decides
+# which groups a scope+mode reaches by reading the conditionals, not this
+# list, so a wrong entry here is a mismatch rather than a silent redefinition.
+scope_groups() {   # scope_groups <scope>:<mode> -> group names, space separated
+  case "$1" in
+    selfcheck:*)     echo "HARNESS" ;;
+    offline:*)       echo "HARNESS BUNDLE FIXTURE DRYRUN OFFLINE" ;;
+    full:foreground) echo "HARNESS BUNDLE FIXTURE DRYRUN FOREGROUND APPLY NEGATIVE TRAFFIC PRIVACY IDEMPOTENCE UNDO" ;;
+    full:service)    echo "HARNESS BUNDLE FIXTURE DRYRUN SERVICE APPLY NEGATIVE TRAFFIC PRIVACY IDEMPOTENCE UNDO" ;;
+  esac
+}
+expected_total() {   # expected_total <scope>:<mode> -> the enforced check count
+  local g n t=0 groups
+  groups="$(scope_groups "$1")"
+  [ -n "$groups" ] || { echo "internal error: no group list for $1" >&2; return 2; }
+  for g in $groups; do
+    n="$(group_size "$g")" || return 2
+    t=$(( t + n ))
+  done
+  echo "$t"
+}
+in_list() {   # in_list <word> <space-separated list>
+  case " $2 " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# THE SELF-TEST. Reads THIS file and counts the checks a given scope+mode can
+# actually execute: it attributes every counted call site to the group in
+# effect at that line, resolves each `if [ "$SCOPE" ... ]` / `if [ "$MODE"
+# ... ]` guard for the combination being enumerated, and collapses the
+# branches of a runtime conditional (which emits one check whichever branch
+# runs) into one.
+#
+# It is deliberately fail-closed. A check inside a loop, a runtime if/else
+# whose branches emit DIFFERENT numbers of checks, a check invoked in a shape
+# it does not recognise, or unbalanced nesting are reported as errors rather
+# than guessed at, because each of those would make the enforced total depend
+# on machine state — the property this whole file exists to deny. A call site
+# that must not be counted carries `#@uncounted` and says why.
+enumerate_checks() {   # enumerate_checks <scope> <mode> -> "GROUP=N" lines
+  awk -v want_scope="$1" -v want_mode="$2" '
+    function fail(msg) { printf "ERROR (line %d): %s\n", NR, msg; errs++ }
+
+    # Quote-aware, so a multi-line SQL string or a multi-line die() message is
+    # read as the single logical line it is.
+    function nquotes(str,   n, i, c, prev) {
+      n = 0; prev = ""
+      for (i = 1; i <= length(str); i++) {
+        c = substr(str, i, 1)
+        if (c == "\"" && prev != "\\") n++
+        prev = c
+      }
+      return n
+    }
+    # Blank out every double-quoted string before matching, so prose in a
+    # label or a die() message can never look like a check or a keyword.
+    function blanked(str,   out) { out = str; gsub(/"[^"]*"/, "\"\"", out); return out }
+
+    function all_active(   i) {
+      for (i = 1; i <= depth; i++) if (!act[i]) return 0
+      return 1
+    }
+    function push(type, a) {
+      depth++
+      ftype[depth] = type; act[depth] = a; taken[depth] = a
+      nbr[depth] = 0; cnt[depth] = 0; first[depth] = 0; closed[depth] = 0
+      if (type == "loop") loops++
+    }
+    function pop() {
+      if (depth == 0) { fail("a closing keyword with nothing open"); return }
+      if (ftype[depth] == "loop") loops--
+      depth--
+    }
+    # A branch of a runtime conditional must emit the same number of checks as
+    # its siblings, because exactly one of them runs and the enforced total
+    # may not depend on which.
+    function close_branch(   d) {
+      d = depth
+      if (d == 0) { fail("a branch keyword outside any conditional"); return }
+      if (ftype[d] != "guard") {
+        if (nbr[d] == 0) first[d] = cnt[d]
+        else if (cnt[d] != first[d])
+          fail("the branches of a runtime conditional emit different numbers of checks (" first[d] " vs " cnt[d] "), so the total would depend on machine state")
+        act[d] = 0
+      }
+      nbr[d]++; cnt[d] = 0; closed[d] = 1
+    }
+    function close_if(   d) {
+      d = depth
+      if (d == 0) { fail("fi with nothing open"); return }
+      close_branch()
+      if (ftype[d] == "runtime" && nbr[d] == 1 && first[d] > 0)
+        fail("a runtime conditional with no else emits " first[d] " check(s) conditionally")
+      pop()
+    }
+    function close_case(   d) {
+      d = depth
+      if (d == 0) { fail("esac with nothing open"); return }
+      if (!closed[d]) close_branch()
+      if (nbr[d] == 1 && first[d] > 0)
+        fail("a case with a single arm emits " first[d] " check(s) conditionally")
+      pop()
+    }
+    # Only a bare `[ "$SCOPE" op "value" ]` / `[ "$MODE" op "value" ]` test is
+    # decidable here. Anything else is treated as a runtime condition, which
+    # is the fail-closed direction: runtime branches must then agree on their
+    # check counts.
+    function classify(str,   n, f, var, op, val, want) {
+      n = split(str, f, /[ \t]+/)
+      if (n != 7 || f[2] != "[" || f[6] != "];" || f[7] != "then") return "?"
+      var = f[3]; gsub(/"/, "", var); sub(/^\$/, "", var)
+      op  = f[4]
+      val = f[5]; gsub(/"/, "", val)
+      if (var == "SCOPE") want = want_scope
+      else if (var == "MODE") want = want_mode
+      else return "?"
+      if (op == "=")  return (val == want) ? "1" : "0"
+      if (op == "!=") return (val != want) ? "1" : "0"
+      return "?"
+    }
+    function site(q, s,   i) {
+      if (s ~ /#@uncounted/) return
+      if (q ~ ("^" PRIM "[ \t]") || q ~ ("(&&|\\|\\|)[ \t]*" PRIM "[ \t]")) {
+        if (loops > 0) fail("a counted check inside a loop makes the total depend on runtime state")
+        if (cur == "") fail("a counted check appears before any group statement")
+        for (i = 1; i <= depth; i++) cnt[i]++
+        if (all_active()) count[cur]++
+        return
+      }
+      if (q ~ ("(;|then|else|do|\\()[ \t]+" PRIM "[ \t]"))
+        fail("a check is invoked in a shape this enumerator cannot count; give it its own line, or mark the line #@uncounted and say why")
+    }
+
+    function handle(s,   q, lead, v) {
+      # Everything above the first `group` statement is definitions and setup;
+      # no check can run there, and every function in this file is defined
+      # there (asserted just below).
+      if (!scanning) {
+        if (s !~ /^group [A-Z_]+$/) return
+        scanning = 1
+      }
+      if (s ~ /^[A-Za-z_][A-Za-z0-9_]*\(\)/) {
+        fail("a function is defined below the first group statement, where this enumerator assumes only checks live")
+        return
+      }
+      q = blanked(s)
+      if (q ~ /^group [A-Z_]+$/) { cur = substr(q, 7); return }
+
+      if (depth > 0 && ftype[depth] == "case" && q ~ /^[^ ()]*\)/) {
+        sub(/^[^ ()]*\)[ \t]*/, "", q)
+        closed[depth] = 0
+      }
+      lead = q; sub(/[ \t].*$/, "", lead)
+
+      if (lead == "then") return
+      if (lead == "fi")   { close_if();   return }
+      if (lead == "esac") { close_case(); return }
+      if (lead == "done") { pop();        return }
+      if (lead == "elif") {
+        close_branch()
+        v = classify(s)
+        if (ftype[depth] == "guard" && v != "?") {
+          act[depth] = (v + 0 && !taken[depth]) ? 1 : 0
+          if (act[depth]) taken[depth] = 1
+        } else if (ftype[depth] == "guard" || v != "?") {
+          fail("an if chain mixes scope/mode guards with runtime conditions")
+        }
+        return
+      }
+      if (lead == "else") {
+        close_branch()
+        if (ftype[depth] == "guard") act[depth] = taken[depth] ? 0 : 1
+        sub(/^else[ \t]*/, "", q)
+        if (q == "") return
+        lead = q; sub(/[ \t].*$/, "", lead)
+      }
+
+      if (lead == "if") {
+        v = classify(s)
+        if (v == "?") push("runtime", 1); else push("guard", v + 0)
+      } else if (q ~ /^case[ \t].*[ \t]in$/) {
+        push("case", 1)
+      } else if (q ~ /^(for|while|until)[ \t].*;[ \t]*do$/) {
+        push("loop", 1)
+      }
+
+      site(q, s)
+
+      if (q ~ /;;[ \t]*$/)  close_branch()
+      if (q ~ /;[ \t]*fi$/) close_if()
+    }
+
+    # SQ is a single quote. This program is itself inside single quotes, so it
+    # cannot contain one literally.
+    BEGIN {
+      PRIM = "(ok|bad|check|assert_db|assert_same_bytes|selfcheck)"
+      SQ = sprintf("%c", 39)
+    }
+    {
+      if (cont) { buf = buf " " $0 }
+      else {
+        t = $0; sub(/^[ \t]+/, "", t)
+        if (t ~ /^#/ || t == "") next
+        buf = $0
+      }
+      if (buf ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, " ", buf); cont = 1; next }
+      # An unbalanced double quote continues the line as well, which is how a
+      # multi-line SQL string stays attached to the assert_db that owns it.
+      # Only when no single quote is in play, though: a double quote inside a
+      # single-quoted sed script is not a string delimiter, and counting it
+      # swallows the rest of the file. The lines that fall out of a string
+      # this way are inert fragments (SELECT clauses, prose) — and if one ever
+      # is not, it lands as unbalanced nesting or an uncountable check shape,
+      # which is an error here rather than a wrong number.
+      if (index(buf, SQ) == 0 && nquotes(buf) % 2 == 1) { cont = 1; next }
+      cont = 0
+      t = buf; buf = ""
+      sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+      handle(t)
+    }
+    END {
+      if (cont)       fail("a logical line is still open at end of file")
+      if (depth != 0) fail("unbalanced if/case/loop nesting at end of file (depth " depth ")")
+      if (errs) exit 1
+      for (g in count) if (count[g] > 0) printf "%s=%d\n", g, count[g]
+    }
+  ' "$0"
+}
+
+# Compares the table above with what this file can actually execute, for
+# EVERY scope+mode — including the ones this run is not executing, because the
+# entry that drifted is the one nobody can run on a developer machine.
+verify_check_inventory() {
+  local tuple scope mode g declared derived rc=0
+  for tuple in selfcheck:none offline:none full:foreground full:service; do
+    scope="${tuple%%:*}"; mode="${tuple##*:}"
+    declared=""
+    for g in $(scope_groups "$tuple"); do
+      declared="$declared $g=$(group_size "$g")"
+    done
+    declared="$(printf '%s\n' $declared | sort | tr '\n' ' ')"
+    derived="$(enumerate_checks "$scope" "$mode")"
+    if [ $? -ne 0 ]; then
+      echo "  $tuple — this file could not be enumerated:"
+      printf '%s\n' "$derived" | sed 's/^/      /'
+      rc=1
+      continue
+    fi
+    derived="$(printf '%s\n' $derived | sort | tr '\n' ' ')"
+    if [ "$declared" != "$derived" ]; then
+      echo "  $tuple"
+      echo "      declared here:   $declared"
+      echo "      found in source: $derived"
+      rc=1
+    fi
+  done
+  return "$rc"
+}
+
+EXPECTED="$(expected_total "$SCOPE:$MODE")" || exit 2
 
 HELPER="$APP/Contents/MacOS/tethra"
 INFO_PLIST="$APP/Contents/Info.plist"
@@ -179,6 +471,23 @@ export API_TRACKER_INSECURE_FAST_KDF=1   # test vault only; never a real one
 LEGACY_LABEL="dev.api-tracker.gateway"
 LA_DIR="$HOME/Library/LaunchAgents"
 PLIST="$LA_DIR/$LEGACY_LABEL.plist"
+
+# Every gateway job REGISTERED IN THE LIVE LAUNCHD SESSION, whatever `$HOME`
+# says.
+#
+# The plist globs below are keyed on `$HOME`. `launchctl` is not: it addresses
+# `gui/<uid>`, which no `HOME` redirection isolates. The previous audit ran
+# `--scope full` with `HOME` pointed at a temp directory — a documented and
+# otherwise sensible technique — and that is exactly the shape that walks past
+# a `$HOME`-keyed interlock while the damage still lands on the user's real
+# service. It was reproduced during this remediation: the run booted the
+# machine's live `dev.api-tracker.gateway` out of launchd.
+#
+# So the interlock asks launchd as well as the filesystem.
+registered_gateway_jobs() {
+  launchctl list 2>/dev/null \
+    | awk -v l="$LEGACY_LABEL" '$3 == l || index($3, l ".") == 1 { print "  " $3 }'
+}
 FAKE_KEY="sk-proj-PACKAGED-VALIDATION-FAKE-NOT-A-REAL-KEY-0001"
 CANARY="TETHRA-CANARY-$$-MUST-NEVER-PERSIST"
 # The shared data directory the desktop app and CLI use when TETHRA_DIR is
@@ -315,8 +624,8 @@ esac
 # ---------------------------------------------------------------------------
 # A mutation test of the script itself. Each control is an assertion whose
 # truth value is KNOWN, run through the completely unmodified reporting path
-# — the same ok()/bad()/check()/assert_db()/assert_same_bytes() the 54 real
-# checks use, with nothing diverted and nothing stubbed. The control runs in
+# — the same ok()/bad()/check()/assert_db()/assert_same_bytes() every real
+# check uses, with nothing diverted and nothing stubbed. The control runs in
 # a subshell so its verdict is captured instead of counted; the driver then
 # reads back both the printed verdict line and the counter deltas the control
 # caused, and demands exactly the pair a working harness must produce.
@@ -374,6 +683,33 @@ group HARNESS
 step "harness self-check (a harness that cannot fail is caught here)"
 mkdir -p "$DIR"
 
+# THE COUNT'S OWN GUARD.
+#
+# The count-equality gate at the end of this run is only as good as the table
+# it compares against, and that table has already been wrong: `full:service`
+# was defined to run 60 checks while the groups it runs sum to 59, so the
+# strongest mode could not report a pass with every one of its assertions
+# green (RA-003). Nobody noticed, because verifying it by hand means
+# recounting 59 call sites on a machine that is allowed to run them.
+#
+# So nothing here is recounted by hand. The enumerator reads the conditionals
+# in this file and reports what each scope+mode can actually execute, for all
+# four combinations — not just the one being run — and a disagreement aborts.
+# It runs in every scope, so `--scope selfcheck` in CI gates on it in seconds
+# without an app bundle. A table that does not describe this file makes every
+# total the script could print wrong, which is the same reason the harness
+# gate below dies rather than tallying: no number from the run is quotable.
+CHECK_INVENTORY_DIFF="$(verify_check_inventory)" || die \
+  "the declared check inventory does not describe this file:
+$CHECK_INVENTORY_DIFF
+
+Every enforced total is summed from that table, so no number from this run is
+quotable until the table and the source agree. Fix whichever one is wrong."
+echo "  check inventory (summed from the group table, proved against this file):"
+for tuple in selfcheck:none offline:none full:foreground full:service; do
+  printf '    %-16s %2d checks\n' "$tuple" "$(expected_total "$tuple")"
+done
+
 # THE GUARD'S OWN GUARD.
 #
 # An adversarial reviewer replaced `selfcheck()` with `selfcheck() { ok "$2"; }`
@@ -396,9 +732,12 @@ mkdir -p "$DIR"
 #      control as passing, it must abort. A bypass reports success.
 #
 # The second runs in a subshell so its deliberate abort cannot end this run.
+# `#@uncounted` tells the enumerator what the subshell already tells bash: the
+# probe's tally never reaches this shell, so it is not one of the 5 HARNESS
+# checks. Without the marker the enumerator would refuse to guess and abort.
 __probe="$DIR/.gate-ran"
 rm -f "$__probe"
-if ( selfcheck pass "gate probe (must not be reported)" sc_false_condition ) >/dev/null 2>&1
+if ( selfcheck pass "gate probe (must not be reported)" sc_false_condition ) >/dev/null 2>&1  #@uncounted
 then
   die "the harness self-check gate ACCEPTED a known-failing control as a pass.
 That means the gate is not evaluating verdicts at all — a selfcheck()
@@ -520,7 +859,7 @@ INIT_CODE=$?
 check $? "a vault was created through the bundled helper (exit $INIT_CODE)"
 
 # The database half of the harness mutation test, now that a real vault
-# exists — assert_db is the primitive behind 17 of the checks below.
+# exists — assert_db is the primitive behind the database assertions below.
 group HARNESS
 selfcheck fail "a known-false database assertion is reported as a FAILURE" sc_false_db
 selfcheck pass "a known-true database assertion is reported as a PASS"     sc_true_db
@@ -549,6 +888,10 @@ if [ "$MODE" = "service" ]; then
     [ -f "$candidate" ] && EXISTING_AGENTS="$EXISTING_AGENTS
   $candidate"
   done
+  REGISTERED="$(registered_gateway_jobs)"
+  [ -z "$REGISTERED" ] || EXISTING_AGENTS="$EXISTING_AGENTS
+  (registered in launchd, regardless of \$HOME):
+$REGISTERED"
   [ -z "$EXISTING_AGENTS" ] || die "a gateway LaunchAgent already exists:$EXISTING_AGENTS
 
 --require-service will not overwrite it and will not downgrade to foreground.
@@ -740,12 +1083,20 @@ check $? "track status exits 2 while unverified"
 # cannot verify a new one" (SI-19 / ZFT-006), tested rather than asserted.
 PROJECT_ID="$(db "SELECT project_id FROM tracking_setups LIMIT 1")"
 APPLIED="$(db "SELECT applied_at FROM tracking_setups LIMIT 1")"
+# Counted BEFORE anything is forged, because the cleanup assertion below has
+# to tell this control's residue apart from the product's own history. The
+# apply runs a keyless path check THROUGH the gateway, so a real gateway
+# observation for this host is normally already recorded a fraction of a
+# second BEFORE applied_at is stamped (measured: applied_at
+# 2026-07-27T23:04:47.074134Z, observation at 2026-07-27T23:04:46.7567Z).
+PRE_APPLY_ROWS="$(db "SELECT COUNT(*) FROM runtime_request_events WHERE at<'$APPLIED'")"
 OLD_AT="1999-01-01T00:00:00Z"
 FORGE_SESSION="forged-session-$$"
 FORGE_EVENT="forged-event-$$"
 FORGE_SERVICE="forged-service-$$"
 echo "    applied_at = $APPLIED"
 echo "    forged event at = $OLD_AT (strictly older, same host, same source)"
+echo "    pre-apply observations the product itself recorded = $PRE_APPLY_ROWS"
 db_write "INSERT OR IGNORE INTO observed_api_services
             (id, host, provider_id, first_seen_at, last_seen_at)
           VALUES ('$FORGE_SERVICE','api.openai.com','openai','$OLD_AT','$OLD_AT');"
@@ -771,13 +1122,34 @@ assert_db "SELECT first_traffic_at IS NULL FROM tracking_setups" \
 db_write "DELETE FROM runtime_request_events WHERE id='$FORGE_EVENT';
           DELETE FROM observation_sessions WHERE id='$FORGE_SESSION';
           DELETE FROM observed_api_services WHERE id='$FORGE_SERVICE';"
-# Not `COUNT(*)=0` over the whole table: the apply's own keyless path check
-# legitimately leaves observations behind. The property that matters is that
-# the forgery is gone and nothing predating the apply survives, so no
-# assertion below can be satisfied by planted evidence.
-assert_db "SELECT (SELECT COUNT(*) FROM runtime_request_events WHERE id='$FORGE_EVENT')=0
-              AND (SELECT COUNT(*) FROM runtime_request_events WHERE at<'$APPLIED')=0" \
-  "the forged rows are gone and no pre-apply observation survives"
+# The control must leave behind nothing of its own and everything of the
+# product's, so that no assertion below can be satisfied by planted evidence
+# and none of the product's real history was destroyed proving it.
+#
+# RA-002: the second clause of this assertion used to be
+# `COUNT(*) FROM runtime_request_events WHERE at<applied_at = 0`, a premise
+# the product's own apply contradicts — the keyless path check writes a
+# genuine gateway observation ~0.3s before applied_at is stamped, so the
+# assertion could not pass on the first `--scope full` run that ever reached
+# it, while the forged row it was actually about had been deleted correctly.
+# An absolute absence was never the property; the delta against
+# $PRE_APPLY_ROWS, captured before the forgery, is.
+#
+# The first three clauses name the planted rows by id and by session, so a
+# survivor cannot hide behind a count. The fourth is a floor rather than an
+# equality on purpose: the gateway's writer thread commits in batches (which
+# is why the traffic step below waits for its window), so a legitimate
+# observation recorded during the apply may still land in the table while
+# this control runs. An equality would turn that into a flaky failure; a
+# floor still catches the failure mode that matters here — a cleanup DELETE
+# wide enough to take the product's own history with it (widen it to
+# `WHERE at<applied_at` and this clause fails).
+assert_db "SELECT (SELECT COUNT(*) FROM runtime_request_events
+                     WHERE id='$FORGE_EVENT' OR session_id='$FORGE_SESSION')=0
+              AND (SELECT COUNT(*) FROM observation_sessions WHERE id='$FORGE_SESSION')=0
+              AND (SELECT COUNT(*) FROM observed_api_services WHERE id='$FORGE_SERVICE')=0
+              AND (SELECT COUNT(*) FROM runtime_request_events WHERE at<'$APPLIED')>=$PRE_APPLY_ROWS" \
+  "the control removed exactly what it planted: no forged row survives, and the $PRE_APPLY_ROWS pre-apply observation(s) the product recorded itself are intact"
 
 # --- 8. real traffic -------------------------------------------------------
 group TRAFFIC
@@ -949,9 +1321,30 @@ echo
 # Equality, not a floor. The old MIN_CHECKS=30 floor detected truncation only;
 # equality also detects a check that quietly stopped executing, which is how a
 # mode downgrade used to keep the same total (ZFT-VAL-4, ZFT-VAL-7).
-if [ "$total" -ne "$EXPECTED" ]; then
+#
+# Per GROUP as well as in total, and both sides come from the inventory that
+# was proved against this file before the first check ran. A total alone
+# cannot say WHICH check stopped running, and two drifts that cancel out
+# (one group short, another long) leave it unmoved.
+GROUP_DIFF=""
+for g in $(scope_groups "$SCOPE:$MODE"); do
+  eval "gp=\${G_${g}_pass:-0}"
+  eval "gf=\${G_${g}_fail:-0}"
+  want="$(group_size "$g")"
+  [ "$((gp+gf))" -eq "$want" ] || GROUP_DIFF="$GROUP_DIFF
+      $g ran $((gp+gf)) checks, defined to run $want"
+done
+# GROUPS_SEEN records a group the moment its `group` statement runs, so this
+# catches a group that reached this scope+mode at all — not only one that
+# reported checks.
+for g in $GROUPS_SEEN; do
+  in_list "$g" "$(scope_groups "$SCOPE:$MODE")" || GROUP_DIFF="$GROUP_DIFF
+      $g ran, but $SCOPE:$MODE is not defined to run it"
+done
+if [ "$total" -ne "$EXPECTED" ] || [ -n "$GROUP_DIFF" ]; then
   echo "=== PACKAGED TRACKING VALIDATION: INCONCLUSIVE ==="
-  echo "    scope=$SCOPE mode=$MODE ran $total checks but is defined to run $EXPECTED."
+  echo "    scope=$SCOPE mode=$MODE ran $total checks; it is defined to run $EXPECTED."
+  [ -n "$GROUP_DIFF" ] && echo "    groups that disagree with the declared inventory:$GROUP_DIFF"
   echo "    A differing count means checks were skipped, added, or made conditional;"
   echo "    the tally ($pass passed, $fail failed) is not quotable until they agree."
   exit 1
