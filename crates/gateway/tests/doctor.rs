@@ -12,6 +12,18 @@ use api_tracker_gateway::service::Service;
 use api_tracker_gateway::{control, routes, store};
 use rusqlite::Connection;
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
 fn uninstalled_service() -> ServiceStatus {
     ServiceStatus {
         platform: "macos-launch-agent",
@@ -115,7 +127,7 @@ fn installed_but_stopped_and_linked_projects_at_risk_are_diagnosed() {
         var_override: None,
     };
     let plan = api_tracker_gateway::envlink::plan_link(&conn, &req).unwrap();
-    api_tracker_gateway::envlink::apply_link(&conn, &req, &plan).unwrap();
+    api_tracker_gateway::envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
     drop(conn);
 
     let report = doctor::diagnose_with(dir.path(), installed_service(dir.path()));

@@ -67,13 +67,17 @@ impl Ctx {
     /// password-driven command.)
     pub fn unlocked(&self) -> Result<(UnlockedVault, Option<SessionToken>)> {
         let session_err = match self.session_unlocked() {
-            Ok(Some(ok)) => return Ok(ok),
+            Ok(Some(mut ok)) => {
+                upgrade_restore_records(&mut ok.0);
+                return Ok(ok);
+            }
             Ok(None) => None,
             Err(err) => Some(err),
         };
         if envcompat::is_set(ENV_PASSWORD) {
             let password = env_secret(ENV_PASSWORD)?;
-            let vault = vault::unlock_vault(&self.paths, &password)?;
+            let mut vault = vault::unlock_vault(&self.paths, &password)?;
+            upgrade_restore_records(&mut vault);
             return Ok((vault, None));
         }
         if let Some(err) = session_err {
@@ -307,4 +311,22 @@ pub fn confirm(question: &str, assume_yes: bool) -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+/// Re-seal any `.env` restore record an earlier build stored in plaintext
+/// (RA-006).
+///
+/// Runs at unlock because that is the only moment a key is definitionally
+/// available: the read-only entry points (`track status`, `track doctor`)
+/// hold no vault, and redacting a legacy record without a key would destroy
+/// the user's ability to undo the link. Best-effort and once per vault — it
+/// must never stop the command the user actually asked for.
+fn upgrade_restore_records(vault: &mut UnlockedVault) {
+    let Ok(crypto) = vault.env_restore_crypto() else {
+        return;
+    };
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(
+        vault.connection(),
+        Some(&crypto),
+    );
 }

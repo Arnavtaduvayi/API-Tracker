@@ -22,6 +22,18 @@ use api_tracker_gateway::server;
 use api_tracker_gateway::upstream::InsecurePlainConnectorForTests;
 use api_tracker_gateway::usage::{Shape, UsageExtractor};
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
 /// Every marker routed through the gateway. If any of these bytes reach any
 /// artifact, the test fails and names the artifact.
 const CANARY_CREDENTIAL: &str = "FAKE-TEST-NOT-A-REAL-KEY-CANARY-9f2c8a71";
@@ -721,7 +733,7 @@ fn no_env_value_canary_survives_the_link_writers_restore_record() {
         "the serialized link plan",
         serde_json::to_string(&plan).unwrap().as_bytes(),
     );
-    envlink::apply_link(&conn, &req, &plan).unwrap();
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
 
     // ANTI-VACUITY GATE: scanning the database proves nothing unless the
     // restore record really was written to it.
@@ -758,18 +770,26 @@ fn no_env_value_canary_survives_the_link_writers_restore_record() {
     }
     assert!(scanned >= 1, "scanning nothing is not a pass");
 
-    // Withholding must be VISIBLE, not silent. Refusing to persist the value
-    // costs the user automatic restore, so they are told BEFORE they confirm
-    // — a quiet refusal would be its own defect.
+    // Recording must be VISIBLE, not silent. The value is kept — sealed —
+    // so the user gets their automatic restore back, and they are told BEFORE
+    // they confirm that their existing value is being recorded.
+    //
+    // This assertion used to require `PriorValueWithheld`. Under ADR 0028
+    // nothing is withheld when a key is available: the protection is
+    // encryption, not refusal, so the honest disclosure changed with it.
     for var in ["OPENAI_BASE_URL", "OPENAI_API_BASE"] {
         assert!(
             plan.warnings
                 .iter()
-                .any(|w| matches!(w, LinkWarning::PriorValueWithheld { key, .. } if key == var)),
-            "{var}'s prior value was withheld but the user was never warned: {:?}",
+                .any(|w| matches!(w, LinkWarning::ExistingValueRecorded { key, .. } if key == var)),
+            "{var}'s prior value was recorded but the user was never told: {:?}",
             plan.warnings
         );
     }
+    assert!(
+        stored.contains("\"sealed\""),
+        "and the record must hold ciphertext, not a withheld marker: {stored}"
+    );
 }
 
 /// Negative control for the canary machinery itself: `assert_absent` must

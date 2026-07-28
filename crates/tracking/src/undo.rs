@@ -45,7 +45,11 @@ pub struct UndoReport {
 /// summary is absent AND link rows exist, the route side cannot be
 /// reconstructed (we cannot tell created from reused), so undo restores
 /// what it can and REFUSES to report completion.
-pub fn undo(conn: &Connection, setup: &TrackingSetup) -> Result<UndoReport> {
+pub fn undo(
+    conn: &Connection,
+    crypto: Option<&api_tracker_core::envrestore::RestoreCrypto>,
+    setup: &TrackingSetup,
+) -> Result<UndoReport> {
     let recorded: Option<PlanSummary> = setup
         .plan_summary_json
         .as_deref()
@@ -91,7 +95,7 @@ pub fn undo(conn: &Connection, setup: &TrackingSetup) -> Result<UndoReport> {
     // (provider N planned over N−1's output), so restoring last-to-first
     // unwinds each layer onto exactly the prior state it recorded.
     for prefix in summary.links.iter().rev() {
-        match envlink::unlink(conn, &setup.project_id, prefix) {
+        match envlink::unlink(conn, crypto, &setup.project_id, prefix) {
             Ok(report) => {
                 complete &= report.complete;
                 links.push(report);

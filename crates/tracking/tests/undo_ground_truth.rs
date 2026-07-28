@@ -26,6 +26,18 @@ use common::*;
 use rusqlite::Connection;
 use std::path::Path;
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
 fn wire_route_and_link(conn: &Connection, project_id: &str, provider: &str) {
     conn.execute(
         "INSERT OR REPLACE INTO gateway_routes
@@ -63,7 +75,7 @@ fn undo_refuses_to_report_success_when_the_plan_was_never_recorded() {
     let setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
     assert!(setup.plan_summary_json.is_none());
 
-    let report = undo::undo(&conn, &setup).unwrap();
+    let report = undo::undo(&conn, Some(&restore_crypto()), &setup).unwrap();
 
     assert!(
         !report.complete,
@@ -107,7 +119,7 @@ fn undo_restores_links_it_finds_in_the_database_even_without_a_summary() {
     wire_route_and_link(&conn, "p1", "openai");
     let setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    let report = undo::undo(&conn, &setup).unwrap();
+    let report = undo::undo(&conn, Some(&restore_crypto()), &setup).unwrap();
     assert!(
         !report.links.is_empty(),
         "undo must attempt the links the database knows about, not the empty \
@@ -141,7 +153,7 @@ fn a_complete_undo_still_reports_success_and_closes_the_session() {
     .unwrap();
     let setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    let report = undo::undo(&conn, &setup).unwrap();
+    let report = undo::undo(&conn, Some(&restore_crypto()), &setup).unwrap();
     assert!(report.complete, "a fully recorded undo must complete");
     assert!(report.notes.is_empty());
 
@@ -190,7 +202,7 @@ fn an_incomplete_undo_keeps_the_apply_watermark_so_status_stays_honest() {
     wire_route_and_link(&conn, "p1", "openai");
     let setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    let report = undo::undo(&conn, &setup).unwrap();
+    let report = undo::undo(&conn, Some(&restore_crypto()), &setup).unwrap();
     assert!(!report.complete);
     let after = state::get_setup(&conn, &setup.id).unwrap().unwrap();
     assert!(
@@ -333,7 +345,7 @@ fn undo_returns_a_re_enabled_route_to_disabled() {
     .unwrap();
     let setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    let report = undo::undo(&conn, &setup).unwrap();
+    let report = undo::undo(&conn, Some(&restore_crypto()), &setup).unwrap();
     assert!(report.complete);
 
     let enabled: i64 = conn
@@ -410,7 +422,7 @@ fn undo_does_not_disable_a_re_enabled_route_another_project_still_links() {
     .unwrap();
     let setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    undo::undo(&conn, &setup).unwrap();
+    undo::undo(&conn, Some(&restore_crypto()), &setup).unwrap();
     let enabled: i64 = conn
         .query_row(
             "SELECT enabled FROM gateway_routes WHERE route_prefix = 'openai'",

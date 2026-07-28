@@ -836,10 +836,12 @@ fn setup_for_folder(ctx: &Ctx, path: Option<PathBuf>) -> Result<Option<state::Tr
     let folder = resolve_folder(path)?;
     let mut conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
     api_tracker_core::db::migrate(&mut conn)?;
-    // One-time privacy scrub of link rows written by builds that recorded
-    // query strings in plaintext (ZFT-016). Best-effort: it must not stop
-    // the command the user asked for.
-    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn);
+    // One-time privacy upgrade of link rows written by builds that stored
+    // prior values in plaintext (ZFT-016, RA-006). These entry points hold
+    // no unlocked vault, so the call is a deliberate no-op here and the work
+    // happens on the next unlocked command — re-sealing needs a key, and
+    // redacting without one would destroy the user's undo.
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn, None);
     let setups = state::setups_for_folder(&conn, &folder)?;
     Ok(setups.into_iter().next())
 }
@@ -848,10 +850,12 @@ fn status(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
     let folder = resolve_folder(path)?;
     let mut conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
     api_tracker_core::db::migrate(&mut conn)?;
-    // One-time privacy scrub of link rows written by builds that recorded
-    // query strings in plaintext (ZFT-016). Best-effort: it must not stop
-    // the command the user asked for.
-    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn);
+    // One-time privacy upgrade of link rows written by builds that stored
+    // prior values in plaintext (ZFT-016, RA-006). These entry points hold
+    // no unlocked vault, so the call is a deliberate no-op here and the work
+    // happens on the next unlocked command — re-sealing needs a key, and
+    // redacting without one would destroy the user's undo.
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn, None);
     let setups = state::setups_for_folder(&conn, &folder)?;
     let Some(mut setup) = setups.into_iter().next() else {
         println!("Tracking is not configured for {}.", folder.display());
@@ -976,10 +980,12 @@ fn doctor(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
     };
     let mut conn = api_tracker_core::db::open(&ctx.paths.db_path())?;
     api_tracker_core::db::migrate(&mut conn)?;
-    // One-time privacy scrub of link rows written by builds that recorded
-    // query strings in plaintext (ZFT-016). Best-effort: it must not stop
-    // the command the user asked for.
-    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn);
+    // One-time privacy upgrade of link rows written by builds that stored
+    // prior values in plaintext (ZFT-016, RA-006). These entry points hold
+    // no unlocked vault, so the call is a deliberate no-op here and the work
+    // happens on the next unlocked command — re-sealing needs a key, and
+    // redacting without one would destroy the user's undo.
+    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(&conn, None);
     let diagnoses = diagnose::diagnose(&conn, &ctx.paths.data_dir, &setup)?;
     render::emit(ctx.json, &diagnoses, || {
         println!("Tracking diagnosis (most likely causes first):\n");
@@ -1002,8 +1008,9 @@ fn undo(ctx: &Ctx, path: Option<PathBuf>, yes: bool) -> Result<()> {
     if !crate::ctx::confirm("Stop tracking and restore?", yes)? {
         bail!("cancelled");
     }
-    let vault = unlocked(ctx)?;
-    let report = track_undo::undo(vault.connection(), &setup)?;
+    let mut vault = unlocked(ctx)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    let report = track_undo::undo(vault.connection(), Some(&restore_crypto), &setup)?;
     for link in &report.links {
         for outcome in &link.outcomes {
             println!("  {}", render::sanitize(&describe_restore(outcome)));

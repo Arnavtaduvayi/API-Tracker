@@ -587,6 +587,60 @@ impl UnlockedVault {
         Ok(key)
     }
 
+    /// The key that protects recorded `.env` restore values (ADR 0028).
+    ///
+    /// `gateway_project_links.prior_env_json` records what a variable held
+    /// before Tethra re-pointed it, so `unlink` can put it back. Those
+    /// values are the user's real API credentials, and the column lives in
+    /// an **unencrypted** SQLite file: any process running as the user, any
+    /// file-level backup, and any disk image can read it. The audited head
+    /// decided what to write with a shape predicate, which classified real
+    /// key material — including a Supabase service-role JWT — as safe
+    /// (RA-006).
+    ///
+    /// The predicate is now gone from that decision. Every recorded value is
+    /// encrypted under this key instead, so secrecy no longer depends on
+    /// recognising which strings are secret.
+    ///
+    /// Unlike [`Self::gateway_matching_key`] and [`Self::gateway_route_mac_key`],
+    /// this key **can** decrypt, so it is never pushed over the gateway
+    /// control socket and never leaves a process with an unlocked vault.
+    pub fn env_restore_key(&mut self) -> Result<SecretBytes> {
+        if let Some(wrapped_hex) = meta_get(&self.conn, "wrapped_env_restore_key")? {
+            let wrapped = hex::decode(wrapped_hex).map_err(|_| {
+                CoreError::VaultCorrupted("wrapped env restore key is not valid hex")
+            })?;
+            return crypto::decrypt(
+                &self.vault_key,
+                &aad::env_restore_key(&self.vault_id),
+                &wrapped,
+                "env restore key",
+            );
+        }
+        let key = crypto::new_key();
+        let wrapped = crypto::encrypt(
+            &self.vault_key,
+            &aad::env_restore_key(&self.vault_id),
+            key.expose(),
+        )?;
+        meta_set(
+            &self.conn,
+            "wrapped_env_restore_key",
+            &hex::encode(&wrapped),
+        )?;
+        audit::record(&self.conn, "env_restore_key_created", None, None, "")?;
+        Ok(key)
+    }
+
+    /// A handle that can seal and open restore records for this vault.
+    pub fn env_restore_crypto(&mut self) -> Result<crate::envrestore::RestoreCrypto> {
+        let key = self.env_restore_key()?;
+        Ok(crate::envrestore::RestoreCrypto::new(
+            self.vault_id.clone(),
+            key,
+        ))
+    }
+
     /// Re-verify the master password (reauthentication for sensitive
     /// actions). Runs the full Argon2id derivation.
     pub fn verify_master_password(&self, master_password: &SecretString) -> Result<()> {

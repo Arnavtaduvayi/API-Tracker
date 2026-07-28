@@ -176,6 +176,42 @@ pub struct Definition {
     pub data_dir: PathBuf,
 }
 
+/// What sits at a service definition's path: nothing, something this crate
+/// can read, or something it cannot.
+///
+/// The third state is the whole point. A missing file, an unreadable one, a
+/// non-UTF-8 one and one whose argv we cannot parse all used to be the same
+/// `None`, and [`ServiceManager::ensure_ours`] read that `None` as "the slot
+/// is empty, there is nothing to destroy" — so `uninstall` deleted, and
+/// `stop` booted out, a definition nobody could prove was ours. ADR 0026 D2
+/// states the rule the other two callers already followed: an unparseable
+/// definition is treated as FOREIGN, not absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionState {
+    /// Nothing is installed at this path — the clean-machine case, and the
+    /// only state that lets a destructive verb through unchallenged.
+    Absent,
+    /// A definition this crate can read, saying where it points.
+    Present(Definition),
+    /// Something is there, but nothing we can prove is a Tethra service
+    /// definition: unreadable, not UTF-8, or missing the argv this crate
+    /// writes.
+    Unparseable,
+}
+
+impl DefinitionState {
+    /// The parsed definition, collapsing absent and unparseable back to
+    /// `None`. Safe ONLY where nothing is about to be changed — status
+    /// reporting. Any caller that goes on to act must match the enum, since
+    /// that collapse is exactly the defect above.
+    pub fn into_definition(self) -> Option<Definition> {
+        match self {
+            Self::Present(def) => Some(def),
+            Self::Absent | Self::Unparseable => None,
+        }
+    }
+}
+
 /// Whether the OS will actually run the service, reported honestly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -224,8 +260,16 @@ pub trait ServiceManager: Send + Sync {
     fn definition_path(&self) -> PathBuf;
     /// Render + write the definition (0600 where the platform has modes).
     fn write_definition(&self, binary: &Path) -> Result<()>;
-    /// Parse the existing definition, if any.
-    fn read_definition(&self) -> Result<Option<Definition>>;
+    /// Parse the existing definition — THREE states, because "we could not
+    /// read it" is not "there is nothing there". See [`DefinitionState`].
+    fn read_definition_state(&self) -> Result<DefinitionState>;
+    /// The parsed definition, if any. `None` covers BOTH absent and
+    /// unparseable, so this is for reporting only; anything that then acts
+    /// on the answer must use [`ServiceManager::read_definition_state`] (or
+    /// [`ServiceManager::ensure_ours`], which does).
+    fn read_definition(&self) -> Result<Option<Definition>> {
+        Ok(self.read_definition_state()?.into_definition())
+    }
     fn remove_definition(&self) -> Result<()>;
     /// Make the OS start it at login/boot-of-session.
     fn register(&self) -> Result<()>;
@@ -250,10 +294,25 @@ pub trait ServiceManager: Send + Sync {
     /// re-read the definition we are about to act on and require it to
     /// point at our own data directory. An absent definition is fine —
     /// there is nothing to destroy — but a foreign one is refused by name
-    /// rather than silently obeyed (ZFT-014).
+    /// rather than silently obeyed (ZFT-014), and so is one we cannot
+    /// PARSE: unreadable is not empty (ADR 0026 D2).
     fn ensure_ours(&self, verb: &str) -> Result<()> {
-        let Some(def) = self.read_definition()? else {
-            return Ok(());
+        let def = match self.read_definition_state()? {
+            DefinitionState::Absent => return Ok(()),
+            DefinitionState::Present(def) => def,
+            // The rule `install` and `reclaim_legacy` already state: a
+            // definition we cannot parse is one we cannot prove is ours,
+            // which is the same answer as someone else's. Refusing costs a
+            // user with a corrupted file one deliberate `rm`; obeying booted
+            // out and deleted a job nobody could identify.
+            DefinitionState::Unparseable => {
+                return Err(CoreError::InvalidInput(format!(
+                    "refusing to {verb}: {} exists but could not be parsed as a Tethra \
+                     service definition. Tethra will not act on a definition it cannot \
+                     prove is its own; inspect or remove it, then try again.",
+                    self.definition_path().display(),
+                )))
+            }
         };
         if same_data_dir(&def.data_dir, self.owned_data_dir()) {
             return Ok(());
@@ -486,8 +545,8 @@ impl Lifecycle {
     /// another vault).
     pub fn install(&self, source_binary: &Path, force: bool) -> Result<InstallReport> {
         let mut notes = Vec::new();
-        match self.manager.read_definition()? {
-            Some(existing) => {
+        match self.manager.read_definition_state()? {
+            DefinitionState::Present(existing) => {
                 if !same_data_dir(&existing.data_dir, &self.data_dir) && !force {
                     return Err(CoreError::InvalidInput(format!(
                         "a Tethra gateway service is already installed for a different data \
@@ -508,7 +567,13 @@ impl Lifecycle {
             // same answer as someone else's: leave it" — and the same rule
             // has to hold here, or an unparseable plist in our slot gets
             // silently unlinked and overwritten.
-            None if self.manager.definition_path().exists() && !force => {
+            //
+            // The manager reports the distinction itself now. This used to
+            // pair `None` with `definition_path().exists()`, which is a real
+            // file only on macOS and Linux: on Windows the "path" is a
+            // registry value name, `exists()` is always false, and the guard
+            // therefore did not exist on that platform at all.
+            DefinitionState::Unparseable if !force => {
                 return Err(CoreError::InvalidInput(format!(
                     "{} already exists but could not be parsed as a Tethra service \
                      definition. Tethra will not overwrite a definition it cannot prove is \
@@ -516,13 +581,13 @@ impl Lifecycle {
                     self.manager.definition_path().display()
                 )));
             }
-            None if self.manager.definition_path().exists() => {
+            DefinitionState::Unparseable => {
                 notes.push(format!(
                     "replaced an unparseable definition at {}",
                     self.manager.definition_path().display()
                 ));
             }
-            None => {}
+            DefinitionState::Absent => {}
         }
 
         let target = self.installed_binary_path();
@@ -610,7 +675,12 @@ impl Lifecycle {
 
     /// Stop + unregister + restore linked `.env` files (unless `keep_env`).
     /// Binaries and DB rows stay — this is "off", not "gone".
-    pub fn disable(&self, conn: &Connection, keep_env: bool) -> Result<DisableReport> {
+    pub fn disable(
+        &self,
+        conn: &Connection,
+        crypto: Option<&api_tracker_core::envrestore::RestoreCrypto>,
+        keep_env: bool,
+    ) -> Result<DisableReport> {
         let mut notes = Vec::new();
         // The stop error is the one that tells a user their environment does
         // not own this slot; swallowing it left `service stopped: false`
@@ -653,7 +723,7 @@ impl Lifecycle {
                 if link.prior_env_json.is_none() {
                     continue; // nothing was ever written for this link
                 }
-                match envlink::unlink(conn, &link.project_id, &link.route_prefix) {
+                match envlink::unlink(conn, crypto, &link.project_id, &link.route_prefix) {
                     Ok(report) => {
                         if !report.complete {
                             incomplete += 1;
@@ -688,8 +758,13 @@ impl Lifecycle {
     /// restore) → delete `<data-dir>/bin` (all versions) → delete logs →
     /// delete stale runtime files. Database rows are KEPT — observed
     /// history is user data; a separate purge exists for that.
-    pub fn uninstall(&self, conn: &Connection, keep_env: bool) -> Result<UninstallReport> {
-        let disable = self.disable(conn, keep_env)?;
+    pub fn uninstall(
+        &self,
+        conn: &Connection,
+        crypto: Option<&api_tracker_core::envrestore::RestoreCrypto>,
+        keep_env: bool,
+    ) -> Result<UninstallReport> {
+        let disable = self.disable(conn, crypto, keep_env)?;
         let mut removed = Vec::new();
         let mut notes = Vec::new();
         for dir in [bin_dir(&self.data_dir), logs_dir(&self.data_dir)] {

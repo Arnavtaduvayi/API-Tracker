@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use api_tracker_core::envfile::{EnvDocument, GATEWAY_MARKER_TAG};
+use api_tracker_core::envrestore::{RestoreCrypto, SealedValue};
 use api_tracker_core::error::{CoreError, Result};
 use api_tracker_core::secret::SecretString;
 use api_tracker_core::{audit, envgov, providers, scanner};
@@ -35,7 +36,13 @@ use crate::routes;
 use crate::store;
 
 /// The current `prior_env_json` document version.
-const PRIOR_ENV_VERSION: u32 = 1;
+/// v1 recorded prior values as PLAINTEXT, gated by a shape predicate.
+/// v2 seals every recorded value under the vault's env-restore key
+/// (ADR 0028), so secrecy no longer depends on recognising which strings
+/// are secret (RA-006). v1 records are still READ — an existing user must
+/// still be able to unlink — and are re-sealed or redacted on the next
+/// write.
+const PRIOR_ENV_VERSION: u32 = 2;
 
 /// Refuse a restore record written by a NEWER build.
 ///
@@ -63,15 +70,26 @@ fn check_prior_env_version(v: u32) -> Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PriorVar {
     pub key: String,
-    /// The value before linking; `None` when the variable did not exist OR
-    /// when it did not look like non-secret configuration (see
-    /// `prior_withheld`). `prior_env_json` is a PLAINTEXT column, so only
-    /// values that are safe there are recorded (D9).
+    /// LEGACY (v1 records only): the value before linking, in plaintext.
+    ///
+    /// Never written by this build. It remains readable so a record made by
+    /// an earlier build can still be restored, and so `scrub` can find and
+    /// re-seal it. Everything this build records goes in [`Self::sealed`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior: Option<String>,
-    /// The variable existed but its value was NOT recorded, because it did
-    /// not look like a base URL or proxy list — `--var` accepts any name, so
-    /// the prior value can be an API key, and a base URL can carry userinfo.
-    /// Restore reports this honestly instead of silently writing nothing.
+    /// The value before linking, sealed under the vault's env-restore key.
+    ///
+    /// `None` when the variable did not exist, or when no key was available
+    /// to seal it (see `prior_withheld`) — never because a predicate judged
+    /// the value safe to store in the clear.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<SealedValue>,
+    /// The variable existed but its value was NOT recorded, because no
+    /// unlocked vault was available to seal it. Restore reports this
+    /// honestly instead of silently writing nothing.
+    ///
+    /// "We could not protect it" and "it is safe to store" must never
+    /// resolve to the same behaviour — that equivalence is what RA-006 was.
     #[serde(default)]
     pub prior_withheld: bool,
     /// What the writer wrote, so restore can tell a user edit from its own.
@@ -84,6 +102,96 @@ pub struct PriorVar {
     /// written by earlier builds still restore exactly as they did.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prior_all: Vec<String>,
+    /// The sealed form of `prior_all`, for the same multi-occurrence case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sealed_all: Vec<SealedValue>,
+}
+
+/// Seal every recorded prior value in `files`, in place.
+///
+/// This is the single point where a prior value becomes durable, and it is
+/// unconditional: no predicate decides whether a value "needs" protecting,
+/// because the audited head's predicate classified a Supabase service-role
+/// JWT as safe to store in the clear (RA-006).
+///
+/// Without a key (`crypto` is `None`) the value is **withheld**, not
+/// written. Every production path that records a prior value holds an
+/// unlocked vault, so this is a genuine can't-happen rather than a routine
+/// degradation — but it degrades safely rather than silently.
+fn seal_prior_files(
+    crypto: Option<&RestoreCrypto>,
+    slug: &str,
+    mut files: Vec<PriorFile>,
+) -> Result<Vec<PriorFile>> {
+    for file in &mut files {
+        for var in &mut file.vars {
+            let plaintext = var.prior.take();
+            let plaintext_all = std::mem::take(&mut var.prior_all);
+            // Already sealed (a merged record from a previous link).
+            if var.sealed.is_some() || !var.sealed_all.is_empty() {
+                continue;
+            }
+            let Some(crypto) = crypto else {
+                if plaintext.is_some() {
+                    var.prior_withheld = true;
+                }
+                continue;
+            };
+            if let Some(value) = plaintext {
+                var.sealed = Some(crypto.seal(slug, &file.path, &var.key, &value)?);
+            }
+            for value in plaintext_all {
+                var.sealed_all
+                    .push(crypto.seal(slug, &file.path, &var.key, &value)?);
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Open a stored record into the in-memory plaintext shape `restore_file`
+/// consumes.
+///
+/// The plaintext exists only for the duration of the restore and is never
+/// written back to the database. A v1 (legacy) record already carries
+/// plaintext and is passed through unchanged, so an existing user can still
+/// unlink after upgrading.
+///
+/// Without a key, a sealed value is reported as **withheld** rather than
+/// treated as absent: `restore_file` deletes the line when it believes no
+/// prior value existed, and deleting a line whose value we merely could not
+/// read would destroy the user's configuration.
+fn open_prior_file(
+    crypto: Option<&RestoreCrypto>,
+    slug: &str,
+    file: &PriorFile,
+) -> Result<PriorFile> {
+    let mut out = file.clone();
+    for var in &mut out.vars {
+        if var.sealed.is_none() && var.sealed_all.is_empty() {
+            continue; // v1 record: `prior` / `prior_all` already hold it
+        }
+        let Some(crypto) = crypto else {
+            var.prior = None;
+            var.prior_all.clear();
+            var.prior_withheld = true;
+            continue;
+        };
+        if let Some(sealed) = &var.sealed {
+            let opened = crypto.open(slug, &file.path, &var.key, sealed)?;
+            var.prior = Some(opened.expose().to_string());
+        }
+        var.prior_all = var
+            .sealed_all
+            .iter()
+            .map(|sealed| {
+                crypto
+                    .open(slug, &file.path, &var.key, sealed)
+                    .map(|v| v.expose().to_string())
+            })
+            .collect::<Result<Vec<_>>>()?;
+    }
+    Ok(out)
 }
 
 /// Whether a prior `.env` value is safe to record in the plaintext
@@ -467,7 +575,12 @@ pub fn plan_link_as_provider_projected(
 /// digest binds the previewed INPUT as well as the planned output, so an edit
 /// the rewrite would have flattened back to the same result still refuses
 /// (ZFT-023).
-pub fn apply_link(conn: &Connection, req: &LinkRequest, approved: &LinkPlan) -> Result<PriorEnv> {
+pub fn apply_link(
+    conn: &Connection,
+    crypto: Option<&RestoreCrypto>,
+    req: &LinkRequest,
+    approved: &LinkPlan,
+) -> Result<PriorEnv> {
     let mut replanned = plan_link_with_slug(conn, req, &approved.link_slug)?;
     if replanned.digest != approved.digest {
         return Err(err(
@@ -489,13 +602,17 @@ pub fn apply_link(conn: &Connection, req: &LinkRequest, approved: &LinkPlan) -> 
             &replanned.link_slug,
         )?;
     }
+    // Seal BEFORE merging, so nothing that reaches `prior_json` has ever
+    // held a plaintext value (RA-006).
+    let fresh = seal_prior_files(
+        crypto,
+        &replanned.link_slug,
+        replanned.files.iter().map(|f| f.prior.clone()).collect(),
+    )?;
     let prior = PriorEnv {
         v: PRIOR_ENV_VERSION,
         port: replanned.port,
-        files: merge_prior(
-            existing_prior(conn, &replanned.link_slug)?,
-            replanned.files.iter().map(|f| f.prior.clone()).collect(),
-        ),
+        files: merge_prior(existing_prior(conn, crypto, &replanned.link_slug)?, fresh),
     };
     let prior_json = serde_json::to_string(&prior).map_err(CoreError::Serde)?;
     let primary = replanned.files.first().map(|f| f.path.clone());
@@ -641,18 +758,14 @@ fn plan_file(
     let mut prior_vars = Vec::new();
     for var in vars {
         let existing = doc.get(var).map(|e| e.value.expose().to_string());
-        // `prior_env_json` is plaintext. `--var` accepts ANY variable name,
-        // and a declared base-URL variable can hold a URL with embedded
-        // credentials, so a prior value is only recorded when it looks like
-        // non-secret configuration.
-        let recordable = existing.as_deref().is_none_or(prior_value_is_recordable);
+        // EVERY prior value is recorded, and every recorded value is sealed
+        // before it is persisted (`seal_prior_files`). The audited head
+        // decided here, with a shape predicate, and the predicate was wrong
+        // about real key material (RA-006) — so there is no longer a
+        // decision to get wrong. What lands in `prior_env_json` is
+        // ciphertext regardless of what the value looks like.
         if let Some(prior) = &existing {
-            if !recordable {
-                warnings.push(LinkWarning::PriorValueWithheld {
-                    path: path_str.clone(),
-                    key: var.clone(),
-                });
-            } else if prior != base_url {
+            if prior != base_url {
                 warnings.push(LinkWarning::ExistingValueRecorded {
                     path: path_str.clone(),
                     key: var.clone(),
@@ -670,17 +783,14 @@ fn plan_file(
                 key: var.clone(),
             });
         }
-        let prior_all =
-            if all.len() > 1 && recordable && all.iter().all(|v| prior_value_is_recordable(v)) {
-                all
-            } else {
-                Vec::new()
-            };
+        let prior_all = if all.len() > 1 { all } else { Vec::new() };
         prior_vars.push(PriorVar {
             key: var.clone(),
-            prior_withheld: existing.is_some() && !recordable,
-            prior: if recordable { existing } else { None },
+            prior_withheld: false,
+            prior: existing,
+            sealed: None,
             prior_all,
+            sealed_all: Vec::new(),
             written: base_url.to_string(),
         });
         doc.set_with_comment(var, SecretString::new(base_url.to_string()), marker);
@@ -696,8 +806,10 @@ fn plan_file(
         prior_vars.push(PriorVar {
             key: "NO_PROXY".into(),
             prior: None,
+            sealed: None,
             prior_withheld: false,
             prior_all: Vec::new(),
+            sealed_all: Vec::new(),
             written: NO_PROXY_ENTRIES.join(","),
         });
         doc.set_with_comment(
@@ -713,23 +825,17 @@ fn plan_file(
                 .unwrap_or_default();
             let extended = extend_no_proxy(&current);
             if extended != current {
-                // The plaintext-column rule applies here too. A NO_PROXY
-                // list is SHAPED like non-secret configuration, but nothing
-                // stops a user keeping something else under that name, and
-                // the unconditional `prior: Some(current)` this replaced
-                // would have written it out verbatim.
-                let recordable = prior_value_is_recordable(&current);
-                if !recordable {
-                    warnings.push(LinkWarning::PriorValueWithheld {
-                        path: path_str.clone(),
-                        key: key.clone(),
-                    });
-                }
+                // A NO_PROXY list is SHAPED like non-secret configuration,
+                // but nothing stops a user keeping something else under that
+                // name — which is why this value is sealed like every other
+                // one rather than judged by its shape.
                 prior_vars.push(PriorVar {
                     key: key.clone(),
-                    prior: recordable.then(|| current.clone()),
-                    prior_withheld: !recordable,
+                    prior: Some(current.clone()),
+                    sealed: None,
+                    prior_withheld: false,
                     prior_all: Vec::new(),
+                    sealed_all: Vec::new(),
                     written: extended.clone(),
                 });
                 doc.set(&key, SecretString::new(extended));
@@ -908,7 +1014,11 @@ pub fn route_provider(conn: &Connection, prefix: &str) -> Result<Option<(String,
         .optional()?)
 }
 
-fn existing_prior(conn: &Connection, slug: &str) -> Result<Vec<PriorFile>> {
+fn existing_prior(
+    conn: &Connection,
+    crypto: Option<&RestoreCrypto>,
+    slug: &str,
+) -> Result<Vec<PriorFile>> {
     let row: Option<Option<String>> = conn
         .query_row(
             "SELECT prior_env_json FROM gateway_project_links WHERE link_slug = ?1",
@@ -921,26 +1031,32 @@ fn existing_prior(conn: &Connection, slug: &str) -> Result<Vec<PriorFile>> {
     };
     let mut parsed: PriorEnv = serde_json::from_str(&json).map_err(CoreError::Serde)?;
     check_prior_env_version(parsed.v)?;
-    // A record written before the recordability rule was tightened can hold a
-    // value this build would refuse to write. `merge_prior` keeps the FIRST
+    // A v1 record holds PLAINTEXT values. `merge_prior` keeps the FIRST
     // recorded prior, so without this every re-link would copy that value
-    // straight back into the plaintext column (ZFT-016).
-    redact_unrecordable(&mut parsed);
+    // straight back into the column (ZFT-016). Re-seal it instead, so an
+    // upgraded user's restore record survives AND stops being plaintext;
+    // with no key available, redact rather than carry it forward.
+    if crypto.is_some() {
+        parsed.files = seal_prior_files(crypto, slug, parsed.files)?;
+    } else {
+        redact_all_plaintext(&mut parsed);
+    }
     Ok(parsed.files)
 }
 
-/// Drop every recorded prior value the CURRENT rule would refuse to write,
-/// marking each one withheld. Returns whether anything changed.
-fn redact_unrecordable(prior: &mut PriorEnv) -> bool {
+/// Drop every PLAINTEXT prior value, marking each one withheld.
+///
+/// Used when no key is available to re-seal a legacy v1 record: carrying the
+/// plaintext forward into a fresh write would re-commit exactly the leak
+/// RA-006 identified, and a withheld value is reported honestly rather than
+/// silently dropped. Returns whether anything changed.
+fn redact_all_plaintext(prior: &mut PriorEnv) -> bool {
     let mut changed = false;
     for file in &mut prior.files {
         for var in &mut file.vars {
-            if var
-                .prior
-                .as_deref()
-                .is_some_and(|v| !prior_value_is_recordable(v))
-            {
+            if var.prior.is_some() || !var.prior_all.is_empty() {
                 var.prior = None;
+                var.prior_all.clear();
                 var.prior_withheld = true;
                 changed = true;
             }
@@ -988,7 +1104,10 @@ fn redact_unrecordable(prior: &mut PriorEnv) -> bool {
 /// concurrent writer) must not stop the command the user actually asked
 /// for. The lazy path in `existing_prior` still redacts any row this misses
 /// the next time that link is touched.
-pub fn scrub_stored_prior_env_once(conn: &Connection) -> Result<usize> {
+pub fn scrub_stored_prior_env_once(
+    conn: &Connection,
+    crypto: Option<&RestoreCrypto>,
+) -> Result<usize> {
     const MARKER: &str = "envlink_prior_scrub_v1";
     let done: Option<String> = conn
         .query_row(
@@ -1000,7 +1119,15 @@ pub fn scrub_stored_prior_env_once(conn: &Connection) -> Result<usize> {
     if done.is_some() {
         return Ok(0);
     }
-    let scrubbed = scrub_stored_prior_env(conn)?;
+    // With no key this would REDACT legacy plaintext rather than re-seal it,
+    // destroying the user's ability to undo a link made by an earlier build.
+    // Losing undo is not an acceptable price for a scrub that a later,
+    // unlocked call can do properly, so the marker is left unset and the
+    // work is deferred until a caller can actually re-seal.
+    if crypto.is_none() {
+        return Ok(0);
+    }
+    let scrubbed = scrub_stored_prior_env(conn, crypto)?;
     conn.execute(
         "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
         rusqlite::params![MARKER, api_tracker_core::clock::now_rfc3339()],
@@ -1008,7 +1135,14 @@ pub fn scrub_stored_prior_env_once(conn: &Connection) -> Result<usize> {
     Ok(scrubbed)
 }
 
-pub fn scrub_stored_prior_env(conn: &Connection) -> Result<usize> {
+/// Upgrade every stored restore record so it holds no plaintext value.
+///
+/// With a key, legacy v1 plaintext is **re-sealed** — the user keeps a
+/// working undo and stops having a credential in a plain column. Without
+/// one, it is redacted and marked withheld: losing the ability to restore
+/// one line automatically is the right trade against leaving a credential
+/// in the clear, and the user is told.
+pub fn scrub_stored_prior_env(conn: &Connection, crypto: Option<&RestoreCrypto>) -> Result<usize> {
     let rows: Vec<(String, String)> = {
         let mut stmt = conn.prepare(
             "SELECT link_slug, prior_env_json FROM gateway_project_links
@@ -1028,9 +1162,23 @@ pub fn scrub_stored_prior_env(conn: &Connection) -> Result<usize> {
         let Ok(mut parsed) = serde_json::from_str::<PriorEnv>(&json) else {
             continue;
         };
-        if parsed.v > PRIOR_ENV_VERSION || !redact_unrecordable(&mut parsed) {
+        if parsed.v > PRIOR_ENV_VERSION {
             continue;
         }
+        let had_plaintext = parsed
+            .files
+            .iter()
+            .flat_map(|f| &f.vars)
+            .any(|v| v.prior.is_some() || !v.prior_all.is_empty());
+        if !had_plaintext {
+            continue;
+        }
+        if crypto.is_some() {
+            parsed.files = seal_prior_files(crypto, &slug, std::mem::take(&mut parsed.files))?;
+        } else {
+            redact_all_plaintext(&mut parsed);
+        }
+        parsed.v = PRIOR_ENV_VERSION;
         let rewritten = serde_json::to_string(&parsed).map_err(CoreError::Serde)?;
         conn.execute(
             "UPDATE gateway_project_links SET prior_env_json = ?2 WHERE link_slug = ?1",
@@ -1086,10 +1234,11 @@ pub enum RestoreOutcome {
     /// A `.env` the link itself created was removed on restore, because
     /// nothing but the writer's own lines was ever in it.
     CreatedFileRemoved { path: String },
-    /// The variable's prior value was never recorded (it did not look like
-    /// non-secret configuration, so it was kept out of the plaintext restore
-    /// record). The gateway line is left in place rather than deleted —
-    /// restoring it is a manual step.
+    /// The variable's prior value was never recorded (no key was available
+    /// to seal it, so it was withheld rather than stored in the clear). The
+    /// gateway line is left in place rather than deleted — restoring it is a
+    /// manual step, and the link row is KEPT so the user still has the
+    /// record and can unlink again once they have put their value back.
     PriorNotRecorded { path: String, key: String },
     /// The file could not be read or written.
     Failed {
@@ -1105,9 +1254,49 @@ pub struct UnlinkReport {
     pub route_prefix: String,
     pub project_id: String,
     pub outcomes: Vec<RestoreOutcome>,
-    /// Whether every file ended in a fully-restored (or missing) state and
-    /// the link row was removed.
+    /// Whether every variable ended in a settled state (see
+    /// [`outcome_is_settled`]) and the link row was therefore removed.
+    ///
+    /// Callers render this as the word "restored", so it is derived from the
+    /// outcomes rather than from the I/O error flag alone: an outcome that
+    /// leaves the gateway's own line sitting in the user's `.env` without
+    /// erroring is not a restore, whatever else went right (RA-013).
     pub complete: bool,
+}
+
+/// Whether one outcome leaves that variable genuinely settled — either back
+/// at its pre-link state, or in a state no retry could improve.
+///
+/// Deliberately an exhaustive `match` rather than a "not Failed" test:
+/// `complete` is what the desktop and the CLI turn into the word "restored"
+/// AND the condition under which the link row (with its restore record) is
+/// deleted, so a variant added later must not fall into that word by
+/// omission. That omission is exactly what RA-013 was — `PriorNotRecorded`
+/// never set the failure flag, so unlink answered `complete: true`, deleted
+/// the only record of what had been changed, and left the `.env` still
+/// pointing at the gateway while telling the user it had been restored.
+fn outcome_is_settled(outcome: &RestoreOutcome) -> bool {
+    match outcome {
+        RestoreOutcome::Restored { .. }
+        | RestoreOutcome::AlreadyRestored { .. }
+        | RestoreOutcome::FileMissing { .. }
+        | RestoreOutcome::CreatedFileRemoved { .. } => true,
+        // The current value is neither the writer's nor the recorded prior:
+        // the gateway's line is already GONE from the file, replaced by the
+        // user's own value. Nothing is left to restore and a retry would do
+        // the same nothing forever, so this settles the link — keeping the
+        // row would make a link the user already fixed by hand permanently
+        // un-unlinkable. This is the case `PriorNotRecorded` is not.
+        RestoreOutcome::LeftUserEdit { .. } => true,
+        // The line the WRITER wrote is still in the user's file — that is
+        // the condition this outcome is produced under — and Tethra cannot
+        // take it out, because it never kept the value that was there
+        // before. Keep the row: the user needs it to see what was changed,
+        // and unlinking again after they restore the value by hand then
+        // completes properly.
+        RestoreOutcome::PriorNotRecorded { .. } => false,
+        RestoreOutcome::Failed { .. } => false,
+    }
 }
 
 /// Restore the recorded prior state and remove the link row.
@@ -1117,7 +1306,16 @@ pub struct UnlinkReport {
 /// failure to rewrite one file keeps the link row so the restore can be
 /// retried — reported per file, never silently skipped (PRODUCT_BEHAVIOR:
 /// disabling an optional feature must not brick a linked app).
-pub fn unlink(conn: &Connection, project_id: &str, route_prefix: &str) -> Result<UnlinkReport> {
+///
+/// "Retryable" is decided over the OUTCOMES, not over I/O errors alone: a
+/// variable whose prior value was never recorded leaves the gateway's line
+/// in the `.env` without any error at all, and the row is kept for it too.
+pub fn unlink(
+    conn: &Connection,
+    crypto: Option<&RestoreCrypto>,
+    project_id: &str,
+    route_prefix: &str,
+) -> Result<UnlinkReport> {
     let Some(link) = routes::find_project_link(conn, project_id, route_prefix)? else {
         return Err(CoreError::NotFound {
             kind: "gateway project link",
@@ -1131,11 +1329,15 @@ pub fn unlink(conn: &Connection, project_id: &str, route_prefix: &str) -> Result
         let prior: PriorEnv = serde_json::from_str(json).map_err(CoreError::Serde)?;
         check_prior_env_version(prior.v)?;
         for file in &prior.files {
-            restore_file(file, &mut outcomes, &mut any_failure);
+            let opened = open_prior_file(crypto, &link.link_slug, file)?;
+            restore_file(&opened, &mut outcomes, &mut any_failure);
         }
     }
 
-    if any_failure {
+    // `any_failure` covers only the errors `restore_file` itself raises, so
+    // it can never see an outcome that failed to restore anything WITHOUT
+    // erroring. `outcome_is_settled` is the classification that can.
+    if any_failure || !outcomes.iter().all(outcome_is_settled) {
         // Keep the row (and its restore record) for a retry.
         return Ok(UnlinkReport {
             route_prefix: route_prefix.to_string(),
@@ -1298,5 +1500,136 @@ fn restore_file(file: &PriorFile, outcomes: &mut Vec<RestoreOutcome>, any_failur
                 error: e.to_string(),
             });
         }
+    }
+}
+
+/// What `complete` is allowed to mean (RA-013).
+///
+/// The `tests/envlink.rs` suite covers the restore mechanics; these two
+/// cover the *verdict* the desktop and the CLI turn into the word
+/// "restored", including the one state that produced that word while the
+/// gateway's line was still in the user's file.
+#[cfg(test)]
+mod restore_completeness_tests {
+    use super::*;
+    use api_tracker_core::db;
+    use api_tracker_core::secret::SecretBytes;
+
+    /// A deterministic, unmistakably fake restore-record key.
+    fn crypto() -> RestoreCrypto {
+        RestoreCrypto::new(
+            "vault-test-0001".to_string(),
+            SecretBytes::new(vec![0x2au8; 32]),
+        )
+    }
+
+    /// A vault with an openai route, a persisted port and a project row —
+    /// the minimum `apply_link` needs.
+    fn linkable(dir: &Path) -> Connection {
+        let mut conn = db::open(&dir.join("vault.db")).unwrap();
+        db::migrate(&mut conn).unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO vault_meta (key, value) VALUES ('vault_id', 'vault-test-0001')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, description, notes, environments, archived,
+                 created_at, updated_at, wrapped_project_key, key_wrap_mode)
+             VALUES ('p1', 'app', '', '', 'development', 0,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', x'00', 'vault')",
+            [],
+        )
+        .unwrap();
+        routes::add_manifest_route(&conn, "openai", "openai").unwrap();
+        let mut config = store::load_config(&conn).unwrap();
+        config.port = Some(49723);
+        store::save_config(&conn, &config).unwrap();
+        conn
+    }
+
+    fn request(env_file: &Path) -> LinkRequest {
+        LinkRequest {
+            project_id: "p1".into(),
+            project_name: "app".into(),
+            route_prefix: "openai".into(),
+            project_dir: None,
+            files: vec![env_file.to_path_buf()],
+            var_override: None,
+        }
+    }
+
+    const PRIOR: &str = "OPENAI_BASE_URL=https://corp-proxy.example/v1\n";
+
+    #[test]
+    fn an_unrecorded_prior_is_not_a_restore_and_keeps_the_link_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = linkable(dir.path());
+        let env = dir.path().join(".env");
+        std::fs::write(&env, PRIOR).unwrap();
+        let req = request(&env);
+
+        // Linking with no key WITHHOLDS the prior value rather than storing
+        // it in the clear (RA-006) — which is exactly the state a later
+        // unlink cannot undo, however well the unlink itself goes.
+        let plan = plan_link(&conn, &req).unwrap();
+        apply_link(&conn, None, &req, &plan).unwrap();
+        assert!(std::fs::read_to_string(&env).unwrap().contains("127.0.0.1"));
+
+        // A key at unlink time cannot conjure a value that was never
+        // recorded, so this is the honest best case, not a degraded one.
+        let report = unlink(&conn, Some(&crypto()), "p1", "openai").unwrap();
+
+        assert!(
+            report.outcomes.iter().any(|o| matches!(
+                o,
+                RestoreOutcome::PriorNotRecorded { key, .. } if key == "OPENAI_BASE_URL"
+            )),
+            "expected a PriorNotRecorded outcome, got {:?}",
+            report.outcomes
+        );
+        assert!(
+            !report.complete,
+            "unlink claimed a completed restore while the value it could not \
+             restore was still withheld: {report:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&env).unwrap().contains("127.0.0.1"),
+            "the gateway's line is still in the file — which is why the report \
+             must not say 'restored'"
+        );
+        assert!(
+            routes::find_project_link(&conn, "p1", "openai")
+                .unwrap()
+                .is_some(),
+            "the link row (and its restore record) must survive so the user \
+             can still see what was changed and retry"
+        );
+    }
+
+    /// The negative control for the test above: with the prior value actually
+    /// recorded, the SAME setup must still reach `complete: true` and drop the
+    /// row. Without this, `outcome_is_settled` could return false for every
+    /// variant — or `linkable` could be silently broken — and the regression
+    /// test would still pass.
+    #[test]
+    fn control_a_recorded_prior_completes_and_removes_the_link_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = linkable(dir.path());
+        let env = dir.path().join(".env");
+        std::fs::write(&env, PRIOR).unwrap();
+        let req = request(&env);
+
+        let plan = plan_link(&conn, &req).unwrap();
+        apply_link(&conn, Some(&crypto()), &req, &plan).unwrap();
+        assert!(std::fs::read_to_string(&env).unwrap().contains("127.0.0.1"));
+
+        let report = unlink(&conn, Some(&crypto()), "p1", "openai").unwrap();
+
+        assert!(report.complete, "{report:?}");
+        assert_eq!(std::fs::read_to_string(&env).unwrap(), PRIOR);
+        assert!(routes::find_project_link(&conn, "p1", "openai")
+            .unwrap()
+            .is_none());
     }
 }

@@ -14,6 +14,18 @@ use api_tracker_gateway::lifecycle::{
 };
 use rusqlite::Connection;
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
 /// Records every invocation; responds from a small rule table.
 #[derive(Default)]
 struct MockRunner {
@@ -459,7 +471,7 @@ fn linked_vault(lc: &Lifecycle) -> (Connection, PathBuf) {
         var_override: None,
     };
     let plan = api_tracker_gateway::envlink::plan_link(&conn, &req).unwrap();
-    api_tracker_gateway::envlink::apply_link(&conn, &req, &plan).unwrap();
+    api_tracker_gateway::envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
     (conn, env)
 }
 
@@ -474,7 +486,7 @@ fn disable_stops_unregisters_restores_env_and_keeps_binaries_and_rows() {
     let (conn, env) = linked_vault(&lc);
     assert!(std::fs::read_to_string(&env).unwrap().contains("127.0.0.1"));
 
-    let report = lc.disable(&conn, false).unwrap();
+    let report = lc.disable(&conn, Some(&restore_crypto()), false).unwrap();
     assert!(report.stopped && report.unregistered);
     assert_eq!(report.incomplete_restores, 0);
     assert_eq!(
@@ -511,7 +523,7 @@ fn disable_keep_env_leaves_files_and_uninstall_removes_every_owned_artifact() {
     std::fs::write(lc.data_dir.join("gateway.nonce"), "aa").unwrap();
     std::fs::write(lc.data_dir.join("gateway.pid"), "1").unwrap();
 
-    let report = lc.uninstall(&conn, true).unwrap();
+    let report = lc.uninstall(&conn, Some(&restore_crypto()), true).unwrap();
     assert!(
         std::fs::read_to_string(&env).unwrap().contains("127.0.0.1"),
         "--keep-env leaves the linked file alone"

@@ -21,6 +21,18 @@ use api_tracker_tracking::verify::ProbeOutcome;
 use common::*;
 use tempfile::TempDir;
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on apply and open on
+/// unlink and get the same key both times — and unmistakably fake, like
+/// every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
 /// Records every call; success by default, individual failures injectable.
 #[derive(Default)]
 struct MockOps {
@@ -490,7 +502,7 @@ fn undo_restores_the_env_exactly_and_removes_only_created_routes() {
     let setup = state::get_setup(fx.tv.vault.connection(), report.setup_id.as_ref().unwrap())
         .unwrap()
         .unwrap();
-    let undo_report = undo(fx.tv.vault.connection(), &setup).unwrap();
+    let undo_report = undo(fx.tv.vault.connection(), Some(&restore_crypto()), &setup).unwrap();
     assert!(undo_report.complete, "{undo_report:?}");
     assert_eq!(
         std::fs::read_to_string(fx.dir.path().join(".env")).unwrap(),
@@ -551,7 +563,7 @@ fn undo_keeps_routes_still_linked_by_another_project() {
     let setup = state::get_setup(fx.tv.vault.connection(), report.setup_id.as_ref().unwrap())
         .unwrap()
         .unwrap();
-    let undo_report = undo(fx.tv.vault.connection(), &setup).unwrap();
+    let undo_report = undo(fx.tv.vault.connection(), Some(&restore_crypto()), &setup).unwrap();
     assert!(undo_report.complete);
     assert!(undo_report
         .removed_routes

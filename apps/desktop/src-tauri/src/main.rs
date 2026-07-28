@@ -2603,7 +2603,10 @@ fn gateway_disable(
     keep_env: bool,
 ) -> CmdResult<gw_lifecycle::DisableReport> {
     let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
-    with_vault(&state, |vault| lc.disable(vault.connection(), keep_env))
+    with_vault(&state, |vault| {
+        let crypto = vault.env_restore_crypto()?;
+        lc.disable(vault.connection(), Some(&crypto), keep_env)
+    })
 }
 
 #[tauri::command]
@@ -2612,7 +2615,10 @@ fn gateway_uninstall(
     keep_env: bool,
 ) -> CmdResult<gw_lifecycle::UninstallReport> {
     let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
-    with_vault(&state, |vault| lc.uninstall(vault.connection(), keep_env))
+    with_vault(&state, |vault| {
+        let crypto = vault.env_restore_crypto()?;
+        lc.uninstall(vault.connection(), Some(&crypto), keep_env)
+    })
 }
 
 #[tauri::command]
@@ -2889,7 +2895,8 @@ fn gateway_link_apply(
                     .into(),
             ));
         }
-        envlink::apply_link(vault.connection(), &req, &plan)?;
+        let crypto = vault.env_restore_crypto()?;
+        envlink::apply_link(vault.connection(), Some(&crypto), &req, &plan)?;
         Ok(())
     })?;
     // The running gateway must resolve the new link slug immediately, not
@@ -2909,7 +2916,8 @@ fn gateway_unlink(
         let link = gw_routes::find_project_link(vault.connection(), &proj.id, &route)?;
         match link {
             Some(row) if row.prior_env_json.is_some() => {
-                envlink::unlink(vault.connection(), &proj.id, &route)
+                let crypto = vault.env_restore_crypto()?;
+                envlink::unlink(vault.connection(), Some(&crypto), &proj.id, &route)
             }
             Some(_) => {
                 gw_routes::remove_project_link(vault.connection(), &proj.id, &route)?;
@@ -4203,7 +4211,8 @@ fn tracking_undo(state: State<'_, AppState>, setup_id: String) -> CmdResult<Trac
                 ident: setup_id.clone(),
             },
         )?;
-        tracking_undo::undo(vault.connection(), &setup)
+        let crypto = vault.env_restore_crypto()?;
+        tracking_undo::undo(vault.connection(), Some(&crypto), &setup)
     })?;
     // Let a running service drop the removed links immediately.
     if let Ok(nonce) = gw_control::read_nonce(&data_dir) {

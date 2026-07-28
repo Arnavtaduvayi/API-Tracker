@@ -513,7 +513,7 @@ fn disable(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
     let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
     refuse_if_foreign(&lc.status(), ctx, "disable the gateway service")?;
 
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let linked = linked_projects_warning(&vault)?;
     if !linked.is_empty() && !keep_env {
         println!("Disabling stops the gateway; these linked projects will have their");
@@ -531,7 +531,8 @@ fn disable(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
     if !crate::ctx::confirm("Disable the gateway service?", yes)? {
         bail!("cancelled");
     }
-    let report = lc.disable(vault.connection(), keep_env)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    let report = lc.disable(vault.connection(), Some(&restore_crypto), keep_env)?;
     ctx.persist_session(&vault, &token)?;
     print_disable_report(&report);
     Ok(())
@@ -582,7 +583,7 @@ fn uninstall(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
     let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
     refuse_if_foreign(&lc.status(), ctx, "uninstall the gateway service")?;
 
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let linked = linked_projects_warning(&vault)?;
     println!("Uninstall stops and removes the gateway service, its binaries, logs, and");
     println!("runtime files. Recorded history stays in your vault.");
@@ -602,7 +603,8 @@ fn uninstall(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
     if !crate::ctx::confirm("Uninstall the gateway?", yes)? {
         bail!("cancelled");
     }
-    let report = lc.uninstall(vault.connection(), keep_env)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    let report = lc.uninstall(vault.connection(), Some(&restore_crypto), keep_env)?;
     ctx.persist_session(&vault, &token)?;
     print_disable_report(&report.disable);
     for p in &report.removed_paths {
@@ -1400,7 +1402,7 @@ fn link(
     dry_run: bool,
     yes: bool,
 ) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let proj = vault.get_project(project)?;
 
     // Default the project directory from the registered repo path when it
@@ -1469,7 +1471,8 @@ fn link(
     if !any_change {
         // Idempotent: make sure the DB row exists even when files are
         // already in the desired state.
-        envlink::apply_link(vault.connection(), &req, &plan)?;
+        let restore_crypto = vault.env_restore_crypto()?;
+        envlink::apply_link(vault.connection(), Some(&restore_crypto), &req, &plan)?;
         ctx.persist_session(&vault, &token)?;
         // A running gateway must see the (possibly new) link slug NOW, not
         // after the 5s poll — otherwise the just-linked SDK gets a 404.
@@ -1486,7 +1489,8 @@ fn link(
     if !crate::ctx::confirm("Apply these .env changes?", yes)? {
         bail!("cancelled");
     }
-    envlink::apply_link(vault.connection(), &req, &plan)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    envlink::apply_link(vault.connection(), Some(&restore_crypto), &req, &plan)?;
     ctx.persist_session(&vault, &token)?;
     // Push the new link slug into the running gateway's snapshot before the
     // probe below runs — the slug must resolve immediately.
@@ -1581,7 +1585,7 @@ fn probe_after_link(ctx: &Ctx, plan: &envlink::LinkPlan) {
 }
 
 fn unlink(ctx: &Ctx, project: &str, route: &str, yes: bool) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let proj = vault.get_project(project)?;
     let link = routes::find_project_link(vault.connection(), &proj.id, route)?;
     let Some(link_row) = link else {
@@ -1597,7 +1601,8 @@ fn unlink(ctx: &Ctx, project: &str, route: &str, yes: bool) -> Result<()> {
         bail!("cancelled");
     }
     if link_row.prior_env_json.is_some() {
-        let report = envlink::unlink(vault.connection(), &proj.id, route)?;
+        let restore_crypto = vault.env_restore_crypto()?;
+        let report = envlink::unlink(vault.connection(), Some(&restore_crypto), &proj.id, route)?;
         for outcome in &report.outcomes {
             println!("  {}", render::sanitize(&format!("{outcome:?}")));
         }

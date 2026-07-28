@@ -543,6 +543,21 @@ pub fn apply(
     }
 
     // -- 6. apply links ---------------------------------------------------
+    // The handle that seals recorded prior `.env` values (RA-006). Derived
+    // once, from the unlocked vault this apply already holds: a recorded
+    // value is a credential, and it must never reach the database in the
+    // clear. Failing to derive it fails the STEP — proceeding would either
+    // store a credential in plaintext or silently lose the ability to undo,
+    // and neither is a thing to do quietly.
+    let restore_crypto = match vault.env_restore_crypto() {
+        Ok(c) => c,
+        Err(e) => fail!(
+            StepId::ApplyLinks,
+            format!("could not prepare the .env restore record key: {e}"),
+            project_id,
+            setup_id
+        ),
+    };
     let mut linked = Vec::new();
     let mut files_touched: Vec<String> = Vec::new();
     for link_plan in &plan.link_plans {
@@ -559,7 +574,7 @@ pub fn apply(
             var_override: None,
         };
         let conn = vault.connection();
-        match envlink::apply_link(conn, &req, link_plan) {
+        match envlink::apply_link(conn, Some(&restore_crypto), &req, link_plan) {
             Ok(_prior) => {
                 linked.push(link_plan.route_prefix.clone());
                 for f in &link_plan.files {
