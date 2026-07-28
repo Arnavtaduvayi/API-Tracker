@@ -37,10 +37,21 @@ name: Packaged macOS service lifecycle
 #   * Windows and Linux packaging are not covered by this macOS harness;
 #   * the app is unsigned (no signing identity exists on a hosted runner).
 
+# Runs on EVERY pull request, with no path filter.
+#
+# A path filter was considered and rejected. The job certifies the packaged
+# lifecycle end to end — bundling, helper provenance, launchd registration,
+# forwarding, verification, privacy at rest and teardown — and the set of
+# changes that cannot affect any of those is not something a glob can state
+# honestly. A Cargo.lock bump, a crate the desktop links, or a change to the
+# bundling script all reach it. Since the alternative is a required check that
+# silently does not run on the commit it is supposed to certify, it runs
+# always: the repository is public, so hosted macOS minutes are free, and a
+# ~20-minute job per PR is a smaller cost than a green tick that means nothing.
 on:
   pull_request:
   push:
-    branches: [main, ci/service-lifecycle-dev]
+    branches: [main]
   workflow_dispatch:
 
 # Least privilege: this job only reads the repository.

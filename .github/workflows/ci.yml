@@ -149,20 +149,23 @@ jobs:
     #       reported as FAILURES (a harness that always says "ok" fails here)
     #
     #   NOT run here, and therefore NOT claimed by a green build:
-    #     - LaunchAgent registration. Service names ARE now namespaced per
-    #       data directory (ADR 0026), so a second environment no longer
-    #       collides with a first — but a hosted runner has no login session
-    #       to register into, `launchctl bootstrap gui/<uid>` behaves
-    #       differently under Actions than on a real desktop, and a green
-    #       result there would not be evidence about the path a user gets.
-    #       So this job never installs one: `--scope offline` starts no
-    #       gateway at all. The LaunchAgent lifecycle is validated manually
-    #       on macOS and recorded in PACKAGED_VALIDATION.md, which is the
-    #       honest split ZFT-VAL-1 asked for.
-    #     - traffic observation, verification, privacy-at-rest and undo, which
-    #       need a running gateway and a real provider request. Those live in
-    #       `--scope full` on a machine with no installed Tethra gateway, and
-    #       in the in-process suites the `rust` job already runs.
+    #     - LaunchAgent registration, traffic observation, verification,
+    #       privacy-at-rest and undo. Those need a running gateway and a real
+    #       provider request, and they now have their own required job:
+    #       `.github/workflows/packaged-service-macos.yml`, which runs
+    #       `--scope full --require-service` on a clean hosted runner.
+    #
+    #       CORRECTION. This block used to say a hosted runner "has no login
+    #       session to register into" and that `launchctl bootstrap gui/<uid>`
+    #       "behaves differently under Actions than on a real desktop". That
+    #       was asserted, never measured, and it is FALSE. Measured on
+    #       macos-26-arm64 (run 30323981718): `launchctl managername` reports
+    #       Aqua, `gui/501` exists and is created by `loginwindow`, bootstrap
+    #       returns 0, and the agent genuinely runs. The claim had the effect
+    #       of retiring the strongest available scope on a technical premise
+    #       nobody had checked — which is worth more attention than the
+    #       missing coverage itself, because a wrong reason for not testing
+    #       survives longer than a gap somebody can see.
     #
     # The script prints its own "NOT RUN HERE" block for the scope it ran, so
     # the log states the boundary rather than relying on this comment.
