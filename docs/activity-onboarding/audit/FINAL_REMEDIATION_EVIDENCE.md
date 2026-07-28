@@ -594,3 +594,80 @@ passed" is worth less without knowing what it took.
 (`-p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p
 api-tracker-gateway -p api-tracker-tracking --all-targets -- -D warnings`,
 toolchain 1.97.0) were both run locally against the final head and are clean.
+
+---
+
+# Addendum — the service scope, executed
+
+Everything above this line is **preserved unchanged**, including the parts
+that record `--scope full --require-service` as never having been observed
+passing. That was true when it was written. This addendum records what
+happened when it finally ran; it does not revise the earlier text to imply it
+had run sooner.
+
+Full record: `SERVICE_VALIDATION_EVIDENCE.md`.
+
+## The premise nobody had measured
+
+CI retired the service scope with the claim that "a hosted runner has no login
+session to register into". Probe run `30323981718` measured it on
+`macos-26-arm64`:
+
+```text
+launchctl managername       Aqua
+launchctl print gui/501     exit 0     creator = loginwindow[162]
+launchctl bootstrap gui/501 exit 0  -> THE AGENT RAN (state = running, pid 1817)
+launchctl bootout  gui/501  exit 0, no residue
+curl https://api.openai.com/v1/models   401
+```
+
+The claim was false. It had the effect of retiring the strongest available
+scope on a technical premise nobody had checked, which is worth more attention
+than the missing coverage itself: a gap somebody can see gets closed, and a
+wrong reason for not testing does not.
+
+## The result
+
+```text
+Workflow  Packaged macOS service lifecycle   run 30325704492
+Runner    macos-26-arm64, macOS 26.4 (25E246), arm64, uid 501, session Aqua
+Label     dev.api-tracker.gateway.39d11f8db375
+Data dir  /tmp/tethra-track-val-13774
+
+  tracking_validate_macos.sh --scope full --require-service
+      63 passed, 0 failed (63/63) — verdict PASS, 0 skipped, 0 duplicate names
+  gateway_validate_macos.sh
+      51 passed, 0 failed
+  cleanup verification (from outside the script, after its EXIT trap)
+      CLEANUP VERIFIED: the machine is as clean after the run as before
+```
+
+## What the run cost, honestly
+
+The first execution failed 2 of 59 (`REM-003`, `REM-004`); the second failed 1
+of 51 in the lifecycle script (`REM-005`). All three were **harness** defects,
+and all three had been invisible for the same reason: the scope had never run,
+so a check that had never executed anywhere was indistinguishable from one
+that always passed.
+
+That is the finding worth carrying forward. The count-equality gate catches a
+check that *stops* executing; nothing in it can catch a check that has *never*
+executed, because the count is consistent either way. `ZFT-VAL-8` was the same
+pattern found by reading; `REM-003` and `REM-005` are the same pattern found
+by running.
+
+## `RA-004`, revisited honestly
+
+The mutation table in §`RA-004` above was produced by an uncommitted harness
+(`REM-006`). It is committed now as `scripts/service_cleanup_safety.sh`, and
+its result reproduces the earlier negative result rather than improving on it:
+
+| Layer defeated | Outcome | Decoy plist |
+|---|---|---|
+| ordering (trap moved above the guards) | **survives** — does not kill | unchanged |
+| ordering **and** ownership (teardown widened to a glob) | **kills** | `absent` — destroyed |
+
+Two independently sufficient layers is a defensible design. Presenting either
+single mutation as a kill would not be, and this file does not. What the
+committed harness adds is that the claim is now re-runnable, and that `P3`
+proves the harness can actually see the danger it reports as absent.

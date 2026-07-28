@@ -182,6 +182,19 @@ desktop builds compile and are covered by CI, but the packaged
 install-and-track lifecycle has not been executed on either. See
 `PACKAGED_VALIDATION.md` for exactly what ran where (`ZFT-044`).
 
+On macOS that lifecycle is now executed **with a real login-registered
+service**, on a disposable hosted runner, on every PR:
+`.github/workflows/packaged-service-macos.yml` runs
+`--scope full --require-service` (63 checks) and
+`gateway_validate_macos.sh` (51 checks), and verifies teardown from outside
+the script. Evidence: `audit/SERVICE_VALIDATION_EVIDENCE.md`.
+
+**One green run is one green run.** That scope first passed on 2026-07-28
+(run `30325704492`). It is repeatable and gated, but it does not yet have a
+long baseline, and its first three executions each found a harness defect
+(`REM-003`, `REM-004`, `REM-005`). Treat early results with the suspicion a
+newly-exercised path deserves.
+
 **No macOS x64 desktop artifact is built.** The release matrix produces
 arm64 desktop artifacts only; the x64 CLI archive is built (`ZFT-043`).
 
@@ -196,6 +209,23 @@ orphaned Login Item. `docs/INSTALL.md` documents the uninstall step
 build as unsigned, and Gatekeeper can refuse to execute the installed
 helper. Tethra detects this with an exec probe *before* pointing a service
 at the binary, and falls back to foreground mode with an honest message.
+
+The CI service job runs against an **unsigned** bundle for the same reason:
+no signing identity exists on a hosted runner. So it proves the lifecycle
+works for the unsigned build a private-alpha user actually gets, and proves
+nothing about Gatekeeper behaviour for a signed one.
+
+**`NetworkClass::Restricted` is a reserved classification, not a reachable
+state.** No code path produces it: `origin::describe` refuses a loopback,
+private, link-local or metadata destination outright rather than describing
+it, so the user is never shown a classification for a destination that could
+not work. The variant is kept so the `match` stays total — a single-variant
+enum would make `Public` the unconditional answer, and the day the
+destination policy is relaxed the classification would silently become a
+false statement instead of a compile error, which is the shape of `RA-011`.
+The reservation is checked rather than asserted: `origin_trust.rs` pins that
+twelve spellings of a restricted destination are refused, with a public
+origin as the anti-vacuity control.
 
 ## Data that is stored in plaintext
 

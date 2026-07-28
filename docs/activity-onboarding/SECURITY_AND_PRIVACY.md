@@ -238,3 +238,58 @@ exists for — never ran it and a leak written by an earlier build persisted.
 The scrub now runs at unlock, which is the only moment a key is definitionally
 available. And `gateway unlink` no longer reports `complete: true` after a
 `PriorNotRecorded` outcome (`RA-013`).
+
+---
+
+## Where the security-sensitive service behaviour is now proven
+
+Every claim in this document that depends on a **running, login-registered**
+gateway used to rest on in-process suites plus one developer-machine run. The
+scope that exercises the real thing —
+`tracking_validate_macos.sh --scope full --require-service` — had never been
+observed passing anywhere, because its own precondition is a machine with no
+installed Tethra gateway.
+
+It now runs on a disposable hosted macOS runner on every PR
+(`.github/workflows/packaged-service-macos.yml`), and these properties are
+asserted against a real per-user LaunchAgent rather than a foreground child:
+
+* **Service identity.** The label is derived by the product from the data
+  directory (ADR 0026), so an isolated run cannot name the production service.
+  CI asserts the recorded label is non-empty, is not
+  `dev.api-tracker.gateway`, and sits inside the namespaced family.
+* **Process identity.** The running service must execute the exact program its
+  own owned plist declares — read with `PlistBuddy`, pid taken from
+  `launchctl print` for the owned label, compared against `ps -o comm=`.
+  Identity, never a name pattern: matching by name is what makes a
+  `pkill -f tethra` reach a user's real gateway.
+* **Helper provenance.** The service runs a copy of the **shipped** binary:
+  the plist points inside this run's data directory, and that copy is proven
+  byte-identical to the helper inside the `.app`.
+* **Control-channel access control.** The control endpoint is a Unix socket at
+  `$TETHRA_DIR/gateway.sock` with mode `0600`; an endpoint that exists but is
+  world-readable fails the check.
+* **Verification cannot be forged.** A fully valid gateway observation for the
+  right provider host, inserted with a timestamp before `applied_at`, does not
+  verify anything — asserted with an armed-control check proving the forgery
+  was really inserted. Only a real request through the service verifies.
+* **Privacy at rest, with a live service.** Neither the credential value nor an
+  unrelated env canary appears anywhere in the isolated data directory or the
+  shared one. Both greps are proven falsifiable first.
+* **Teardown.** The service, its definition, its launchd registration, the
+  installed helper, the control socket, the control nonce and the pid file are
+  all removed — verified from outside the script, after its `EXIT` trap ran.
+
+The lifecycle verbs (install → stop → restart → uninstall, with vault
+lock/unlock and credential attribution) are covered by
+`gateway_validate_macos.sh` in the same clean room: 51 checks, 0 failed,
+including the isolation invariant that the production plist is exactly as the
+run found it and the production label was never registered by it.
+
+**What this does not cover:** the desktop GUI is not click-driven; Windows and
+Linux are not covered; the bundle is unsigned; and provider *acceptance* is
+not proven — routes use fake keys, so a `401` proves the path and nothing
+about a real credential.
+
+Full record, including the three harness defects the first real runs exposed:
+`audit/SERVICE_VALIDATION_EVIDENCE.md`.

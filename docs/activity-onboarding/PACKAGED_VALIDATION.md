@@ -25,22 +25,40 @@ foreground run therefore cannot be mistaken for, or quoted as, a service run
 | `--scope selfcheck` | **5** | HARNESS 5 | **yes** |
 | `--scope offline` | **20** | HARNESS 5 · BUNDLE 5 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
 | `--scope full --foreground` | **57** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
-| `--scope full --require-service` | **59** | as above, minus FOREGROUND 3, plus SERVICE 5 | no |
+| `--scope full --require-service` | **63** | as above, minus FOREGROUND 3, plus SERVICE 9 | **yes** |
 
-> **`--scope full --require-service` has never been observed passing.** The
-> structural defect (`RA-003`) is fixed — the run now reaches the count gate and
-> reports `59/59` instead of INCONCLUSIVE — but a clean pass needs a machine
-> with **no installed Tethra gateway**, which is this mode's own documented
-> precondition. Do not quote it as passing until someone runs it somewhere
-> clean.
+> **`--scope full --require-service` now passes, on a clean hosted macOS
+> runner, and runs on every PR.**
 >
-> Running it on a machine that *does* have one is how `REM-001` was found: the
-> interlock globbed `$HOME/Library/LaunchAgents`, but `launchctl` addresses
-> `gui/<uid>`, which `$HOME` does not isolate — so redirecting `HOME` walked
-> past the interlock while every `launchctl` call still landed on the live
-> service, and it stopped a real production gateway. The interlock now asks
-> launchd as well as the filesystem. **Shim `launchctl` anyway if you are
-> experimenting with this mode.**
+> ```text
+> Workflow  Packaged macOS service lifecycle   run 30325704492
+> Runner    macos-26-arm64, macOS 26.4 (25E246), arm64, session Aqua
+> Result    63 passed, 0 failed (63/63) — verdict PASS, 0 skipped
+> Label     dev.api-tracker.gateway.39d11f8db375  (namespaced, per data dir)
+> Cleanup   verified from outside the script: no residue
+> ```
+>
+> Full record: `audit/SERVICE_VALIDATION_EVIDENCE.md`.
+>
+> **The history matters and is not rewritten.** Until run `30325704492` this
+> scope had never been observed passing anywhere. The structural defect
+> (`RA-003`) was fixed first — the run reached the count gate and reported
+> `59/59` instead of INCONCLUSIVE — but a clean pass needs a machine with **no
+> installed Tethra gateway**, which no developer machine here satisfies. When
+> that first real run finally happened it failed 2 of 59: `REM-003` and
+> `REM-004`, both checks that had never executed anywhere and one of which
+> asserted something the product does not do. SERVICE is 9 checks, not 5,
+> because of what fixing them made provable.
+>
+> Running it on a machine that *does* have a gateway is how `REM-001` was
+> found: the interlock globbed `$HOME/Library/LaunchAgents`, but `launchctl`
+> addresses `gui/<uid>`, which `$HOME` does not isolate — so redirecting `HOME`
+> walked past the interlock while every `launchctl` call still landed on the
+> live service, and it stopped a real production gateway. The interlock now
+> asks launchd as well as the filesystem, and it runs **before** any cleanup
+> trap is armed. **Shim `launchctl` anyway if you are experimenting with this
+> mode** — `scripts/service_cleanup_safety.sh` does exactly that, and is the
+> executable proof that a refusal is inert.
 
 None of those four totals is written down in the script. Each is **summed**
 from one number per group, and the group table is **proved against the
@@ -49,13 +67,21 @@ enumerator walks the `$SCOPE`/`$MODE` conditionals and reports what each of
 the four combinations can actually execute, and a disagreement aborts the run.
 
 That exists because the hand-maintained version of this table was wrong.
-`full:service` was declared to run **60** checks while the groups it runs sum
+`full:service` was declared to run **60** checks while the groups it ran summed
 to **59** (`57 − FOREGROUND 3 + SERVICE 5`), so the strongest mode was
 unpassable by construction: all 59 of its assertions could pass and the gate
 would still print `INCONCLUSIVE` and exit 1. The entry that drifted was the
-one nobody can run on a machine that already has Tethra installed, which is
+one nobody could run on a machine that already has Tethra installed, which is
 why the check is now mechanical and runs in CI on every PR rather than
-depending on a human recounting 59 call sites.
+depending on a human recounting call sites.
+
+That mechanism was then exercised for real. `SERVICE` went 5 → 9 when the
+first clean-runner execution exposed `REM-003` and `REM-004`, and the total
+moved 59 → 63 **without anyone editing a total**: `group_size(SERVICE)`
+changed, `expected_total()` re-summed, and the enumerator independently
+re-derived 63 by reading the script's own conditionals. A stale expected total
+is the failure this design exists to prevent, and the change that would have
+produced one is the change that proved it does not.
 
 ### Measured on this machine (macOS 25.5.0, aarch64)
 
@@ -65,7 +91,7 @@ $ bash scripts/tracking_validate_macos.sh --scope selfcheck
     selfcheck:none    5 checks
     offline:none     20 checks
     full:foreground  57 checks
-    full:service     59 checks
+    full:service     63 checks
 === PACKAGED TRACKING VALIDATION (scope=selfcheck, mode=none): 5 passed, 0 failed (5/5 checks) ===
 
 $ bash scripts/tracking_validate_macos.sh --scope offline
@@ -117,8 +143,13 @@ rather than damage anything. The interlock exists anyway, for three reasons:
   so the interlock **aborts** rather than being tallied as a check.
 
 `--scope full` therefore needs a machine with no installed Tethra gateway.
-That has not been run for this branch, and nothing on this page claims it
-has.
+**It now has one: a fresh hosted macOS runner**, which is disposable, has
+never had Tethra on it, and is destroyed after the job. That is the job
+`.github/workflows/packaged-service-macos.yml` runs on every PR, and its
+results are in `audit/SERVICE_VALIDATION_EVIDENCE.md`.
+
+Nothing on this page claims the scope was ever run on THIS machine. It was
+not, it must not be, and the refusal above is the correct outcome here.
 
 ---
 
@@ -144,20 +175,51 @@ every PR:
 
 Every one of those fails the build.
 
+`.github/workflows/packaged-service-macos.yml`, job **`Packaged macOS service
+lifecycle`** (`macos-latest`), also on every PR — this is the one that runs
+the **real service**:
+
+1. `ci_service_preconditions.sh` — assert a clean room, read-only, and
+   **refuse rather than remediate**. It runs before any toolchain, any build
+   and any cleanup registration;
+2. `tracking_validate_macos.sh --scope selfcheck` — the anti-tautology gate,
+   before a bundle exists, so a broken harness fails in seconds;
+3. `bundle_cli.sh`, then `gateway_validate_macos.sh` — 51 checks driving
+   install → stop → restart → uninstall against a **real per-user
+   LaunchAgent**, before the ten-minute bundle build so a lifecycle failure
+   surfaces early;
+4. `ci_service_preconditions.sh` again — the clean room must be a clean room
+   again between the two real-service runs;
+5. `tauri build --bundles app`, then the `.app` is **copied outside the
+   repository**, so nothing it needs may resolve relative to the source tree;
+6. `tracking_validate_macos.sh --scope full --require-service` — **63
+   required checks**;
+7. `ci_assert_service_results.sh` — assert the machine-readable result names
+   the exact scope and mode, per-group counts, zero failed, zero skipped,
+   zero duplicate names, every register row `pass`, and a **namespaced**
+   service label. Not `grep "0 failed"`, which a silent downgrade satisfies;
+8. `ci_service_cleanup_check.sh` — verify teardown from outside the script,
+   after its `EXIT` trap has run;
+9. logs and `results.json` uploaded as an artifact.
+
 ### What a green CI build does NOT claim
 
-* **LaunchAgent registration.** A hosted runner has no login session to
-  register into, and `launchctl bootstrap gui/<uid>` behaves differently
-  under Actions than on a desktop, so a green result there would not be
-  evidence about the path a real user gets. `--scope offline` starts no
-  gateway at all.
-* **Traffic observation, verification, privacy-at-rest, undo.** These need a
-  running gateway and a real request. They live in `--scope full`, and in
-  the in-process suites the `rust` job already runs
-  (`crates/tracking/tests/verification_freshness.rs`,
-  `crates/gateway/tests/privacy_canaries.rs`,
-  `crates/tracking/tests/undo_ground_truth.rs`).
+* **The desktop GUI.** Nothing click-drives the React surface.
 * **Windows and Linux packaging.** Not covered by this harness at all.
+* **Provider acceptance.** Routes point at real origins with fake keys, so a
+  `401` proves DNS → gateway → TLS → provider and nothing about a real
+  credential.
+* **Code signing.** No signing identity exists on a hosted runner; the alpha
+  ships unsigned (`docs/PACKAGING.md`).
+
+This list used to begin with "**LaunchAgent registration.** A hosted runner
+has no login session to register into…". That was asserted and never
+measured, and it is **false** — `launchctl managername` reports `Aqua` on
+`macos-26-arm64`, `gui/501` is created by `loginwindow`, bootstrap returns 0
+and the agent runs (probe run `30323981718`). The claim retired the strongest
+available scope on a premise nobody had checked. It is recorded here rather
+than quietly deleted, because a wrong reason for not testing survives longer
+than a gap somebody can see.
 
 The script prints its own `NOT RUN HERE` block for whichever scope it ran,
 so the CI log states the boundary rather than relying on this page.
@@ -200,3 +262,26 @@ verdict and the counter deltas, and a mismatch **aborts** rather than being
 reported through `bad()` — a weakened `bad()` cannot be trusted to report
 its own weakening. `validation_harness_mutants.sh` makes that repeatable:
 8 mutants, 8 killed.
+
+### What the first REAL service run found
+
+`RA-002`, `RA-003` and `RA-015` were found by running the harness at
+`--scope full --foreground`. The four below needed something no developer
+machine here can provide: a clean room in which `--require-service` can
+actually execute. They were found by the first three runs of
+`.github/workflows/packaged-service-macos.yml`.
+
+| Finding | What was wrong | What it does now |
+|---|---|---|
+| `REM-003` | `the installed LaunchAgent runs the bundled helper` grepped the plist for the path inside the `.app`. The plist never contains it: `gateway install` deliberately copies the running CLI to `<data-dir>/bin/tethra-gateway-<version>` so the login item survives the `.app` moving. The check was written blind against a scope nobody could run, and had therefore never executed anywhere | two assertions, each stronger than the one they replace: the plist runs the copy installed inside **this run's** data directory, and that copy is **byte-identical** to the in-bundle helper. Provenance proven, not inferred from a path |
+| `REM-004` | the privacy header sweep matched `authorization:` / `Bearer ` inside the installed helper **binary** — a compiled forwarding proxy carries those as its own string constants. In service mode that binary lands inside `$TETHRA_DIR`; foreground mode never produces it | excluded from the header sweep only, and sound *because of* `REM-003`'s fix: the binary is proven byte-identical to the shipped one, so it cannot hold anything captured at runtime. The two per-run needles still sweep that directory |
+| `REM-005` | `gateway_validate_macos.sh` gated its attribution assertions on `--json gateway status \| grep '"matching_key_present":true'`. That command emits the **doctor** document, which has never carried that field (it lives on the control-channel status), and is pretty-printed besides. The gate was false on every run for the whole life of the check, so the else-branch reported a permanent COVERAGE GAP and blamed a TTY — while the transcript read `credential-matching key installed` every time. A gate that is always false does not protect an assertion, it deletes it: the `ZFT-VAL-7` shape inverted | the gate is removed. The two assertions are unconditional and are themselves the ground truth about whether the key is resident. push-key's own success line is asserted separately, so a real breakage fails three checks with a readable cause instead of being skipped |
+| `REM-006` | the `RA-004` evidence quoted sha256 pairs, a `launchctl` invocation log and a four-row mutation table produced by a harness that **was never committed** — the strongest safety claim in the remediation rested on output nobody could regenerate | `scripts/service_cleanup_safety.sh`, committed. 11 assertions across both validation scripts, and it reports honestly that defeating the trap ordering alone does **not** kill while defeating both layers destroys the decoy plist |
+
+Note what `REM-003` and `REM-005` have in common with `ZFT-VAL-8`, and why
+that pattern is worth naming: an assertion that never runs is
+indistinguishable, from the outside, from an assertion that always passes.
+The count-equality gate catches a check that stops executing; it cannot catch
+a check that has never executed anywhere, because the count is consistent
+either way. Only running the scope catches that — which is the argument for
+this CI job, stated as the thing it actually found.
