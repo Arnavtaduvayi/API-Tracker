@@ -141,7 +141,16 @@ export function TrackFlow({
   const [originRequests, setOriginRequests] = useState<TrackingOriginRequest[] | null>(null);
   const [originError, setOriginError] = useState<string | null>(null);
   const [typedOrigins, setTypedOrigins] = useState<Record<string, string>>({});
-  const [approvedTyped, setApprovedTyped] = useState<Set<string>>(new Set());
+  // Typed destinations the backend confirmed an approval for, keyed by
+  // provider id and holding the request it returned. The whole DTO is kept,
+  // not a flag: it carries the same question and five-line disclosure the
+  // inferred path renders, and discarding it is what made this the one
+  // consent point in the app reached without ever showing the user what they
+  // were allowing (RA-012). Keying the tick on the recorded ORIGIN also means
+  // it can never appear next to an address other than the approved one.
+  const [typedApprovals, setTypedApprovals] = useState<Record<string, TrackingOriginRequest>>(
+    {},
+  );
   const [plan, setPlan] = useState<TrackingPlan | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   const [password, setPassword] = useState("");
@@ -193,7 +202,7 @@ export function TrackFlow({
     setOriginRequests(null);
     setOriginError(null);
     setTypedOrigins({});
-    setApprovedTyped(new Set());
+    setTypedApprovals({});
     setExpanded(new Set());
     setCopied(null);
     setCopyFallback(null);
@@ -281,31 +290,68 @@ export function TrackFlow({
     }
   }
 
-  /** A typed destination for a provider whose origin could not be inferred. */
+  /**
+   * Forget a typed approval AND the selection it justified.
+   *
+   * The two always move together: `trackingPlanBuild` takes provider ids and
+   * reads the destination from the backend's own session approvals, so a
+   * needs-origin provider left in `selected` would be configured with
+   * whatever origin the backend still holds — which is exactly what this
+   * screen can no longer vouch for once an approval call has failed.
+   */
+  function dropTypedApproval(providerId: string) {
+    setTypedApprovals((prev) => {
+      const next = { ...prev };
+      delete next[providerId];
+      return next;
+    });
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.delete(providerId);
+      return next;
+    });
+  }
+
+  /**
+   * A typed destination for a provider whose origin could not be inferred.
+   *
+   * The approve call RETURNS the shared `OriginApprovalRequest` — question,
+   * disclosure, host, port, credential forwarding, network class — and that
+   * DTO is what the screen renders under the tick. The audited version threw
+   * it away, so this destination was allowed on the strength of the user's
+   * own typed string and a static label, while the inferred path a few lines
+   * above showed the full disclosure for the same decision (RA-012). Nothing
+   * is written to any file until "Start tracking", and unticking withdraws
+   * the approval, so the disclosure still arrives before any traffic moves.
+   */
   async function toggleTypedOrigin(providerId: string, approve: boolean) {
     const origin = (typedOrigins[providerId] ?? "").trim();
     setOriginError(null);
     try {
       if (approve) {
         if (origin.length === 0) return;
-        await api.trackingOriginApprove(providerId, origin);
-        setApprovedTyped((prev) => new Set(prev).add(providerId));
+        const request = await api.trackingOriginApprove(providerId, origin);
+        setTypedApprovals((prev) => ({ ...prev, [providerId]: request }));
         setSelected((prev) => new Set(prev).add(providerId));
       } else {
         await api.trackingOriginRevoke(providerId);
-        setApprovedTyped((prev) => {
-          const next = new Set(prev);
-          next.delete(providerId);
-          return next;
-        });
-        setSelected((prev) => {
-          const next = new Set(prev);
-          next.delete(providerId);
-          return next;
-        });
+        dropTypedApproval(providerId);
       }
     } catch (e) {
       setOriginError(errText(e));
+      // Fail CLOSED, in both directions: after a failed approve there is no
+      // approval to show, and after a failed revoke there may still be one
+      // the user just asked to withdraw. Either way this screen cannot prove
+      // what the backend holds, so it must stop acting as though it can.
+      dropTypedApproval(providerId);
+      // Then re-read the destinations the backend CAN enumerate, exactly as
+      // the inferred path does, so those checkboxes keep reflecting the
+      // backend rather than the click.
+      try {
+        setOriginRequests(await api.trackingOriginRequests());
+      } catch {
+        /* the error above already says the approval did not take effect */
+      }
     }
   }
 
@@ -633,53 +679,85 @@ export function TrackFlow({
                   )}
                 </li>
               ))}
-              {needsInput.map((p) => (
-                <li key={p.provider_id}>
-                  <div>
-                    <strong>{p.display_name}</strong>{" "}
-                    <span className="muted">
-                      no destination could be read from this project
-                    </span>
-                  </div>
-                  <div className="muted">
-                    {p.evidence.map((line, i) => (
-                      <div key={i}>{line}</div>
-                    ))}
-                  </div>
-                  <div className="field">
-                    <label htmlFor={`origin-${p.provider_id}`}>
-                      Its project URL (traffic will be forwarded only to this exact address)
-                    </label>
-                    <input
-                      id={`origin-${p.provider_id}`}
-                      className="mono"
-                      value={typedOrigins[p.provider_id] ?? ""}
-                      placeholder="https://your-project.example.com"
-                      onChange={(e) => {
-                        setTypedOrigins({
-                          ...typedOrigins,
-                          [p.provider_id]: e.target.value,
-                        });
-                        // Editing the address withdraws any approval given
-                        // for the previous one: approval is granted for one
-                        // exact destination.
-                        if (approvedTyped.has(p.provider_id)) {
-                          void toggleTypedOrigin(p.provider_id, false);
+              {needsInput.map((p) => {
+                const typed = (typedOrigins[p.provider_id] ?? "").trim();
+                const approval = typedApprovals[p.provider_id];
+                // Approved means: the backend confirmed an approval for the
+                // address that is on screen RIGHT NOW. Anything else — a
+                // pending edit, a failed call — reads as not approved.
+                const approvedNow = typed.length > 0 && approval?.origin === typed;
+                return (
+                  <li key={p.provider_id}>
+                    <div>
+                      <strong>{p.display_name}</strong>{" "}
+                      <span className="muted">
+                        no destination could be read from this project
+                      </span>
+                    </div>
+                    <div className="muted">
+                      {p.evidence.map((line, i) => (
+                        <div key={i}>{line}</div>
+                      ))}
+                    </div>
+                    <div className="field">
+                      <label htmlFor={`origin-${p.provider_id}`}>
+                        Its project URL (traffic will be forwarded only to this exact address)
+                      </label>
+                      <input
+                        id={`origin-${p.provider_id}`}
+                        className="mono"
+                        value={typedOrigins[p.provider_id] ?? ""}
+                        placeholder="https://your-project.example.com"
+                        onChange={(e) => {
+                          setTypedOrigins({
+                            ...typedOrigins,
+                            [p.provider_id]: e.target.value,
+                          });
+                          // Editing the address withdraws any approval given
+                          // for the previous one: approval is granted for one
+                          // exact destination.
+                          if (approval) {
+                            void toggleTypedOrigin(p.provider_id, false);
+                          }
+                        }}
+                      />
+                    </div>
+                    <label>
+                      <input
+                        type="checkbox"
+                        disabled={typed.length === 0}
+                        checked={approvedNow}
+                        onChange={(e) =>
+                          void toggleTypedOrigin(p.provider_id, e.target.checked)
                         }
-                      }}
-                    />
-                  </div>
-                  <label>
-                    <input
-                      type="checkbox"
-                      disabled={(typedOrigins[p.provider_id] ?? "").trim().length === 0}
-                      checked={approvedTyped.has(p.provider_id)}
-                      onChange={(e) => void toggleTypedOrigin(p.provider_id, e.target.checked)}
-                    />{" "}
-                    Allow this project to send API traffic through this address
-                  </label>
-                </li>
-              ))}
+                      />{" "}
+                      Allow this project to send API traffic through this address
+                    </label>
+                    {approvedNow ? (
+                      // The same disclosure the shared Rust request renders
+                      // for an inferred destination. It is the backend's own
+                      // account of what was approved — host, port, whether a
+                      // credential travels with the request, what kind of
+                      // address it is — not this screen's paraphrase of it.
+                      <div className="muted">
+                        <div>{approval.question}</div>
+                        {approval.disclosure.map((line, i) => (
+                          <div key={i}>{line}</div>
+                        ))}
+                        <div>
+                          Nothing is written to your files until you start tracking; unticking
+                          this withdraws the approval.
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="muted">
+                        Ticking this records an approval for this exact address and shows what
+                        Tethra will do with it. It changes no file on its own.
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </>
         )}

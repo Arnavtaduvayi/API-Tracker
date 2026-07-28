@@ -11,9 +11,9 @@
 // * unrecognised credentials are enumerated with an exact count and never
 //   a value (ZFT-010);
 // * a stopped watch says so and can be re-armed (ZFT-015).
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TrackFlow } from "./TrackFlow";
 import { api } from "../api";
 import type {
@@ -147,6 +147,68 @@ function originRequestFixture(
     refusal: null,
     ...over,
   };
+}
+
+/**
+ * A provider Tethra recognises but whose destination is nowhere in the
+ * project, so the user has to type it. No fixture anywhere exercised this
+ * configurability before RA-012.
+ */
+function needsInputScan(): TrackingScan {
+  return scanFixture({
+    providers: [
+      {
+        provider_id: "self-hosted",
+        display_name: "Self-hosted LLM",
+        confidence: "likely",
+        configurability: "needs_origin_input",
+        inferred_origin: null,
+        evidence: ["Found LLM_API_KEY in .env (value not read)"],
+        limitations: [],
+        credential_candidates: [],
+        selected_by_default: false,
+        needs_origin_approval: true,
+        unsupported_reason: null,
+      },
+    ],
+    coverage_lines: ["1 API integration found", "1 needs you to say where its traffic goes"],
+    coverage: {
+      total: 1,
+      tracked_automatically: 0,
+      needs_origin_confirmation: 1,
+      detected_unsupported: 0,
+      unrecognized: 0,
+      low_confidence: 0,
+    },
+  });
+}
+
+/**
+ * What `tracking_origin_approve` returns for a TYPED destination
+ * (main.rs `origin_request_dto`): the same shared disclosure the inferred
+ * path gets, with no source file/variable because the user supplied it.
+ */
+function typedApprovalFixture(
+  over: Partial<TrackingOriginRequest> = {},
+): TrackingOriginRequest {
+  return originRequestFixture({
+    provider_id: "self-hosted",
+    provider_display_name: "Self-hosted LLM",
+    origin: "https://llm.corp.example",
+    host: "llm.corp.example",
+    source_file: null,
+    source_var: null,
+    question: "Allow this project to send API traffic through https://llm.corp.example?",
+    disclosure: [
+      "Destination: https://llm.corp.example (host llm.corp.example, port 443)",
+      "Provider: Self-hosted LLM",
+      "Why Tethra suggests it: read from this project's configuration, not from Tethra",
+      "If you allow it, requests carrying this project's API credential will be forwarded to that host.",
+      "The host is a public internet address.",
+    ],
+    approved_now: true,
+    ...over,
+  });
 }
 
 function planFixture(overrides: Partial<TrackingPlan> = {}): TrackingPlan {
@@ -719,6 +781,249 @@ describe("TrackFlow apply and verification", () => {
     expect(
       within(field).getByText(/only credentials in linked, non-password-locked projects/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("TrackFlow typed destination approval (RA-012)", () => {
+  /** Reach the review screen for a provider whose origin must be typed. */
+  async function reachTypedReview() {
+    mockApi.trackingScan.mockResolvedValue(needsInputScan());
+    openDialog.mockResolvedValue("/Users/dev/my-app");
+    render(<TrackFlow onDone={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Select project folder" }));
+    await screen.findByText("1 API integration found");
+  }
+
+  const box = () =>
+    screen.getByRole("checkbox", {
+      name: /Allow this project to send API traffic through this address/,
+    });
+
+  it("renders the backend's own disclosure for a destination the user typed", async () => {
+    mockApi.trackingOriginApprove.mockResolvedValue(typedApprovalFixture());
+    await reachTypedReview();
+
+    // The negative control: before the box is ticked the screen shows the
+    // user's own string and nothing else. If these passed before the click
+    // the assertions below would prove nothing about the approval call.
+    expect(
+      screen.queryByText(
+        "Allow this project to send API traffic through https://llm.corp.example?",
+      ),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/will be forwarded to that host/)).not.toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText(/Its project URL/), "https://llm.corp.example");
+    await userEvent.click(box());
+
+    await waitFor(() =>
+      expect(mockApi.trackingOriginApprove).toHaveBeenCalledWith(
+        "self-hosted",
+        "https://llm.corp.example",
+      ),
+    );
+    // Every line the shared Rust request renders, not a paraphrase.
+    expect(
+      await screen.findByText(
+        "Allow this project to send API traffic through https://llm.corp.example?",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Destination: https://llm.corp.example (host llm.corp.example, port 443)",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Provider: Self-hosted LLM")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /requests carrying this project's API credential will be forwarded to that host/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("The host is a public internet address.")).toBeInTheDocument();
+    expect(box()).toBeChecked();
+  });
+
+  it("never leaves the tick beside an address other than the approved one", async () => {
+    mockApi.trackingOriginApprove.mockResolvedValue(typedApprovalFixture());
+    // The withdrawal is still IN FLIGHT while the user keeps typing. The tick
+    // must not wait on it to stop claiming an approval for an address that is
+    // no longer the one on screen — approval is granted for one exact
+    // destination, so it can only ever be shown against that one.
+    mockApi.trackingOriginRevoke.mockReturnValue(new Promise<void>(() => {}));
+    await reachTypedReview();
+    const field = screen.getByLabelText(/Its project URL/);
+    await userEvent.type(field, "https://llm.corp.example");
+    await userEvent.click(box());
+    await waitFor(() => expect(box()).toBeChecked());
+
+    await userEvent.type(field, "x");
+    await waitFor(() => expect(box()).not.toBeChecked());
+    expect(mockApi.trackingOriginRevoke).toHaveBeenCalledWith("self-hosted");
+    expect(
+      screen.queryByText(
+        "Destination: https://llm.corp.example (host llm.corp.example, port 443)",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("drops the approval and the selection when the approve call fails", async () => {
+    mockApi.trackingOriginApprove.mockRejectedValue({
+      code: "invalid_input",
+      message: "origin 'https://llm.corp.example' is a private network address",
+    });
+    await reachTypedReview();
+    const requestReadsBefore = mockApi.trackingOriginRequests.mock.calls.length;
+
+    await userEvent.type(screen.getByLabelText(/Its project URL/), "https://llm.corp.example");
+    await userEvent.click(box());
+
+    expect(await screen.findByText(/is a private network address/)).toBeInTheDocument();
+    // The tick reflects the BACKEND, not the click...
+    expect(box()).not.toBeChecked();
+    // ...the destination the user never got approved cannot reach a plan...
+    expect(mockApi.trackingPlanBuild).not.toHaveBeenCalledWith(["self-hosted"]);
+    expect(
+      screen.getByText(/nothing is selected, so there is nothing to configure/),
+    ).toBeInTheDocument();
+    // ...and the backend was re-read, as the inferred path does on failure.
+    await waitFor(() =>
+      expect(mockApi.trackingOriginRequests.mock.calls.length).toBeGreaterThan(
+        requestReadsBefore,
+      ),
+    );
+  });
+
+  it("drops the selection when the WITHDRAWAL fails, not just the approval", async () => {
+    mockApi.trackingOriginApprove.mockResolvedValue(typedApprovalFixture());
+    mockApi.trackingOriginRevoke.mockRejectedValue({
+      code: "no_session",
+      message: "no folder has been scanned yet",
+    });
+    await reachTypedReview();
+    await userEvent.type(screen.getByLabelText(/Its project URL/), "https://llm.corp.example");
+    await userEvent.click(box());
+    await waitFor(() => expect(box()).toBeChecked());
+    await waitFor(() =>
+      expect(mockApi.trackingPlanBuild).toHaveBeenLastCalledWith(["self-hosted"]),
+    );
+
+    // The user unticks and the withdrawal fails. The backend may still hold
+    // that approval, and `tracking_plan_build` reads the destination from
+    // there — so leaving the provider selected would configure an origin the
+    // user has just said they do not want. Fail closed instead.
+    await userEvent.click(box());
+    expect(await screen.findByText(/no folder has been scanned yet/)).toBeInTheDocument();
+    expect(box()).not.toBeChecked();
+    await waitFor(() =>
+      expect(
+        screen.getByText(/nothing is selected, so there is nothing to configure/),
+      ).toBeInTheDocument(),
+    );
+  });
+});
+
+describe("TrackFlow recurring poll (ZFT-015)", () => {
+  // No other test in this suite uses fake timers, which is why deleting the
+  // `setInterval` in the waiting effect kept the whole suite green while
+  // reproducing the original ZFT-015 symptom exactly: one poll, then
+  // "Waiting for traffic…" forever with nothing watching (RA-014).
+  //
+  // These tests drive the DOM with `fireEvent` and settle promises with
+  // `flushPromises`, deliberately using neither `userEvent` nor `waitFor`:
+  // both wait on real wall-clock timers that `vi.useFakeTimers` has frozen,
+  // so under a fake clock they hang instead of failing.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Settle pending promise chains without touching the (frozen) clock. */
+  async function flushPromises() {
+    for (let i = 0; i < 10; i += 1) {
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+  }
+
+  /** Reach the waiting screen, where the poll lives. */
+  async function reachWaiting() {
+    openDialog.mockResolvedValue("/Users/dev/my-app");
+    render(<TrackFlow onDone={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "Select project folder" }));
+    await flushPromises();
+    expect(screen.getByText("2 API integrations found")).toBeInTheDocument();
+    const start = screen.getByRole("button", { name: "Start tracking" });
+    expect(start).toBeEnabled();
+    fireEvent.click(start);
+    await flushPromises();
+    expect(screen.getByText("Configuration applied")).toBeInTheDocument();
+  }
+
+  /** Let the fake clock run, then settle whatever the ticks started. */
+  async function advance(ms: number) {
+    await act(async () => {
+      vi.advanceTimersByTime(ms);
+    });
+    await flushPromises();
+  }
+
+  it("polls AGAIN on the interval, so traffic that arrives later is still seen", async () => {
+    await reachWaiting();
+    expect(mockApi.trackingStatus).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Waiting for traffic…/)).toBeInTheDocument();
+
+    // The request the user makes AFTER the immediate first poll. Only a
+    // RECURRING poll can see it — this is the whole point of the interval.
+    mockApi.trackingStatus.mockResolvedValue({
+      ...waitingStatus(),
+      state: "traffic_observed",
+      watch: "observed",
+      observed_provider: "openai",
+      health: {
+        kind: "verified_and_active",
+        sentence: "tracking verified and active",
+        currently_working: true,
+      },
+    });
+    await advance(2000);
+
+    expect(mockApi.trackingStatus).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Tracking verified")).toBeInTheDocument();
+  });
+
+  it("stops watching after two minutes and says so instead of claiming to wait", async () => {
+    mockApi.trackingDiagnose.mockResolvedValue([
+      {
+        id: "not_restarted",
+        severity: "hint",
+        message: "The project may not have been restarted.",
+      },
+    ]);
+    await reachWaiting();
+    expect(mockApi.trackingStatus).toHaveBeenCalledTimes(1);
+
+    // Just under the cutoff: still watching, and still saying so.
+    await advance(118_000);
+    expect(screen.getByText(/Waiting for traffic…/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Check again" })).not.toBeInTheDocument();
+
+    // At the cutoff the watch ENDS, and the screen must stop implying it.
+    await advance(2000);
+    expect(
+      screen.getByText(/Tethra stopped watching after two minutes with no traffic/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/It is not watching now/)).toBeInTheDocument();
+    expect(screen.queryByText(/Waiting for traffic…/)).not.toBeInTheDocument();
+    expect(mockApi.trackingDiagnose).toHaveBeenCalledWith("setup-1");
+    expect(screen.getByRole("button", { name: "Check again" })).toBeInTheDocument();
+
+    // And it really did stop: nothing polls on its own after the cutoff.
+    const callsAtCutoff = mockApi.trackingStatus.mock.calls.length;
+    await advance(10_000);
+    expect(mockApi.trackingStatus).toHaveBeenCalledTimes(callsAtCutoff);
   });
 });
 

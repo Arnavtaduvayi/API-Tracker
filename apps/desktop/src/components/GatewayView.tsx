@@ -16,6 +16,7 @@ import type {
   GatewayFinding,
   GatewayLinkPlan,
   GatewayRouteList,
+  GatewayUnlinkReport,
   Project,
   ProviderManifest,
 } from "../types";
@@ -865,6 +866,46 @@ function RoutesTab(props: {
 // Projects (link / unlink)
 // ---------------------------------------------------------------------------
 
+/**
+ * Read one `RestoreOutcome` out of an unlink report.
+ *
+ * `GatewayUnlinkReport.outcomes` is declared `Record<string, unknown>[]`: the
+ * Rust enum is serialized with `#[serde(tag = "outcome")]` and its seven
+ * variants carry different fields, so nothing here may assume a shape
+ * TypeScript never checked. Each field is read defensively and an unknown tag
+ * is printed as itself — a variant this build does not recognise must show up
+ * in the report rather than vanish from it.
+ */
+function restoreOutcomeLine(o: Record<string, unknown>): string {
+  const text = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : "");
+  const path = text("path");
+  const key = text("key");
+  const where = key ? `${path} (${key})` : path;
+  switch (o.outcome) {
+    case "restored":
+      return `${where}: the value you had before linking is back.`;
+    case "already_restored":
+      return `${where}: already at its pre-link value — nothing to change.`;
+    case "created_file_removed":
+      return `${where}: this file was created by the link and held nothing else, so it was removed.`;
+    case "file_missing":
+      return `${where}: the file no longer exists, so there was nothing in it to restore.`;
+    case "left_user_edit":
+      return `${where}: left exactly as YOU changed it after linking — not overwritten, and no longer pointing at the gateway.`;
+    case "prior_not_recorded":
+      return `${where}: NOT restored. Tethra never recorded what this variable held before linking, so its gateway line is STILL in your file. Put your own value back by hand, then unlink again.`;
+    case "failed":
+      return `${where}: NOT restored — ${text("error")}`;
+    default:
+      return `${where}: ${String(o.outcome ?? "unrecognised outcome")}`;
+  }
+}
+
+/** Outcomes that leave the gateway's own line in the user's file. */
+function isUnrestored(o: Record<string, unknown>): boolean {
+  return o.outcome === "prior_not_recorded" || o.outcome === "failed";
+}
+
 function ProjectsTab(props: {
   report: GatewayDoctor;
   installed: boolean;
@@ -884,6 +925,15 @@ function ProjectsTab(props: {
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [unlinking, setUnlinking] = useState<{ project: string; route: string } | null>(null);
+  // The LAST unlink's per-variable outcomes. Kept so the panel can say what
+  // actually happened to each file: the previous code discarded
+  // `report.outcomes` and printed one of two fixed strings, so an unlink that
+  // restored nothing at all still read "Unlinked … (restored)" (RA-013).
+  const [unlinked, setUnlinked] = useState<{
+    project: string;
+    route: string;
+    report: GatewayUnlinkReport;
+  } | null>(null);
   const planRequest = useRef<{
     project: string;
     route: string;
@@ -957,6 +1007,40 @@ function ProjectsTab(props: {
         <div className="warnbox">
           The gateway is not running. Linking rewrites .env files to point at 127.0.0.1 — until
           the gateway starts, linked SDKs get connection refused.
+        </div>
+      )}
+
+      {unlinked && (
+        <div className={unlinked.report.complete ? undefined : "warnbox"}>
+          <h2>
+            {unlinked.report.complete
+              ? `Unlinked ${unlinked.project} from ${unlinked.route}`
+              : `${unlinked.project} is still linked to ${unlinked.route}`}
+          </h2>
+          {!unlinked.report.complete && (
+            <p role="alert">
+              {unlinked.report.outcomes.filter(isUnrestored).length} of{" "}
+              {unlinked.report.outcomes.length} item(s) could not be restored, so the link and
+              its restore record were kept. Fix the items below, then unlink again.
+            </p>
+          )}
+          {unlinked.report.outcomes.length === 0 ? (
+            <p className="muted">
+              Nothing was recorded for this link, so nothing was restored. Check the .env
+              yourself before assuming it is back to its pre-link state.
+            </p>
+          ) : (
+            <ul>
+              {unlinked.report.outcomes.map((o, i) => (
+                <li key={i} className="mono">
+                  {restoreOutcomeLine(o)}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="link" onClick={() => setUnlinked(null)}>
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -1105,16 +1189,24 @@ function ProjectsTab(props: {
       {unlinking && (
         <ConfirmDialog
           title={`Unlink ${unlinking.project} from ${unlinking.route}?`}
-          body="The recorded pre-link .env state is restored: prior values come back, lines Tethra created are removed, and anything you edited after linking is left alone and reported."
+          body="The recorded pre-link .env state is restored: prior values come back, lines Tethra created are removed, and anything you edited after linking is left alone. Any variable whose prior value was never recorded is left pointing at the gateway — every file and variable is named in the report afterwards."
           confirmLabel="Unlink and restore"
           onConfirm={() => {
             void (async () => {
               try {
                 const report = await api.gatewayUnlink(unlinking.project, unlinking.route);
+                setUnlinked({
+                  project: unlinking.project,
+                  route: unlinking.route,
+                  report,
+                });
+                // The banner carries only the verdict; the per-variable
+                // outcomes are rendered above, because "restored" is a claim
+                // about specific files and has to name them.
                 props.onChanged(
                   report.complete
-                    ? `Unlinked ${unlinking.project} (restored).`
-                    : `Some files could not be restored; the link was kept for retry.`,
+                    ? `Unlinked ${unlinking.project} from ${unlinking.route}.`
+                    : `${unlinking.project} is STILL LINKED to ${unlinking.route}: not everything could be restored, so the link was kept for retry.`,
                 );
               } catch (e) {
                 props.onError(errText(e));

@@ -17,6 +17,7 @@ vi.mock("../api", async () => {
       gatewayRouteList: vi.fn().mockResolvedValue({ routes: [], skipped: [] }),
       gatewayMatchWhileLockedGet: vi.fn().mockResolvedValue(false),
       gatewayMatchWhileLockedSet: vi.fn().mockResolvedValue(undefined),
+      gatewayUnlink: vi.fn(),
       providersList: vi.fn().mockResolvedValue([]),
       projectList: vi.fn().mockResolvedValue([]),
     },
@@ -32,6 +33,7 @@ const mockApi = api as unknown as {
   gatewayMatchWhileLockedSet: ReturnType<typeof vi.fn>;
   gatewayLocateCli: ReturnType<typeof vi.fn>;
   gatewayInstall: ReturnType<typeof vi.fn>;
+  gatewayUnlink: ReturnType<typeof vi.fn>;
 };
 
 function absent(): GatewayDoctor {
@@ -102,10 +104,26 @@ function running(): GatewayDoctor {
   return d;
 }
 
+function linked(): GatewayDoctor {
+  const d = running();
+  d.links = [
+    {
+      project_id: "app",
+      route_prefix: "openai",
+      env_path: "/Users/dev/app/.env",
+      env_file_exists: true,
+      env_points_at_gateway: true,
+      issues: [],
+    },
+  ];
+  return d;
+}
+
 beforeEach(() => {
   mockApi.gatewayDoctor.mockReset();
   mockApi.gatewayLocateCli.mockReset();
   mockApi.gatewayInstall.mockReset();
+  mockApi.gatewayUnlink.mockReset();
 });
 
 describe("GatewayView consent and honesty", () => {
@@ -187,5 +205,132 @@ describe("GatewayView consent and honesty", () => {
     ).toBeInTheDocument();
     // Nothing is written until the password is supplied and confirmed.
     expect(mockApi.gatewayMatchWhileLockedSet).not.toHaveBeenCalled();
+  });
+});
+
+describe("GatewayView unlink reporting (RA-013)", () => {
+  /** Open Projects and confirm the unlink of the one linked project. */
+  async function unlink() {
+    mockApi.gatewayDoctor.mockResolvedValue(linked());
+    render(<GatewayView />);
+    await userEvent.click(await screen.findByRole("button", { name: "Projects" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Unlink" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Unlink and restore" }));
+  }
+
+  it("never says 'restored' for a variable whose prior value was never recorded", async () => {
+    // The exact report `gateway_unlink` now returns for a withheld prior:
+    // the restore did NOT happen, the row was kept, and the .env is still
+    // pointing at the gateway. The audited screen answered this with
+    // "Unlinked app (restored)." — a word that was simply false (RA-013).
+    mockApi.gatewayUnlink.mockResolvedValue({
+      route_prefix: "openai",
+      project_id: "app",
+      complete: false,
+      outcomes: [
+        {
+          outcome: "prior_not_recorded",
+          path: "/Users/dev/app/.env",
+          key: "OPENAI_BASE_URL",
+        },
+        { outcome: "restored", path: "/Users/dev/app/.env", key: "NO_PROXY" },
+      ],
+    });
+    await unlink();
+
+    // The negative control: the word the old screen printed unconditionally.
+    expect(screen.queryByText(/Unlinked app \(restored\)/)).not.toBeInTheDocument();
+    // What is actually true, naming the file and the variable.
+    const said = await screen.findByText(/NOT restored/);
+    expect(said.textContent).toMatch(/\/Users\/dev\/app\/\.env \(OPENAI_BASE_URL\)/);
+    expect(said.textContent).toMatch(/its gateway line is STILL in your file/);
+    expect(screen.getByText(/1 of 2 item\(s\) could not be restored/)).toBeInTheDocument();
+    expect(screen.getByText(/app is still linked to openai/)).toBeInTheDocument();
+    // The variable that DID come back is still reported as such.
+    expect(
+      screen.getByText(/\/Users\/dev\/app\/\.env \(NO_PROXY\): the value you had before/),
+    ).toBeInTheDocument();
+  });
+
+  it("distinguishes a value left as the user edited it from one restored", async () => {
+    mockApi.gatewayUnlink.mockResolvedValue({
+      route_prefix: "openai",
+      project_id: "app",
+      complete: true,
+      outcomes: [
+        {
+          outcome: "left_user_edit",
+          path: "/Users/dev/app/.env",
+          key: "OPENAI_BASE_URL",
+        },
+      ],
+    });
+    await unlink();
+
+    expect(
+      await screen.findByRole("heading", { name: "Unlinked app from openai" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/left exactly as YOU changed it after linking/),
+    ).toBeInTheDocument();
+    // A completed unlink is still not a blanket claim that values came back.
+    expect(
+      screen.queryByText(/the value you had before linking is back/),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/NOT restored/)).not.toBeInTheDocument();
+  });
+
+  it("names the file and the error when a restore fails outright", async () => {
+    mockApi.gatewayUnlink.mockResolvedValue({
+      route_prefix: "openai",
+      project_id: "app",
+      complete: false,
+      outcomes: [
+        {
+          outcome: "failed",
+          path: "/Users/dev/app/.env",
+          key: "",
+          error: "the file is now a symlink; refusing to replace it",
+        },
+      ],
+    });
+    await unlink();
+
+    const line = await screen.findByText(/NOT restored/);
+    expect(line.textContent).toMatch(/\/Users\/dev\/app\/\.env/);
+    expect(line.textContent).toMatch(/the file is now a symlink; refusing to replace it/);
+  });
+
+  it("shows an outcome it does not recognise rather than dropping it", async () => {
+    // A variant a future gateway build adds must not vanish from a report
+    // the user reads to decide whether their .env is back.
+    mockApi.gatewayUnlink.mockResolvedValue({
+      route_prefix: "openai",
+      project_id: "app",
+      complete: false,
+      outcomes: [{ outcome: "some_future_variant", path: "/Users/dev/app/.env", key: "X" }],
+    });
+    await unlink();
+
+    expect(
+      await screen.findByText(/\/Users\/dev\/app\/\.env \(X\): some_future_variant/),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing was restored when the link had no restore record", async () => {
+    // `gateway_unlink` removes a link row with no `prior_env_json` and
+    // returns complete: true with NO outcomes. Nothing was restored, so the
+    // screen must not let "complete" be read as "your .env is back".
+    mockApi.gatewayUnlink.mockResolvedValue({
+      route_prefix: "openai",
+      project_id: "app",
+      complete: true,
+      outcomes: [],
+    });
+    await unlink();
+
+    expect(
+      await screen.findByText(/Nothing was recorded for this link, so nothing was restored/),
+    ).toBeInTheDocument();
   });
 });
