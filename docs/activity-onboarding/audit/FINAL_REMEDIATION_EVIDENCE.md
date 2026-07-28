@@ -637,7 +637,7 @@ Data dir  /tmp/tethra-track-val-13774
   tracking_validate_macos.sh --scope full --require-service
       63 passed, 0 failed (63/63) — verdict PASS, 0 skipped, 0 duplicate names
   gateway_validate_macos.sh
-      51 passed, 0 failed
+      56 passed, 0 failed
   cleanup verification (from outside the script, after its EXIT trap)
       CLEANUP VERIFIED: the machine is as clean after the run as before
 ```

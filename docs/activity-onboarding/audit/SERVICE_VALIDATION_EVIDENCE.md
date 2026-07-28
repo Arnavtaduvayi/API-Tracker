@@ -82,12 +82,25 @@ Workflow:   Packaged macOS service lifecycle
             .github/workflows/packaged-service-macos.yml
 
 --- the last CODE change on this branch ----------------------------------
-Run ID:     30327487534
-Commit:     9bbe3b10  (feat/zero-friction-api-tracking, PR #16)
-Label:      dev.api-tracker.gateway.6b44b8d8867e
+Run ID:     30328567106
+Commit:     3f7bff90  (feat/zero-friction-api-tracking, PR #16)
 Result:     tracking  63 passed, 0 failed (63/63)  verdict PASS, 0 skipped
-            lifecycle 51 passed, 0 failed
+            lifecycle 56 passed, 0 failed   <- `repair` added here (was 51)
             cleanup   VERIFIED
+
+              == 22b. Repair: damage an OWNED resource and re-align ==
+                PASS  the installed helper was removed
+                        (damage staged: tethra-gateway-0.1.0)
+                PASS  gateway repair completed
+                PASS  repair restored the installed helper binary
+                PASS  the gateway is serving again after repair
+                PASS  repair did not touch the production label
+
+--- the previous code head, all six checks green -------------------------
+Run ID:     30327487534
+Commit:     9bbe3b10
+Label:      dev.api-tracker.gateway.6b44b8d8867e
+Result:     tracking 63/63, lifecycle 51/51, cleanup verified,
             all 6 required PR checks green
 
 --- the first head to carry the finished evidence ------------------------
@@ -95,6 +108,7 @@ Run ID:     30326526816     duration 11m52s
 Commit:     bf421b9f
 Label:      dev.api-tracker.gateway.6c7a0d0c85df
 Result:     identical: 63/63, 51/51, cleanup verified, 6/6 checks green
+            (lifecycle was 51 here: `repair` was added afterwards)
 
 --- the development run whose detail §4 quotes ---------------------------
 Run ID:     30325704492
@@ -239,7 +253,14 @@ Unchanged in structure from the foreground scope and passing here against a
 before the bundle build:
 
 ```text
-=== PACKAGED MACOS RESULT: 51 passed, 0 failed ===
+=== PACKAGED MACOS RESULT: 56 passed, 0 failed ===
+
+== 22b. Repair: damage an OWNED resource and re-align the installation ==
+  PASS  the installed helper was removed (damage staged: tethra-gateway-0.1.0)
+  PASS  gateway repair completed
+  PASS  repair restored the installed helper binary
+  PASS  the gateway is serving again after repair
+  PASS  repair did not touch the production label
 ```
 
 Covering install → bootstrap → push-key → attribution → vault lock/unlock →
@@ -555,7 +576,7 @@ To reproduce on a clean macOS machine with **no** Tethra installed:
 ```bash
 bash scripts/ci_service_preconditions.sh          # must pass, or stop
 bash scripts/bundle_cli.sh
-bash scripts/gateway_validate_macos.sh            # 51 checks
+bash scripts/gateway_validate_macos.sh            # 56 checks
 cd apps/desktop && npm ci && npm run tauri build -- --bundles app && cd -
 cp -R target/release/bundle/macos/Tethra.app /tmp/packaged/
 TETHRA_VALIDATION_RESULTS_JSON=/tmp/results.json \

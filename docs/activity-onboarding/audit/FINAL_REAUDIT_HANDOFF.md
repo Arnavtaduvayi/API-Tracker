@@ -221,7 +221,7 @@ machine, and the workflow is committed:
 ```bash
 bash scripts/ci_service_preconditions.sh     # must pass, or stop. read-only.
 bash scripts/bundle_cli.sh
-bash scripts/gateway_validate_macos.sh                       # 51 checks
+bash scripts/gateway_validate_macos.sh                       # 56 checks
 cd apps/desktop && npm ci && npm run tauri build -- --bundles app && cd -
 cp -R target/release/bundle/macos/Tethra.app /tmp/packaged/
 TETHRA_VALIDATION_RESULTS_JSON=/tmp/results.json \

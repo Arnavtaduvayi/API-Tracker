@@ -282,7 +282,7 @@ asserted against a real per-user LaunchAgent rather than a foreground child:
 
 The lifecycle verbs (install → stop → restart → uninstall, with vault
 lock/unlock and credential attribution) are covered by
-`gateway_validate_macos.sh` in the same clean room: 51 checks, 0 failed,
+`gateway_validate_macos.sh` in the same clean room: 56 checks, 0 failed,
 including the isolation invariant that the production plist is exactly as the
 run found it and the production label was never registered by it.
 
