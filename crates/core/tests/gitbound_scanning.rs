@@ -65,9 +65,12 @@ fn write_stub(dir: &Path) -> PathBuf {
         r#"#!/bin/sh
 [ -n "$STUB_PID_FILE" ] && echo $$ > "$STUB_PID_FILE"
 # Invocations look like:
-#   git --no-pager -c k=v ... -C <repo> <subcommand> ...
-# The hardening options (ADR 0023) sit before `-C`, so the repository and
-# the subcommand are found by scanning argv rather than by position — a
+#   git --no-pager -c k=v ... --git-dir <sealed> <subcommand> ...
+# and, for the one read-through caller (config --get),
+#   git --no-pager -C <repo> config --get <key>
+# The hardening options (ADR 0023) and the sealed-directory selector
+# (ADR 0027) both sit before the subcommand, so the repository and the
+# subcommand are found by scanning argv rather than by position — a
 # positional stub would silently stop matching the moment the option list
 # changes, which is exactly how a fixture starts lying.
 REPO=""
@@ -78,6 +81,7 @@ while [ $# -gt 0 ]; do
     --no-pager) shift ;;
     -c) shift 2 ;;
     -C) REPO="$2"; shift 2 ;;
+    --git-dir) REPO="$2"; shift 2 ;;
     *)
       SUB="$1"; shift
       SUBARG="$1"
@@ -181,6 +185,10 @@ fn init_repo(dir: &Path) {
 fn hung_git_times_out_incomplete_and_child_is_reaped() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -209,6 +217,10 @@ fn hung_git_times_out_incomplete_and_child_is_reaped() {
 fn short_git_commands_error_loudly_on_timeout() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -235,6 +247,10 @@ fn slow_git_yields_partial_findings_and_incomplete_coverage() {
     let _l = lock();
     let (_vault_dir, _paths, vault) = new_vault();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -265,6 +281,10 @@ fn slow_git_yields_partial_findings_and_incomplete_coverage() {
 fn infinite_output_hits_byte_cap_incomplete_and_reaped() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -302,6 +322,10 @@ fn infinite_output_hits_byte_cap_incomplete_and_reaped() {
 fn retained_content_cap_stops_the_scan_honestly() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -335,6 +359,10 @@ fn oversized_line_is_truncated_but_normal_findings_survive() {
     let _l = lock();
     let (_vault_dir, _paths, vault) = new_vault();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let _env = EnvGuard::set(&[
         ("API_TRACKER_GIT_BINARY", stub.display().to_string()),

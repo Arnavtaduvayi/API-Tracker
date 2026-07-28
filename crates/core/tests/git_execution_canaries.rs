@@ -518,13 +518,52 @@ fn each_canary_is_armed_against_unhardened_git() {
             armed.push(name);
         }
     }
+    // `armed.len() >= 2` used to stand here. It was the hole RA-001 hid in:
+    // with `core.fsmonitor` pre-added, only ONE of the remaining nine had
+    // to fire, so eight canaries could be permanently inert while the suite
+    // stayed green — and several were inert by construction. The set is now
+    // EXPLICIT, so a vector that silently stops arming fails the test, and
+    // a vector that starts arming fails it too (a new execution surface is
+    // news, not a free pass).
+    //
+    // Reachability against the PRODUCT's own command set — a stricter and
+    // more relevant question than reachability against this broad control —
+    // is enforced separately by `git_isolation_canaries.rs`, where every
+    // vector declared reachable must arm and every excused one must carry a
+    // measured reason.
+    armed.sort_unstable();
+    let missing: Vec<_> = REQUIRED_ARMED
+        .iter()
+        .filter(|name| !armed.contains(name))
+        .collect();
     assert!(
-        armed.len() >= 2,
-        "only {armed:?} of {} vectors could fire even without hardening; the fixtures are \
-         not exercising real Git execution surfaces",
-        VECTORS.len()
+        missing.is_empty(),
+        "these vectors MUST fire against unhardened git, and did not: {missing:?}. \
+         The protection assertions for them are therefore vacuous. Observed armed set: \
+         {armed:?}"
     );
 }
+
+/// The vectors that MUST fire against unhardened Git, measured on
+/// git 2.50.1 with this file's control command set.
+///
+/// Named rather than counted, and a minimum rather than an exact set:
+/// `hooks` arms only when the control happens to refresh the index, so an
+/// exact-set assertion would be flaky. Extra vectors arming is not a
+/// failure — it means the control is stronger than expected.
+///
+/// The rest are inert by construction and are documented as such:
+/// `aliases` (Git resolves builtins before aliases, and every subcommand
+/// used is a builtin), `hooks` (no control command writes a ref, commits or
+/// checks out), `credential helper` (no control command contacts a remote),
+/// `submodule update command` (requires `git submodule`, which is never
+/// run), `nested hostile repository` (every control command addresses the
+/// outer repository), `pager and editor` (stdout is a pipe and no command
+/// opens an editor), and `external diff driver` — measured, not assumed:
+/// git 2.50.1 invokes `diff.external` only for a bare working-tree
+/// `git diff`, not for `diff --cached`, `log -p` or `show`, none of which
+/// this control set or the product's command set includes.
+const REQUIRED_ARMED: &[&str] = &["core.fsmonitor", "clean/smudge filters", "textconv"];
 
 /// Detection must still WORK after the hardening — a scanner that refuses
 /// every repository would pass every canary and be useless.
