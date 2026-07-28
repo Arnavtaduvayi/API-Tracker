@@ -513,10 +513,11 @@ fn a_failure_half_a_second_newer_than_an_observation_still_wins() {
 
     // An observation on a whole second, inside every admissibility window.
     let observed = shifted(60);
-    let whole_second = format!(
-        "{}Z",
-        &observed[..observed.len() - 1].split('.').next().unwrap()
-    );
+    let seconds = observed[..observed.len() - 1]
+        .split('.')
+        .next()
+        .expect("an RFC 3339 timestamp has a seconds field");
+    let whole_second = format!("{seconds}Z");
     insert_gateway_event(&conn, "p1", "api.openai.com", &whole_second);
 
     // A failure recorded half a second LATER, in the same second.
