@@ -623,6 +623,39 @@ for i in $(seq 1 40); do
 done
 [ -n "$RECOVERED" ] && ok "gateway recovered after restart" || bad "no recovery"
 
+step "22b. Repair: damage an OWNED resource and re-align the installation"
+# `gateway repair` is `install(force=false)` underneath: re-copy this binary,
+# rewrite the definition for this data directory, re-register, restart. It was
+# the one supported lifecycle verb this script never exercised — doctor was
+# called, but the repair it hints at was not.
+#
+# The damage is deliberately to a resource THIS RUN OWNS and created: the
+# installed helper under $DIR/bin, which the ownership ledger already covers.
+# Nothing outside the run's own namespace is touched.
+INSTALLED_HELPER="$(find "$DIR/bin" -maxdepth 1 -name 'tethra-gateway-*' 2>/dev/null | head -1)"
+if [ -z "$INSTALLED_HELPER" ]; then
+  bad "no installed helper found under $DIR/bin to exercise repair against"
+else
+  rm -f "$INSTALLED_HELPER"
+  [ ! -e "$INSTALLED_HELPER" ] && ok "the installed helper was removed (damage staged: $(basename "$INSTALLED_HELPER"))" \
+    || bad "could not stage the damage"
+  "$CLI" gateway repair --yes >/dev/null 2>&1 && ok "gateway repair completed" || bad "gateway repair failed"
+  [ -x "$INSTALLED_HELPER" ] && ok "repair restored the installed helper binary" \
+    || bad "repair did not restore the installed helper"
+  # And the service must actually be serving again, not merely present.
+  REPAIRED=""
+  for i in $(seq 1 40); do
+    REPAIRED="$("$CLI" --json gateway status 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print("y" if d.get("gateway") else "")' 2>/dev/null)"
+    [ -n "$REPAIRED" ] && break
+    sleep 0.25
+  done
+  [ -n "$REPAIRED" ] && ok "the gateway is serving again after repair" || bad "no gateway after repair"
+  # Repair must not have escaped this run's namespace.
+  launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1 \
+    && bad "repair registered the PRODUCTION label" \
+    || ok "repair did not touch the production label"
+fi
+
 step "23. Unlink the project (restore prior .env)"
 "$CLI" gateway unlink --project app --route openai --yes >/dev/null 2>&1 && ok "unlink succeeded" || bad "unlink failed"
 if grep -q "OPENAI_API_KEY=$KNOWN_KEY" "$PROJDIR/.env" && ! grep -q "127.0.0.1" "$PROJDIR/.env"; then
