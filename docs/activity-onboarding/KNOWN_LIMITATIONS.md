@@ -55,12 +55,34 @@ file at the filesystem level and is read. Symlinks are refused; hardlinks
 cannot be. Only variable names and dependency names leave the parse
 (`ZFT-002`).
 
-**The hardened-git key list is an enumeration.** Where Tethra still runs
-`git` — the deliberate secret scanner, the pre-commit hook, the history
-probe — it overrides every configuration key currently known to name a
-program. A future git version could add a new execution surface the list
-does not cover. This is precisely why the *automatic* path spawns nothing
-at all rather than relying on the list (`ZFT-001`).
+**Repository configuration cannot participate in a Git read — but the
+seal has edges.** Where Tethra runs `git`, it runs against a *sealed* Git
+directory holding only Tethra's own configuration plus a pointer at the
+repository's object store (ADR 0027). The repository's `config`,
+`config.worktree`, and anything they include are structurally absent, so a
+hostile repository cannot name a program for Git to run. The enumerated
+`-c` overrides are kept as a second layer, no longer relied on: an
+enumeration is what `RA-001` defeated, with `log.showSignature` plus
+`gpg.program` executing a repository's chosen binary on `git log -p`.
+
+Two consequences worth knowing:
+
+* **A repository using a Git extension Tethra cannot reproduce is refused,
+  not scanned.** The allowlist covers `objectFormat`, `compatObjectFormat`,
+  `refStorage`, `worktreeConfig` and Git's `noop` placeholders. Anything
+  else — a partial clone, a future extension — loses history scanning until
+  support is added. The failure is a loud refusal; Tethra never falls back
+  to running Git against the repository's own configuration.
+* **`safe.directory` no longer applies.** Git's dubious-ownership check
+  validates the gitdir it is pointed at, which is now Tethra's. A
+  repository owned by another user is therefore read where it previously
+  errored. This is a net improvement — `safe.directory` exists to prevent
+  exactly the hostile-config execution that the seal makes impossible — but
+  it is a behaviour change.
+
+**A repository with more than 20 000 loose refs is refused.** Sealing copies
+refs, under explicit count and byte bounds. Packed refs are one file and do
+not count against it.
 
 **A truncated scan is reported, not hidden.** A folder with more than 2000
 environment files, more than 20 000 directories, more than 64 MB of
@@ -80,6 +102,28 @@ gates on tracking working must not be told yes while the service is down.
 **A bulk read cannot assert present health.** Listing setups does not probe
 the gateway per row, so those reads report history and never a present-tense
 success claim.
+
+**An observation dated more than five minutes ahead of this machine's clock
+is ignored.** Stored timestamps are untrusted input: they are written by
+another process and read against a different clock. `RA-005` showed a
+one-sided freshness window letting a future-dated row read as a present-tense
+success indefinitely — and, being the largest timestamp in the table,
+out-rank a failure recorded *now* and erase its reason. Observations outside
+the window are excluded rather than clamped, and admissibility additionally
+requires an insertion-ordered watermark that no writer's clock can influence.
+
+Consequences:
+
+* If your machine's clock jumps **backward** (an NTP step-back, a restored
+  VM snapshot), observations written before the jump look like the future
+  and stop counting. Tracking reads as *not currently verified* rather than
+  claiming success from evidence it cannot place in time. It recovers on its
+  own once real traffic arrives after the new clock.
+* If the gateway service and the desktop app disagree about the time by more
+  than five minutes, verification will not settle. That is a real
+  misconfiguration, and Tethra prefers saying so to guessing.
+* A failure recorded now is never erased by an anomalous observation. When
+  the two cannot be ordered, the failure wins.
 
 **An incomplete undo leaves routes in place.** When a setup fails before its
 plan was recorded, Tethra cannot tell which routes it created from which it
@@ -162,7 +206,27 @@ The vault's credential values are encrypted. These are not, by design:
   (`ZFT-047`).
 * **Detection evidence** — provider ids, confidence labels, variable
   *names*, dependency names and file paths.
-* **The prior state of environment variables Tethra rewrote**, so undo can
-  restore them exactly. Only non-secret configuration is recorded; a value
-  that does not look like non-secret configuration is deliberately not
-  stored, and undo reports it as a manual step instead.
+* **The *structure* of what Tethra rewrote in an environment file** — which
+  file, which variable, whether the file existed, and what Tethra wrote.
+  The **values** are not plaintext: every recorded prior value is encrypted
+  under a vault-wrapped key (ADR 0028), because the previous design decided
+  what was safe to store from a value's *shape* and classified a Supabase
+  service-role JWT as safe (`RA-006`).
+
+  Consequences:
+
+  * A user who loses their vault password loses *automatic* restore for
+    links made before that point. The structural record survives, so the
+    change can be undone by hand, and `unlink` says so rather than claiming
+    a restore it did not perform.
+  * Restore records written by builds before this change hold plaintext.
+    They are re-sealed the next time the vault is unlocked. Until then they
+    remain as they were — deleting them without a key would take away an
+    undo that a later unlocked run can still preserve.
+
+* **The consent diff shows a declared base URL's current value verbatim.**
+  When Tethra is about to replace `OPENAI_BASE_URL`, the removed line is
+  shown unmasked, because seeing exactly what is being replaced is the
+  point of the approval screen (ADR 0019 D9). Every other removed value is
+  masked. This is an on-screen disclosure of your own file to you; it is
+  never persisted.

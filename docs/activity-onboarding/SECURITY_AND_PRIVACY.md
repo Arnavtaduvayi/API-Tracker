@@ -162,3 +162,79 @@ origin pre-filled, so a repository containing no secrets at all could cause
 a MAC'd, enabled route to an attacker-chosen host. The promise is now
 implemented as written: default off, per destination, with the full
 disclosure, and `--yes` refuses rather than granting it. See ADR 0024.
+
+
+## Correction (2026-07-27, final re-audit): scanner execution and restore records
+
+The final independent re-audit of PR #16 found two further claims on this
+page and its neighbours that the implementation did not meet. Both are now
+true. As above, what was wrong is kept on the record rather than edited away.
+
+**"No project-controlled code executes during scanning or setup" was false
+(`RA-001`, CRITICAL).** The claim held for the *automatic detection* path,
+which genuinely spawns nothing (ADR 0023). It did not hold for the paths that
+still run `git`. `crates/core/src/gitrepo.rs` protected those with an
+enumeration of configuration keys known to launch a program, and the
+enumeration omitted `log.showSignature` and `gpg.<format>.program`. A
+repository shipping
+
+```text
+[log]
+	showSignature = true
+[gpg]
+	program = ./payload.sh
+```
+
+plus any commit carrying a `gpgsig` header executed its own binary as the
+user on the next `git log -p`. The signature did not have to be valid — Git
+pattern-matches the header and hands the blob to the configured program.
+
+The trigger was this PR's own primary journey: selecting a folder registers it
+as a monitored repository, and the desktop's background timer then reaches
+`git log -p` with **no user interaction at all**. ADR 0023 had said sandboxing
+was "worth revisiting if history traversal ever moves onto an automatic path";
+it had already moved there.
+
+The fix is structural rather than another key. Every isolated Git invocation
+now runs against a **sealed Git directory** (ADR 0027) that contains only
+Tethra's own configuration plus a pointer at the repository's object store, so
+repository configuration is not part of the repository Git reads — not for
+keys anyone thought of, and not for keys a future Git adds. The enumeration is
+kept as an independent second layer and is no longer load-bearing.
+
+Note for anyone auditing this: the isolation is asserted **on its own**, with
+no `-c` overrides in play, by `sealing_alone_closes_every_vector`. The
+previous canary suite's arming threshold of `armed.len() >= 2` of ten vectors
+— which allowed eight canaries to be permanently inert while the suite stayed
+green, and is how this class stayed invisible — is gone. Every vector declared
+reachable must arm, and every excused one must carry a specific measured
+reason.
+
+**"Only non-secret configuration is recorded" was false (`RA-006`, HIGH).**
+Undo records what an environment variable held before Tethra rewrote it, in
+`gateway_project_links.prior_env_json` — a plaintext column of a database
+opened with no `PRAGMA key`, readable by any process running as the user, any
+file-level backup, and any disk image. What went in was decided by a **shape
+predicate**, and the predicate admitted values the codebase's *own*
+`looks_like_key_material` flagged as key material: an `sk-proj-…` key, an
+`AKIA…:…` pair, and a JWT — the shape of `SUPABASE_SERVICE_ROLE_KEY`, a full
+RLS-bypassing admin credential for a provider in this very catalog. The
+leaking case was silent; only the *withheld* case raised a warning.
+
+The two predicates contradicting each other on the same input was the real
+signal: the design required a correct answer to "is this string a secret?",
+and that question does not have one. So the question is gone. Every recorded
+prior value is now sealed under a vault-wrapped key (ADR 0028), bound by
+associated data to its link, file and variable. Only structure stays in the
+clear. Without a key the value is withheld, never written in the clear.
+
+This also made undo *more* capable: values the old design refused to record —
+a base URL with userinfo, one carrying a key in its query string — now restore
+byte-for-byte.
+
+**Two related honesty gaps closed at the same time.** `scrub_stored_prior_env_once`
+had three call sites, all in the CLI, so a GUI-only user — the persona this PR
+exists for — never ran it and a leak written by an earlier build persisted.
+The scrub now runs at unlock, which is the only moment a key is definitionally
+available. And `gateway unlink` no longer reports `complete: true` after a
+`PriorNotRecorded` outcome (`RA-013`).
