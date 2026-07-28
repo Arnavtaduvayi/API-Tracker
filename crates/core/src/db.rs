@@ -1109,6 +1109,32 @@ CREATE TABLE tracking_approved_origins (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 18,
+        name: "insertion-ordered verification watermark (timestamps are untrusted input)",
+        sql: r#"
+-- v16 bound an observation to the current verification session by comparing
+-- its `at` timestamp against the setup's `applied_at`. The re-audit showed
+-- what that costs: `at` is a wall-clock string written by another process
+-- and stored in a plain column, and it was only ever bounded from BELOW. A
+-- row dated a year ahead therefore read as a present-tense success and
+-- stayed one until the clock caught up, and — being the largest timestamp in
+-- the table — it also out-ranked a failure recorded now and caused the
+-- failure reason to be nulled (RA-005).
+--
+-- The bound from above is a clock-skew window, but a window is still a
+-- judgement about two clocks. This column adds a signal that does not depend
+-- on any clock at all: the highest observation rowid at the moment the setup
+-- was applied. SQLite assigns rowids monotonically on insert, so
+-- `rowid > applied_event_rowid` means "physically recorded after this setup
+-- was applied" regardless of what time the writer claims it was.
+--
+-- Existing rows get 0, which admits every row exactly as before, so an
+-- already-applied setup is not retroactively un-verified by the upgrade; its
+-- timestamp bounds still apply, and its next apply stamps a real watermark.
+ALTER TABLE tracking_setups ADD COLUMN applied_event_rowid INTEGER NOT NULL DEFAULT 0;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

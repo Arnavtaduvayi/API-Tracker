@@ -18,6 +18,17 @@ fn summary(providers: &[&str]) -> PlanSummary {
     }
 }
 
+/// A timestamp a real gateway could have written: a moment after the apply
+/// that just happened, and inside the clock-skew window verification allows.
+///
+/// These fixtures used to use `2099-01-01T00:00:00Z` as a stand-in for
+/// "after applied_at". That is not a time any writer could produce, and
+/// verification now refuses observations dated implausibly far ahead of this
+/// machine's clock (RA-005), so the stand-in has to be a real one.
+fn just_after_apply() -> String {
+    api_tracker_core::clock::rfc3339_minus_seconds(&api_tracker_core::clock::now_rfc3339(), -2)
+}
+
 #[test]
 fn every_documented_transition_is_legal_and_others_are_rejected() {
     use TrackingState::*;
@@ -135,9 +146,9 @@ fn traffic_after_apply_verifies_and_watch_reports_it() {
     }
 
     // A qualifying event arrives (strictly after applied_at).
-    let later = "2099-01-01T00:00:00Z";
-    assert!(later > applied_at.as_str());
-    insert_gateway_event(&conn, "p1", "api.openai.com", later);
+    let later = just_after_apply();
+    assert!(later.as_str() > applied_at.as_str());
+    insert_gateway_event(&conn, "p1", "api.openai.com", &later);
 
     match verify::check_traffic(&conn, &mut setup).unwrap() {
         WatchStatus::Observed {
@@ -154,7 +165,7 @@ fn traffic_after_apply_verifies_and_watch_reports_it() {
         }
         other => panic!("expected Observed, got {other:?}"),
     }
-    assert_eq!(setup.first_traffic_at.as_deref(), Some(later));
+    assert_eq!(setup.first_traffic_at.as_deref(), Some(later.as_str()));
 }
 
 /// Clock honesty: traffic recorded BEFORE apply belongs to an earlier
@@ -200,7 +211,7 @@ fn partial_observation_is_derived_per_provider() {
     state::record_applied(&conn, &setup.id, &summary(&["openai", "anthropic"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    insert_gateway_event(&conn, "p1", "api.openai.com", "2099-01-01T00:00:00Z");
+    insert_gateway_event(&conn, "p1", "api.openai.com", &just_after_apply());
     let freshness = state::refresh(&conn, &mut setup).unwrap();
     assert_eq!(setup.state, TrackingState::PartiallyObserved);
     let openai = freshness
@@ -215,7 +226,7 @@ fn partial_observation_is_derived_per_provider() {
     assert!(anthropic.last_observed_at.is_none());
 
     // The second provider arrives → full observation.
-    insert_gateway_event(&conn, "p1", "api.anthropic.com", "2099-01-01T00:01:00Z");
+    insert_gateway_event(&conn, "p1", "api.anthropic.com", &just_after_apply());
     state::refresh(&conn, &mut setup).unwrap();
     assert_eq!(setup.state, TrackingState::TrafficObserved);
 }
@@ -236,7 +247,7 @@ fn another_projects_traffic_never_verifies_this_setup() {
     state::record_applied(&conn, &setup.id, &summary(&["openai"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
-    insert_gateway_event(&conn, "p2", "api.openai.com", "2099-01-01T00:00:00Z");
+    insert_gateway_event(&conn, "p2", "api.openai.com", &just_after_apply());
     state::refresh(&conn, &mut setup).unwrap();
     assert_eq!(setup.state, TrackingState::AwaitingFirstRequest);
 }
@@ -271,7 +282,7 @@ fn custom_origin_hosts_map_through_the_route_table() {
         &conn,
         "p1",
         "xyzcompany.supabase.example",
-        "2099-01-01T00:00:00Z",
+        &just_after_apply(),
     );
     state::refresh(&conn, &mut setup).unwrap();
     assert_eq!(setup.state, TrackingState::TrafficObserved);

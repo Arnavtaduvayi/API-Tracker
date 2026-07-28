@@ -158,12 +158,26 @@ fn latest_exchange(conn: &Connection, setup: &TrackingSetup) -> Result<Option<Ob
     let Some(applied_at) = &setup.applied_at else {
         return Ok(None);
     };
+    // Admissibility matches `state::refresh_with` exactly (RA-005): the same
+    // insertion-ordered watermark and the same clock-skew bound. If this
+    // query were looser, the screen would quote an exchange the derivation
+    // refused to count — "verified" next to an event that proves nothing.
+    let future_after = api_tracker_core::clock::rfc3339_minus_seconds(
+        &api_tracker_core::clock::now_rfc3339(),
+        -state::MAX_CLOCK_SKEW_SECS,
+    );
     let row = conn
         .query_row(
             "SELECT host, at, latency_ms, id FROM runtime_request_events
-             WHERE project_id = ?1 AND observation_source = 'gateway' AND at >= ?2
+             WHERE project_id = ?1 AND observation_source = 'gateway'
+               AND rowid > ?3 AND at >= ?2 AND at <= ?4
              ORDER BY at DESC LIMIT 1",
-            rusqlite::params![setup.project_id, applied_at],
+            rusqlite::params![
+                setup.project_id,
+                applied_at,
+                setup.applied_event_rowid,
+                future_after
+            ],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,

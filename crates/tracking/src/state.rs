@@ -126,6 +126,15 @@ pub struct TrackingSetup {
     /// newer than the newest observation must not be erased by that
     /// observation (ZFT-006).
     pub attention_at: Option<String>,
+    /// The highest `runtime_request_events` rowid at the moment this setup
+    /// was applied.
+    ///
+    /// SQLite assigns rowids monotonically on insert, so this is a
+    /// clock-independent watermark: only observations *physically recorded
+    /// after* the apply can verify it. That is what actually binds an
+    /// observation to the current verification session, and it is what a
+    /// forged or skewed `at` timestamp cannot forge (RA-005).
+    pub applied_event_rowid: i64,
 }
 
 /// Per-provider observation freshness derived by [`refresh`].
@@ -151,6 +160,50 @@ pub struct ProviderFreshness {
 /// while still expiring long before the 7-to-90-day event retention that
 /// let the old code claim success for months.
 pub const OBSERVATION_FRESHNESS_SECS: i64 = 6 * 60 * 60;
+
+/// How far ahead of this machine's clock a stored observation may be dated
+/// and still be believed (RA-005).
+///
+/// # Why an upper bound exists at all
+///
+/// `at` is **untrusted stored input**. It is a wall-clock string written by
+/// whichever process recorded the exchange, and the reader compares it
+/// against its own wall clock. The two can disagree — an NTP step, a
+/// suspended laptop, a restored VM snapshot, a gateway and desktop on
+/// different clocks — and the row can also simply be edited. Before this
+/// bound existed, `fresh` was `at >= now - 6h` with **no upper limit**, so a
+/// single row dated a year ahead read as a present-tense success and stayed
+/// one until the wall clock caught up. Worse, being the newest timestamp in
+/// the table, it also out-ranked a failure recorded *now* and caused
+/// `attention_reason` to be nulled — the exact ZFT-006 shape the freshness
+/// work exists to prevent.
+///
+/// # Why five minutes
+///
+/// It has to absorb ordinary skew between two processes on one machine (a
+/// few hundred milliseconds), and between a gateway service and a desktop
+/// app that may have started at different times. It must stay far below
+/// [`OBSERVATION_FRESHNESS_SECS`], so that "slightly ahead" can never
+/// meaningfully extend the freshness window. Five minutes is the same order
+/// as the default NTP correction step and is generous for both.
+///
+/// Observations outside this window are **excluded**, not clamped: a
+/// timestamp we cannot believe is not evidence, and silently rewriting it
+/// would make the stored row disagree with what the reader acted on.
+pub const MAX_CLOCK_SKEW_SECS: i64 = 5 * 60;
+
+/// Whether `a` is strictly later than `b`, comparing parsed instants.
+///
+/// Fails **closed**: if either side cannot be parsed, the answer is `true`.
+/// Both call sites ask "is the recorded failure newer than the newest
+/// observation?", so `true` preserves the failure. A timestamp we cannot
+/// read is a reason to keep bad news, never to discard it.
+fn instant_is_after(a: &str, b: &str) -> bool {
+    match (clock::parse_rfc3339(a), clock::parse_rfc3339(b)) {
+        (Ok(a), Ok(b)) => a > b,
+        _ => true,
+    }
+}
 
 /// Inputs `refresh` cannot read from the database: whether the gateway is
 /// actually answering right now.
@@ -314,7 +367,8 @@ pub struct PlanSummary {
 
 const COLS: &str = "id, project_id, folder_path, state, detection_json, plan_summary_json, \
                     applied_at, first_traffic_at, last_transition_at, attention_reason, \
-                    verification_session, config_generation, first_verified_at, attention_at";
+                    verification_session, config_generation, first_verified_at, attention_at, \
+                    applied_event_rowid";
 
 fn row_to_setup(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackingSetup> {
     let state_raw: String = r.get(3)?;
@@ -335,7 +389,22 @@ fn row_to_setup(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackingSetup> {
         config_generation: r.get(11)?,
         first_verified_at: r.get(12)?,
         attention_at: r.get(13)?,
+        applied_event_rowid: r.get(14)?,
     })
+}
+
+/// The highest observation rowid currently in the table.
+///
+/// Captured at apply time and stored as the setup's watermark. `COALESCE`
+/// handles the empty table; the value is only ever compared with `>`, so
+/// zero admits everything, which is exactly right for a setup applied
+/// before any observation existed.
+fn newest_event_rowid(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(rowid), 0) FROM runtime_request_events",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 /// Create or replace the setup row for (project, folder), opening a NEW
@@ -366,11 +435,16 @@ pub fn upsert_setup(
     let now = clock::now_rfc3339();
     let id = uuid::Uuid::new_v4().to_string();
     let session = uuid::Uuid::new_v4().to_string();
+    // Move the insertion-ordered watermark forward as well. `applied_at` is
+    // nulled here, so nothing is verifiable until the apply completes — but
+    // carrying a STALE rowid across a re-run would leave the previous
+    // attempt's observations admissible the moment it does.
+    let rowid = newest_event_rowid(conn)?;
     conn.execute(
         "INSERT INTO tracking_setups
              (id, project_id, folder_path, state, detection_json, last_transition_at,
-              verification_session, config_generation)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)
+              verification_session, config_generation, applied_event_rowid)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8)
          ON CONFLICT(project_id, folder_path) DO UPDATE SET
              state = excluded.state,
              detection_json = excluded.detection_json,
@@ -381,7 +455,8 @@ pub fn upsert_setup(
              config_generation = tracking_setups.config_generation + 1,
              plan_summary_json = NULL,
              applied_at = NULL,
-             first_traffic_at = NULL",
+             first_traffic_at = NULL,
+             applied_event_rowid = excluded.applied_event_rowid",
         params![
             id,
             project_id,
@@ -389,7 +464,8 @@ pub fn upsert_setup(
             state.as_str(),
             detection_json,
             now,
-            session
+            session,
+            rowid
         ],
     )?;
     find_setup(conn, project_id, folder)?.ok_or(CoreError::NotFound {
@@ -486,11 +562,16 @@ pub fn transition(
 /// Record a completed apply: plan summary + applied_at timestamp.
 pub fn record_applied(conn: &Connection, setup_id: &str, plan_summary: &PlanSummary) -> Result<()> {
     let now = clock::now_rfc3339();
+    // Stamp the insertion-ordered watermark in the SAME statement as the
+    // wall-clock one. Only observations recorded after this point can
+    // verify this session, and that fact is now anchored to something the
+    // writer's clock cannot influence (RA-005).
+    let rowid = newest_event_rowid(conn)?;
     conn.execute(
         "UPDATE tracking_setups
-         SET plan_summary_json = ?2, applied_at = ?3
+         SET plan_summary_json = ?2, applied_at = ?3, applied_event_rowid = ?4
          WHERE id = ?1",
-        params![setup_id, serde_json::to_string(plan_summary)?, now],
+        params![setup_id, serde_json::to_string(plan_summary)?, now, rowid],
     )?;
     Ok(())
 }
@@ -637,22 +718,55 @@ pub fn refresh_with(
     // --- qualifying observations of THIS session -------------------------
     let now = clock::now_rfc3339();
     let stale_before = clock::rfc3339_minus_seconds(&now, OBSERVATION_FRESHNESS_SECS);
+    // The upper edge of belief. `rfc3339_minus_seconds` with a negative
+    // count adds, and degrades to the year-9999 sentinel on unparseable
+    // input — which here means "believe nothing later than the far future",
+    // i.e. it fails OPEN on the upper bound only if our own `now` is
+    // unparseable, which cannot happen because we just formatted it.
+    let future_after = clock::rfc3339_minus_seconds(&now, -MAX_CLOCK_SKEW_SECS);
     let mut per_provider: BTreeMap<String, Option<String>> =
         providers.iter().map(|p| (p.clone(), None)).collect();
     let mut earliest: Option<String> = None;
     {
+        // Three independent admissibility conditions, all of which must
+        // hold (RA-005):
+        //
+        //   `rowid > ?2`  — the row was physically inserted after this
+        //                   setup was applied. SQLite assigns rowids
+        //                   monotonically, so this is an ordering signal
+        //                   the writer's wall clock cannot influence, and
+        //                   it is what actually binds an observation to the
+        //                   CURRENT verification session.
+        //   `at >= ?3`    — and it claims a time at or after the apply
+        //                   watermark, so a row back-dated into a previous
+        //                   session is excluded even if it was inserted now.
+        //   `at <= ?4`    — and it does not claim a time this machine's
+        //                   clock says has not happened yet.
+        //
+        // Belt and braces on purpose: the rowid alone would be defeated by
+        // deleting the highest row (rowids are reused without AUTOINCREMENT),
+        // and the timestamps alone are exactly what RA-005 forged.
         let mut stmt = conn.prepare(
             "SELECT host, MIN(at), MAX(at) FROM runtime_request_events
-             WHERE project_id = ?1 AND observation_source = 'gateway' AND at >= ?2
+             WHERE project_id = ?1 AND observation_source = 'gateway'
+               AND rowid > ?2 AND at >= ?3 AND at <= ?4
              GROUP BY host",
         )?;
-        let rows = stmt.query_map(params![setup.project_id, applied_at], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![
+                setup.project_id,
+                setup.applied_event_rowid,
+                applied_at,
+                future_after
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )?;
         for row in rows {
             let (host, first_at, last_at) = row?;
             let Some(provider) = provider_of_host(&host, &custom_hosts) else {
@@ -684,9 +798,13 @@ pub fn refresh_with(
             last_observed_at: last_observed_at.clone(),
             route_present: route_present.get(provider_id).copied().unwrap_or(false),
             link_present: link_present.contains_key(provider_id),
+            // Bounded on BOTH sides. The upper bound is redundant with the
+            // SQL above today, and deliberately kept: this predicate is the
+            // one a reader reaches for when asking "is this fresh?", and it
+            // must not be true for a timestamp we do not believe.
             fresh: last_observed_at
                 .as_deref()
-                .is_some_and(|at| at >= stale_before.as_str()),
+                .is_some_and(|at| at >= stale_before.as_str() && at <= future_after.as_str()),
         })
         .collect();
 
@@ -710,8 +828,18 @@ pub fn refresh_with(
     // A failure recorded AFTER the newest observation is the more recent
     // truth and must survive; only an observation that post-dates the
     // failure may clear it.
+    //
+    // `newest_observation` is now drawn only from admissible rows, so a
+    // forged future timestamp can no longer out-rank a real failure just by
+    // being the largest string in the table (RA-005). The comparison itself
+    // is done on parsed instants rather than bytes, because RFC 3339 is not
+    // byte-order-equivalent to time order: `now_rfc3339` omits the
+    // fractional part when nanoseconds are zero, and `'.'` (0x2E) sorts
+    // before `'Z'` (0x5A), so `12:00:00.5Z` compares as OLDER than
+    // `12:00:00Z`. On the sub-second boundary that is the difference
+    // between preserving a failure and erasing it.
     let failure_is_newer = match (&setup.attention_at, &newest_observation) {
-        (Some(failed), Some(seen)) => failed.as_str() > seen.as_str(),
+        (Some(failed), Some(seen)) => instant_is_after(failed, seen),
         (Some(_), None) => true,
         _ => false,
     };
