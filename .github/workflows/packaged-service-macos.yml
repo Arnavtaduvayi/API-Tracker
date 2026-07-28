@@ -1,0 +1,149 @@
+name: Packaged macOS service lifecycle
+
+# The authoritative execution of `--scope full --require-service`.
+#
+# WHY THIS JOB EXISTS
+# -------------------
+# `--require-service` is the only scope that installs a REAL per-user
+# LaunchAgent through the product's own path and then drives the service
+# lifecycle against it. It had never been observed passing anywhere, because
+# its own precondition — a machine with no installed Tethra gateway — is not
+# met on the developer machine that carries a live production gateway, and
+# running it there is how REM-001 (a redirected $HOME does not isolate
+# launchd) was found the hard way.
+#
+# A hosted macOS runner is the disposable clean room that scope needs. That
+# this is possible at all was MEASURED, not assumed: the `macos-26-arm64`
+# image runs a real Aqua login session (`launchctl managername` = Aqua,
+# `gui/501` created by `loginwindow`), `launchctl bootstrap gui/<uid>`
+# returns 0, and a bootstrapped agent genuinely RUNS. The previous claim in
+# ci.yml that "a hosted runner has no login session to register into" was
+# wrong, and is corrected there.
+#
+# WHAT A GREEN RUN HERE CLAIMS
+#   * the packaged .app carries a runnable, version- and byte-matched helper;
+#   * the product installs a LaunchAgent whose label is namespaced to THIS
+#     run's data directory and is therefore never the production label;
+#   * launchd loaded that exact job, and the running process's executable and
+#     arguments match the plist this run owns;
+#   * the service answers on its authenticated control path;
+#   * zero-friction setup verifies only after real traffic;
+#   * the whole service lifecycle (status/stop/start/restart/uninstall) works
+#     through the product's own verbs;
+#   * every resource this run created was removed, and nothing else was.
+#
+# WHAT IT DOES NOT CLAIM
+#   * the desktop GUI is not click-driven here;
+#   * Windows and Linux packaging are not covered by this macOS harness;
+#   * the app is unsigned (no signing identity exists on a hosted runner).
+
+on:
+  pull_request:
+  push:
+    branches: [main, ci/service-lifecycle-dev]
+  workflow_dispatch:
+
+# Least privilege: this job only reads the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  service-lifecycle:
+    name: Packaged macOS service lifecycle
+    runs-on: macos-latest
+    # A full bundle build plus a real service lifecycle and a live provider
+    # round trip. The cap is a guard against a hang, not a budget.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # ---------------------------------------------------------------------
+      # PRECONDITIONS — before any toolchain, any build, and above all before
+      # anything that could register a cleanup action.
+      #
+      # This job is only evidence if it ran in a clean room. It asserts that
+      # and FAILS SAFELY if not. It deliberately does NOT delete pre-existing
+      # state to force itself to continue: unknown state on a runner means the
+      # premise is broken, and destroying it would be exactly the REM-001
+      # mistake in a new costume.
+      # ---------------------------------------------------------------------
+      - name: Clean-runner preconditions (fail safely; never remediate)
+        run: bash scripts/ci_service_preconditions.sh
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      # The anti-tautology gate first: it needs no bundle, so a harness that
+      # cannot report a failure dies in seconds rather than after a build.
+      - name: Validation harness self-check (anti-tautology gate)
+        run: bash scripts/tracking_validate_macos.sh --scope selfcheck
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Stage the bundled CLI sidecar (externalBin — the app ships its helper)
+        run: bash scripts/bundle_cli.sh
+
+      - name: Build the real macOS app bundle
+        working-directory: apps/desktop
+        run: npm run tauri build -- --bundles app
+
+      # The app a user gets is not "the app inside the build tree". Copying it
+      # out proves the bundle is self-contained: nothing it needs may be
+      # resolved relative to the repository.
+      - name: Copy the .app outside the repository
+        run: |
+          set -euo pipefail
+          DEST="$RUNNER_TEMP/packaged-app"
+          mkdir -p "$DEST"
+          cp -R target/release/bundle/macos/Tethra.app "$DEST/"
+          echo "PACKAGED_APP=$DEST/Tethra.app" >> "$GITHUB_ENV"
+          echo "copied to $DEST/Tethra.app"
+          ls -la "$DEST/Tethra.app/Contents/MacOS/"
+
+      # ---------------------------------------------------------------------
+      # THE POINT OF THE JOB.
+      # ---------------------------------------------------------------------
+      - name: Packaged validation (FULL scope, REAL service — REQUIRED)
+        id: service
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/service-evidence"
+          export TETHRA_VALIDATION_RESULTS_JSON="$RUNNER_TEMP/service-evidence/results.json"
+          bash scripts/tracking_validate_macos.sh \
+            --scope full --require-service "$PACKAGED_APP" \
+            2>&1 | tee "$RUNNER_TEMP/service-evidence/service-lifecycle.log"
+
+      # A green script exit is not the same statement as "the service scope
+      # completed". This asserts the machine-readable result says so: the exact
+      # scope and mode, zero failures, zero skipped, and the full declared
+      # check count actually executed.
+      - name: Assert the service scope completed (not merely exited)
+        if: always() && steps.service.outcome != 'skipped'
+        run: bash scripts/ci_assert_service_results.sh "$RUNNER_TEMP/service-evidence/results.json"
+
+      # Cleanup is a claim the run makes about itself. Verify it independently,
+      # from outside the script, after the script's own trap has run.
+      - name: Verify cleanup left nothing behind
+        if: always() && steps.service.outcome != 'skipped'
+        run: bash scripts/ci_service_cleanup_check.sh | tee "$RUNNER_TEMP/service-evidence/cleanup.log"
+
+      - name: Upload service-lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaged-macos-service-lifecycle
+          path: ${{ runner.temp }}/service-evidence
+          if-no-files-found: warn
+          retention-days: 30

@@ -83,11 +83,11 @@ echo "    each mutant must be KILLED by the harness's own self-check"
 echo
 
 mutate "MA — bad() prints PASS and counts a pass" \
-  's|^bad() { echo "  FAIL  \$1"; fail=\$((fail+1)); bump fail; }|bad() { echo "  PASS  $1"; pass=$((pass+1)); bump pass; }|' \
+  's|^bad() { echo "  FAIL  \$1"; fail=\$((fail+1)); bump fail; record_check fail "\$1"; }|bad() { echo "  PASS  $1"; pass=$((pass+1)); bump pass; record_check pass "$1"; }|' \
   "the literal ZFT-VAL-7 defect: a harness that can only say ok."
 
 mutate "MB — bad() is a silent no-op" \
-  's|^bad() { echo "  FAIL  \$1"; fail=\$((fail+1)); bump fail; }|bad() { return 0; }|' \
+  's|^bad() { echo "  FAIL  \$1"; fail=\$((fail+1)); bump fail; record_check fail "\$1"; }|bad() { return 0; }|' \
   "failures vanish entirely; the total shrinks and every check appears green."
 
 mutate "MC — check() always calls ok()" \

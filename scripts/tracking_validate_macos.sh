@@ -519,8 +519,36 @@ group() {
 }
 bump() { eval "G_${GROUP}_$1=\$(( \${G_${GROUP}_$1:-0} + 1 ))"; }
 
-ok()  { echo "  PASS  $1"; pass=$((pass+1)); bump pass; }
-bad() { echo "  FAIL  $1"; fail=$((fail+1)); bump fail; }
+# --- the check register ----------------------------------------------------
+# Every counted check records itself here, as it executes, under the group in
+# effect. Three things come out of it that a running tally cannot give:
+#
+#   * a machine-readable result (CI asserts the SCOPE completed, rather than
+#     asserting the script exited 0 — those are different statements, and the
+#     RA-003 defect was precisely a script that exited on a count gate with
+#     every assertion green);
+#   * every check has a NAME, and two checks may not share one. A duplicate
+#     name makes "which check did not run?" unanswerable, which is the
+#     question the per-group equality gate exists to answer;
+#   * the register is the evidence that a required check EXECUTED rather than
+#     being reported. A check that never ran leaves no row, and the row count
+#     is reconciled against the declared inventory below.
+#
+# RECORD is 0 only inside the harness self-check's own subshells, where a
+# control's verdict is captured for inspection rather than counted. Those
+# controls must not appear in the register for the same reason they must not
+# appear in the tally: they are deliberately-false assertions about nothing.
+RESULTS_TSV=""
+RECORD=1
+record_check() {   # record_check <pass|fail> <label>
+  [ -n "$RESULTS_TSV" ] || return 0
+  [ "${RECORD:-1}" -eq 1 ] || return 0
+  [ "$SELFCHECK" -eq 0 ] || return 0
+  printf '%s\t%s\t%s\n' "$GROUP" "$1" "$2" >> "$RESULTS_TSV"
+}
+
+ok()  { echo "  PASS  $1"; pass=$((pass+1)); bump pass; record_check pass "$1"; }
+bad() { echo "  FAIL  $1"; fail=$((fail+1)); bump fail; record_check fail "$1"; }
 # The single funnel every shell-condition check uses.
 check() { if [ "$1" -eq 0 ]; then ok "$2"; else bad "$2"; fi; }
 step()  { echo; echo "== $1 =="; }
@@ -682,6 +710,20 @@ sc_true_db()         { assert_db "SELECT 1=1" "control: a query returning 1"; }
 group HARNESS
 step "harness self-check (a harness that cannot fail is caught here)"
 mkdir -p "$DIR"
+# The register opens here, before the first counted check, so that every check
+# this run executes lands in it.
+#
+# It lives under $COPIES rather than under $DIR, for the same reason the
+# byte-exact .env snapshots do: the privacy sweep greps everything under $DIR
+# that is not the fixture, and a check LABEL is prose that can legitimately
+# contain a needle shape. "no authorization header line and no bearer token is
+# stored" matches the sweep's own case-insensitive `Bearer [A-Za-z0-9_-]`
+# pattern — so a register inside $DIR would make the privacy check fail on the
+# text of the privacy check. Keeping it outside means the sweep needs no new
+# exclusion, and the only excluded path stays the fixture the product may read.
+mkdir -p "$COPIES"
+RESULTS_TSV="$COPIES/checks.tsv"
+: > "$RESULTS_TSV"
 
 # THE COUNT'S OWN GUARD.
 #
@@ -737,7 +779,7 @@ done
 # checks. Without the marker the enumerator would refuse to guess and abort.
 __probe="$DIR/.gate-ran"
 rm -f "$__probe"
-if ( selfcheck pass "gate probe (must not be reported)" sc_false_condition ) >/dev/null 2>&1  #@uncounted
+if ( RECORD=0; selfcheck pass "gate probe (must not be reported)" sc_false_condition ) >/dev/null 2>&1  #@uncounted
 then
   die "the harness self-check gate ACCEPTED a known-failing control as a pass.
 That means the gate is not evaluating verdicts at all — a selfcheck()
@@ -1326,7 +1368,83 @@ echo
 # was proved against this file before the first check ran. A total alone
 # cannot say WHICH check stopped running, and two drifts that cancel out
 # (one group short, another long) leave it unmoved.
+# --- the register: duplicate names, and a machine-readable result -----------
+# Two checks may not share a name. The per-group equality gate answers "did
+# every declared check run?"; a duplicate name makes the follow-up question —
+# WHICH one stopped running — unanswerable, because two rows are
+# indistinguishable. It is a hard failure rather than a warning for the same
+# reason the count gate is: a result nobody can attribute is not quotable.
+DUPLICATES=""
+if [ -n "$RESULTS_TSV" ] && [ -f "$RESULTS_TSV" ]; then
+  DUPLICATES="$(awk -F'\t' '{ key = $1 "\t" $3; n[key]++ }
+    END { for (k in n) if (n[k] > 1) printf "      %d x %s\n", n[k], k }' "$RESULTS_TSV")"
+fi
+
+# The machine-readable result. CI asserts against THIS rather than against the
+# script's exit status, because those are different statements: RA-003 was a
+# script that exited non-zero on a count gate with all 59 of its assertions
+# green, and the mirror-image failure — exiting 0 having run the wrong scope —
+# is exactly what a job that greps for "0 failed" would wave through. The file
+# names the scope, the mode, the declared and executed totals, and every check
+# by name and verdict, so a caller can require the exact combination it meant
+# to run.
+if [ -n "${TETHRA_VALIDATION_RESULTS_JSON:-}" ]; then
+  RESULTS_VERDICT="PASS"
+  [ "$fail" -eq 0 ] || RESULTS_VERDICT="FAIL"
+  [ "$total" -eq "$EXPECTED" ] || RESULTS_VERDICT="INCONCLUSIVE"
+  [ -z "$DUPLICATES" ] || RESULTS_VERDICT="INCONCLUSIVE"
+  {
+    echo "{"
+    echo "  \"schema\": \"tethra.validation.results/1\","
+    echo "  \"scope\": \"$SCOPE\","
+    echo "  \"mode\": \"$MODE\","
+    echo "  \"verdict\": \"$RESULTS_VERDICT\","
+    echo "  \"expected_total\": $EXPECTED,"
+    echo "  \"executed_total\": $total,"
+    echo "  \"passed\": $pass,"
+    echo "  \"failed\": $fail,"
+    # Nothing in this harness is ever "skipped": a check either executes and is
+    # counted, or the run is INCONCLUSIVE. The field is emitted as a constant 0
+    # so a caller can assert on it without having to know that.
+    echo "  \"skipped\": 0,"
+    echo "  \"duplicate_names\": $(printf '%s' "$DUPLICATES" | grep -c . || true),"
+    echo "  \"app\": \"$(printf '%s' "$APP" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"data_dir\": \"$(printf '%s' "$DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"service_plist\": \"$(printf '%s' "${SERVICE_INSTALLED:-}" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"service_label\": \"$(basename "${SERVICE_INSTALLED:-}" .plist 2>/dev/null | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"groups\": ["
+    RESULTS_SEP=""
+    for g in $(scope_groups "$SCOPE:$MODE"); do
+      eval "gp=\${G_${g}_pass:-0}"
+      eval "gf=\${G_${g}_fail:-0}"
+      printf '%s    {"name": "%s", "expected": %s, "executed": %s, "passed": %s, "failed": %s}' \
+        "$RESULTS_SEP" "$g" "$(group_size "$g")" "$((gp + gf))" "$gp" "$gf"
+      RESULTS_SEP=",
+"
+    done
+    echo
+    echo "  ],"
+    echo "  \"checks\": ["
+    if [ -f "$RESULTS_TSV" ]; then
+      awk -F'\t' '{
+        name = $3
+        gsub(/\\/, "\\\\", name); gsub(/"/, "\\\"", name)
+        printf "%s    {\"group\": \"%s\", \"result\": \"%s\", \"name\": \"%s\"}", sep, $1, $2, name
+        sep = ",\n"
+      } END { if (NR) printf "\n" }' "$RESULTS_TSV"
+    fi
+    echo "  ]"
+    echo "}"
+  } > "$TETHRA_VALIDATION_RESULTS_JSON"
+  echo "  machine-readable results written to $TETHRA_VALIDATION_RESULTS_JSON"
+fi
+
 GROUP_DIFF=""
+if [ -n "$DUPLICATES" ]; then
+  GROUP_DIFF="$GROUP_DIFF
+      two or more checks share a name, so a missing one cannot be identified:
+$DUPLICATES"
+fi
 for g in $(scope_groups "$SCOPE:$MODE"); do
   eval "gp=\${G_${g}_pass:-0}"
   eval "gf=\${G_${g}_fail:-0}"
