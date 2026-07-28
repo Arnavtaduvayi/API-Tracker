@@ -73,19 +73,28 @@ it ran on the **exact PR head**; the first is kept because it is the run whose
 numbers §4 quotes and because deleting the working history would be the same
 dishonesty this page exists to avoid.
 
+The job runs on **every** head, so the authoritative answer for whatever the
+head is when you read this comes from `gh pr checks 16`, not from a hash typed
+here. Three runs are named below because each says something the others do not.
+
 ```text
 Workflow:   Packaged macOS service lifecycle
             .github/workflows/packaged-service-macos.yml
 
---- on the exact PR head -------------------------------------------------
-Run ID:     30326526816     duration 11m52s
-Commit:     bf421b9f83100ecd17df6ab83a892fc09ce5370c
-Branch:     feat/zero-friction-api-tracking   (PR #16)
-Label:      dev.api-tracker.gateway.6c7a0d0c85df
+--- the last CODE change on this branch ----------------------------------
+Run ID:     30327487534
+Commit:     9bbe3b10  (feat/zero-friction-api-tracking, PR #16)
+Label:      dev.api-tracker.gateway.6b44b8d8867e
 Result:     tracking  63 passed, 0 failed (63/63)  verdict PASS, 0 skipped
             lifecycle 51 passed, 0 failed
-            cleanup   VERIFIED — the machine is as clean after as before
+            cleanup   VERIFIED
             all 6 required PR checks green
+
+--- the first head to carry the finished evidence ------------------------
+Run ID:     30326526816     duration 11m52s
+Commit:     bf421b9f
+Label:      dev.api-tracker.gateway.6c7a0d0c85df
+Result:     identical: 63/63, 51/51, cleanup verified, 6/6 checks green
 
 --- the development run whose detail §4 quotes ---------------------------
 Run ID:     30325704492
@@ -94,10 +103,17 @@ Label:      dev.api-tracker.gateway.39d11f8db375
 Result:     identical: 63/63, 51/51, cleanup verified
 ```
 
-Note the two labels differ (`6c7a0d0c85df` vs `39d11f8db375`) and neither is
-the production label. They are derived from each run's own data directory
-(`/tmp/tethra-track-val-<pid>`), which is what makes the namespace
-run-specific rather than merely test-specific.
+Any commit after `9bbe3b10` on this branch is documentation only — this file
+included. Those commits get their own run of the same required job, linked
+from the PR; naming their hashes here would be a hash chasing its own tail,
+because writing the hash changes it.
+
+Note the three labels all differ (`6b44b8d8867e`, `6c7a0d0c85df`,
+`39d11f8db375`) and none is the production label. They are derived from each
+run's own data directory (`/tmp/tethra-track-val-<pid>`), which is what makes
+the namespace run-specific rather than merely test-specific — and three
+independent runs producing three different labels is that property observed
+rather than argued.
 
 The detail in the rest of this section is quoted from `30325704492`; the
 PR-head run reproduces every number.
