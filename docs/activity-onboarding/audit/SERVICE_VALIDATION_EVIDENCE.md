@@ -243,10 +243,10 @@ before the bundle build:
 ```
 
 Covering install → bootstrap → push-key → attribution → vault lock/unlock →
-**stop** → doctor → **restart** → unlink → **uninstall** → verification that
-the plist, launchd registration, control socket, control nonce and service
-binaries are all gone → ordinary networking unaffected → negative controls →
-and the isolation invariant:
+**stop** → doctor → **restart** → **repair** → unlink → **uninstall** →
+verification that the plist, launchd registration, control socket, control
+nonce and service binaries are all gone → ordinary networking unaffected →
+negative controls → and the isolation invariant:
 
 ```text
 PASS  the production plist is exactly as this run found it (absent)
@@ -258,6 +258,19 @@ The previous handoff recorded "I did not run
 gap. That gap is closed here rather than by reimplementing the same lifecycle
 inside the tracking harness, because two harnesses asserting the same
 property is how they drift.
+
+**`repair` was added while writing this page.** The brief asks for stop,
+start, restart, status, repair and uninstall *where supported*; `gateway
+repair` is supported — `install(force = false)` underneath: re-copy the
+binary, rewrite the definition for this data directory, re-register, restart —
+and the script called `doctor` but never the repair `doctor` hints at.
+Recording the lifecycle as covered while that verb had never executed would
+have been `REM-003` again, in the page claiming to have found it. The damage
+is staged against a resource this run owns (the installed helper under
+`$TETHRA_DIR/bin`), and the check asserts repair restored it, the gateway
+serves again, and the **production label was not registered** — the last
+mattering because repair takes the install path, which is where a slot
+takeover would happen if ownership were not proven first.
 
 ### Cleanup
 
