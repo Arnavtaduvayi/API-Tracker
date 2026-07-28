@@ -273,3 +273,277 @@ fn a_corrupt_index_degrades_to_unknown_and_says_so() {
         "a degraded answer must carry a reported limit"
     );
 }
+
+/// A split index moves every path out of `.git/index` and into
+/// `.git/sharedindex.<oid>`, leaving the main index full of name-less
+/// placeholders and one `link` extension. The old tail check accepted any
+/// four alphabetic bytes as "an extension", so `link` passed unexamined and
+/// a three-file repository read as one tracked path and no reported limit —
+/// silently disabling the product's only committed-secret control (RA-007).
+#[test]
+fn split_index_agrees_with_git() {
+    if !git_available() {
+        eprintln!("SKIP: git is not on PATH; the differential fixture needs it");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    // A hundred entries so that removing one is under `splitIndex`'s
+    // rewrite threshold: below it Git simply rewrites the shared index and
+    // the delete bitmap — the part of the extension that actually changes
+    // the answer — is never exercised.
+    for i in 0..100 {
+        write(&dir.join(format!("f{i:03}.env")), "X=1\n");
+    }
+    assert!(git(dir, &["add", "-A"]).status.success());
+    assert!(git(dir, &["update-index", "--split-index"])
+        .status
+        .success());
+    assert!(git(dir, &["rm", "-q", "--cached", "f007.env"])
+        .status
+        .success());
+    write(&dir.join("added.env"), "N=1\n");
+    assert!(git(dir, &["add", "added.env"]).status.success());
+
+    // Prove the fixture is the shape the finding describes rather than a
+    // repository Git quietly un-split: one shared index, still naming the
+    // path that `git ls-files` no longer reports.
+    let shared: Vec<_> = std::fs::read_dir(dir.join(".git"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("sharedindex."))
+        .collect();
+    assert_eq!(shared.len(), 1, "the fixture must be a split index");
+    let shared_bytes = std::fs::read(shared[0].path()).unwrap();
+    assert!(
+        shared_bytes.windows(9).any(|w| w == b"f007.env\0"),
+        "the shared index must still carry the entry the delete bitmap removes"
+    );
+    let main = std::fs::read(dir.join(".git/index")).unwrap();
+    assert!(
+        main.windows(4).any(|w| w == b"link"),
+        "the main index must carry the link extension"
+    );
+
+    let mut rels: Vec<String> = (0..100).map(|i| format!("f{i:03}.env")).collect();
+    rels.push("added.env".to_string());
+    let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+    assert_agrees(dir, &refs);
+}
+
+/// Split index and index version 4 compose: the placeholders are prefix
+/// compressed too, so an empty name is "strip the whole previous path and
+/// append nothing".
+#[test]
+fn split_index_version_4_agrees_with_git() {
+    if !git_available() {
+        eprintln!("SKIP: git is not on PATH; the differential fixture needs it");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    for i in 0..100 {
+        write(&dir.join(format!("deep/nested/path/f{i:03}.env")), "X=1\n");
+    }
+    assert!(git(dir, &["add", "-A"]).status.success());
+    assert!(git(dir, &["update-index", "--index-version", "4"])
+        .status
+        .success());
+    assert!(git(dir, &["update-index", "--split-index"])
+        .status
+        .success());
+    assert!(
+        git(dir, &["rm", "-q", "--cached", "deep/nested/path/f007.env"])
+            .status
+            .success()
+    );
+
+    let raw = std::fs::read(dir.join(".git/index")).unwrap();
+    assert_eq!(
+        u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+        4,
+        "the fixture must actually be a version-4 index"
+    );
+    assert!(
+        raw.windows(4).any(|w| w == b"link"),
+        "the fixture must actually be a split index"
+    );
+
+    let rels: Vec<String> = (0..100)
+        .map(|i| format!("deep/nested/path/f{i:03}.env"))
+        .collect();
+    let refs: Vec<&str> = rels.iter().map(String::as_str).collect();
+    assert_agrees(dir, &refs);
+}
+
+/// An index that exists but cannot be read is not the same fact as "this
+/// repository tracks nothing". Both used to return an empty set with
+/// `index_readable` still true, so a committed `.env` read `Untracked` and
+/// no warning was raised (RA-007).
+#[test]
+fn an_index_that_cannot_be_read_is_unknown_not_untracked() {
+    if !git_available() {
+        eprintln!("SKIP: git is not on PATH; the differential fixture needs it");
+        return;
+    }
+    // `.git/index` replaced by a directory — the `!is_file()` branch.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    write(&dir.join("a.env"), "1\n");
+    assert!(git(dir, &["add", "-A"]).status.success());
+    std::fs::remove_file(dir.join(".git/index")).unwrap();
+    std::fs::create_dir(dir.join(".git/index")).unwrap();
+    let canonical = dir.canonicalize().unwrap();
+    let view = RepoView::open(&canonical).expect("the repository is still discoverable");
+    assert_eq!(
+        view.status_of(&canonical.join("a.env")),
+        PathStatus::Unknown,
+        "an index that is not a regular file must not read as nothing tracked"
+    );
+    assert!(
+        !view.limits().is_empty(),
+        "a degraded answer must carry a reported limit"
+    );
+
+    // `.git/index` replaced by a symlink — this module never reads through
+    // a symlink at the final component, so it must refuse, not answer.
+    #[cfg(unix)]
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo(dir);
+        write(&dir.join("a.env"), "1\n");
+        assert!(git(dir, &["add", "-A"]).status.success());
+        let index = dir.join(".git/index");
+        let elsewhere = dir.join(".git/real-index");
+        std::fs::rename(&index, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &index).unwrap();
+        let canonical = dir.canonicalize().unwrap();
+        let view = RepoView::open(&canonical).expect("the repository is still discoverable");
+        assert_eq!(
+            view.status_of(&canonical.join("a.env")),
+            PathStatus::Unknown,
+            "a symlinked index must not read as nothing tracked"
+        );
+        assert!(
+            !view.limits().is_empty(),
+            "a degraded answer must carry a reported limit"
+        );
+    }
+}
+
+/// macOS hands back decomposed (NFD) names from `readdir` while Git's index
+/// stores the precomposed (NFC) form, so the exact-bytes lookup reported a
+/// COMMITTED `.env` under an accented directory as `Untracked` (RA-018).
+///
+/// The fixture builds both halves explicitly — the directory is created with
+/// NFD bytes and the index entry is inserted with NFC bytes — so the test
+/// exercises the same mismatch on every platform rather than depending on
+/// the filesystem to produce it.
+#[test]
+fn a_decomposed_path_still_finds_its_precomposed_index_entry() {
+    if !git_available() {
+        eprintln!("SKIP: git is not on PATH; the differential fixture needs it");
+        return;
+    }
+    // "café": U+0065 U+0301 on disk, U+00E9 in the index.
+    let nfd_dir = "caf\u{65}\u{301}";
+    let nfc_dir = "caf\u{e9}";
+    assert_ne!(nfd_dir, nfc_dir, "the two forms must differ bytewise");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    write(&dir.join(nfd_dir).join(".env"), "A=1\n");
+    let hashed = git(dir, &["hash-object", "-w", &format!("{nfd_dir}/.env")]);
+    assert!(hashed.status.success());
+    let blob = String::from_utf8(hashed.stdout).unwrap().trim().to_string();
+    assert!(git(
+        dir,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("100644,{blob},{nfc_dir}/.env"),
+        ]
+    )
+    .status
+    .success());
+
+    // The index really does hold the precomposed form and nothing else.
+    // `core.quotepath=false` keeps Git from octal-escaping the bytes back.
+    let listed = git(dir, &["-c", "core.quotepath=false", "ls-files"]);
+    let listed = String::from_utf8_lossy(&listed.stdout).trim().to_string();
+    assert_eq!(listed, format!("{nfc_dir}/.env"));
+
+    let canonical = dir.canonicalize().unwrap();
+    let view = RepoView::open(&canonical).unwrap();
+    assert!(view.limits().is_empty(), "{:?}", view.limits());
+    assert_eq!(
+        view.status_of(&canonical.join(nfd_dir).join(".env")),
+        PathStatus::Tracked,
+        "a committed .env must not read Untracked because the directory name arrived decomposed"
+    );
+    assert_eq!(
+        view.dir_view(nfd_dir).status_of_name(".env", false),
+        PathStatus::Tracked,
+        "the per-directory view must agree with the whole-path view"
+    );
+
+    // The fold must not collapse names that are genuinely different: an
+    // accent-insensitive comparison would report this one Tracked too.
+    assert_eq!(
+        view.dir_view("cafe").status_of_name(".env", false),
+        PathStatus::Untracked,
+        "canonical equivalence must not degrade into ignoring accents"
+    );
+}
+
+/// The `**` evaluator was rewritten from recursion over every split point
+/// to the same greedy backtracking `*` already used, because the recursive
+/// form explored an exponential search space (RA-009). Rewriting a matcher
+/// is exactly the change that needs Git as the oracle rather than the
+/// author's belief about what `**` means.
+#[test]
+fn double_star_patterns_agree_with_git() {
+    if !git_available() {
+        eprintln!("SKIP: git is not on PATH; the differential fixture needs it");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    init_repo(dir);
+    write(
+        &dir.join(".gitignore"),
+        "**/secret/*.env\n\
+         a/**/x.env\n\
+         vendor/**\n\
+         **/**/twice.env\n\
+         logs/**/*.env\n\
+         !a/keep/x.env\n",
+    );
+    let rels = [
+        "secret/x.env",
+        "a/secret/x.env",
+        "a/b/c/secret/x.env",
+        "a/secret/deep/x.env",
+        "a/x.env",
+        "a/b/c/x.env",
+        "b/a/x.env",
+        "vendor/pkg/deep/x.env",
+        "vendor.env",
+        "twice.env",
+        "p/q/twice.env",
+        "logs/x.env",
+        "logs/a/b/x.env",
+        "a/keep/x.env",
+        "plain.env",
+    ];
+    for rel in rels {
+        write(&dir.join(rel), "1\n");
+    }
+    assert_agrees(dir, &rels);
+}

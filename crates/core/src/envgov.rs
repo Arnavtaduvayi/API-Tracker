@@ -302,6 +302,16 @@ pub fn discover_bounded(
         let dir_view = repo.as_ref().map(|r| r.dir_view(&dir_rel_in_repo));
 
         for entry in entries.flatten() {
+            // The per-directory check above cannot preempt a single
+            // directory holding thousands of entries, each of which costs a
+            // metadata call, a read and an ignore-rule evaluation. Without a
+            // check here the 20-second budget was advisory for any wide
+            // folder, so a slow per-entry step ran to completion however
+            // long it took (RA-009).
+            if started.elapsed() > limits.max_duration {
+                truncated = Some(DiscoveryTruncation::TimeBudget);
+                break 'walk;
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             let file_type = match entry.file_type() {
@@ -1154,6 +1164,61 @@ mod tests {
             probed_by(".env.local").git_history,
             GitHistory::Present,
             "deleting from tracking must not hide history"
+        );
+    }
+
+    /// The time budget used to be checked once per DIRECTORY, so a folder
+    /// holding many files ran its whole entry loop however long that took —
+    /// which is what made a single slow `is_ignored` call unpreemptable
+    /// (RA-009). A budget that only fires between directories is not a
+    /// budget for a wide folder.
+    #[test]
+    fn the_time_budget_is_enforced_inside_a_single_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        // One directory, no subdirectories: the ONLY places the walk can
+        // stop are the per-directory check (before any file is inspected)
+        // and the per-entry check. A non-empty result therefore proves the
+        // per-entry check is what stopped it.
+        let mut body = String::new();
+        while body.len() < 64 * 1024 {
+            body.push_str("SOME_KEY_NAME_HERE=some-value-goes-here-0123456789\n");
+        }
+        let total = 200;
+        for i in 0..total {
+            std::fs::write(dir.path().join(format!(".env.f{i:04}")), &body).unwrap();
+        }
+        // Big enough that no OTHER bound can be the one that fires.
+        let generous = DiscoveryLimits {
+            max_files: 100_000,
+            max_total_bytes: 4 * 1024 * 1024 * 1024,
+            max_duration: std::time::Duration::from_secs(3600),
+            ..DiscoveryLimits::default()
+        };
+
+        // Negative control first: with time to spare the same fixture is
+        // read completely and reports no truncation at all.
+        let full = discover_bounded(dir.path(), generous, HistoryProbe::Skip).unwrap();
+        assert_eq!(full.files.len(), total);
+        assert_eq!(full.truncated, None);
+
+        let budgeted = DiscoveryLimits {
+            max_duration: std::time::Duration::from_millis(25),
+            ..generous
+        };
+        let report = discover_bounded(dir.path(), budgeted, HistoryProbe::Skip).unwrap();
+        assert_eq!(
+            report.truncated,
+            Some(DiscoveryTruncation::TimeBudget),
+            "reading {total} files must not overrun the budget silently"
+        );
+        assert!(
+            report.files.len() < total,
+            "the pass must have stopped early"
+        );
+        assert!(
+            !report.files.is_empty(),
+            "the walk reached the entry loop and stopped inside it, so some files must have \
+             been inspected; an empty result would mean only the per-directory check ran"
         );
     }
 
