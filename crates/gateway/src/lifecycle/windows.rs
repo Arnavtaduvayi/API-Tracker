@@ -30,7 +30,9 @@ use std::sync::Arc;
 
 use api_tracker_core::error::{CoreError, Result};
 
-use super::{CommandRunner, Definition, OsWillRun, RegistrationState, ServiceManager};
+use super::{
+    CommandRunner, Definition, DefinitionState, OsWillRun, RegistrationState, ServiceManager,
+};
 
 pub const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
@@ -71,13 +73,27 @@ impl RunKey {
 
     /// Read one `Run` value back as a definition. Shared by the namespaced
     /// read and the legacy-migration probe.
-    fn read_value(&self, value_name: &str) -> Option<Definition> {
-        let out = self
+    ///
+    /// Three states (ADR 0026 D2), but the absent/unparseable line is drawn
+    /// differently here than on macOS and Linux, deliberately. There the
+    /// filesystem gives a typed `NotFound`; here the only signal is
+    /// `reg.exe`'s exit status, which is non-zero for "no such value" AND
+    /// for every other failure, and whose accompanying message is LOCALIZED.
+    /// Calling a failed query "unparseable" would therefore make every verb
+    /// — including the first install — refuse on a machine whose only sin is
+    /// a non-English Windows. So a failed query stays absent, exactly as
+    /// before, and `Unparseable` is reserved for the case this platform can
+    /// prove: the value IS there and its command line is not one we wrote.
+    /// That is also the only case an attacker or a hand-edit can create.
+    fn read_value(&self, value_name: &str) -> DefinitionState {
+        let Ok(out) = self
             .runner
             .run("reg", &["query", RUN_KEY, "/v", value_name])
-            .ok()?;
+        else {
+            return DefinitionState::Absent;
+        };
         if !out.ok() {
-            return None;
+            return DefinitionState::Absent;
         }
         // reg query output: `    TethraGateway-<id>    REG_SZ    "C:\...\bin.exe" ...`
         // Match the name as a WHOLE token: the legacy name is a prefix of
@@ -90,8 +106,15 @@ impl RunKey {
             }
             t.find("REG_SZ")
                 .map(|i| t[i + "REG_SZ".len()..].trim().to_string())
-        })?;
-        RunKey::parse_run_value(&value)
+        });
+        // A SUCCESSFUL query that carries no row for the name we asked
+        // about, or a row we cannot parse, is not an empty slot: `reg query
+        // /v` exits non-zero when the value is missing, so reaching here
+        // means something answers to our name that we cannot identify.
+        match value.as_deref().and_then(RunKey::parse_run_value) {
+            Some(def) => DefinitionState::Present(def),
+            None => DefinitionState::Unparseable,
+        }
     }
 
     /// The command line stored in the Run value. Windows command-line
@@ -162,7 +185,7 @@ impl ServiceManager for RunKey {
     fn reclaim_legacy(&self) -> Result<Option<String>> {
         // Unreadable or unparseable means we cannot PROVE it is ours, which
         // is the same answer as "someone else's": leave it.
-        let Some(def) = self.read_value(LEGACY_VALUE_NAME) else {
+        let DefinitionState::Present(def) = self.read_value(LEGACY_VALUE_NAME) else {
             return Ok(None);
         };
         if !super::same_data_dir(&def.data_dir, &self.data_dir) {
@@ -215,7 +238,7 @@ impl ServiceManager for RunKey {
         Ok(())
     }
 
-    fn read_definition(&self) -> Result<Option<Definition>> {
+    fn read_definition_state(&self) -> Result<DefinitionState> {
         Ok(self.read_value(&self.value_name()))
     }
 

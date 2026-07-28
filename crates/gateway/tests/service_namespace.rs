@@ -29,9 +29,21 @@ use std::sync::{Arc, Mutex};
 use api_tracker_core::db;
 use api_tracker_gateway::lifecycle::{
     self, installation_id, linux::SystemdUser, macos::LaunchAgent, windows::RunKey, CommandRunner,
-    Lifecycle, RunOutput, ServiceManager,
+    DefinitionState, Lifecycle, RunOutput, ServiceManager,
 };
 use rusqlite::Connection;
+
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
 
 /// Every verb that can take another environment's gateway down. The
 /// ownership-proof tests assert the mock recorded NONE of these against a
@@ -618,7 +630,7 @@ fn installing_and_uninstalling_one_environment_leaves_the_other_untouched() {
 
     // Uninstalling A must remove exactly A's definition.
     let conn = migrated(&a.data_dir.join("vault.db"));
-    a.uninstall(&conn, true).unwrap();
+    a.uninstall(&conn, Some(&restore_crypto()), true).unwrap();
 
     assert!(!a.manager.definition_path().exists(), "ours is gone");
     assert!(
@@ -921,7 +933,7 @@ fn uninstall_removes_our_legacy_definition_but_never_another_environments() {
         &theirs,
     );
     let conn = migrated(&lc.data_dir.join("vault.db"));
-    let report = lc.uninstall(&conn, true).unwrap();
+    let report = lc.uninstall(&conn, Some(&restore_crypto()), true).unwrap();
     assert!(legacy_plist.exists(), "not ours to delete");
     assert!(!runner.ran_exactly(&format!("launchctl bootout gui/501/{legacy_label}")));
     assert!(!lc.manager.definition_path().exists());
@@ -934,7 +946,7 @@ fn uninstall_removes_our_legacy_definition_but_never_another_environments() {
         &lc.data_dir.join("bin/tethra-gateway-0.0.9"),
         &lc.data_dir,
     );
-    let report2 = lc.uninstall(&conn, true).unwrap();
+    let report2 = lc.uninstall(&conn, Some(&restore_crypto()), true).unwrap();
     assert!(!legacy_plist.exists(), "our own legacy agent is removed");
     assert!(
         report2
@@ -1053,5 +1065,346 @@ fn install_refuses_to_overwrite_a_definition_it_cannot_parse() {
         report.notes.iter().any(|n| n.contains("unparseable")),
         "a forced overwrite must be reported: {:?}",
         report.notes
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Unparseable ≠ absent, at the DESTRUCTIVE end of the lifecycle
+// ---------------------------------------------------------------------------
+//
+// `install` learned the rule above. `ensure_ours` had not: `read_definition`
+// answered one `None` for a missing file, an unreadable one, a non-UTF-8 one
+// and one whose argv we cannot parse, and every destructive verb read that
+// `None` as "the slot is empty, there is nothing to destroy". So `uninstall`
+// DELETED, and `stop` BOOTED OUT, a definition sitting at our own namespaced
+// path that nobody could identify — on the machine's live login domain. ADR
+// 0026 D2 states the rule these three tests pin down: an unparseable
+// definition is treated as FOREIGN, not absent.
+//
+// They are only worth anything next to
+// `every_destructive_verb_still_proceeds_when_the_definition_is_genuinely_absent`,
+// which proves the refusal is about unparseability rather than a blanket
+// "refuse everything" that would also pass here while breaking every clean
+// machine.
+
+#[cfg(unix)] // Unix service-manager (LaunchAgent) behavior
+#[test]
+fn macos_refuses_every_destructive_verb_against_an_unparseable_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner::default());
+    let ours = mac_env(dir.path(), "vault-a", runner.clone());
+
+    // Readable, plainly a plist, and completely silent about which data
+    // directory it serves — the shape a hand-edit or a truncated write
+    // leaves behind.
+    let path = ours.manager.definition_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "<?xml version=\"1.0\"?>\n<plist version=\"1.0\"><dict/></plist>\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    assert_eq!(
+        ours.manager.read_definition_state().unwrap(),
+        DefinitionState::Unparseable,
+        "the manager must report WHICH kind of nothing it found"
+    );
+
+    // Every verb first, then the MUTATION check BEFORE the wording check:
+    // delete the ownership proof and this must fail on "a command reached
+    // launchd", not on an error string a refactor could legitimately reword.
+    let results = [
+        ours.manager.stop(),
+        ours.manager.unregister(),
+        ours.manager.restart(),
+        ours.manager.remove_definition(),
+        ours.manager.start(),
+        ours.manager.register(),
+    ];
+
+    runner.assert_no_destructive_verb_ran();
+    // Stronger than the destructive-verb list: `bootstrap` and a plain
+    // `kickstart` are not on it, and both put a job we cannot identify into
+    // the live gui/<uid> domain.
+    assert!(
+        !runner.ran("launchctl"),
+        "nothing may reach launchctl at all: {:?}",
+        runner.calls()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "a refused remove_definition must leave the file exactly as it was"
+    );
+
+    for result in results {
+        let err = result
+            .expect_err("an unparseable definition must be refused")
+            .to_string();
+        assert!(
+            err.contains("could not be parsed"),
+            "the refusal must say WHY, in the same words install uses: {err}"
+        );
+        assert!(
+            err.contains(&path.display().to_string()),
+            "the refusal must name the file to inspect: {err}"
+        );
+    }
+}
+
+#[cfg(unix)] // Unix service-manager (systemd) behavior
+#[test]
+fn linux_refuses_every_destructive_verb_against_an_unparseable_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner::default());
+    let ours = linux_env(dir.path(), "vault-a", runner.clone());
+
+    let path = ours.manager.definition_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "[Unit]\nDescription=a unit under our name with no ExecStart\n\n\
+         [Install]\nWantedBy=default.target\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&path).unwrap();
+
+    assert_eq!(
+        ours.manager.read_definition_state().unwrap(),
+        DefinitionState::Unparseable
+    );
+
+    let results = [
+        ours.manager.stop(),
+        ours.manager.unregister(),
+        ours.manager.restart(),
+        ours.manager.remove_definition(),
+        ours.manager.start(),
+        ours.manager.register(),
+    ];
+
+    runner.assert_no_destructive_verb_ran();
+    assert!(
+        !runner.ran("systemctl"),
+        "nothing may reach the user manager at all — `enable` alone would \
+         give an unidentifiable unit a login slot: {:?}",
+        runner.calls()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "the unit file must be left exactly as it was"
+    );
+
+    for result in results {
+        let err = result
+            .expect_err("an unparseable unit must be refused")
+            .to_string();
+        assert!(err.contains("could not be parsed"), "{err}");
+        assert!(err.contains(&path.display().to_string()), "{err}");
+    }
+}
+
+#[test]
+fn windows_refuses_every_destructive_verb_against_an_unparseable_run_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(RegRunner::default());
+    let ours = dir.path().join("vault-a");
+    std::fs::create_dir_all(&ours).unwrap();
+    let key = RunKey::new(ours, runner.clone());
+
+    // A command line that is not one this crate wrote: no quoted binary, no
+    // `--data-dir`. `reg query` finds it, so it is emphatically not absent.
+    let foreign = r"C:\tools\something.exe --serve".to_string();
+    runner.set(&key.value_name(), foreign.clone());
+
+    assert_eq!(
+        key.read_definition_state().unwrap(),
+        DefinitionState::Unparseable
+    );
+
+    let results = [
+        key.stop(),
+        key.unregister(),
+        key.restart(),
+        key.remove_definition(),
+        key.start(),
+    ];
+
+    runner.assert_no_destructive_verb_ran();
+    assert!(
+        !runner.calls().iter().any(|c| c.starts_with("spawn")),
+        "`start` must not launch a command line it cannot parse: {:?}",
+        runner.calls()
+    );
+    assert_eq!(
+        runner.get(&key.value_name()).as_deref(),
+        Some(foreign.as_str()),
+        "the value must be left exactly as it was"
+    );
+
+    for result in results {
+        let err = result
+            .expect_err("an unparseable Run value must be refused")
+            .to_string();
+        assert!(err.contains("could not be parsed"), "{err}");
+    }
+}
+
+/// The control that stops the three tests above from being vacuous.
+///
+/// A `ensure_ours` that refused EVERY state would satisfy all of them and
+/// break the product outright: a clean machine has no definition at all, and
+/// install, register, start, stop and uninstall must still work there. Same
+/// verbs, same fixtures, nothing at our path — every verb must proceed, and
+/// the mock must show the command actually reaching the OS.
+#[test]
+fn every_destructive_verb_still_proceeds_when_the_definition_is_genuinely_absent() {
+    let dir = tempfile::tempdir().unwrap();
+
+    #[cfg(unix)]
+    {
+        let runner = Arc::new(MockRunner::default());
+        let ours = mac_env(dir.path(), "mac-vault", runner.clone());
+        assert!(!ours.manager.definition_path().exists());
+        assert_eq!(
+            ours.manager.read_definition_state().unwrap(),
+            DefinitionState::Absent,
+            "a missing plist is absent, not unparseable"
+        );
+
+        ours.manager.stop().expect("stop on a clean machine");
+        ours.manager
+            .unregister()
+            .expect("unregister on a clean machine");
+        ours.manager.restart().expect("restart on a clean machine");
+        ours.manager
+            .remove_definition()
+            .expect("remove_definition on a clean machine");
+        ours.manager
+            .register()
+            .expect("register on a clean machine");
+        ours.manager.start().expect("start on a clean machine");
+
+        let label = ours.manager.service_name();
+        for expected in [
+            format!("bootout gui/501/{label}"),
+            format!("kickstart -k gui/501/{label}"),
+            format!("kickstart gui/501/{label}"),
+            "bootstrap gui/501".to_string(),
+        ] {
+            assert!(
+                runner.ran(&expected),
+                "`{expected}` never reached launchd, so the refusal tests \
+                 above prove nothing: {:?}",
+                runner.calls()
+            );
+        }
+
+        let runner = Arc::new(MockRunner::default());
+        let ours = linux_env(dir.path(), "linux-vault", runner.clone());
+        assert_eq!(
+            ours.manager.read_definition_state().unwrap(),
+            DefinitionState::Absent
+        );
+        ours.manager.stop().expect("stop on a clean machine");
+        ours.manager
+            .unregister()
+            .expect("unregister on a clean machine");
+        ours.manager.restart().expect("restart on a clean machine");
+        ours.manager
+            .remove_definition()
+            .expect("remove_definition on a clean machine");
+        ours.manager
+            .register()
+            .expect("register on a clean machine");
+        ours.manager.start().expect("start on a clean machine");
+
+        let unit = ours.manager.service_name();
+        for expected in [
+            format!("systemctl --user stop {unit}"),
+            format!("systemctl --user disable {unit}"),
+            format!("systemctl --user restart {unit}"),
+            format!("systemctl --user enable {unit}"),
+            format!("systemctl --user start {unit}"),
+        ] {
+            assert!(
+                runner.ran(&expected),
+                "`{expected}` never reached the user manager: {:?}",
+                runner.calls()
+            );
+        }
+    }
+
+    // Windows: a failed `reg query` is the ONLY absent signal that platform
+    // has, and it is the answer a clean machine gives.
+    let runner = Arc::new(RegRunner::default());
+    let data_dir = dir.path().join("win-vault");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let key = RunKey::new(data_dir, runner.clone());
+    assert_eq!(
+        key.read_definition_state().unwrap(),
+        DefinitionState::Absent,
+        "a value that is not in the Run key is absent, not unparseable"
+    );
+    key.remove_definition()
+        .expect("removing a value that is not there is success");
+    key.unregister()
+        .expect("unregistering a value that is not there is success");
+    assert!(
+        runner
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("reg delete") && c.contains(&key.value_name())),
+        "the delete never reached the registry: {:?}",
+        runner.calls()
+    );
+    // `start` has nothing to spawn — but it must fail for THAT reason, not
+    // at the ownership proof.
+    let err = key
+        .start()
+        .expect_err("there is nothing to start")
+        .to_string();
+    assert!(err.contains("the Run value is absent"), "{err}");
+    assert!(!err.contains("could not be parsed"), "{err}");
+}
+
+/// The clean-machine end-to-end control: absent really does mean installable.
+///
+/// The three refusal tests all write something at our path first, so none of
+/// them can catch a regression that made `read_definition_state` answer
+/// `Unparseable` for a path with nothing at it. That regression would not
+/// look like a refusal in a lifecycle test — it would look like a product
+/// that can never be installed.
+#[cfg(unix)] // Unix service-manager (LaunchAgent) behavior
+#[test]
+fn a_first_install_on_a_clean_machine_is_unaffected_by_the_unparseable_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let runner = Arc::new(MockRunner::default());
+    let lc = mac_env(dir.path(), "vault-a", runner.clone());
+    let src = fake_source_binary(dir.path());
+
+    assert_eq!(
+        lc.manager.read_definition_state().unwrap(),
+        DefinitionState::Absent
+    );
+    let report = lc
+        .install(&src, false)
+        .expect("an empty slot must still install without --force");
+    assert!(
+        !report.notes.iter().any(|n| n.contains("unparseable")),
+        "nothing was replaced, so nothing may be claimed: {:?}",
+        report.notes
+    );
+    assert_eq!(
+        lc.manager.read_definition_state().unwrap(),
+        DefinitionState::Present(
+            lc.manager
+                .read_definition()
+                .unwrap()
+                .expect("the definition we just wrote parses")
+        ),
     );
 }

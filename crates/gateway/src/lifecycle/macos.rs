@@ -19,7 +19,9 @@ use std::sync::Arc;
 
 use api_tracker_core::error::{CoreError, Result};
 
-use super::{CommandRunner, Definition, OsWillRun, RegistrationState, ServiceManager};
+use super::{
+    CommandRunner, Definition, DefinitionState, OsWillRun, RegistrationState, ServiceManager,
+};
 
 /// The label used before per-installation namespacing. Kept ONLY so
 /// migration can recognise and take over an agent this machine already has
@@ -196,16 +198,33 @@ fn parse_program_arguments(plist: &str) -> Vec<String> {
 
 /// Read and parse a plist THIS module wrote, wherever it sits. Shared by
 /// the namespaced read and the legacy-migration probe.
-fn definition_at(path: &Path) -> Option<Definition> {
-    let content = std::fs::read_to_string(path).ok()?;
+///
+/// Three states, not two: an absent plist and one we cannot read answered
+/// the same `None`, and `ensure_ours` acted on that `None` as "empty slot"
+/// (ADR 0026 D2).
+fn definition_at(path: &Path) -> DefinitionState {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        // ONLY "no such file" is genuinely absent — that is the clean
+        // machine, and install must still work there. Unreadable, not
+        // UTF-8, or a directory in the way all mean the same thing: there
+        // is something here and we cannot prove whose it is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DefinitionState::Absent,
+        Err(_) => return DefinitionState::Unparseable,
+    };
     let args = parse_program_arguments(&content);
-    let binary = args.first().map(PathBuf::from)?;
-    let data_dir = args
+    let Some(binary) = args.first().map(PathBuf::from) else {
+        return DefinitionState::Unparseable;
+    };
+    let Some(data_dir) = args
         .iter()
         .position(|a| a == "--data-dir")
         .and_then(|i| args.get(i + 1))
-        .map(PathBuf::from)?;
-    Some(Definition { binary, data_dir })
+        .map(PathBuf::from)
+    else {
+        return DefinitionState::Unparseable;
+    };
+    DefinitionState::Present(Definition { binary, data_dir })
 }
 
 impl ServiceManager for LaunchAgent {
@@ -229,7 +248,7 @@ impl ServiceManager for LaunchAgent {
         let path = self.plist_path(LEGACY_LABEL);
         // Unreadable or unparseable means we cannot PROVE it is ours, which
         // is the same answer as "someone else's": leave it.
-        let Some(def) = definition_at(&path) else {
+        let DefinitionState::Present(def) = definition_at(&path) else {
             return Ok(None);
         };
         if !super::same_data_dir(&def.data_dir, &self.data_dir) {
@@ -277,7 +296,7 @@ impl ServiceManager for LaunchAgent {
         Ok(())
     }
 
-    fn read_definition(&self) -> Result<Option<Definition>> {
+    fn read_definition_state(&self) -> Result<DefinitionState> {
         Ok(definition_at(&self.definition_path()))
     }
 
