@@ -1,0 +1,150 @@
+name: Probe launchd on hosted macOS
+
+# Throwaway diagnostic branch workflow. Answers ONE question that decides
+# whether `--scope full --require-service` can run authoritatively on a hosted
+# runner: does a GitHub-hosted macOS runner have a `gui/<uid>` launchd domain
+# that a per-user LaunchAgent can actually be bootstrapped into and RUN in?
+#
+# It installs only a throwaway namespaced label under its own $HOME and boots
+# it out again. It never references any Tethra identifier.
+
+on:
+  push:
+    branches: [ci/probe-launchd-macos]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: launchd probe (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Runner identity
+        run: |
+          echo "== identity =="
+          echo "whoami:  $(whoami)"
+          echo "uid:     $(id -u)"
+          echo "HOME:    $HOME"
+          echo "sw_vers:"; sw_vers
+          echo "uname:   $(uname -a)"
+          echo "ImageOS: ${ImageOS:-<unset>}  ImageVersion: ${ImageVersion:-<unset>}"
+          echo
+          echo "== launchd session context =="
+          echo "managername: $(launchctl managername 2>&1 || true)"
+          echo "manageruid:  $(launchctl manageruid 2>&1 || true)"
+          echo "managerpid:  $(launchctl managerpid 2>&1 || true)"
+          echo
+          echo "== is there a loginwindow / Aqua session? =="
+          ps aux | grep -i -E "loginwindow|WindowServer" | grep -v grep || echo "  (none)"
+
+      - name: Does the gui/<uid> domain exist?
+        id: gui
+        run: |
+          set +e
+          echo "== launchctl print gui/$(id -u) (first 30 lines) =="
+          launchctl print "gui/$(id -u)" 2>&1 | head -30
+          rc=${PIPESTATUS[0]}
+          echo "print gui/<uid> exit code: $rc"
+          echo "gui_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo
+          echo "== launchctl print user/$(id -u) (first 15 lines) =="
+          launchctl print "user/$(id -u)" 2>&1 | head -15
+          echo "print user/<uid> exit code: ${PIPESTATUS[0]}"
+
+      - name: Bootstrap a throwaway namespaced LaunchAgent and prove it RUNS
+        run: |
+          set +e
+          UID_NUM="$(id -u)"
+          LABEL="probe.launchd.test.$GITHUB_RUN_ID.$$"
+          LA_DIR="$HOME/Library/LaunchAgents"
+          PLIST="$LA_DIR/$LABEL.plist"
+          MARKER="$HOME/probe-marker-$LABEL.txt"
+          mkdir -p "$LA_DIR"
+
+          echo "label: $LABEL"
+          echo "plist: $PLIST"
+
+          cat > "$PLIST" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>Label</key><string>$LABEL</string>
+            <key>ProgramArguments</key>
+            <array>
+              <string>/bin/sh</string>
+              <string>-c</string>
+              <string>date > "$MARKER"; echo "pid=\$\$" >> "$MARKER"; sleep 120</string>
+            </array>
+            <key>RunAtLoad</key><true/>
+            <key>StandardOutPath</key><string>$HOME/probe-$LABEL.out</string>
+            <key>StandardErrorPath</key><string>$HOME/probe-$LABEL.err</string>
+          </dict>
+          </plist>
+          EOF
+
+          echo
+          echo "== bootstrap gui/$UID_NUM =="
+          launchctl bootstrap "gui/$UID_NUM" "$PLIST" 2>&1
+          echo "bootstrap(gui) exit code: $?"
+
+          echo
+          echo "== bootstrap user/$UID_NUM (fallback if gui failed) =="
+          launchctl bootstrap "user/$UID_NUM" "$PLIST" 2>&1
+          echo "bootstrap(user) exit code: $?"
+
+          echo
+          echo "== did the job actually RUN? (waiting up to 20s for its marker) =="
+          for i in $(seq 1 20); do
+            [ -f "$MARKER" ] && break
+            sleep 1
+          done
+          if [ -f "$MARKER" ]; then
+            echo "RESULT: THE AGENT RAN. marker contents:"
+            sed 's/^/    /' "$MARKER"
+          else
+            echo "RESULT: THE AGENT DID NOT RUN (no marker after 20s)"
+          fi
+
+          echo
+          echo "== launchctl print gui/$UID_NUM/$LABEL =="
+          launchctl print "gui/$UID_NUM/$LABEL" 2>&1 | head -25
+          echo "print exit code: ${PIPESTATUS[0]}"
+
+          echo
+          echo "== launchctl list | grep probe =="
+          launchctl list 2>/dev/null | grep -F "probe.launchd.test" || echo "  (not in launchctl list)"
+
+          echo
+          echo "== kickstart / stop / start round trip =="
+          launchctl kickstart -k "gui/$UID_NUM/$LABEL" 2>&1; echo "kickstart exit: $?"
+
+          echo
+          echo "== bootout (cleanup) =="
+          launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1; echo "bootout(gui) exit: $?"
+          launchctl bootout "user/$UID_NUM/$LABEL" 2>&1; echo "bootout(user) exit: $?"
+          rm -f "$PLIST" "$MARKER" "$HOME/probe-$LABEL.out" "$HOME/probe-$LABEL.err"
+
+          echo
+          echo "== residue check =="
+          ls -la "$LA_DIR" 2>&1
+          launchctl list 2>/dev/null | grep -F "probe.launchd.test" && echo "RESIDUE REMAINS" || echo "  clean"
+
+      - name: Clean-runner preconditions the real job will assert
+        run: |
+          set +e
+          echo "== any Tethra/api-tracker LaunchAgent already present? =="
+          ls -la "$HOME/Library/LaunchAgents" 2>&1
+          launchctl list 2>/dev/null | grep -i -E "api-tracker|tethra" && echo "PRESENT" || echo "  none registered"
+          echo
+          echo "== any Tethra data dir? =="
+          ls -la "$HOME/Library/Application Support/api-tracker" 2>&1 || echo "  absent (good)"
+          echo
+          echo "== any tethra on PATH? =="
+          command -v tethra api-tracker 2>&1 || echo "  none (good)"
+          echo
+          echo "== network egress to a real provider (the traffic step needs this) =="
+          curl -s -o /dev/null -w "api.openai.com -> %{http_code}\n" -m 20 https://api.openai.com/v1/models || echo "  curl failed"
