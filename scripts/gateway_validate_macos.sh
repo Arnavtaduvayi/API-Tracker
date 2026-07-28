@@ -518,22 +518,14 @@ else
   # GROUND TRUTH, not inference.
   #
   # This used to be `expect ... && ok "matching key pushed"`, which asserts
-  # that EXPECT ran to eof — a statement about the test harness, not about the
-  # product. It reported PASS in the first CI run on a clean runner and then
-  # the gate three lines below reported "no matching key resident" in the same
-  # breath, blaming a TTY that had demonstrably worked. Two contradictory
-  # claims from one step is how a harness stops being evidence.
-  #
-  # Ask the gateway instead. The same question the gate asks, asked once.
-  if "$CLI" --json gateway status 2>/dev/null | grep -q '"matching_key_present":true'; then
-    ok "matching key pushed and resident in the running gateway (attribution enabled)"
+  # that EXPECT ran to eof — a statement about the harness, not about the
+  # product. Expect exits 0 whether or not the key landed.
+  if printf '%s\n' "$PUSH_KEY_LOG" | grep -q "credential-matching key installed"; then
+    ok "push-key installed the credential-matching key (the product said so)"
   else
-    bad "push-key did not leave a matching key resident in the running gateway"
+    bad "push-key did not install a credential-matching key"
     echo "      push-key transcript (password redacted):"
     printf '%s\n' "$PUSH_KEY_LOG" | head -20 | sed 's/^/        /'
-    echo "      gateway status reported:"
-    "$CLI" --json gateway status 2>&1 | head -c 1200 | sed 's/^/        /'
-    echo
   fi
 fi
 BEFORE_EVENTS="$(db "SELECT COUNT(*) FROM runtime_request_events WHERE observation_source='gateway'")"
@@ -551,26 +543,40 @@ assert_db "SELECT CASE WHEN COUNT(*) >= ${BEFORE_EVENTS:-0} + 2 THEN 1 ELSE 0 EN
 
 # The two exchanges must be attributed DIFFERENTLY. This is the check whose
 # absence the audit found: the previous script printed a 'distinct
-# fingerprint' claim that no assertion ever produced. With the matching key
-# resident, the known key resolves to a credential and the unknown one does
-# not; without the key, both are unavailable and the check is skipped with a
-# recorded reason rather than silently passing.
-if "$CLI" --json gateway status 2>/dev/null | grep -q '"matching_key_present":true'; then
-  assert_db "SELECT CASE WHEN COUNT(DISTINCT COALESCE(credential_id,'<none>')) >= 2
-                         THEN 1 ELSE 0 END
-             FROM (SELECT credential_id FROM runtime_request_events
-                   WHERE observation_source='gateway'
-                   ORDER BY at DESC LIMIT 2)" \
-    "the known and unknown credentials attribute DISTINCTLY"
-  assert_db "SELECT CASE WHEN COUNT(*) >= 1 THEN 1 ELSE 0 END
-             FROM runtime_request_events
-             WHERE observation_source='gateway' AND credential_id IS NOT NULL" \
-    "the known fake credential was matched to a vault credential"
-else
-  echo "  SKIP attribution distinctness: no matching key resident (push-key"
-  echo "       needs a TTY). This is a COVERAGE GAP in this run, not a pass."
-  bad "attribution distinctness NOT verified (no matching key)"
-fi
+# fingerprint' claim that no assertion ever produced.
+#
+# REM-005: it then spent its whole life un-runnable, behind
+#
+#     if "$CLI" --json gateway status | grep -q '"matching_key_present":true'
+#
+# `--json gateway status` emits the DOCTOR document — `overall`, `findings[]`,
+# and a `service` object — and has never carried a `matching_key_present`
+# field at all; the field lives on the control-channel status
+# (gateway/src/control.rs). The grep could not match for two independent
+# reasons (the field is absent, and the document is pretty-printed while the
+# pattern has no space), so the else-branch fired on every run and reported a
+# COVERAGE GAP blamed on a missing TTY.
+#
+# The first clean-runner CI execution showed the blame was wrong: the
+# transcript reads "credential-matching key installed" every time. A gate that
+# is always false does not protect an assertion, it deletes it — the same
+# shape as the counted check that could never fail (ZFT-VAL-7), inverted.
+#
+# So there is no gate. These two assertions ARE the property, and they are the
+# ground truth about whether the key is resident: with it, the known key
+# resolves to a credential and the unknown one does not. If push-key ever
+# breaks, the check above fails AND these fail, which is both correct and
+# more informative than a skip.
+assert_db "SELECT CASE WHEN COUNT(DISTINCT COALESCE(credential_id,'<none>')) >= 2
+                       THEN 1 ELSE 0 END
+           FROM (SELECT credential_id FROM runtime_request_events
+                 WHERE observation_source='gateway'
+                 ORDER BY at DESC LIMIT 2)" \
+  "the known and unknown credentials attribute DISTINCTLY"
+assert_db "SELECT CASE WHEN COUNT(*) >= 1 THEN 1 ELSE 0 END
+           FROM runtime_request_events
+           WHERE observation_source='gateway' AND credential_id IS NOT NULL" \
+  "the known fake credential was matched to a vault credential"
 
 step "13. SSE begins promptly — NOT VERIFIED HERE"
 echo "  A 401 does not stream, and a synthetic local upstream is structurally"
