@@ -765,3 +765,85 @@ fn planning_refuses_when_another_installation_holds_the_service_slot() {
     )
     .expect("our own installed service plans normally");
 }
+
+// ---------------------------------------------------------------------------
+// RA-011 follow-up: `NetworkClass::Restricted` is a RESERVED classification.
+// ---------------------------------------------------------------------------
+// The previous remediation disclosed this variant as unreachable and left it
+// in place with a comment explaining why. A comment is not a control: it
+// cannot notice the day a refactor starts producing the variant, and it
+// cannot notice the opposite failure either — a restricted host quietly
+// becoming approvable and being described as "a public internet address",
+// which is exactly the RA-011 defect.
+//
+// So the disclosure is converted into two checked properties. Together they
+// say: the variant names a state the product can DESCRIBE but never REACHES,
+// because a restricted destination is refused before anyone is asked to
+// approve it.
+
+/// Every spelling of a restricted destination is REFUSED by `describe`, so no
+/// approval request naming one can exist.
+///
+/// The spellings matter more than the list length: `127.1`, `0x7f.0.0.1` and
+/// `2130706433` all reach loopback through the platform resolver and all
+/// passed the pre-fix policy. If a future change accepts any of them, this
+/// fails here rather than in front of a user being asked to approve loopback.
+#[test]
+fn a_restricted_destination_is_refused_rather_than_described() {
+    let restricted = [
+        "https://127.0.0.1",
+        "https://127.0.0.1:8080",
+        "https://127.1",
+        "https://0x7f.0.0.1",
+        "https://2130706433",
+        "https://localhost",
+        "https://localhost:3000",
+        "https://[::1]",
+        "https://10.0.0.5",
+        "https://192.168.1.10",
+        "https://172.16.0.1",
+        "https://169.254.169.254", // cloud metadata
+    ];
+    for origin_str in restricted {
+        let result = origin::describe(
+            "openai",
+            "OpenAI",
+            origin_str,
+            Some(".env"),
+            Some("OPENAI_BASE_URL"),
+            true,
+            origin::OriginTrust::RepositoryDiscovered,
+        );
+        assert!(
+            result.is_err(),
+            "{origin_str} produced an approval request; a restricted destination must be \
+             refused BEFORE the user is asked, not described to them"
+        );
+    }
+}
+
+/// The anti-vacuity control for the test above.
+///
+/// If `describe` ever started refusing everything — a plausible way to make
+/// the previous test pass for the wrong reason — this fails. A public origin
+/// must still produce a request, and that request must be classified
+/// `Public`, never `Restricted`.
+#[test]
+fn a_public_destination_is_still_described_and_never_classified_restricted() {
+    let request = origin::describe(
+        "openai",
+        "OpenAI",
+        "https://api.openai.com",
+        Some(".env"),
+        Some("OPENAI_BASE_URL"),
+        true,
+        origin::OriginTrust::RepositoryDiscovered,
+    )
+    .expect("a public origin must still be describable");
+    assert_eq!(
+        request.network_class,
+        origin::NetworkClass::Public,
+        "no code path produces NetworkClass::Restricted; it is a reserved name for a state \
+         the product refuses before describing, and this pins that the reachable path is Public"
+    );
+}

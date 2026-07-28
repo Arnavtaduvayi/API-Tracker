@@ -490,16 +490,51 @@ assert_db "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
 
 step "11-12. Attribution: KNOWN vs UNKNOWN fake credential"
 # Attribution is fingerprint-based, so it works on a 401. Push the key.
+# push-key is DELIBERATELY interactive: it is a reauthentication, so it uses
+# prompt_secret() rather than master_password() and does not read
+# $TETHRA_PASSWORD from the environment the way `unlock` does. That is a
+# security property, not an oversight, and this script drives the prompt with
+# a pty rather than asking for it to be relaxed.
+#
+# The stdin attempt below cannot work for the same reason (prompt_hidden reads
+# the terminal, not stdin). It is kept only so the expect path is not the only
+# thing that has ever been tried, and its result is ignored.
 "$CLI" gateway push-key >/dev/null 2>&1 <<< "$TETHRA_PASSWORD" || true
-# push-key uses prompt_secret (interactive); drive it with expect.
-if command -v expect >/dev/null; then
-  expect -c "
+if ! command -v expect >/dev/null; then
+  bad "expect(1) is unavailable, so the interactive push-key path cannot be driven here"
+else
+  # The transcript stays in a shell variable and is REDACTED before it is
+  # printed. It must never reach the disk: a pty transcript of a password
+  # prompt can echo the password, $DIR is swept for canaries at step 29, and
+  # "the harness wrote the secret to the directory it then searches" is a
+  # self-inflicted version of the exact defect that sweep exists to catch.
+  PUSH_KEY_LOG="$(expect -c "
     set timeout 15
     spawn $CLI gateway push-key
     expect -re {[Pp]assword}
     send \"$TETHRA_PASSWORD\r\"
     expect eof
-  " >/dev/null 2>&1 && ok "matching key pushed (attribution enabled)" || echo "  NOTE push-key needs a TTY; attribution stays off (honest state)"
+  " 2>&1 | sed "s/$TETHRA_PASSWORD/<redacted>/g")"
+  # GROUND TRUTH, not inference.
+  #
+  # This used to be `expect ... && ok "matching key pushed"`, which asserts
+  # that EXPECT ran to eof — a statement about the test harness, not about the
+  # product. It reported PASS in the first CI run on a clean runner and then
+  # the gate three lines below reported "no matching key resident" in the same
+  # breath, blaming a TTY that had demonstrably worked. Two contradictory
+  # claims from one step is how a harness stops being evidence.
+  #
+  # Ask the gateway instead. The same question the gate asks, asked once.
+  if "$CLI" --json gateway status 2>/dev/null | grep -q '"matching_key_present":true'; then
+    ok "matching key pushed and resident in the running gateway (attribution enabled)"
+  else
+    bad "push-key did not leave a matching key resident in the running gateway"
+    echo "      push-key transcript (password redacted):"
+    printf '%s\n' "$PUSH_KEY_LOG" | head -20 | sed 's/^/        /'
+    echo "      gateway status reported:"
+    "$CLI" --json gateway status 2>&1 | head -c 1200 | sed 's/^/        /'
+    echo
+  fi
 fi
 BEFORE_EVENTS="$(db "SELECT COUNT(*) FROM runtime_request_events WHERE observation_source='gateway'")"
 # Known key traffic:

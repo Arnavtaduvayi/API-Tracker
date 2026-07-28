@@ -80,13 +80,26 @@ pub enum NetworkClass {
     Public,
     /// Loopback, private, link-local or cloud-metadata.
     ///
-    /// [`describe`] never returns a request carrying this: the gateway's
-    /// destination policy refuses such a host and `describe` fails, so the
-    /// user is never asked to approve something that could not work. The
-    /// variant exists so a caller that wants to EXPLAIN a refusal has a
-    /// name for it, and so this enum stays a total description of the
-    /// classification rather than a one-value type that silently becomes
-    /// wrong the day the policy changes.
+    /// **RESERVED. No code path produces this today, and nothing in the
+    /// product claims otherwise.** [`describe`] refuses such a host outright —
+    /// the gateway's destination policy rejects it and `describe` returns an
+    /// error — so a user is never asked to approve a destination that could
+    /// not work, and never shown a classification for one.
+    ///
+    /// It is kept, rather than deleted, for one reason that is about safety
+    /// and not about tidiness: a single-variant enum makes `Public` the
+    /// unconditional answer, so the day the destination policy is relaxed the
+    /// classification silently becomes a false statement instead of a compile
+    /// error. That is the shape of RA-011, where loopback spellings the policy
+    /// did not canonicalise were disclosed to the user as "a public internet
+    /// address". Keeping the name keeps the `match` total and keeps the wrong
+    /// answer un-writable.
+    ///
+    /// The reservation is CHECKED, not asserted: `origin_trust.rs` pins that
+    /// twelve spellings of a restricted destination are refused rather than
+    /// described, and — as the anti-vacuity control — that a public one is
+    /// still described, as `Public`. If a future change starts producing this
+    /// variant, or starts accepting a restricted host, one of those two fails.
     Restricted,
 }
 
