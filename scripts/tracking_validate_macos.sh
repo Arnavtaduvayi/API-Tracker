@@ -54,11 +54,15 @@
 #     succeeds only because the machine happened to be clean is not evidence.
 #     Use `--scope offline` there.
 #   * the totals for the modes DIFFER BY CONSTRUCTION (foreground 57,
-#     service 59, offline 20, selfcheck 5). A foreground run therefore can
+#     service 63, offline 20, selfcheck 5). A foreground run therefore can
 #     never be mistaken for, or quoted as, a service run. Those four numbers
 #     are SUMMED from the group table below, never typed in: `full:service`
 #     was once typed as 60 while its groups sum to 59, which made the mode
-#     unpassable with every one of its assertions green (RA-003).
+#     unpassable with every one of its assertions green (RA-003). The service
+#     total moved from 59 to 63 when the first REAL service run — the one the
+#     packaged-service CI job finally made possible — showed that one of its
+#     assertions had never executed anywhere and was wrong about the product
+#     (REM-003), and four stronger ones replaced it.
 #   * this is a macOS harness. Windows and Linux packaging are not covered.
 #
 # ANTI-VACUITY MECHANICS:
@@ -178,7 +182,7 @@ group_size() {   # group_size <GROUP> -> the number of checks that group runs
     DRYRUN)      echo 6 ;;
     OFFLINE)     echo 1 ;;
     FOREGROUND)  echo 3 ;;
-    SERVICE)     echo 5 ;;
+    SERVICE)     echo 9 ;;
     APPLY)       echo 9 ;;
     NEGATIVE)    echo 8 ;;
     TRAFFIC)     echo 5 ;;
@@ -601,36 +605,227 @@ la_digest() {
   fi
 }
 
-SERVE_PID=""
-cleanup() {
-  step "cleanup"
-  if [ -n "$SERVE_PID" ]; then
-    kill "$SERVE_PID" >/dev/null 2>&1
-    wait "$SERVE_PID" 2>/dev/null
-    echo "  stopped the foreground gateway (pid $SERVE_PID)"
-  fi
-  # Only ever remove a LaunchAgent this run actually installed.
-  # SERVICE_INSTALLED holds the resolved path of the plist THIS run
-  # installed, so cleanup removes exactly that and nothing else. It used to
-  # boot out `$LABEL` — a variable that no longer exists — and delete the
-  # LEGACY path, so a real namespaced agent would have been orphaned.
-  if [ "$MODE" = "service" ] && [ -n "${SERVICE_INSTALLED:-}" ]; then
-    "$HELPER" gateway uninstall --yes >/dev/null 2>&1
-    launchctl bootout "gui/$(id -u)/$(basename "$SERVICE_INSTALLED" .plist)" >/dev/null 2>&1
-    rm -f "$SERVICE_INSTALLED"
-    echo "  removed the LaunchAgent this run installed: $SERVICE_INSTALLED"
-  fi
-  rm -rf "$DIR" "$COPIES"
-  echo "  cleaned $DIR"
-}
-trap cleanup EXIT
-
 die() {
   echo
   echo "FATAL: $1"
   echo "=== PACKAGED TRACKING VALIDATION: ABORTED (a precondition failed) ==="
   exit 1
 }
+
+# --- the ownership ledger --------------------------------------------------
+# Cleanup may remove only what THIS run created. The ledger is how it knows.
+#
+# Ownership is recorded at creation time and re-proved at teardown time; it is
+# never INFERRED from a filename pattern. That distinction is the whole point:
+# a glob over `$LA_DIR/dev.api-tracker.gateway.*.plist` would match a second
+# Tethra environment's live agent exactly as well as it matches ours, and
+# `pkill -f tethra` would match the user's production gateway holding their
+# real vault. Both are the REM-001 mistake with a different verb.
+#
+# This mirrors scripts/gateway_validate_macos.sh, which grew the model first.
+# Applying it here too is the point of the interlock re-audit: one script
+# having the safe design is not the same as the design being the house style.
+UID_N="$(id -u)"
+LEDGER="/tmp/tethra-track-val-ledger-$$.tsv"
+PROD_PLIST="$LA_DIR/$LEGACY_LABEL.plist"
+ledger_add()    { printf '%s\t%s\t%s\n' "$1" "$2" "${3:-}" >> "$LEDGER"; }
+ledger_values() { awk -F'\t' -v k="$1" '$1 == k { print $2 "\t" $3 }' "$LEDGER" 2>/dev/null; }
+
+# Does this plist still prove it is ours? Content, not name: it must declare
+# the label we recorded AND point at the data directory this run created.
+plist_is_ours() {
+  local p="$1" lbl="$2"
+  [ -f "$p" ] || return 1
+  grep -q "<string>$lbl</string>" "$p" 2>/dev/null || return 1
+  grep -q "$DIR" "$p" 2>/dev/null || return 1
+  return 0
+}
+
+# Is pid $1 still the process we started from $2? IDENTITY, never a pattern.
+proc_is_ours() {
+  local pid="$1" prefix="$2" cmd
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  cmd="$(ps -p "$pid" -o comm= 2>/dev/null)" || return 1
+  case "$cmd" in "$prefix"*) return 0 ;; *) return 1 ;; esac
+}
+
+# Read-only signature of the PRODUCTION definition. Snapshotted before the
+# trap is armed and asserted after teardown: if this run ever creates, moves
+# or replaces the user's live plist, the two differ. That is the invariant
+# that would have caught RA-004 from inside the script rather than from the
+# user noticing their gateway had stopped.
+prod_sig() {
+  if [ -e "$PROD_PLIST" ]; then
+    stat -f '%z-bytes mtime=%m mode=%Lp' "$PROD_PLIST" 2>/dev/null || echo "present-unreadable"
+  else
+    echo absent
+  fi
+}
+
+SERVE_PID=""
+cleanup() {
+  step "cleanup"
+  local value extra
+
+  # 1. Foreground child, by the pid we started and only while it is still that
+  #    process.
+  if [ -n "$SERVE_PID" ] && proc_is_ours "$SERVE_PID" "$HELPER"; then
+    kill "$SERVE_PID" >/dev/null 2>&1
+    wait "$SERVE_PID" 2>/dev/null
+    echo "  stopped the foreground gateway (pid $SERVE_PID)"
+  fi
+
+  # 2. Let the PRODUCT tear its own installation down first, through the same
+  #    verb a user runs. It applies its own ownership proof against
+  #    $TETHRA_DIR, so it can only act on this run's service.
+  if [ "$MODE" = "service" ] && [ -n "$(ledger_values label)" ]; then
+    "$HELPER" gateway uninstall --yes >/dev/null 2>&1
+  fi
+
+  # 3. Unload only labels this run bootstrapped. `bootout` addresses the LIVE
+  #    gui/<uid> domain regardless of $HOME (REM-001), so it gets the strictest
+  #    guard: never the production label, and — while the definition is still
+  #    on disk — only while that definition proves ours.
+  while IFS="$(printf '\t')" read -r value extra; do
+    [ -n "$value" ] || continue
+    [ "$value" = "$LEGACY_LABEL" ] && continue
+    if [ -e "$LA_DIR/$value.plist" ] && ! plist_is_ours "$LA_DIR/$value.plist" "$value"; then
+      echo "  cleanup: leaving $LA_DIR/$value.plist alone (it no longer proves it is ours)"
+      continue
+    fi
+    launchctl bootout "gui/$UID_N/$value" >/dev/null 2>&1
+    echo "  booted out the job this run registered: gui/$UID_N/$value"
+  done <<EOF
+$(ledger_values label)
+EOF
+
+  # 4. Remove only definitions this run created, and only while they still
+  #    prove it. A recorded plist whose contents stopped matching is LEFT IN
+  #    PLACE and reported: a visible stray file is a far smaller harm than
+  #    deleting a file we can no longer prove we wrote.
+  while IFS="$(printf '\t')" read -r value extra; do
+    [ -n "$value" ] || continue
+    [ "$value" = "$PROD_PLIST" ] && continue
+    if [ -e "$value" ] && ! plist_is_ours "$value" "$extra"; then
+      echo "  cleanup: NOT removing $value (it no longer proves it is ours)"
+      continue
+    fi
+    rm -f "$value" 2>/dev/null
+    echo "  removed the LaunchAgent definition this run installed: $value"
+  done <<EOF
+$(ledger_values plist)
+EOF
+
+  # 5. Our scratch directories. The prefix test is belt-and-braces: a truncated
+  #    or corrupted ledger must not be able to widen an `rm -rf`.
+  while IFS="$(printf '\t')" read -r value extra; do
+    case "$value" in
+      /tmp/tethra-track-val-*) rm -rf "$value" 2>/dev/null; echo "  cleaned $value" ;;
+      *) [ -n "$value" ] && echo "  cleanup: refusing to remove unexpected directory $value" ;;
+    esac
+  done <<EOF
+$(ledger_values dir)
+EOF
+
+  # 6. The production definition must be exactly as this run found it.
+  if [ "$(prod_sig)" != "$PROD_SIG_BEFORE" ]; then
+    echo "  *** CLEANUP INVARIANT VIOLATED ***"
+    echo "      the production definition $PROD_PLIST changed during this run"
+    echo "      before: $PROD_SIG_BEFORE"
+    echo "      after:  $(prod_sig)"
+  else
+    echo "  production definition unchanged ($PROD_SIG_BEFORE)"
+  fi
+  rm -f "$LEDGER" 2>/dev/null
+}
+
+# ===========================================================================
+# PREFLIGHT — every refusal lives here, ABOVE the trap, and writes nothing.
+# ===========================================================================
+# ORDER MATTERS, and it is the order the RA-004 finding is about:
+#
+#   1. arguments        (done above)
+#   2. resolve the test namespace
+#   3. clean-runner preconditions
+#   4. prove the namespace is non-production
+#   5. initialise the ownership ledger
+#   6. ONLY THEN register cleanup
+#
+# The previous revision armed `trap cleanup EXIT` here, before the mode
+# preconditions below had run, so a REFUSAL still fired a destructive trap.
+# That was survivable only because the ledger was empty at that point — two
+# independent layers, one of which masked the other in mutation testing
+# (RA-004). They are now separated: this ordering is the first layer, the
+# ledger is the second, and each is tested on its own
+# (tests/service_namespace_scripts.rs).
+#
+# A refusal from here leaves the machine byte-identical to how it was found:
+# no directory, no ledger, no trap, no launchctl call.
+
+# 2. Resolve the namespace, and refuse to ADOPT anything.
+[ -n "${HOME:-}" ] || die "HOME is not set; cannot locate ~/Library/LaunchAgents"
+[ -e "$DIR" ] && die "the isolated data directory $DIR already exists.
+This run neither adopts nor deletes a directory it did not create."
+[ -e "$COPIES" ] && die "the snapshot directory $COPIES already exists."
+[ -e "$LEDGER" ] && die "the ownership ledger $LEDGER already exists."
+
+# 4. Prove the namespace is non-production BEFORE anything can act on it.
+#    $DIR is what every service identifier is derived from (ADR 0026:
+#    installation_id = blake3(canonical data dir)), so pinning $DIR away from
+#    the shared directory is what makes the derived label test-specific.
+[ "$DIR" != "$SHARED_DIR" ] || die "the isolated data directory resolved to the SHARED directory"
+case "$DIR" in
+  /tmp/tethra-track-val-*) ;;
+  *) die "the isolated data directory '$DIR' is outside the test namespace /tmp/tethra-track-val-*" ;;
+esac
+[ "$TETHRA_DIR" = "$DIR" ] || die "TETHRA_DIR ($TETHRA_DIR) does not point at the isolated data directory ($DIR)"
+
+# 3. Clean-runner preconditions for the modes that touch the login slot.
+#
+#    These used to live several hundred lines further down, INSIDE the mode
+#    block and therefore after the trap was armed. They are preconditions, not
+#    checks: awarding a counted pass for "the machine happened to be clean" is
+#    the ZFT-VAL-7 shape, so they abort loudly and are never tallied.
+if [ "$SCOPE" = "full" ]; then
+  EXISTING_AGENTS=""
+  for candidate in "$PROD_PLIST" "$LA_DIR/$LEGACY_LABEL".*.plist; do
+    [ -f "$candidate" ] && EXISTING_AGENTS="$EXISTING_AGENTS
+  $candidate"
+  done
+  # Ask launchd as well as the filesystem. The plist globs are keyed on $HOME;
+  # `launchctl` is not — it addresses gui/<uid>, which no HOME redirection
+  # isolates. Checking only the filesystem is exactly how REM-001 walked past
+  # a $HOME-keyed interlock while the damage landed on the real service.
+  REGISTERED="$(registered_gateway_jobs)"
+  [ -z "$REGISTERED" ] || EXISTING_AGENTS="$EXISTING_AGENTS
+  (registered in launchd, regardless of \$HOME):
+$REGISTERED"
+  [ -z "$EXISTING_AGENTS" ] || die "a gateway LaunchAgent already exists:$EXISTING_AGENTS
+
+--scope full applies a real configuration and reaches the service-lifecycle
+step, so it refuses in EITHER mode. --require-service will not overwrite an
+existing agent and will not downgrade to foreground; --foreground is not a
+workaround, because the apply reaches the same login slot.
+Service names are namespaced per data directory now (ADR 0026) and every
+destructive verb proves ownership first, so a current helper would hard-stop
+rather than damage anything — but a pre-namespacing helper under test would
+boot that gateway out of its slot (ZFT-014), and a run that succeeds only
+because the machine happened to be clean is not evidence either.
+Use '--scope offline' here (20 checks), or run this on a machine with no
+installed Tethra gateway — which is what the packaged-service CI job is for."
+fi
+
+PROD_SIG_BEFORE="$(prod_sig)"
+
+# 5. and 6. The ledger exists before the trap does, so teardown always has
+# something to consult and can never fall back to a pattern.
+: > "$LEDGER" || die "could not create the ownership ledger at $LEDGER"
+mkdir -p "$DIR" "$COPIES" || { rm -f "$LEDGER"; die "could not create the isolated directories"; }
+chmod 700 "$DIR"
+ledger_add dir "$DIR"
+ledger_add dir "$COPIES"
+trap cleanup EXIT
 
 echo "=== packaged tracking validation — scope=$SCOPE mode=$MODE ==="
 echo "    app:      $APP"
@@ -914,74 +1109,26 @@ if [ "$MODE" = "service" ]; then
   group SERVICE
   step "service mode (a REAL LaunchAgent; --require-service never downgrades)"
   # ZFT-VAL-4: the old script silently switched to foreground here and kept
-  # the same total, so the evidence could be quieter than its label. This
-  # aborts instead.
+  # the same total, so the evidence could be quieter than its label. It
+  # aborts instead — and it aborts in the PREFLIGHT, several hundred lines
+  # above, before `trap cleanup EXIT` is armed and before this run has
+  # created a single file.
   #
-  # The interlock is a PRECONDITION, not a check: awarding a counted pass
-  # for "the machine happened to be clean" is the shape ZFT-VAL-7 objected
-  # to, and this branch used to do exactly that ten lines from the
-  # foreground branch that refuses to. It globs for the namespaced names as
-  # well as the legacy one — the product writes
-  # `dev.api-tracker.gateway.<installation-id>.plist` now (ADR 0026), so
-  # checking only the legacy path would wave through the machine most
-  # likely to have one.
-  EXISTING_AGENTS=""
-  for candidate in "$PLIST" "$LA_DIR/$LEGACY_LABEL".*.plist; do
-    [ -f "$candidate" ] && EXISTING_AGENTS="$EXISTING_AGENTS
-  $candidate"
-  done
-  REGISTERED="$(registered_gateway_jobs)"
-  [ -z "$REGISTERED" ] || EXISTING_AGENTS="$EXISTING_AGENTS
-  (registered in launchd, regardless of \$HOME):
-$REGISTERED"
-  [ -z "$EXISTING_AGENTS" ] || die "a gateway LaunchAgent already exists:$EXISTING_AGENTS
-
---require-service will not overwrite it and will not downgrade to foreground.
-Run this on a machine with no installed Tethra gateway. Passing --foreground
-is NOT a workaround: --scope full applies a real configuration whose service
-step reaches the same login slot, so it refuses there too.
-Use --scope offline (20 checks) instead."
+  # That move is the RA-004 fix. The interlock used to live HERE, which is
+  # after the trap, so a refusal fired a destructive teardown. It survived
+  # only because the ledger happened to be empty at that moment — one layer
+  # masking the other. Ordering and ownership are now separate defences and
+  # are tested separately (crates/tracking/tests/validation_script_safety.rs).
+  #
+  # It remains a PRECONDITION rather than a check: awarding a counted pass
+  # for "the machine happened to be clean" is the shape ZFT-VAL-7 objected to.
 elif [ "$MODE" = "foreground" ]; then
   group FOREGROUND
   step "foreground gateway (the unsigned-build fallback path)"
-  # Safety interlock, deliberately NOT a counted check.
-  #
-  # "Foreground" describes how THIS script starts the gateway; it does not
-  # stop `track --yes` further down from reaching the service-lifecycle step.
-  # Service names are namespaced per data directory now (ADR 0026), and every
-  # destructive verb proves ownership before it runs — so a post-fix helper
-  # would hard-stop rather than damage anything. But a PRE-namespacing helper
-  # would still boot the user's live gateway out of its slot (ZFT-014, which
-  # is exactly what happened during the audit), and a legacy agent pointing at
-  # this data directory would be silently migrated. Neither outcome is
-  # evidence, and one of them is damage — so refuse before anything is
-  # applied, regardless of which helper is under test.
-  #
-  # A precondition is not a product property: awarding a pass for "the
-  # machine happened to be clean" is the shape ZFT-VAL-7 objected to. It
-  # aborts loudly instead of being tallied.
-  # Glob for the namespaced names as well as the legacy one: a machine whose
-  # gateway is ALREADY namespaced is the most likely developer machine, and
-  # checking only `$PLIST` would wave it through.
-  EXISTING_AGENTS=""
-  for candidate in "$PLIST" "$LA_DIR/$LEGACY_LABEL".*.plist; do
-    [ -f "$candidate" ] && EXISTING_AGENTS="$EXISTING_AGENTS
-  $candidate"
-  done
-  if [ -n "$EXISTING_AGENTS" ]; then
-    die "a gateway LaunchAgent already exists on this machine:$EXISTING_AGENTS
-
---scope full applies a real configuration and reaches the service-lifecycle
-step. Service names are namespaced per data directory now (ADR 0026) and
-every destructive verb proves ownership first, so a current helper would
-hard-stop rather than damage anything — but a pre-namespacing helper under
-test would boot that gateway out of its slot (ZFT-014), and a legacy agent
-pointing at this data directory would be migrated. A run that succeeds only
-because the machine happened to be clean is not evidence either.
-Run '--scope offline' on this machine (20 checks: packaging, helper
-execution, PATH isolation and dry-run inertness), or run '--scope full' on a
-machine with no installed Tethra gateway."
-  fi
+  # The same interlock covers this mode, in the same preflight, for the same
+  # reason: "foreground" describes how THIS script starts the gateway, and
+  # does not stop `track --yes` below from reaching the service-lifecycle
+  # step and the same login slot.
   "$HELPER" gateway serve >"$DIR/serve.log" 2>&1 &
   SERVE_PID=$!
   PORT=""
@@ -1090,6 +1237,15 @@ elif [ "$MODE" = "service" ]; then
     INSTALLED_PLIST="$(ls -1 "$LA_DIR/$LEGACY_LABEL".*.plist 2>/dev/null | head -1)"
   fi
   [ -n "$INSTALLED_PLIST" ] && [ -f "$INSTALLED_PLIST" ] && SERVICE_INSTALLED="$INSTALLED_PLIST"
+  # Record it in the ownership ledger the moment it is resolved, with the
+  # label as the proof term. Everything teardown later does to this plist and
+  # this launchd job is bounded by these two rows: nothing is ever inferred
+  # from `$LA_DIR/dev.api-tracker.gateway.*.plist`, which would match a second
+  # environment's live agent just as well as it matches ours.
+  if [ -n "${SERVICE_INSTALLED:-}" ]; then
+    ledger_add plist "$SERVICE_INSTALLED" "$(basename "$SERVICE_INSTALLED" .plist)"
+    ledger_add label "$(basename "$SERVICE_INSTALLED" .plist)"
+  fi
   [ -n "${SERVICE_INSTALLED:-}" ]
   check $? "the apply installed a real LaunchAgent (resolved: ${SERVICE_INSTALLED:-none})"
   INSTALLED_LABEL="$(basename "${SERVICE_INSTALLED:-none}" .plist)"
@@ -1098,8 +1254,58 @@ elif [ "$MODE" = "service" ]; then
   # ADR 0026: the label must be namespaced, not the pre-namespacing global.
   [ "$INSTALLED_LABEL" != "$LEGACY_LABEL" ]
   check $? "the label is namespaced per data directory, not the global one"
-  grep -qF "$HELPER" "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null
-  check $? "the installed LaunchAgent runs the bundled helper, not a developer CLI"
+  # WHAT THE PLIST ACTUALLY POINTS AT, measured rather than assumed.
+  #
+  # This assertion used to be `grep -qF "$HELPER"` — "the plist names the path
+  # inside the .app". It is the first check in this file that had never been
+  # EXECUTED anywhere, because --require-service had never completed on any
+  # machine, and the first real run showed it was simply wrong about the
+  # product: `gateway install` deliberately COPIES the running CLI to
+  # <data-dir>/bin/tethra-gateway-<version> and points the plist at that
+  # (lifecycle/mod.rs), so the login item survives the .app being moved,
+  # updated or deleted. The bundle path never appears in the plist.
+  #
+  # The property the old check was reaching for is provenance, and it splits
+  # into two assertions that are each stronger than the one they replace:
+  #   1. the plist runs the copy the product installed inside THIS run's data
+  #      directory — so it is neither a developer CLI nor a shared location;
+  #   2. that copy is byte-identical to the in-bundle helper — so the service
+  #      runs the shipped program, from its stable install location.
+  INSTALLED_HELPER="$DIR/bin/tethra-gateway-$APP_VER"
+  grep -qF "$INSTALLED_HELPER" "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null
+  check $? "the LaunchAgent runs the helper the product installed in this run's data directory, not a developer CLI"
+  assert_same_bytes "$HELPER" "$INSTALLED_HELPER" \
+    "the installed helper is byte-identical to the in-bundle helper (the service runs the shipped program)"
+
+  # The service must be LOADED IN LAUNCHD, not merely described by a file.
+  # `launchctl print` addresses gui/<uid>, so this is a statement about the
+  # live login session — the domain a $HOME redirection cannot reach, which is
+  # the whole REM-001 lesson turned into an assertion.
+  for _ in $(seq 1 40); do
+    [ -S "$DIR/gateway.sock" ] && break
+    sleep 0.5
+  done
+  launchctl print "gui/$UID_N/$INSTALLED_LABEL" >/dev/null 2>&1
+  check $? "launchd loaded the namespaced service gui/$UID_N/$INSTALLED_LABEL"
+
+  # The RUNNING PROCESS must execute the program the OWNED plist declares —
+  # not merely "something called tethra". Identity, never a pattern: matching
+  # by name is what makes a `pkill -f tethra` reach a user's production
+  # gateway, and an assertion built the same way would certify the wrong
+  # process just as happily.
+  PLIST_PROGRAM="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' \
+    "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null)"
+  SVC_PID="$(launchctl print "gui/$UID_N/$INSTALLED_LABEL" 2>/dev/null \
+    | awk '/^[[:space:]]*pid = /{print $3; exit}')"
+  SVC_EXE="$(ps -p "${SVC_PID:-0}" -o comm= 2>/dev/null)"
+  [ -n "$SVC_PID" ] && [ -n "$PLIST_PROGRAM" ] && [ "$SVC_EXE" = "$PLIST_PROGRAM" ]
+  check $? "the running service (pid ${SVC_PID:-none}) executes the program its own plist declares"
+
+  # The control endpoint: a 0600 unix socket inside THIS run's data directory.
+  # Its mode is the access control (ADR 0019 / control.rs), so an endpoint that
+  # exists but is world-readable is a finding, not a pass.
+  [ -S "$DIR/gateway.sock" ] && [ "$(stat -f '%Lp' "$DIR/gateway.sock" 2>/dev/null)" = "600" ]
+  check $? "the service exposes its control endpoint at \$TETHRA_DIR/gateway.sock, mode 0600"
 fi
 
 # --- 7. negative controls --------------------------------------------------
@@ -1261,7 +1467,22 @@ check $? "the unrelated env value (canary) appears in no file under the isolated
 # would false-FAIL on the `had_authorization` column name carried in the
 # schema text. Match the header LINE form and the bearer prefix instead;
 # neither of those appears in a schema.
-HITS_HDR="$(grep -rlEi 'authorization[[:space:]]*:|Bearer [A-Za-z0-9_-]' "$DIR" 2>/dev/null | grep -v "^$PROJECT/")"
+# $DIR/bin holds the helper the product installs for the LaunchAgent to run
+# (service mode only — in foreground mode this directory does not exist, which
+# is why the first real --require-service run was the first to see this).
+#
+# It is excluded from the HEADER sweep and from that sweep only. A compiled
+# forwarding proxy necessarily carries the literal strings "authorization:"
+# and "Bearer " as its own constants — matching them there matches the
+# program's source code, not stored user data, and a check that cannot pass
+# for a correct product is a broken check.
+#
+# The exclusion is SOUND because of an assertion made above rather than an
+# assumption made here: the installed helper is proven byte-identical to the
+# in-bundle helper, so it cannot hold anything captured at runtime. And it is
+# NARROW: the two per-run needles above still sweep this directory, and they
+# are the ones that could only appear there by capture.
+HITS_HDR="$(grep -rlEi 'authorization[[:space:]]*:|Bearer [A-Za-z0-9_-]' "$DIR" 2>/dev/null | grep -v "^$PROJECT/" | grep -v "^$DIR/bin/")"
 [ -z "$HITS_HDR" ]
 check $? "no authorization header line and no bearer token is stored${HITS_HDR:+ — hits: $HITS_HDR}"
 

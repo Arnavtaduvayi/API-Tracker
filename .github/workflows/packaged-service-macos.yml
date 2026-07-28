@@ -95,6 +95,32 @@ jobs:
       - name: Stage the bundled CLI sidecar (externalBin — the app ships its helper)
         run: bash scripts/bundle_cli.sh
 
+      # The service LIFECYCLE VERBS — install, stop, start, restart, status,
+      # uninstall — against a real per-user LaunchAgent. This script was
+      # written for exactly that and has never run anywhere but a developer's
+      # machine; the previous handoff records "I did not run
+      # scripts/gateway_validate_macos.sh against the real $HOME" as an
+      # explicit gap. It runs here rather than being reimplemented inside the
+      # tracking harness, because two harnesses asserting the same lifecycle
+      # is how they drift.
+      #
+      # It runs BEFORE the bundle build so a lifecycle failure surfaces in
+      # ~2 minutes instead of after a ten-minute Tauri build. It installs and
+      # removes only its own per-installation label and proves its teardown.
+      - name: Gateway service lifecycle (install → stop → restart → uninstall)
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/service-evidence"
+          bash scripts/gateway_validate_macos.sh \
+            2>&1 | tee "$RUNNER_TEMP/service-evidence/gateway-lifecycle.log"
+
+      # Between the two real-service runs the machine must be a clean room
+      # again. If the lifecycle script left anything, the tracking scope's own
+      # precondition would refuse — this makes that the explicit statement
+      # rather than a confusing downstream refusal.
+      - name: Re-assert the clean room between the two service runs
+        run: bash scripts/ci_service_preconditions.sh
+
       - name: Build the real macOS app bundle
         working-directory: apps/desktop
         run: npm run tauri build -- --bundles app
