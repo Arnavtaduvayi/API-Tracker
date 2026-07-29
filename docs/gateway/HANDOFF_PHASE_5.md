@@ -1,5 +1,12 @@
 # Local Gateway — Phase 5 handoff (final-audit remediation)
 
+> **Status correction (2026-07-27):** PR #15 was merged into `main`
+> (merge commit `0e6764b`, 2026-07-27) **without** the fresh independent
+> re-audit this document requires. No re-audit is recorded in the tree.
+> The statements below describe the pre-merge state and are kept
+> unchanged as a record; the open governance question is tracked as
+> O-22-9 in `docs/activity-onboarding/OPEN_DECISIONS.md`.
+
 **Status: remediation complete; merge readiness NOT claimed.** PR #15 is open
 and unmerged and requires a fresh independent re-audit before any merge
 decision. See `audit/RE_AUDIT_HANDOFF.md`.

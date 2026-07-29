@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use api_tracker_gateway::lifecycle::provision;
 use api_tracker_gateway::{control, doctor, envlink, lifecycle, routes, service::Service, store};
 use clap::Subcommand;
 
@@ -244,10 +245,113 @@ pub fn run(ctx: &Ctx, cmd: GatewayCmd) -> Result<()> {
 // Service lifecycle
 // ---------------------------------------------------------------------------
 
+/// What the service definition currently in our slot points at, when that is
+/// NOT this data directory. `None` means the slot is ours (or empty) and the
+/// verb may proceed.
+///
+/// `installed` is only ever true with a definition the manager could parse,
+/// so the `unwrap_or_else` below is unreachable today; it exists so that a
+/// future status shape cannot turn a missing field into a silent pass.
+fn foreign_owner(status: &lifecycle::ServiceStatus) -> Option<String> {
+    if !status.installed || status.matches_data_dir {
+        return None;
+    }
+    Some(
+        status
+            .definition
+            .as_ref()
+            .map(|d| d.data_dir.display().to_string())
+            .unwrap_or_else(|| "an unreadable data directory".to_string()),
+    )
+}
+
+/// Refuse a verb aimed at a service that belongs to a DIFFERENT data
+/// directory (ZFT-014).
+///
+/// The lifecycle engine now proves ownership on every destructive verb, so a
+/// foreign target already fails there — but it fails LATE and quietly: as a
+/// `stop: ...` line buried in a report, and only after `uninstall` has
+/// printed its consent wall, unlocked the vault, and started deleting. A
+/// user running two Tethra environments cannot act on what they cannot see,
+/// so every verb that reaches the OS service manager checks FIRST, names the
+/// data directory that actually owns the job, and exits non-zero without
+/// touching launchd/systemd/the registry at all.
+fn refuse_if_foreign(status: &lifecycle::ServiceStatus, ctx: &Ctx, verb: &str) -> Result<()> {
+    let Some(other) = foreign_owner(status) else {
+        return Ok(());
+    };
+    bail!(
+        "refusing to {verb}: the installed service '{name}' belongs to a different Tethra \
+         data directory ({other}), not this one ({ours}). Acting on it would control \
+         another environment's gateway.\n\
+         To act on that installation, re-run with `--data-dir {other}`.\n\
+         To take this machine's login slot over from here instead, run \
+         `tethra gateway install --force`, which prints exactly what it replaces.",
+        name = render::sanitize(&status.service_name),
+        other = render::sanitize(&other),
+        ours = render::sanitize(&ctx.paths.data_dir.display().to_string()),
+    )
+}
+
+/// Print what `--force` is about to displace, and take a second, separate
+/// confirmation for it.
+///
+/// `--force` is the one path that is ALLOWED to write over another
+/// installation's definition, so "the user passed a flag" is not consent:
+/// the flag is usually typed because the engine's refusal suggested it, long
+/// before the user knows which other environment is involved. The
+/// replacement is therefore disclosed concretely (definition file, service
+/// name, both data directories) and confirmed on its own — `--yes` is what
+/// says "I have seen this and still mean it".
+fn confirm_forced_replacement(
+    ctx: &Ctx,
+    lc: &lifecycle::Lifecycle,
+    status: &lifecycle::ServiceStatus,
+    yes: bool,
+) -> Result<()> {
+    let Some(other) = foreign_owner(status) else {
+        return Ok(());
+    };
+    println!("--force: this REPLACES an existing service definition.");
+    println!(
+        "  definition file  {}",
+        render::sanitize(&lc.manager.definition_path().display().to_string())
+    );
+    println!(
+        "  service name     {}",
+        render::sanitize(&status.service_name)
+    );
+    println!("  it currently runs the gateway for data directory:");
+    println!("      {}", render::sanitize(&other));
+    println!("  this data directory is:");
+    println!(
+        "      {}",
+        render::sanitize(&ctx.paths.data_dir.display().to_string())
+    );
+    println!("  After replacement, that installation's gateway will no longer start at");
+    println!("  login through this service. Its vault, links, and recorded history are");
+    println!("  not touched, and its .env files are left exactly as they are.");
+    println!();
+    if !crate::ctx::confirm("Replace that installation's service?", yes)? {
+        bail!("cancelled");
+    }
+    println!();
+    Ok(())
+}
+
 fn install(ctx: &Ctx, force: bool, yes: bool) -> Result<()> {
     let data_dir = &ctx.paths.data_dir;
     let lc = lifecycle::Lifecycle::for_host(data_dir)
         .context("preparing the service manager for this platform")?;
+
+    // Ownership is settled before anything else: without `--force` this
+    // install cannot succeed against a foreign slot, so failing here saves
+    // the user the disclosure wall, the vault unlock, and a port binding
+    // that would all be discarded by the engine's refusal.
+    let status = lc.status();
+    if !force {
+        refuse_if_foreign(&status, ctx, "install over the existing service")?;
+    }
 
     println!("Tethra can run a local background gateway at 127.0.0.1.");
     println!();
@@ -281,70 +385,155 @@ fn install(ctx: &Ctx, force: bool, yes: bool) -> Result<()> {
     println!("Routes can be disabled individually; one action removes everything and");
     println!("restores your .env files.");
     println!();
+    // Order matters: what the feature IS, then what this particular run
+    // destroys. Each is its own decision, so each gets its own prompt.
+    if force {
+        confirm_forced_replacement(ctx, &lc, &status, yes)?;
+    }
     if !crate::ctx::confirm("Install and start the gateway service?", yes)? {
         bail!("cancelled");
     }
 
     let (vault, token) = ctx.unlocked()?;
 
-    // The stable port is chosen at enable time (random high port, ADR O3)
-    // so .env base URLs survive restarts.
-    let mut config = store::load_config(vault.connection())?;
-    if config.port.is_none() {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .context("choosing a stable local port")?;
-        config.port = Some(listener.local_addr()?.port());
-        drop(listener);
-    }
-    let port = config.port.expect("just ensured");
-
+    // Everything past this point — choosing the port, committing it BEFORE
+    // the service that will read it is started, writing the definition,
+    // starting, verifying, rolling back — is the shared install primitive
+    // (NEW-02). It used to live here as a hand-ordered sequence, and this
+    // command had it wrong: it started the service and committed the port
+    // afterwards, so a service booting in that window read a NULL port and
+    // bound an unrelated ephemeral one. The ordering is a property of the
+    // operation now, not of this function.
     let source = std::env::current_exe().context("locating this binary")?;
-    let report = lc.install(&source, force)?;
-
-    config.enabled = true;
-    config.service_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    store::save_config(vault.connection(), &config)?;
-    api_tracker_core::audit::record(
+    let version = env!("CARGO_PKG_VERSION");
+    let outcome = provision::install_gateway(
+        &lc,
         vault.connection(),
-        "gateway_service_installed",
-        None,
-        None,
-        &format!("port={port} definition={}", report.definition),
-    )?;
-    ctx.persist_session(&vault, &token)?;
+        &CliInstallHost::new(),
+        &provision::InstallRequest::new(&source, force, version),
+    );
+    // The session is persisted whatever happened: an install that failed
+    // its verification still consumed the unlock, and making the user
+    // re-enter the passphrase to run `tethra gateway doctor` is a second
+    // punishment for the same failure. Reported rather than swallowed —
+    // the install's own error must not be the reason a second one goes
+    // unmentioned.
+    // Closes the progress line whichever way the probe went; the failure
+    // path must not leave the user's error message glued to a row of dots.
+    println!();
+    if let Err(why) = ctx.persist_session(&vault, &token) {
+        println!("warning: the unlocked session could not be persisted ({why});");
+        println!("         the next command will ask for the passphrase again.");
+    }
+    let outcome = outcome?;
+    let port = outcome.port;
 
-    // Verify the service actually came up, identity-checked (D11): never
-    // report healthy on the strength of an exit code alone.
-    print!("waiting for the gateway to come up");
-    let mut verified = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        if matches!(
-            control::verify_listener(data_dir, port),
-            control::ListenerIdentity::Verified { .. }
-        ) {
-            verified = true;
-            break;
+    println!("gateway service installed and running on http://127.0.0.1:{port}");
+    println!();
+    println!("Next: link a project so its SDK uses the gateway:");
+    println!("  tethra gateway route add openai");
+    println!("  tethra gateway link --project <name> --route openai");
+    Ok(())
+}
+
+/// The CLI's [`provision::InstallHost`]: the real environment plus the
+/// progress a person staring at a terminal needs.
+///
+/// The stages are printed as they happen rather than summarized at the end,
+/// because the ones that matter most — a legacy agent taken over, another
+/// data directory's definition replaced, a rollback — are exactly the ones
+/// a failed install would otherwise swallow.
+struct CliInstallHost {
+    inner: provision::HostEnvironment,
+}
+
+impl CliInstallHost {
+    fn new() -> Self {
+        Self {
+            inner: provision::HostEnvironment::quiet(),
         }
+    }
+}
+
+impl provision::InstallHost for CliInstallHost {
+    fn reserve_port(&self) -> api_tracker_core::error::Result<provision::PortReservation> {
+        self.inner.reserve_port()
+    }
+
+    fn verify_listener(&self, data_dir: &std::path::Path, port: u16) -> control::ListenerIdentity {
+        self.inner.verify_listener(data_dir, port)
+    }
+
+    fn control_status(&self, data_dir: &std::path::Path) -> Option<control::Status> {
+        self.inner.control_status(data_dir)
+    }
+
+    fn sleep(&self, d: std::time::Duration) {
+        self.inner.sleep(d);
         print!(".");
         use std::io::Write;
         let _ = std::io::stdout().flush();
     }
-    println!();
+
+    fn observe(&self, stage: provision::InstallStage) {
+        use provision::InstallStage as S;
+        match stage {
+            S::Note(note) => println!("note: {}", render::sanitize(&note)),
+            S::RolledBack { action } => {
+                println!("rolled back: {}", render::sanitize(&action))
+            }
+            S::ServiceStarted { .. } => {
+                print!("waiting for the gateway to come up");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            S::PlanValidated
+            | S::PortSelected { .. }
+            | S::PortCommitted { .. }
+            | S::ListenerVerified { .. }
+            | S::Enabled { .. } => {}
+        }
+    }
+}
+
+/// Everything the install/repair engine reported, including the parts that
+/// used to be dropped on the floor.
+///
+/// `notes` carries the events a user MUST be able to see after the fact:
+/// legacy-agent migrations ("took over the pre-namespacing agent"), an
+/// ownership refusal the engine tolerated rather than aborting on, and forced
+/// replacements. `pruned_binaries` says which older helper copies were
+/// deleted from `<data-dir>/bin`, and `started` says whether the engine
+/// actually asked the OS to run it — all three are facts about this machine
+/// that no other command reports.
+///
+/// Built as lines rather than printed inline so the formatting is testable
+/// without installing a service (`report_lines_surface_*` below).
+fn install_report_lines(report: &lifecycle::InstallReport) -> Vec<String> {
+    let mut lines = Vec::new();
     for note in &report.notes {
-        println!("note: {}", render::sanitize(note));
+        lines.push(format!("note: {}", render::sanitize(note)));
     }
-    if verified {
-        println!("gateway service installed and running on http://127.0.0.1:{port}");
-        println!();
-        println!("Next: link a project so its SDK uses the gateway:");
-        println!("  tethra gateway route add openai");
-        println!("  tethra gateway link --project <name> --route openai");
-    } else {
-        println!("The service was installed but did not answer its identity probe yet.");
-        println!("Diagnose with: tethra gateway doctor");
+    for pruned in &report.pruned_binaries {
+        lines.push(format!(
+            "removed older helper binary {}",
+            render::sanitize(pruned)
+        ));
     }
-    Ok(())
+    if !report.started {
+        lines.push(
+            "note: the service manager did not report a successful start; \
+             diagnose with `tethra gateway doctor`"
+                .to_string(),
+        );
+    }
+    lines
+}
+
+fn print_install_report(report: &lifecycle::InstallReport) {
+    for line in install_report_lines(report) {
+        println!("{line}");
+    }
 }
 
 fn linked_projects_warning(vault: &api_tracker_core::vault::UnlockedVault) -> Result<Vec<String>> {
@@ -357,7 +546,13 @@ fn linked_projects_warning(vault: &api_tracker_core::vault::UnlockedVault) -> Re
 }
 
 fn disable(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    // Ownership first, before the vault is unlocked and before a single
+    // `.env` is described as "about to be restored": disable stops and
+    // unregisters an OS job, and the job in the slot may not be ours.
+    let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
+    refuse_if_foreign(&lc.status(), ctx, "disable the gateway service")?;
+
+    let (mut vault, token) = ctx.unlocked()?;
     let linked = linked_projects_warning(&vault)?;
     if !linked.is_empty() && !keep_env {
         println!("Disabling stops the gateway; these linked projects will have their");
@@ -375,37 +570,59 @@ fn disable(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
     if !crate::ctx::confirm("Disable the gateway service?", yes)? {
         bail!("cancelled");
     }
-    let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
-    let report = lc.disable(vault.connection(), keep_env)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    let report = lc.disable(vault.connection(), Some(&restore_crypto), keep_env)?;
     ctx.persist_session(&vault, &token)?;
     print_disable_report(&report);
     Ok(())
 }
 
-fn print_disable_report(report: &lifecycle::DisableReport) {
-    println!(
+/// The disable/uninstall result, notes included.
+///
+/// `stopped: false` on its own is not an answer — the reason lives in
+/// `notes`, which is where the engine now records an ownership refusal
+/// ("stop: refusing to stop the service: … belongs to a different Tethra
+/// data directory") and legacy-agent reclamation. Printing the booleans
+/// without the notes is what made a refused teardown read as a mysterious
+/// half-success.
+fn disable_report_lines(report: &lifecycle::DisableReport) -> Vec<String> {
+    let mut lines = vec![format!(
         "service stopped: {} / unregistered: {}",
         report.stopped, report.unregistered
-    );
+    )];
     for restore in &report.env_restores {
         for outcome in &restore.outcomes {
-            println!("  {}", render::sanitize(&format!("{outcome:?}")));
+            lines.push(format!("  {}", render::sanitize(&format!("{outcome:?}"))));
         }
     }
     if report.incomplete_restores > 0 {
-        println!(
+        lines.push(format!(
             "WARNING: {} restore(s) could not complete; the link rows were kept so you \
              can retry with `tethra gateway unlink`",
             report.incomplete_restores
-        );
+        ));
     }
     for note in &report.notes {
-        println!("note: {}", render::sanitize(note));
+        lines.push(format!("note: {}", render::sanitize(note)));
+    }
+    lines
+}
+
+fn print_disable_report(report: &lifecycle::DisableReport) {
+    for line in disable_report_lines(report) {
+        println!("{line}");
     }
 }
 
 fn uninstall(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    // Uninstall is the sharpest case: it stops the job, unregisters it, and
+    // removes the definition FILE. Against a foreign slot that last step
+    // deletes another environment's service definition, so the check has to
+    // come before the vault, the consent wall, and the engine.
+    let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
+    refuse_if_foreign(&lc.status(), ctx, "uninstall the gateway service")?;
+
+    let (mut vault, token) = ctx.unlocked()?;
     let linked = linked_projects_warning(&vault)?;
     println!("Uninstall stops and removes the gateway service, its binaries, logs, and");
     println!("runtime files. Recorded history stays in your vault.");
@@ -425,8 +642,8 @@ fn uninstall(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
     if !crate::ctx::confirm("Uninstall the gateway?", yes)? {
         bail!("cancelled");
     }
-    let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
-    let report = lc.uninstall(vault.connection(), keep_env)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    let report = lc.uninstall(vault.connection(), Some(&restore_crypto), keep_env)?;
     ctx.persist_session(&vault, &token)?;
     print_disable_report(&report.disable);
     for p in &report.removed_paths {
@@ -442,6 +659,7 @@ fn uninstall(ctx: &Ctx, keep_env: bool, yes: bool) -> Result<()> {
 fn start(ctx: &Ctx) -> Result<()> {
     let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
     let s = lc.status();
+    refuse_if_foreign(&s, ctx, "start the gateway service")?;
     if !s.installed {
         bail!(
             "no gateway service is installed. Install one with `tethra gateway install`, \
@@ -476,8 +694,17 @@ fn stop(ctx: &Ctx) -> Result<()> {
             other => bail!("unexpected control response: {other:?}"),
         }
     }
+    // Only the service-manager fallback can reach a job that is not ours.
+    // The graceful drain above is scoped to THIS data directory by
+    // construction — it speaks to this directory's control socket and proves
+    // the listener's identity against this directory's nonce — so the
+    // ownership check belongs here, not at the top, or a foreign definition
+    // sitting in the login slot would block a user from stopping their own
+    // foreground gateway.
     let lc = lifecycle::Lifecycle::for_host(data_dir)?;
-    if !lc.status().installed {
+    let s = lc.status();
+    refuse_if_foreign(&s, ctx, "stop the gateway service")?;
+    if !s.installed {
         println!("nothing to stop: no service installed and no gateway reachable");
         return Ok(());
     }
@@ -488,7 +715,9 @@ fn stop(ctx: &Ctx) -> Result<()> {
 
 fn restart(ctx: &Ctx) -> Result<()> {
     let lc = lifecycle::Lifecycle::for_host(&ctx.paths.data_dir)?;
-    if !lc.status().installed {
+    let s = lc.status();
+    refuse_if_foreign(&s, ctx, "restart the gateway service")?;
+    if !s.installed {
         bail!("no gateway service is installed; use `tethra gateway serve` for foreground runs");
     }
     lc.restart()?;
@@ -499,28 +728,47 @@ fn restart(ctx: &Ctx) -> Result<()> {
 fn repair(ctx: &Ctx, yes: bool) -> Result<()> {
     let data_dir = &ctx.paths.data_dir;
     let lc = lifecycle::Lifecycle::for_host(data_dir)?;
+    // `repair` is `install(force = false)` underneath, so a foreign slot can
+    // only ever end in the engine's refusal — say so before asking for
+    // consent to an operation that cannot succeed.
+    refuse_if_foreign(&lc.status(), ctx, "repair the gateway service")?;
     println!("Repair re-copies this binary, rewrites the service definition for this");
     println!("data directory, re-registers it, and restarts the service.");
     if !crate::ctx::confirm("Repair the gateway service?", yes)? {
         bail!("cancelled");
     }
     let source = std::env::current_exe().context("locating this binary")?;
-    let report = lc.repair(&source)?;
-    // Keep the recorded version in step (plain config write, same trust
-    // level as serve's port persistence).
-    if let Ok(conn) = api_tracker_core::db::open_at_current_version(&ctx.paths.db_path()) {
-        if let Ok(mut config) = store::load_config(&conn) {
-            config.service_version = Some(env!("CARGO_PKG_VERSION").to_string());
-            let _ = store::save_config(&conn, &config);
-        }
-    }
-    println!(
-        "repaired: binary {}, definition {}",
-        report.binary, report.definition
+    // Repair goes through the same ordered primitive as install. It is
+    // `install(force = false)` underneath, so it starts a service that
+    // resolves its port from the database — which means repairing an
+    // installation whose `gateway_config.port` was still NULL produced the
+    // same bind-a-random-port service NEW-02 describes, from a path
+    // `tethra track` reaches automatically. The primitive commits a port
+    // first; the recorded version is written there too, and no longer
+    // swallowed (a failed version write is what makes `doctor` report a
+    // drift the repair has just fixed).
+    let conn = api_tracker_core::db::open_at_current_version(&ctx.paths.db_path())
+        .context("opening the vault database to record the repair")?;
+    let outcome = provision::repair_gateway(
+        &lc,
+        &conn,
+        &CliInstallHost::new(),
+        &provision::InstallRequest::new(&source, false, env!("CARGO_PKG_VERSION")),
     );
-    for note in &report.notes {
-        println!("note: {}", render::sanitize(note));
+    println!();
+    let outcome = outcome?;
+    println!(
+        "repaired: binary {}, definition {}, port {}",
+        outcome.report.binary, outcome.report.definition, outcome.port
+    );
+    if outcome.port_was_new {
+        println!(
+            "note: no gateway port had been chosen for this data directory; {} is now \
+             persisted and the service reads it at boot.",
+            outcome.port
+        );
     }
+    print_install_report(&outcome.report);
     Ok(())
 }
 
@@ -537,10 +785,45 @@ fn severity_tag(s: doctor::Severity) -> &'static str {
     }
 }
 
+/// The two facts that tell a user WHICH service these numbers describe.
+///
+/// A developer with a work vault and a personal vault has two launchd labels
+/// (or systemd units, or `Run` values) on one machine, and every lifecycle
+/// verb silently addresses exactly one of them. Printing the resolved name
+/// and the installation id is what makes `launchctl print gui/501/<label>`,
+/// `systemctl --user status <unit>`, or a support request possible at all —
+/// and it is the only place the mismatch between the slot and this data
+/// directory is visible without reading a plist by hand.
+fn print_service_identity(status: &lifecycle::ServiceStatus, ctx: &Ctx) {
+    println!("  name      {}", render::sanitize(&status.service_name));
+    println!("  id        {}", render::sanitize(&status.installation_id));
+    println!(
+        "  data dir  {}",
+        render::sanitize(&ctx.paths.data_dir.display().to_string())
+    );
+    if let Some(other) = foreign_owner(status) {
+        println!(
+            "  WARNING   the installed definition ({}) names a DIFFERENT data",
+            render::sanitize(&status.definition_path)
+        );
+        println!("            directory: {}", render::sanitize(&other));
+        println!("            start/stop/restart/disable/uninstall refuse here; use");
+        println!("            `--data-dir <that directory>`, or `install --force` to");
+        println!("            take the slot over from this environment.");
+    }
+}
+
 fn doctor_cmd(ctx: &Ctx) -> Result<()> {
     let report = doctor::diagnose(&ctx.paths.data_dir);
     render::emit(ctx.json, &report, || {
         println!("gateway doctor — overall: {}", severity_tag(report.overall));
+        println!();
+        println!("service identity (which OS job this vault controls):");
+        print_service_identity(&report.service, ctx);
+        println!(
+            "  file      {}",
+            render::sanitize(&report.service.definition_path)
+        );
         println!();
         for f in &report.findings {
             println!(
@@ -591,6 +874,7 @@ fn status(ctx: &Ctx) -> Result<()> {
                     "not running".to_string()
                 }
             );
+            print_service_identity(s, ctx);
             println!(
                 "  at login  {}",
                 match &s.os_will_run {
@@ -605,6 +889,10 @@ fn status(ctx: &Ctx) -> Result<()> {
             );
         } else {
             println!("service     not installed (install with `tethra gateway install`)");
+            // The name is still worth printing: it is the slot this data
+            // directory WOULD claim, which is what a second environment
+            // needs to see to know the two will not collide.
+            print_service_identity(s, ctx);
         }
 
         // Live gateway.
@@ -614,6 +902,21 @@ fn status(ctx: &Ctx) -> Result<()> {
                     "gateway     running v{} on http://127.0.0.1:{}",
                     g.version, g.port
                 );
+                // A gateway serving a port nobody linked against reads as
+                // perfectly healthy on every other line of this report
+                // (NEW-02). Printing only the LIVE port is what made the
+                // divergence invisible here, so say both whenever they
+                // disagree — doctor's `port_drift` finding carries the
+                // severity and the remedy.
+                if let Some(configured) = report.configured_port {
+                    if configured != g.port {
+                        println!(
+                            "  WARNING   configuration says port {configured}; every linked \
+                             .env points there and gets connection-refused"
+                        );
+                        println!("            fix with: tethra gateway restart");
+                    }
+                }
                 match &report.listener {
                     Some(control::ListenerIdentity::Verified { .. }) => {
                         println!("  identity  verified (answers this data directory's nonce)");
@@ -778,8 +1081,8 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
                 if custom_unavailable {
                     println!(
                         "custom-origin routes: unavailable (no unlocked vault session, so the \
-                         route verification key could not be installed). Run `tethra vault \
-                         unlock` in this shell and restart, or use the desktop app."
+                         route verification key could not be installed). Run `tethra unlock` \
+                         in this shell and restart, or use the desktop app."
                     );
                 }
             }
@@ -827,7 +1130,6 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
 /// stdout to the same file; on Windows nothing else captures it).
 fn serve_service_mode(ctx: &Ctx, port: Option<u16>) -> Result<()> {
     let data_dir = ctx.paths.data_dir.clone();
-    let configured = port.or_else(|| store::port_hint(&data_dir)).unwrap_or(0);
     let log_path = lifecycle::logs_dir(&data_dir).join("gateway.log");
     let _ = std::fs::create_dir_all(lifecycle::logs_dir(&data_dir));
 
@@ -844,11 +1146,155 @@ fn serve_service_mode(ctx: &Ctx, port: Option<u16>) -> Result<()> {
         }
     };
 
+    let configured = resolve_service_port(&data_dir, port, &write_log);
     let exit = api_tracker_gateway::service::run_as_service(&data_dir, configured, write_log);
     // Both exits are CLEAN by design: KeepAlive={Crashed:true} and
     // Restart=on-failure must not respawn us.
     let _ = exit;
     Ok(())
+}
+
+/// How long service mode waits for a readable, decided port before acting
+/// on its own: 12 × 250 ms = 3 s. Long enough to ride out a busy database or
+/// an installer from an older build that is still mid-commit (the window the
+/// fixed installer no longer has is process-startup sized), short enough
+/// that a genuinely unconfigured directory still gets a gateway promptly.
+const SERVICE_PORT_ROUNDS: u32 = 12;
+const SERVICE_PORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The installed service's boot-time port decision, and the persistence of
+/// whatever it decides.
+///
+/// The predecessor was `port.or_else(port_hint).unwrap_or(0)`. Both halves
+/// were wrong in the same direction (NEW-02): `port_hint` collapsed "no port
+/// has been chosen" and "the database could not be read" into one `None`,
+/// and `unwrap_or(0)` answered that `None` with a fresh ephemeral port —
+/// silently invalidating every `.env` already written against the persisted
+/// one. Each state now gets the response it deserves, and the port this
+/// process is going to bind is committed BEFORE it binds, so the config row
+/// and the running service cannot diverge. `run_as_service` retries the
+/// exact port it is given (with backoff, never exiting), so a non-zero
+/// argument is a guarantee about what will eventually be bound, not a wish.
+fn resolve_service_port(
+    data_dir: &std::path::Path,
+    explicit: Option<u16>,
+    log: &impl Fn(&str),
+) -> u16 {
+    if let Some(port) = explicit {
+        // An explicit `--port` in the service definition's argv is the
+        // strongest statement of intent there is; it wins, and it fills in
+        // an unset config row so the two agree from the first boot.
+        fill_in_unset_port(data_dir, port, log);
+        return port;
+    }
+
+    let mut last = store::PortState::NoneYet;
+    let mut announced_unreadable = false;
+    for round in 0..SERVICE_PORT_ROUNDS {
+        last = store::port_state(data_dir);
+        match &last {
+            store::PortState::Persisted(port) => return *port,
+            store::PortState::NoneYet => {}
+            store::PortState::Unavailable(why) => {
+                if !announced_unreadable {
+                    announced_unreadable = true;
+                    log(&format!(
+                        "degraded: the configured gateway port could not be read ({why}); \
+                         retrying rather than choosing a new one"
+                    ));
+                }
+            }
+        }
+        if round + 1 < SERVICE_PORT_ROUNDS {
+            std::thread::sleep(SERVICE_PORT_INTERVAL);
+        }
+    }
+
+    match last {
+        store::PortState::Persisted(port) => port,
+        // Readable, and genuinely undecided: this boot IS the decision, so
+        // make it explicitly and write it down before binding.
+        store::PortState::NoneYet => match choose_and_commit_port(data_dir) {
+            Ok(port) => {
+                log(&format!(
+                    "no gateway port was configured; chose {port} and persisted it"
+                ));
+                port
+            }
+            Err(why) => {
+                log(&format!(
+                    "DEGRADED: no port was configured and one could not be persisted \
+                     ({why}); binding an ephemeral port for this run. Any .env written \
+                     against a different port will get connection-refused — fix with \
+                     `tethra gateway doctor`"
+                ));
+                0
+            }
+        },
+        // Never readable. We cannot prove no port exists, so choosing one
+        // could invalidate `.env` files we simply could not see. Say so at
+        // full volume and take the ephemeral port for this run only; the
+        // `port_drift` doctor finding makes the result visible instead of
+        // leaving it to be discovered by a connection-refused in an SDK.
+        store::PortState::Unavailable(why) => {
+            log(&format!(
+                "DEGRADED: the configured gateway port was still unreadable after {}s \
+                 ({why}); binding an ephemeral port for this run WITHOUT persisting it, \
+                 because a port may exist that this process cannot see. Linked projects \
+                 may get connection-refused until `tethra gateway restart` succeeds",
+                (SERVICE_PORT_ROUNDS as u64 * SERVICE_PORT_INTERVAL.as_millis() as u64) / 1000
+            ));
+            0
+        }
+    }
+}
+
+/// Persist `port` only when nothing has been decided yet.
+///
+/// The asymmetry is the point: a service may FILL IN an unset port, but it
+/// may never CHANGE a set one. The persisted port is what `.env` base URLs
+/// were built from, so moving it is a re-link decision belonging to the
+/// installer — a symmetric "persist whatever I bound" would let one
+/// transient `EADDRINUSE` silently break every linked project.
+fn fill_in_unset_port(data_dir: &std::path::Path, port: u16, log: &impl Fn(&str)) {
+    match store::port_state(data_dir) {
+        store::PortState::Persisted(existing) if existing == port => {}
+        store::PortState::Persisted(existing) => log(&format!(
+            "configuration says port {existing} but this service was told to bind {port}; \
+             not overwriting the configured port. Linked projects point at {existing} — \
+             fix with `tethra gateway restart`"
+        )),
+        store::PortState::NoneYet => match choose_and_commit_port_value(data_dir, port) {
+            Ok(committed) if committed == port => {
+                log(&format!("persisted port {port} (none was configured)"))
+            }
+            Ok(committed) => log(&format!(
+                "another writer configured port {committed} first; this service was told \
+                 to bind {port} and will, so `tethra gateway restart` is needed to converge"
+            )),
+            Err(why) => log(&format!(
+                "DEGRADED: bound {port} but could not persist it ({why}); a restart would \
+                 move the port and every linked .env would break"
+            )),
+        },
+        store::PortState::Unavailable(why) => log(&format!(
+            "could not read the configured port ({why}); binding {port} without persisting it"
+        )),
+    }
+}
+
+/// Reserve a free loopback port and commit it, returning the port that is
+/// now authoritative (another writer may have won the race).
+fn choose_and_commit_port(data_dir: &std::path::Path) -> Result<u16> {
+    let reservation = api_tracker_gateway::lifecycle::provision::PortReservation::fresh()
+        .context("choosing a stable local port")?;
+    choose_and_commit_port_value(data_dir, reservation.port())
+}
+
+fn choose_and_commit_port_value(data_dir: &std::path::Path, port: u16) -> Result<u16> {
+    let conn = api_tracker_core::db::open_at_current_version(&data_dir.join("vault.db"))
+        .context("opening the vault database to persist the gateway port")?;
+    store::commit_port(&conn, port).context("persisting the gateway port")
 }
 
 fn persist_port(ctx: &Ctx, port: u16) -> Result<()> {
@@ -1170,7 +1616,7 @@ fn link(
     dry_run: bool,
     yes: bool,
 ) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let proj = vault.get_project(project)?;
 
     // Default the project directory from the registered repo path when it
@@ -1239,7 +1685,8 @@ fn link(
     if !any_change {
         // Idempotent: make sure the DB row exists even when files are
         // already in the desired state.
-        envlink::apply_link(vault.connection(), &req, &plan)?;
+        let restore_crypto = vault.env_restore_crypto()?;
+        envlink::apply_link(vault.connection(), Some(&restore_crypto), &req, &plan)?;
         ctx.persist_session(&vault, &token)?;
         // A running gateway must see the (possibly new) link slug NOW, not
         // after the 5s poll — otherwise the just-linked SDK gets a 404.
@@ -1256,7 +1703,8 @@ fn link(
     if !crate::ctx::confirm("Apply these .env changes?", yes)? {
         bail!("cancelled");
     }
-    envlink::apply_link(vault.connection(), &req, &plan)?;
+    let restore_crypto = vault.env_restore_crypto()?;
+    envlink::apply_link(vault.connection(), Some(&restore_crypto), &req, &plan)?;
     ctx.persist_session(&vault, &token)?;
     // Push the new link slug into the running gateway's snapshot before the
     // probe below runs — the slug must resolve immediately.
@@ -1265,6 +1713,18 @@ fn link(
 
     probe_after_link(ctx, &plan);
     Ok(())
+}
+
+/// The port a live gateway for this data directory says it bound, over the
+/// control channel — which answers regardless of which TCP port was taken,
+/// and is therefore the only way to tell "nothing is running" from "something
+/// is running somewhere else".
+fn live_gateway_port(ctx: &Ctx) -> Option<u16> {
+    provision::InstallHost::control_status(
+        &provision::HostEnvironment::quiet(),
+        &ctx.paths.data_dir,
+    )
+    .map(|s| s.port)
 }
 
 /// The link-time keyless probe (D9/GW-13): one credential-free GET through
@@ -1277,12 +1737,35 @@ fn probe_after_link(ctx: &Ctx, plan: &envlink::LinkPlan) {
         control::ListenerIdentity::Verified { .. } => {}
         control::ListenerIdentity::NoListener => {
             println!();
-            println!("note: the gateway is not running, so the link was not probed.");
-            println!("      Start it (`tethra gateway start` or `serve`) — until then the");
-            println!(
-                "      project's SDK will get connection refused on 127.0.0.1:{}.",
-                plan.port
-            );
+            // "Not running" was the wrong diagnosis for the failure this
+            // note is most likely to be describing. Nothing answering on
+            // the PERSISTED port is exactly what a gateway that bound a
+            // different port looks like from here (NEW-02), and the remedy
+            // for that is a restart, not a start — so ask the control
+            // channel which it is before naming a cause.
+            match live_gateway_port(ctx) {
+                Some(live) if live != plan.port => {
+                    println!(
+                        "WARNING: a gateway IS running for this data directory, but on port \
+                         {live},"
+                    );
+                    println!(
+                        "         not the persisted {} this .env was just written with.",
+                        plan.port
+                    );
+                    println!("         The persisted port is the authority — restarting makes");
+                    println!("         the service bind it and this link becomes correct with");
+                    println!("         no re-link: tethra gateway restart");
+                }
+                _ => {
+                    println!("note: the gateway is not running, so the link was not probed.");
+                    println!("      Start it (`tethra gateway start` or `serve`) — until then the");
+                    println!(
+                        "      project's SDK will get connection refused on 127.0.0.1:{}.",
+                        plan.port
+                    );
+                }
+            }
             return;
         }
         other => {
@@ -1351,7 +1834,7 @@ fn probe_after_link(ctx: &Ctx, plan: &envlink::LinkPlan) {
 }
 
 fn unlink(ctx: &Ctx, project: &str, route: &str, yes: bool) -> Result<()> {
-    let (vault, token) = ctx.unlocked()?;
+    let (mut vault, token) = ctx.unlocked()?;
     let proj = vault.get_project(project)?;
     let link = routes::find_project_link(vault.connection(), &proj.id, route)?;
     let Some(link_row) = link else {
@@ -1367,7 +1850,8 @@ fn unlink(ctx: &Ctx, project: &str, route: &str, yes: bool) -> Result<()> {
         bail!("cancelled");
     }
     if link_row.prior_env_json.is_some() {
-        let report = envlink::unlink(vault.connection(), &proj.id, route)?;
+        let restore_crypto = vault.env_restore_crypto()?;
+        let report = envlink::unlink(vault.connection(), Some(&restore_crypto), &proj.id, route)?;
         for outcome in &report.outcomes {
             println!("  {}", render::sanitize(&format!("{outcome:?}")));
         }
@@ -1386,4 +1870,151 @@ fn unlink(ctx: &Ctx, project: &str, route: &str, yes: bool) -> Result<()> {
     nudge_running_gateway(ctx);
     println!("unlinked project '{project}' from route '{route}'");
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the report/ownership formatting.
+//
+// These live here rather than in `tests/gateway_cli.rs` because the only way
+// to make the lifecycle engine EMIT an install/disable report through the CLI
+// is to install a real OS service, which no test may do. The report values
+// are therefore built directly and the rendering asserted, so a note the
+// engine records can never again be silently dropped on the way to the user.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn status_with_definition(data_dir: &str) -> lifecycle::ServiceStatus {
+        lifecycle::ServiceStatus {
+            installed: true,
+            matches_data_dir: false,
+            service_name: "dev.api-tracker.gateway.deadbeef1234".into(),
+            installation_id: "deadbeef1234".into(),
+            definition: Some(lifecycle::Definition {
+                binary: PathBuf::from("/other/bin/tethra-gateway-0.1.0"),
+                data_dir: PathBuf::from(data_dir),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn foreign_owner_names_the_other_data_directory() {
+        let s = status_with_definition("/Users/someone/Library/Application Support/OtherTethra");
+        assert_eq!(
+            foreign_owner(&s).as_deref(),
+            Some("/Users/someone/Library/Application Support/OtherTethra"),
+            "a slot pointing elsewhere must be reported with the directory that owns it"
+        );
+    }
+
+    #[test]
+    fn foreign_owner_passes_our_own_and_absent_installations() {
+        let mut ours = status_with_definition("/ours");
+        ours.matches_data_dir = true;
+        assert_eq!(
+            foreign_owner(&ours),
+            None,
+            "our own installation must not be refused"
+        );
+
+        let mut absent = status_with_definition("/other");
+        absent.installed = false;
+        assert_eq!(
+            foreign_owner(&absent),
+            None,
+            "no installation at all is not a foreign installation"
+        );
+    }
+
+    #[test]
+    fn install_report_lines_surface_notes_pruned_binaries_and_a_failed_start() {
+        let report = lifecycle::InstallReport {
+            binary: "/data/bin/tethra-gateway-0.1.0".into(),
+            definition: "/home/u/Library/LaunchAgents/x.plist".into(),
+            started: false,
+            pruned_binaries: vec!["/data/bin/tethra-gateway-0.0.9".into()],
+            notes: vec!["replaced a service that pointed at /other/data".into()],
+        };
+        let lines = install_report_lines(&report);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "note: replaced a service that pointed at /other/data"),
+            "the takeover note must reach the user: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("removed older helper binary /data/bin/tethra-gateway-0.0.9")),
+            "pruned binaries must be reported: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("did not report a successful start")),
+            "a service that was installed but not started must say so: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn install_report_lines_stay_quiet_on_a_clean_start() {
+        let report = lifecycle::InstallReport {
+            binary: "/data/bin/tethra-gateway-0.1.0".into(),
+            definition: "/home/u/Library/LaunchAgents/x.plist".into(),
+            started: true,
+            pruned_binaries: Vec::new(),
+            notes: Vec::new(),
+        };
+        assert!(
+            install_report_lines(&report).is_empty(),
+            "a clean install must not invent warnings"
+        );
+    }
+
+    #[test]
+    fn install_report_notes_are_stripped_of_control_characters() {
+        // Notes interpolate paths read off disk, so a crafted definition
+        // must not be able to smuggle an escape sequence into the terminal.
+        let report = lifecycle::InstallReport {
+            binary: String::new(),
+            definition: String::new(),
+            started: true,
+            pruned_binaries: vec!["/tmp/a\u{1b}[2Kb".into()],
+            notes: vec!["replaced /tmp/x\u{1b}[31my".into()],
+        };
+        for line in install_report_lines(&report) {
+            assert!(
+                !line.contains('\u{1b}'),
+                "escape sequences must be stripped: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_report_lines_surface_the_reason_a_teardown_did_not_happen() {
+        let report = lifecycle::DisableReport {
+            stopped: false,
+            unregistered: false,
+            env_restores: Vec::new(),
+            incomplete_restores: 0,
+            notes: vec!["stop: refusing to stop the service: the service \
+                 dev.api-tracker.gateway.abc belongs to a different Tethra data directory \
+                 (/other/data), not this one (/ours)."
+                .into()],
+        };
+        let lines = disable_report_lines(&report);
+        assert!(
+            lines.iter().any(|l| l.contains("service stopped: false")),
+            "the bare outcome is still reported: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("different Tethra data directory") && l.contains("/other/data")),
+            "a false 'stopped' without its reason is unactionable: {lines:?}"
+        );
+    }
 }

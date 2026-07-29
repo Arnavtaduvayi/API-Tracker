@@ -52,6 +52,12 @@ pub struct UnlockArgs {
 pub fn unlock(ctx: &Ctx, args: UnlockArgs) -> Result<()> {
     let password = ctx::master_password()?;
     let mut vault = vault::unlock_vault(&ctx.paths, &password)?;
+    // NEW-07: `Ctx::unlocked` runs the legacy rollback re-seal on every
+    // successful unlock, but this command bypasses it — it unlocks directly.
+    // The plaintext was reached anyway by whatever command ran next, which
+    // made the gap look harmless; it is not, because `unlock` is precisely
+    // the command a user runs before walking away.
+    ctx::upgrade_restore_records(&mut vault);
     let token = SessionToken::generate();
     vault.save_session(&token)?;
     let auto_lock = vault.settings().auto_lock_minutes;

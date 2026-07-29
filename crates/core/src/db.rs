@@ -892,12 +892,21 @@ CREATE TABLE gateway_config (
 
 -- Registered routes, keyed by the first path segment. Manifest routes store
 -- NO origin at all — the upstream is resolved from the compiled-in provider
--- manifest at forward time, so a direct UPDATE of this same-uid-writable
--- table cannot redirect a live pass-through credential (ADR 0019 D3, the
--- route-row-tampering blocker). Custom-origin routes store the origin string
--- ONLY next to a MAC over (vault_id, provider_id, origin, port, consent_ts)
+-- manifest at forward time, so no attacker-chosen destination can be written
+-- into this same-uid-writable table (ADR 0019 D3, the route-row-tampering
+-- blocker). Custom-origin routes store the origin string ONLY next to a MAC
+-- over (vault_id, route_prefix, provider_id, origin, port, consent_ts)
 -- computed under a vault-derived key at consent time; the gateway verifies
--- the MAC before forwarding and never obeys the bare DB value.
+-- the MAC before forwarding and never obeys the bare DB value, so an edited
+-- stored origin STOPS the route instead of redirecting it.
+--
+-- Scope limit (SEC-01 / NEW-49): provider_id IS stored here, is not covered
+-- by any MAC for a manifest row, and selects which compiled-in origin a
+-- built-in route resolves to. The three CHECK constraints below also let all
+-- four custom columns go NULL together, which downgrades a MAC'd custom row
+-- to the unauthenticated manifest path. Both need local write access to
+-- vault.db and are an accepted, documented exclusion, not a defence — see
+-- docs/gateway/SECURITY.md and docs/gateway/THREAT_MODEL.md GW-3.
 CREATE TABLE gateway_routes (
     route_prefix             TEXT PRIMARY KEY,
     provider_id              TEXT NOT NULL,
@@ -1003,6 +1012,166 @@ ALTER TABLE runtime_request_events ADD COLUMN attribution_method TEXT;
 -- writer runs `retention::sweep` every 5 minutes, deleting a whole cohort of
 -- expired runtime events at a time.
 CREATE INDEX IF NOT EXISTS idx_gue_event ON gateway_usage_events(event_id);
+"#,
+    },
+    Migration {
+        version: 15,
+        name: "tracking_setups (zero-friction tracking state machine)",
+        sql: r#"
+-- One row per (project, folder) tracking setup — the persisted product-level
+-- state behind "Track API activity" / `tethra track` (ADR 0022 D8). The row
+-- caches the state machine value; readers re-derive it against the
+-- observation tables on every load, so a stale row can never overclaim
+-- `traffic_observed` (SI-19). Contents carry NO SECRET VALUES: provider ids,
+-- confidence labels, evidence kinds, and file paths — never a credential,
+-- a header, a body, or wire data.
+--
+-- One NON-SECRET value is carried, deliberately: a repository-discovered
+-- origin the user explicitly approved (`NeedsOriginConfirm.inferred_origin`,
+-- read from a manifest-declared base-URL variable such as `SUPABASE_URL`).
+-- It is a host name the user was shown verbatim at the approval point, and
+-- undo needs it. This comment previously said "value-free", which the
+-- crate's own test contradicts by asserting the host IS present
+-- (audit finding `ZFT-047`).
+CREATE TABLE tracking_setups (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    folder_path TEXT NOT NULL,            -- canonicalized at insert
+    state TEXT NOT NULL,
+    detection_json TEXT NOT NULL,
+    plan_summary_json TEXT,
+    applied_at TEXT,
+    first_traffic_at TEXT,
+    last_transition_at TEXT NOT NULL,
+    attention_reason TEXT,
+    UNIQUE(project_id, folder_path)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_tracking_setups_project
+    ON tracking_setups(project_id);
+"#,
+    },
+    Migration {
+        version: 16,
+        name: "tracking verification sessions (current health vs historical verification)",
+        sql: r#"
+-- v15 collapsed several distinct facts into one durable `state` value plus a
+-- `first_traffic_at` watermark, and the audit showed what that costs: a
+-- setup stayed "tracking verified" after the gateway was killed, a FAILED
+-- re-run was promoted back to verified by the PREVIOUS run's traffic, and
+-- nulling one column skipped re-derivation entirely (ZFT-005, ZFT-006,
+-- ZFT-008).
+--
+-- The fix separates them. Each apply or repair attempt opens a new
+-- verification SESSION with its own non-secret id and its own generation
+-- number; only observations recorded during the CURRENT session can verify
+-- the CURRENT setup. Historical success keeps its own column so it can still
+-- be displayed without implying present health, and a failure carries its own
+-- timestamp so newer bad news is never erased by older good news.
+--
+-- All values remain non-secret: opaque ids, integers and RFC 3339 timestamps.
+ALTER TABLE tracking_setups ADD COLUMN verification_session TEXT;
+ALTER TABLE tracking_setups ADD COLUMN config_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tracking_setups ADD COLUMN first_verified_at TEXT;
+ALTER TABLE tracking_setups ADD COLUMN attention_at TEXT;
+
+-- Existing rows: carry the historical watermark across so an already-verified
+-- user keeps their "first verified" date, and open a generation so the next
+-- read re-derives against the new rules instead of trusting the cached value.
+UPDATE tracking_setups SET first_verified_at = first_traffic_at
+    WHERE first_traffic_at IS NOT NULL;
+UPDATE tracking_setups SET attention_at = last_transition_at
+    WHERE attention_reason IS NOT NULL;
+
+-- The re-derivation query filters observations by project, source, session
+-- window and freshness; this is the index that keeps it cheap.
+CREATE INDEX IF NOT EXISTS idx_rre_project_source_at
+    ON runtime_request_events(project_id, observation_source, at);
+"#,
+    },
+    Migration {
+        version: 17,
+        name: "approved route origins (repository content is not authorization)",
+        sql: r#"
+-- Destinations a user has explicitly approved for API traffic (ADR 0024).
+--
+-- The audit showed a repository with no secrets in it — just a committed
+-- `package.json` and a committed `SUPABASE_URL` — driving the creation of a
+-- MAC'd, enabled route to an attacker-chosen host (ZFT-004). Project content
+-- may suggest that an API exists; it may never authorize a destination.
+-- Origins that come from a compiled-in Tethra manifest stay automatic;
+-- origins read from project files need a row here first.
+--
+-- `mac` is a keyed BLAKE3 over (vault id, origin, provider id, approved_at)
+-- using the vault's route MAC key, in the same length-prefixed shape as
+-- `gateway_routes`. A hand-edited row fails verification and is treated as
+-- ABSENT, so tampering downgrades to "ask the user again" rather than to
+-- "silently trusted".
+--
+-- Contents are non-secret: a host name the user was shown verbatim at the
+-- moment they approved it, a provider id, and a timestamp.
+CREATE TABLE tracking_approved_origins (
+    origin TEXT NOT NULL,             -- canonical https://<host>:<port>
+    provider_id TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    mac TEXT NOT NULL,
+    PRIMARY KEY (origin, provider_id)
+) STRICT;
+"#,
+    },
+    Migration {
+        version: 18,
+        name: "insertion-ordered verification watermark (timestamps are untrusted input)",
+        sql: r#"
+-- v16 bound an observation to the current verification session by comparing
+-- its `at` timestamp against the setup's `applied_at`. The re-audit showed
+-- what that costs: `at` is a wall-clock string written by another process
+-- and stored in a plain column, and it was only ever bounded from BELOW. A
+-- row dated a year ahead therefore read as a present-tense success and
+-- stayed one until the clock caught up, and — being the largest timestamp in
+-- the table — it also out-ranked a failure recorded now and caused the
+-- failure reason to be nulled (RA-005).
+--
+-- The bound from above is a clock-skew window, but a window is still a
+-- judgement about two clocks. This column adds a signal that does not depend
+-- on any clock at all: the highest observation rowid at the moment the setup
+-- was applied. SQLite assigns rowids monotonically on insert, so
+-- `rowid > applied_event_rowid` means "physically recorded after this setup
+-- was applied" regardless of what time the writer claims it was.
+--
+-- Existing rows get 0, which admits every row exactly as before, so an
+-- already-applied setup is not retroactively un-verified by the upgrade; its
+-- timestamp bounds still apply, and its next apply stamps a real watermark.
+ALTER TABLE tracking_setups ADD COLUMN applied_event_rowid INTEGER NOT NULL DEFAULT 0;
+"#,
+    },
+    Migration {
+        version: 19,
+        name: "tracking setup row version (compare-and-swap, not last-writer-wins)",
+        sql: r#"
+-- Every write to a tracking setup's health columns used to be
+-- `UPDATE tracking_setups SET ... WHERE id = ?1` — a blind write. The state
+-- the write was DECIDED from was read into memory earlier, so any change
+-- another process made in between was overwritten without anyone noticing.
+--
+-- That is a lost update, and it reproduces `ZFT-006` with no attacker and no
+-- clock skew: the desktop lists setups, refreshes each one, and while it is
+-- deciding, the CLI (or the gateway, or a second window) records a failure.
+-- The refresh then writes the conclusion it reached from the PRE-failure row,
+-- nulling `attention_reason`/`attention_at` and reporting `VerifiedAndActive`
+-- for a setup that is, right now, broken (`VER-01`). WAL and `busy_timeout`
+-- do not help — both transactions commit, in order, and the second one is
+-- simply wrong.
+--
+-- This column is the compare-and-swap token. A reader carries the version it
+-- read; the writer requires the row to still be at that version and bumps it.
+-- A concurrent change makes the UPDATE affect zero rows, which is a signal
+-- rather than a silent overwrite: the caller re-reads and re-derives against
+-- what is actually there. `crates/core/src/rotation.rs` has used this shape
+-- since rotations existed; this brings tracking to the same standard.
+--
+-- Existing rows start at 0, which is exactly right: the first CAS write
+-- against an un-upgraded row reads 0, requires 0, and moves it to 1.
+ALTER TABLE tracking_setups ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
 "#,
     },
 ];

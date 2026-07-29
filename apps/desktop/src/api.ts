@@ -59,6 +59,15 @@ import type {
   ProviderKeyListing,
   CredentialActivitySources,
   GatewayActivitySummary,
+  ProjectActivity,
+  TrackingScan,
+  TrackingPlan,
+  TrackingApplyReport,
+  TrackingStatus,
+  TrackingDiagnosis,
+  TrackingOriginRequest,
+  TrackingUndoReport,
+  ForegroundStatus,
   GatewayDisableReport,
   GatewayDoctor,
   GatewayInstallReport,
@@ -593,6 +602,38 @@ export const api = {
   gatewayRecording: (pause: boolean) => call<void>("gateway_recording", { pause }),
   gatewayActivity: (since: string | null) =>
     call<GatewayActivitySummary>("gateway_activity", { since }),
+  /** Same rows and window as `gatewayActivity`, split by project. */
+  gatewayActivityByProject: (since: string | null) =>
+    call<ProjectActivity[]>("gateway_activity_by_project", { since }),
   credentialActivitySources: (selector: string) =>
     call<CredentialActivitySources>("credential_activity_sources", { selector }),
+
+  // --- Track API activity (ADR 0022) ----------------------------------
+  trackingScan: (folder: string) => call<TrackingScan>("tracking_scan", { folder }),
+  /** Every repository-discovered destination, with its full disclosure. */
+  trackingOriginRequests: () => call<TrackingOriginRequest[]>("tracking_origin_requests"),
+  /**
+   * The ONLY way a repository-discovered destination enters a plan.
+   * Deliberately separate from planning and applying: neither of those can
+   * approve anything (ADR 0024, ZFT-004).
+   */
+  trackingOriginApprove: (providerId: string, origin: string) =>
+    call<TrackingOriginRequest>("tracking_origin_approve", { providerId, origin }),
+  trackingOriginRevoke: (providerId: string) =>
+    call<void>("tracking_origin_revoke", { providerId }),
+  /** Providers only — destinations come from the approvals above. */
+  trackingPlanBuild: (providers: string[]) =>
+    call<TrackingPlan>("tracking_plan_build", { providers }),
+  trackingApply: (password: string | null) =>
+    call<TrackingApplyReport>("tracking_apply", { password }),
+  trackingStatus: (setupId: string) => call<TrackingStatus>("tracking_status", { setupId }),
+  trackingList: () => call<TrackingStatus[]>("tracking_list"),
+  trackingDiagnose: (setupId: string) =>
+    call<TrackingDiagnosis[]>("tracking_diagnose", { setupId }),
+  trackingUndo: (setupId: string) => call<TrackingUndoReport>("tracking_undo", { setupId }),
+  trackingForegroundStart: () => call<void>("tracking_foreground_start"),
+  trackingForegroundActive: () => call<ForegroundStatus>("tracking_foreground_active"),
+  trackingForegroundStop: () => call<void>("tracking_foreground_stop"),
+  trackingResumeAttribution: (password: string) =>
+    call<void>("tracking_resume_attribution", { password }),
 };

@@ -555,11 +555,16 @@ impl UnlockedVault {
 
     /// The gateway route-MAC key (ADR 0019 D3), created on first use and
     /// stored vault-key-wrapped in `vault_meta` — the exact fingerprint-key
-    /// pattern. It authenticates custom-origin gateway routes (a keyed MAC
+    /// pattern. It authenticates CUSTOM-ORIGIN gateway routes (a keyed MAC
     /// over the route's identity fields) so the plaintext, same-uid-writable
-    /// `gateway_routes` table is never the trust root for where a live
-    /// pass-through credential is forwarded. Like the fingerprint key it can
-    /// verify/produce MACs only; it can never decrypt anything.
+    /// `gateway_routes` table is never a source of free-form destinations: an
+    /// edited stored origin fails verification and the route stops forwarding
+    /// instead of moving. Scope limit (SEC-01 / NEW-49): built-in routes are
+    /// selected by an unauthenticated `provider_id` and carry no MAC, and a
+    /// row whose custom columns are nulled is not checked against this key at
+    /// all — an accepted, documented exclusion, see docs/gateway/SECURITY.md.
+    /// Like the fingerprint key it can verify/produce MACs only; it can never
+    /// decrypt anything.
     pub fn gateway_route_mac_key(&mut self) -> Result<SecretBytes> {
         if let Some(wrapped_hex) = meta_get(&self.conn, "wrapped_gateway_mac_key")? {
             let wrapped = hex::decode(wrapped_hex).map_err(|_| {
@@ -585,6 +590,60 @@ impl UnlockedVault {
         )?;
         audit::record(&self.conn, "gateway_mac_key_created", None, None, "")?;
         Ok(key)
+    }
+
+    /// The key that protects recorded `.env` restore values (ADR 0028).
+    ///
+    /// `gateway_project_links.prior_env_json` records what a variable held
+    /// before Tethra re-pointed it, so `unlink` can put it back. Those
+    /// values are the user's real API credentials, and the column lives in
+    /// an **unencrypted** SQLite file: any process running as the user, any
+    /// file-level backup, and any disk image can read it. The audited head
+    /// decided what to write with a shape predicate, which classified real
+    /// key material — including a Supabase service-role JWT — as safe
+    /// (RA-006).
+    ///
+    /// The predicate is now gone from that decision. Every recorded value is
+    /// encrypted under this key instead, so secrecy no longer depends on
+    /// recognising which strings are secret.
+    ///
+    /// Unlike [`Self::gateway_matching_key`] and [`Self::gateway_route_mac_key`],
+    /// this key **can** decrypt, so it is never pushed over the gateway
+    /// control socket and never leaves a process with an unlocked vault.
+    pub fn env_restore_key(&mut self) -> Result<SecretBytes> {
+        if let Some(wrapped_hex) = meta_get(&self.conn, "wrapped_env_restore_key")? {
+            let wrapped = hex::decode(wrapped_hex).map_err(|_| {
+                CoreError::VaultCorrupted("wrapped env restore key is not valid hex")
+            })?;
+            return crypto::decrypt(
+                &self.vault_key,
+                &aad::env_restore_key(&self.vault_id),
+                &wrapped,
+                "env restore key",
+            );
+        }
+        let key = crypto::new_key();
+        let wrapped = crypto::encrypt(
+            &self.vault_key,
+            &aad::env_restore_key(&self.vault_id),
+            key.expose(),
+        )?;
+        meta_set(
+            &self.conn,
+            "wrapped_env_restore_key",
+            &hex::encode(&wrapped),
+        )?;
+        audit::record(&self.conn, "env_restore_key_created", None, None, "")?;
+        Ok(key)
+    }
+
+    /// A handle that can seal and open restore records for this vault.
+    pub fn env_restore_crypto(&mut self) -> Result<crate::envrestore::RestoreCrypto> {
+        let key = self.env_restore_key()?;
+        Ok(crate::envrestore::RestoreCrypto::new(
+            self.vault_id.clone(),
+            key,
+        ))
     }
 
     /// Re-verify the master password (reauthentication for sensitive
@@ -772,7 +831,14 @@ impl UnlockedVault {
                 wrapped,
             ],
         )?;
-        let mut repos: Vec<String> = new.repo_paths;
+        // New rows are stored canonicalized so folder-first flows can
+        // match them exactly; pre-existing rows are never rewritten
+        // (comparisons canonicalize on read instead).
+        let mut repos: Vec<String> = new
+            .repo_paths
+            .iter()
+            .map(|p| canonical_repo_path(p))
+            .collect();
         repos.sort();
         repos.dedup();
         for repo in &repos {
@@ -865,14 +931,16 @@ impl UnlockedVault {
         for repo in &update.add_repo_paths {
             self.conn.execute(
                 "INSERT OR IGNORE INTO project_repos (project_id, path) VALUES (?1, ?2)",
-                params![row.id, repo],
+                params![row.id, canonical_repo_path(repo)],
             )?;
             changed.push("repos");
         }
         for repo in &update.remove_repo_paths {
+            // Remove both spellings: the literal argument (pre-existing
+            // rows were stored as typed) and the canonical form.
             self.conn.execute(
-                "DELETE FROM project_repos WHERE project_id = ?1 AND path = ?2",
-                params![row.id, repo],
+                "DELETE FROM project_repos WHERE project_id = ?1 AND path IN (?2, ?3)",
+                params![row.id, repo, canonical_repo_path(repo)],
             )?;
             changed.push("repos");
         }
@@ -4797,11 +4865,27 @@ impl UnlockedVault {
     // ------------------------------------------------------------------
 
     /// Discover environment files across a project's registered repositories
-    /// (or an explicit path).
+    /// (or an explicit path). Non-executing: no subprocess is spawned, and
+    /// `git_history` is reported as `NotChecked`.
     pub fn env_discover(
         &self,
         project: Option<&str>,
         path: Option<&std::path::Path>,
+    ) -> Result<Vec<crate::envgov::EnvFileInfo>> {
+        self.env_discover_with(project, path, crate::envgov::HistoryProbe::Skip)
+    }
+
+    /// [`Self::env_discover`] with an explicit history policy.
+    ///
+    /// `HistoryProbe::HardenedGit` runs `git log` under `gitrepo`'s
+    /// argument and environment hardening. Callers must only pass it for a
+    /// command the user explicitly invoked against a folder they chose for
+    /// that purpose — never from an automatic scan (ADR 0023).
+    pub fn env_discover_with(
+        &self,
+        project: Option<&str>,
+        path: Option<&std::path::Path>,
+        probe: crate::envgov::HistoryProbe,
     ) -> Result<Vec<crate::envgov::EnvFileInfo>> {
         let mut roots: Vec<PathBuf> = Vec::new();
         if let Some(path) = path {
@@ -4819,7 +4903,14 @@ impl UnlockedVault {
         }
         let mut out = Vec::new();
         for root in roots {
-            out.extend(crate::envgov::discover(&root)?);
+            out.extend(
+                crate::envgov::discover_bounded(
+                    &root,
+                    crate::envgov::DiscoveryLimits::default(),
+                    probe,
+                )?
+                .files,
+            );
         }
         Ok(out)
     }
@@ -9231,6 +9322,45 @@ fn parse_optional_ts_lenient(value: Option<&str>) -> (Option<time::OffsetDateTim
             Err(_) => (None, true),
         },
     }
+}
+
+/// Canonical spelling of a project repo path: symlinks and `..` resolved,
+/// falling back to the literal path when the directory does not exist (the
+/// same rule `stack_repo_key` uses, so the two path keys cannot drift).
+/// New `project_repos` rows are stored in this form; comparisons against
+/// pre-existing rows canonicalize on read instead of rewriting user data.
+pub fn canonical_repo_path(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    p.canonicalize()
+        .unwrap_or_else(|_| p.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// Reverse lookup: which projects have `folder` registered as a repo path?
+/// Both sides are canonicalized before comparison, so a stored literal path
+/// and a selected symlinked spelling of the same directory still match.
+/// Returns project ids sorted by project name (deterministic for callers
+/// that must resolve ambiguity honestly rather than pick silently).
+pub fn projects_for_folder(conn: &Connection, folder: &std::path::Path) -> Result<Vec<String>> {
+    let wanted = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf())
+        .display()
+        .to_string();
+    let mut stmt = conn.prepare(
+        "SELECT pr.project_id, pr.path FROM project_repos pr
+         JOIN projects p ON p.id = pr.project_id ORDER BY p.name, pr.path",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut ids: Vec<String> = Vec::new();
+    for row in rows {
+        let (project_id, path) = row?;
+        if canonical_repo_path(&path) == wanted && !ids.contains(&project_id) {
+            ids.push(project_id);
+        }
+    }
+    Ok(ids)
 }
 
 // ---------------------------------------------------------------------------

@@ -162,7 +162,15 @@ pub fn run(ctx: &Ctx, cmd: EnvCmd) -> Result<()> {
 
 fn discover(ctx: &Ctx, args: DiscoverArgs) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
-    let found = vault.env_discover(args.project.as_deref(), args.path.as_deref())?;
+    // `env discover` is an explicitly invoked command against a folder the
+    // user named for this purpose, so it may pay for the hardened history
+    // probe. Automatic scans (folder selection, tracking) never do — see
+    // ADR 0023.
+    let found = vault.env_discover_with(
+        args.project.as_deref(),
+        args.path.as_deref(),
+        envgov::HistoryProbe::HardenedGit,
+    )?;
     render::emit(ctx.json, &found, || {
         if found.is_empty() {
             println!("No .env files found.");
@@ -178,7 +186,12 @@ fn discover(ctx: &Ctx, args: DiscoverArgs) -> Result<()> {
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| "-".into()),
                     format!("{:?}", f.git_status).to_lowercase(),
-                    if f.in_git_history { "yes" } else { "no" }.into(),
+                    match f.git_history {
+                        envgov::GitHistory::Present => "yes",
+                        envgov::GitHistory::Absent => "no",
+                        envgov::GitHistory::NotChecked => "not checked",
+                    }
+                    .into(),
                     f.entry_count.to_string(),
                     f.problems.len().to_string(),
                 ]
@@ -204,7 +217,7 @@ fn discover(ctx: &Ctx, args: DiscoverArgs) -> Result<()> {
                     f.rel_path
                 );
             }
-            if f.in_git_history && f.class == envgov::EnvFileClass::Values {
+            if f.in_git_history() && f.class == envgov::EnvFileClass::Values {
                 println!(
                     "NOTE: {} appears in Git history; deleting the file does not remove past commits.",
                     f.rel_path

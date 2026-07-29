@@ -106,6 +106,73 @@ fn a_direct_update_of_a_manifest_route_row_cannot_redirect_it() {
         .any(|(p, why)| p == "openai" && why.contains("unknown provider")));
 }
 
+/// PINS AN ACCEPTED RISK — this is not a property anyone wants.
+///
+/// `NEW-50`: the test above proves only that an UNKNOWN `provider_id` fails
+/// closed, which is the easy half. The half that matters is that a KNOWN one
+/// succeeds: anyone who can write to `gateway_routes` can point a built-in
+/// route at a DIFFERENT built-in provider's origin, and traffic sent to
+/// `/openai/...` then goes to `api.anthropic.com` with the caller's OpenAI
+/// credential attached. Nothing detects it, because a manifest route carries
+/// no MAC — only custom origins do (`custom_origin_mac`).
+///
+/// This is the accepted residual of `SEC-01`: write access to the vault
+/// database is already game over by the threat model, and the MAC that would
+/// close it needs a key the gateway does not have while the vault is locked.
+/// The test exists so the behaviour cannot change SILENTLY — if a future
+/// change makes manifest rows integrity-checked, this test fails and the
+/// documented risk gets re-dispositioned deliberately rather than by accident.
+#[test]
+fn pinned_accepted_risk_a_known_provider_id_on_a_manifest_row_does_redirect_the_route() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = migrated(&dir.path().join("vault.db"));
+    routes::add_manifest_route(&conn, "openai", "openai").unwrap();
+
+    // Baseline: the route resolves to the provider it was registered for.
+    let table = routes::load_route_table(&conn, None).unwrap();
+    match &table.route("openai").expect("openai route").target {
+        RouteTarget::Ready(origin) => assert_eq!(origin.host, "api.openai.com"),
+        other => panic!("expected ready, got {other:?}"),
+    }
+
+    // A direct write swaps the provider for another COMPILED-IN one.
+    conn.execute(
+        "UPDATE gateway_routes SET provider_id = 'anthropic' WHERE route_prefix = 'openai'",
+        [],
+    )
+    .unwrap();
+
+    let table = routes::load_route_table(&conn, None).unwrap();
+    let route = table
+        .route("openai")
+        .expect("the row still loads: nothing about it is integrity-checked");
+    match &route.target {
+        RouteTarget::Ready(origin) => {
+            assert_eq!(
+                origin.host, "api.anthropic.com",
+                "ACCEPTED RISK (SEC-01): a database write redirects the prefix to the \
+                 other built-in provider's origin. If this assertion ever fails, the \
+                 risk was closed — update SECURITY_AND_PRIVACY.md rather than this test."
+            );
+            assert_eq!(origin.port, 443);
+        }
+        other => panic!("expected ready, got {other:?}"),
+    }
+    assert_eq!(route.provider_id, "anthropic");
+    assert_eq!(
+        route.usage_shape, "anthropic",
+        "the usage extractor follows the provider too, so the redirect is total"
+    );
+    assert!(
+        !route.custom,
+        "the row is still a manifest route, which is why no MAC guards it"
+    );
+    assert!(
+        table.skipped.is_empty(),
+        "nothing is skipped and nothing is reported: the redirect is silent"
+    );
+}
+
 #[test]
 fn custom_routes_are_mac_bound_and_tamper_evident() {
     let dir = tempfile::tempdir().unwrap();

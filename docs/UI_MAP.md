@@ -1097,3 +1097,44 @@ section 3.23, and the runtime-observability mapping rows) reflect the
 `feat/runtime-api-observability` branch; see the gate documents under
 `docs/observability/` for the authoritative architecture, threat model,
 and privacy model.
+
+## Activity dashboard and Track API activity (ADR 0022)
+
+Added by the zero-friction tracking milestone. The app's default view is
+now **Activity**; navigation is grouped ACTIVITY / VAULT / SECURITY /
+ADVANCED, with the previous Gateway view under **Advanced → Gateway
+internals** and the previous API activity view as **Observation runs**.
+Nothing was deleted.
+
+### Activity (`DashboardView.tsx`) — default view
+
+| Control | Behavior |
+|---|---|
+| Today / 7 days / 30 days | time-range selector for the observed-traffic panel |
+| Track API activity | opens the Track flow |
+| Retry (activity) | re-fetches after a visible load failure |
+| Retry (tracked projects) | independent of the activity panel |
+| Resume attribution | master-password dialog; appears only when attribution is paused |
+| Run tracking check | ranked diagnosis for that project |
+| Stop tracking… | undo: restores files, removes routes it created, keeps history |
+
+Panels: observed-locally metrics (requests, success rate, errors,
+latency p50/p95/p99, tokens, estimated cost labeled a lower bound, first
+and last observed), endpoints, models, attribution states, tracked-project
+cards, and a coverage-honesty footer. Every panel distinguishes loading,
+empty, and error.
+
+### Track API activity (`TrackFlow.tsx`)
+
+| Screen | Controls |
+|---|---|
+| idle | Select project folder · Cancel (Try again after an error) |
+| scanning | none (transient; errors render inline) |
+| review | per-provider checkboxes · per-provider origin field (custom-origin providers only) · master-password field (optional) · Start tracking · Cancel |
+| applying | none |
+| waiting | Run diagnostics · Open dashboard |
+| verified | Open dashboard |
+| needs attention | Track while the app is open (only when the OS blocked the service) · Try again · Back to dashboard |
+
+Start tracking is disabled — with the reason stated — when nothing is
+selected or the diff could not be prepared.

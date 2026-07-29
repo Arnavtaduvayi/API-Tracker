@@ -1,0 +1,270 @@
+name: Packaged macOS service lifecycle
+
+# The authoritative execution of `--scope full --require-service`.
+#
+# WHY THIS JOB EXISTS
+# -------------------
+# `--require-service` is the only scope that installs a REAL per-user
+# LaunchAgent through the product's own path and then drives the service
+# lifecycle against it. It had never been observed passing anywhere, because
+# its own precondition — a machine with no installed Tethra gateway — is not
+# met on the developer machine that carries a live production gateway, and
+# running it there is how REM-001 (a redirected $HOME does not isolate
+# launchd) was found the hard way.
+#
+# A hosted macOS runner is the disposable clean room that scope needs. That
+# this is possible at all was MEASURED, not assumed: the `macos-26-arm64`
+# image runs a real Aqua login session (`launchctl managername` = Aqua,
+# `gui/501` created by `loginwindow`), `launchctl bootstrap gui/<uid>`
+# returns 0, and a bootstrapped agent genuinely RUNS. The previous claim in
+# ci.yml that "a hosted runner has no login session to register into" was
+# wrong, and is corrected there.
+#
+# WHAT A GREEN RUN HERE CLAIMS
+#   * the packaged .app carries a runnable, version- and byte-matched helper;
+#   * the product installs a LaunchAgent whose label is namespaced to THIS
+#     run's data directory and is therefore never the production label;
+#   * launchd loaded that exact job, and the running process's executable and
+#     arguments match the plist this run owns;
+#   * the service answers on its authenticated control path;
+#   * zero-friction setup verifies only after real traffic;
+#   * the whole service lifecycle (status/stop/start/restart/uninstall) works
+#     through the product's own verbs;
+#   * every resource this run created was removed, and nothing else was.
+#
+# WHAT IT DOES NOT CLAIM
+#   * the desktop GUI is not click-driven here;
+#   * Windows and Linux packaging are not covered by this macOS harness;
+#   * the app is unsigned (no signing identity exists on a hosted runner).
+
+# Runs on EVERY pull request, with no path filter.
+#
+# A path filter was considered and rejected. The job certifies the packaged
+# lifecycle end to end — bundling, helper provenance, launchd registration,
+# forwarding, verification, privacy at rest and teardown — and the set of
+# changes that cannot affect any of those is not something a glob can state
+# honestly. A Cargo.lock bump, a crate the desktop links, or a change to the
+# bundling script all reach it. Since the alternative is a required check that
+# silently does not run on the commit it is supposed to certify, it runs
+# always: the repository is public, so hosted macOS minutes are free, and a
+# ~20-minute job per PR is a smaller cost than a green tick that means nothing.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: this job only reads the repository.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  service-lifecycle:
+    name: Packaged macOS service lifecycle
+    runs-on: macos-latest
+    # A full bundle build plus a real service lifecycle and a live provider
+    # round trip. The cap is a guard against a hang, not a budget.
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # ---------------------------------------------------------------------
+      # PRECONDITIONS — before any toolchain, any build, and above all before
+      # anything that could register a cleanup action.
+      #
+      # This job is only evidence if it ran in a clean room. It asserts that
+      # and FAILS SAFELY if not. It deliberately does NOT delete pre-existing
+      # state to force itself to continue: unknown state on a runner means the
+      # premise is broken, and destroying it would be exactly the REM-001
+      # mistake in a new costume.
+      # ---------------------------------------------------------------------
+      - name: Clean-runner preconditions (fail safely; never remediate)
+        run: bash scripts/ci_service_preconditions.sh
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable branch
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      # The anti-tautology gate first: it needs no bundle, so a harness that
+      # cannot report a failure dies in seconds rather than after a build.
+      - name: Validation harness self-check (anti-tautology gate)
+        run: bash scripts/tracking_validate_macos.sh --scope selfcheck
+
+      - name: Install frontend deps
+        working-directory: apps/desktop
+        run: npm ci
+
+      - name: Stage the bundled CLI sidecar (externalBin — the app ships its helper)
+        run: bash scripts/bundle_cli.sh
+
+      # The service LIFECYCLE VERBS — install, stop, start, restart, status,
+      # uninstall — against a real per-user LaunchAgent. This script was
+      # written for exactly that and has never run anywhere but a developer's
+      # machine; the previous handoff records "I did not run
+      # scripts/gateway_validate_macos.sh against the real $HOME" as an
+      # explicit gap. It runs here rather than being reimplemented inside the
+      # tracking harness, because two harnesses asserting the same lifecycle
+      # is how they drift.
+      #
+      # It runs BEFORE the bundle build so a lifecycle failure surfaces in
+      # ~2 minutes instead of after a ten-minute Tauri build. It installs and
+      # removes only its own per-installation label and proves its teardown.
+      - name: Gateway service lifecycle (install → stop → restart → uninstall)
+        id: gateway
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/service-evidence"
+          export TETHRA_GATEWAY_VALIDATION_RESULTS_JSON="$RUNNER_TEMP/service-evidence/gateway-results.json"
+          bash scripts/gateway_validate_macos.sh \
+            2>&1 | tee "$RUNNER_TEMP/service-evidence/gateway-lifecycle.log"
+
+      # `VAL-05-R`: this harness used to gate on its own exit code and an
+      # in-script `REQUIRED_CHECKS=50` equality — a number derived from ONE
+      # measured run — with no register and no machine-readable result at all.
+      # Identity binding was 0 of 57: renaming a check moved nothing. It now
+      # emits the same schema the tracking harness does and is asserted by the
+      # SAME validator against the SAME trusted manifest, which names all 50
+      # required checks and all 15 optional ones individually. Scope, mode and
+      # commit are passed IN from this workflow and are never read from the
+      # artifact.
+      - name: Assert the gateway lifecycle scope completed (not merely exited)
+        if: always() && steps.gateway.outcome != 'skipped'
+        run: |
+          bash scripts/ci_assert_service_results.sh \
+            "$RUNNER_TEMP/service-evidence/gateway-results.json" \
+            --scope gateway --mode lifecycle --commit "${{ github.sha }}"
+
+      # Between the two real-service runs the machine must be a clean room
+      # again. If the lifecycle script left anything, the tracking scope's own
+      # precondition would refuse — this makes that the explicit statement
+      # rather than a confusing downstream refusal.
+      - name: Re-assert the clean room between the two service runs
+        run: bash scripts/ci_service_preconditions.sh
+
+      - name: Build the real macOS app bundle
+        working-directory: apps/desktop
+        run: npm run tauri build -- --bundles app
+
+      # The app a user gets is not "the app inside the build tree". Copying it
+      # out is the SETUP for proving the bundle is self-contained; the step
+      # after it is the proof.
+      - name: Copy the .app outside the repository
+        run: |
+          set -euo pipefail
+          DEST="$RUNNER_TEMP/packaged-app"
+          mkdir -p "$DEST"
+          cp -R target/release/bundle/macos/Tethra.app "$DEST/"
+          echo "PACKAGED_APP=$DEST/Tethra.app" >> "$GITHUB_ENV"
+          echo "copied to $DEST/Tethra.app"
+          ls -la "$DEST/Tethra.app/Contents/MacOS/"
+
+      # NEW-47: the step above used to CLAIM that copying the bundle out
+      # "proves it is self-contained". Copying proves nothing on its own — the
+      # copy was never exercised in a way that could fail if a path resolved
+      # back into the repository. The audit confirmed the property holds by
+      # measurement; this makes that measurement a gate instead of a comment.
+      - name: Assert the bundle resolves nothing relative to the repository
+        run: |
+          set -euo pipefail
+          APP="$PACKAGED_APP"
+          REPO="$GITHUB_WORKSPACE"
+          fail=0
+          for bin in "$APP/Contents/MacOS/"*; do
+            [ -f "$bin" ] || continue
+            # 1. No compiled-in path into the source tree.
+            if strings -a "$bin" | grep -qF "$REPO"; then
+              echo "FAIL: $bin embeds the repository root $REPO"
+              strings -a "$bin" | grep -F "$REPO" | head -5
+              fail=1
+            else
+              echo "PASS: $(basename "$bin") embeds no path into $REPO"
+            fi
+            # 2. No non-system dynamic library.
+            if otool -L "$bin" | tail -n +2 \
+                 | grep -vE '^\s+(/usr/lib/|/System/Library/)' | grep -q .; then
+              echo "FAIL: $bin links a non-system dylib"
+              otool -L "$bin" | tail -n +2 \
+                | grep -vE '^\s+(/usr/lib/|/System/Library/)'
+              fail=1
+            else
+              echo "PASS: $(basename "$bin") links only system libraries"
+            fi
+          done
+          # 3. The bundled helper reads its compiled-in provider manifests with
+          #    an EMPTY environment and a working directory outside the
+          #    repository. `env -i` strips PATH, HOME and every TETHRA_*
+          #    variable, so anything it needs must come from inside the binary.
+          #    `provider list` is the right verb precisely because it needs no
+          #    vault and no state: what it prints comes from `include_str!`-ed
+          #    manifests or from nowhere.
+          out="$(cd / && env -i "$APP/Contents/MacOS/tethra" provider list 2>&1)" || true
+          n="$(printf '%s\n' "$out" | grep -cE '^[a-z0-9][a-z0-9-]* +' || true)"
+          if [ "$n" -ge 21 ] && printf '%s' "$out" | grep -q '^openai '; then
+            echo "PASS: the bundled helper read $n embedded manifests under env -i with cwd=/"
+          else
+            echo "FAIL: the bundled helper could not read its manifests outside the repository"
+            echo "      (matched $n manifest rows; expected at least 21, including openai)"
+            printf '%s\n' "$out" | head -20
+            fail=1
+          fi
+          exit "$fail"
+
+      # ---------------------------------------------------------------------
+      # THE POINT OF THE JOB.
+      # ---------------------------------------------------------------------
+      - name: Packaged validation (FULL scope, REAL service — REQUIRED)
+        id: service
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/service-evidence"
+          export TETHRA_VALIDATION_RESULTS_JSON="$RUNNER_TEMP/service-evidence/results.json"
+          bash scripts/tracking_validate_macos.sh \
+            --scope full --require-service "$PACKAGED_APP" \
+            2>&1 | tee "$RUNNER_TEMP/service-evidence/service-lifecycle.log"
+
+      # A green script exit is not the same statement as "the service scope
+      # completed". This asserts the machine-readable result says so.
+      #
+      # The scope, mode and commit are passed IN, from this workflow — they are
+      # never read from the artifact. Together with the committed manifest that
+      # supplies the required counts and check names, that is what stops a
+      # results file from defining its own acceptance criteria: the previous
+      # revision took every expectation from the file it was validating, and a
+      # twelve-line forgery declaring zero checks passed it (VAL-01).
+      #
+      # `github.sha` and NOT `github.event.pull_request.head.sha`: on a
+      # pull_request event GitHub checks out a MERGE commit, `GITHUB_SHA` is
+      # that merge commit, and the harness stamps `GITHUB_SHA` into the
+      # results. Passing the PR head here instead would compare two different
+      # commits and fail every PR run — which is how a commit check turns from
+      # a guard into an outage.
+      - name: Assert the service scope completed (not merely exited)
+        if: always() && steps.service.outcome != 'skipped'
+        run: |
+          bash scripts/ci_assert_service_results.sh \
+            "$RUNNER_TEMP/service-evidence/results.json" \
+            --scope full --mode service --commit "${{ github.sha }}"
+
+      # Cleanup is a claim the run makes about itself. Verify it independently,
+      # from outside the script, after the script's own trap has run.
+      - name: Verify cleanup left nothing behind
+        if: always() && steps.service.outcome != 'skipped'
+        run: bash scripts/ci_service_cleanup_check.sh | tee "$RUNNER_TEMP/service-evidence/cleanup.log"
+
+      - name: Upload service-lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: packaged-macos-service-lifecycle
+          path: ${{ runner.temp }}/service-evidence
+          if-no-files-found: warn
+          retention-days: 30

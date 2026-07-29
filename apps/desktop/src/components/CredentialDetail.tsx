@@ -54,6 +54,7 @@ export function CredentialDetail(props: {
   const [exposurePromptOpen, setExposurePromptOpen] = useState(false);
   const [permissions, setPermissions] = useState<StoredPermissions | null>(null);
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
+  const [manifestError, setManifestError] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[] | null>(null);
   const [versions, setVersions] = useState<CredentialVersionInfo[] | null>(null);
   const [permPreview, setPermPreview] = useState<PermissionsPreview | null>(null);
@@ -106,12 +107,25 @@ export function CredentialDetail(props: {
 
   // The provider manifest gates the provider-side lifecycle actions so only
   // truly implemented capabilities get buttons (honest representation).
+  //
+  // A failed read is NOT "this provider cannot do it" (NEW-38). Swallowing
+  // the error into `null` left `manifest?.capabilities…support ===
+  // "implemented"` false, and the screen then asserted "This provider has no
+  // API key creation" — a fabricated capability claim about OpenAI and
+  // Supabase, which both implement it, on the one surface whose purpose is
+  // capability honesty. The failure is now its own state.
   useEffect(() => {
     if (!credential) return;
     api
       .providerGet(credential.provider)
-      .then(setManifest)
-      .catch(() => setManifest(null));
+      .then((m) => {
+        setManifest(m);
+        setManifestError(null);
+      })
+      .catch((e) => {
+        setManifest(null);
+        setManifestError(isApiError(e) ? e.message : String(e));
+      });
   }, [credential]);
 
   const hideRevealed = useCallback(() => {
@@ -523,23 +537,40 @@ export function CredentialDetail(props: {
             These act on REAL provider-side keys through the provider&apos;s administrative
             connection.
           </p>
+          {manifestError !== null && (
+            <p className="error" role="alert">
+              {c.provider}&apos;s capability manifest could not be read: {manifestError}. What
+              this provider supports is therefore UNKNOWN on this screen — the absence of the
+              buttons below is not evidence that it lacks these operations.
+            </p>
+          )}
           <p style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
             {manifest?.capabilities.create_credential.support === "implemented" ? (
               <button onClick={() => setTestKeyOpen(true)}>Create test key…</button>
+            ) : manifest === null ? (
+              <span className="muted">
+                Whether {c.provider} supports API key creation is unknown — its manifest was not
+                read.
+              </span>
             ) : (
               <span className="muted">
                 This provider has no API key creation — create keys in its dashboard
-                {manifest?.manage_url ? ` (${manifest.manage_url})` : ""}.
+                {manifest.manage_url ? ` (${manifest.manage_url})` : ""}.
               </span>
             )}
             {manifest?.capabilities.revoke_credential.support === "implemented" ? (
               <button className="danger" onClick={() => setRevokeConfirmOpen(true)}>
                 Revoke at provider…
               </button>
+            ) : manifest === null ? (
+              <span className="muted">
+                Whether {c.provider} supports API revocation is unknown — its manifest was not
+                read.
+              </span>
             ) : (
               <span className="muted">
                 This provider has no API revocation — revoke keys in its dashboard
-                {manifest?.manage_url ? ` (${manifest.manage_url})` : ""}.
+                {manifest.manage_url ? ` (${manifest.manage_url})` : ""}.
               </span>
             )}
           </p>

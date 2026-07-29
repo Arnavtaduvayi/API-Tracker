@@ -12,15 +12,32 @@ use api_tracker_gateway::service::Service;
 use api_tracker_gateway::{control, routes, store};
 use rusqlite::Connection;
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
 fn uninstalled_service() -> ServiceStatus {
     ServiceStatus {
         platform: "macos-launch-agent",
+        // Namespaced service identity (ADR 0025): a fixture must name an
+        // explicit test installation, never a real one.
+        installation_id: "0123456789ab".into(),
+        service_name: "dev.api-tracker.gateway.0123456789ab".into(),
         installed: false,
         definition_path: "/tmp/none.plist".into(),
         definition: None,
         matches_data_dir: false,
         binary_exists: false,
         binary_version: None,
+        binary_version_measured: false,
         registered: false,
         running: false,
         pid: None,
@@ -110,7 +127,7 @@ fn installed_but_stopped_and_linked_projects_at_risk_are_diagnosed() {
         var_override: None,
     };
     let plan = api_tracker_gateway::envlink::plan_link(&conn, &req).unwrap();
-    api_tracker_gateway::envlink::apply_link(&conn, &req, &plan).unwrap();
+    api_tracker_gateway::envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
     drop(conn);
 
     let report = doctor::diagnose_with(dir.path(), installed_service(dir.path()));
@@ -224,4 +241,123 @@ fn a_stale_nonce_diagnoses_control_auth_failure_and_stale_paths_are_reported() {
     missing.binary_exists = false;
     let report = doctor::diagnose_with(dir.path(), missing);
     assert!(ids(&report).contains(&"service_binary_missing"));
+}
+
+// ---------------------------------------------------------------------------
+// Port drift (NEW-02)
+//
+// A gateway that bound a different port than the persisted one was invisible
+// to every check in this file: the control channel answers regardless of
+// which TCP port was taken, so the state classified as `running`; the
+// identity probe on `config.port` returned `NoListener`, which is not a
+// finding; and `link_health` compared the `.env` against `config.port` — the
+// same value the `.env` was written from. That is why the packaged-link CI
+// failure could only be recorded as "unexplained".
+// ---------------------------------------------------------------------------
+
+/// A port nothing is listening on, so the identity probe answers
+/// `NoListener` rather than accidentally finding a stranger.
+#[cfg(unix)]
+fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    l.local_addr().unwrap().port()
+}
+
+#[cfg(unix)]
+#[test]
+fn port_drift_is_an_error_and_names_both_ports() {
+    let dir = vault_dir();
+    let conn = migrated(&dir.path().join("vault.db"));
+    routes::add_manifest_route(&conn, "openai", "openai").unwrap();
+
+    // The configured port: what every linked .env was written from.
+    let configured = free_port();
+    let mut config = store::load_config(&conn).unwrap();
+    config.port = Some(configured);
+    config.enabled = true;
+    store::save_config(&conn, &config).unwrap();
+
+    let env = dir.path().join("app.env");
+    std::fs::write(&env, "").unwrap();
+    let req = api_tracker_gateway::envlink::LinkRequest {
+        project_id: "p1".into(),
+        project_name: "app".into(),
+        route_prefix: "openai".into(),
+        project_dir: None,
+        files: vec![env.clone()],
+        var_override: None,
+    };
+    let plan = api_tracker_gateway::envlink::plan_link(&conn, &req).unwrap();
+    api_tracker_gateway::envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
+    drop(conn);
+
+    // The gateway comes up on a DIFFERENT port, exactly as it did when it
+    // read a NULL port at boot and fell back to `bind(0)`.
+    let service = Service::start(dir.path(), 0).unwrap();
+    let live = service.port();
+    assert_ne!(live, configured, "the fixture must actually diverge");
+
+    let report = doctor::diagnose_with(dir.path(), installed_service(dir.path()));
+    let found = ids(&report);
+    assert!(found.contains(&"port_drift"), "{found:?}");
+    assert_eq!(report.overall, Severity::Error);
+    let f = report
+        .findings
+        .iter()
+        .find(|f| f.id == "port_drift")
+        .unwrap();
+    assert!(f.title.contains(&live.to_string()), "{}", f.title);
+    assert!(
+        f.title.contains(&configured.to_string()),
+        "both numbers, or the reader cannot tell which is authoritative: {}",
+        f.title
+    );
+    assert_eq!(f.repair.as_deref(), Some("tethra gateway restart"));
+
+    // The `running` line must stop presenting the live port as the whole
+    // truth, and the per-link view must agree with the global finding.
+    let running = report.findings.iter().find(|f| f.id == "running").unwrap();
+    assert!(
+        running.detail.contains(&configured.to_string()),
+        "{}",
+        running.detail
+    );
+    assert!(
+        report.links[0]
+            .issues
+            .iter()
+            .any(|i| i.contains(&live.to_string()) && i.contains("restart")),
+        "{:?}",
+        report.links[0].issues
+    );
+
+    drop(service);
+}
+
+/// Negative control: the same fixture with the two ports EQUAL must not
+/// produce the finding, so it is driven by the comparison and not by the
+/// mere presence of a live gateway.
+#[cfg(unix)]
+#[test]
+fn no_port_drift_when_the_live_port_is_the_configured_one() {
+    let dir = vault_dir();
+    let conn = migrated(&dir.path().join("vault.db"));
+    routes::add_manifest_route(&conn, "openai", "openai").unwrap();
+    drop(conn);
+
+    let service = Service::start(dir.path(), 0).unwrap();
+    let port = service.port();
+    let conn = db::open(&dir.path().join("vault.db")).unwrap();
+    let mut config = store::load_config(&conn).unwrap();
+    config.port = Some(port);
+    config.enabled = true;
+    store::save_config(&conn, &config).unwrap();
+    drop(conn);
+
+    let report = doctor::diagnose_with(dir.path(), installed_service(dir.path()));
+    let found = ids(&report);
+    assert!(!found.contains(&"port_drift"), "{found:?}");
+    assert!(found.contains(&"running"), "{found:?}");
+
+    drop(service);
 }

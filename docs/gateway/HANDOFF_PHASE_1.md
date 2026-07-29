@@ -60,8 +60,13 @@ highs:
 - Coalesced 100-continue hang (no seedable response-head reader) → seedable
   reader; spike-proven. ADR D2.
 - Route-row-tampering credential theft (free-form origins in a same-uid DB) →
-  origins never stored in / obeyed from the DB (manifest lookup + MAC'd custom
-  origins, not forwarded while locked-since-boot). ADR D3.
+  no free-form origin is stored in / obeyed from the DB (manifest lookup +
+  MAC'd custom origins, not forwarded while locked-since-boot). ADR D3.
+  *(Scoped, SEC-01: built-in routes still select their origin by an
+  unauthenticated `provider_id`, so a local-DB attacker can reassign one to a
+  different SHIPPED provider's origin, or strip a custom row's authenticated
+  columns to reach the same path. Documented exclusion — see
+  `SECURITY.md` and `THREAT_MODEL.md` GW-3.)*
 - Post-DNS SSRF gap (`check_authority` doesn't classify DNS names) → two-phase
   `resolve_validated` on every connect. ADR D3.
 - Key-handoff over unauthenticated loopback TCP → Unix socket, peer-uid,

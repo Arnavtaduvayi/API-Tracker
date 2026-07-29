@@ -2817,3 +2817,28 @@ SET-01 ☐ ·
 BCK-01 ☐ BCK-02 ☐ BCK-03 ☐ BCK-04 ☐ BCK-05 ☐ BCK-06 ☐ BCK-07 ☐ BCK-08 ☐ ·
 CLEAN-01 ☐ ·
 L-01 ☐ L-02 ☐ L-03 ☐ L-04 ☐ L-05 ☐ L-06 ☐ L-07 ☐
+
+## Tracking cases (ADR 0022)
+
+Previously this plan had zero gateway or tracking coverage. These cases
+cover the primary workflow. Use fake credentials only.
+
+| # | Case | Steps | Expected |
+|---|---|---|---|
+| T1 | First-time tracking, one provider | Fresh vault → Activity → Track API activity → pick a folder with `OPENAI_API_KEY` in `.env` and `openai` in `package.json` → Start tracking | One review screen lists OpenAI as confirmed with its evidence, shows the exact `.env` diff, and states what is never recorded. Apply reports each step. Then "Restart your app, then make one API request." |
+| T2 | Verification requires real traffic | From T1, do nothing | Stays on "Waiting for traffic…". **Never** shows "Tracking verified". |
+| T3 | Verification succeeds | From T2, restart the sample app and make one request | Flips to "Tracking verified" naming the provider, latency, and model when present. |
+| T4 | Multiple providers in one pass | Folder with OpenAI + Anthropic keys and SDKs | Both appear pre-selected; ONE review screen; one Start tracking; both routes created. No per-provider form. |
+| T5 | Unsupported provider is honest | Add `STRIPE_SECRET_KEY` and the stripe SDK | Stripe is listed as "detected, not currently supported" with the reason, its checkbox disabled, and Start tracking still enabled for the others. |
+| T6 | Custom origin needs confirmation | Folder with `SUPABASE_URL` | Supabase shows a pre-filled, editable origin field and the "forwarded only to this exact address" wording. |
+| T7 | Nothing detected | Empty folder | "No trackable APIs detected in this folder." plus what was scanned and how deep. Not a blank screen. |
+| T8 | Refused scan root | Pick your home directory | Inline error naming the refusal, with Try again. |
+| T9 | Deselect everything | Uncheck every provider | Start tracking disabled AND the reason shown. |
+| T10 | Diagnosis on demand | On the waiting screen, click Run diagnostics | Ranked list; restart hint first when the gateway is healthy. |
+| T11 | Docker project | Add `docker-compose.yml`, run diagnostics | Compose cause listed explicitly. |
+| T12 | Attribution paused | Lock the vault, return to Activity | Banner: "Credential attribution paused — traffic is still recorded." with Resume attribution. |
+| T13 | Resume attribution | Click Resume attribution, enter master password | Banner clears. |
+| T14 | Stop tracking | Project card → Stop tracking… | `.env` restored to pre-tracking content; routes removed unless shared; history retained. |
+| T15 | Re-run is idempotent | Run T1 again on the same folder | "already tracked" note; no duplicate rows; no second file change. |
+| T16 | Load failure is visible | Simulate a backend failure for the activity fetch | Error text plus Retry — never an empty chart presented as no data. |
+| T17 | Advanced still reachable | Advanced → Gateway internals | The previous Gateway view, unchanged. |

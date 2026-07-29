@@ -102,9 +102,12 @@ shared vault.db:
   bind, matching-key toggle (default OFF), enabled service version,
   retention overrides.
 - `gateway_routes` — (route_prefix, provider_id, custom_origin_mac?,
-  enabled). **The upstream origin is NOT stored here** — manifest routes
+  enabled). No free-form upstream origin is stored here — manifest routes
   resolve it from the on-disk manifest; custom origins store a MAC over
-  `(vault_id, provider_id, origin, port, consent_ts)` verified before use.
+  `(vault_id, route_prefix, provider_id, origin, port, consent_ts)` verified
+  before use. `provider_id` IS stored here, is unauthenticated, and selects
+  which compiled-in manifest origin a built-in route resolves to (SEC-01,
+  below).
 - `gateway_project_links` — (link_slug≥128-bit CSPRNG, project_id,
   route_prefix, prior env value + no_proxy state for restore).
 - `gateway_usage_events` — extracted usage (model, token counts,
@@ -118,9 +121,21 @@ changes by polling SQLite `PRAGMA data_version` (cheap, no vault). Route/config
 WRITES require an unlocked vault + re-auth via the CLI/desktop and are audited;
 the service only READS CONFIGURATION. (It is not read-only overall: its writer
 thread bumps `gateway_route_counters`, inserts `gateway_usage_events` and
-`gateway_usage_daily`, and deletes expired rows on its retention sweep.) Because origins are never obeyed from the DB (manifest
-lookup or MAC-verified), a same-user `UPDATE gateway_routes` cannot redirect a
-live pass-through credential. Every upstream connection runs the observe
+`gateway_usage_daily`, and deletes expired rows on its retention sweep.)
+Because no free-form origin is obeyed from the DB (manifest lookup or
+MAC-verified), a same-user `UPDATE gateway_routes SET custom_origin = ...`
+cannot redirect a MAC'd custom route — the edited row fails verification and
+the route stops forwarding rather than going somewhere new, and no
+attacker-chosen destination can be injected. A `provider_id` rewrite is a
+different matter and IS effective: it moves a built-in route to another
+SHIPPED provider's compiled-in origin with the pass-through credential still
+attached, and nulling all four custom columns downgrades a custom route onto
+that same unauthenticated path. Both require local write access to `vault.db`
+and are a documented, accepted exclusion — see `SECURITY.md` *"What database
+tampering can and cannot do to your routes"*, the root `THREAT_MODEL.md`
+metadata-edit row, and `docs/activity-onboarding/SECURITY_AND_PRIVACY.md`
+*"the local-database attacker"* (SEC-01 / NEW-49).
+Every upstream connection runs the observe
 two-phase SSRF check (`check_authority` at load AND `resolve_validated` at
 connect — resolve once, filter each resolved address, dial the validated
 `SocketAddr`, never re-resolve). Custom-origin routes whose MAC cannot be

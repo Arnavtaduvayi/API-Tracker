@@ -58,6 +58,12 @@ pub enum CoreError {
     #[error("another Tethra process is writing to the vault; try again")]
     Busy,
 
+    #[error(
+        "{kind} '{ident}' changed while this operation was deciding what to write; \
+         nothing was overwritten — re-read it and try again"
+    )]
+    StateConflict { kind: &'static str, ident: String },
+
     #[error("backup file is not valid: {0}")]
     BackupInvalid(String),
 
@@ -133,6 +139,7 @@ impl CoreError {
             CoreError::InvalidInput(_) => "invalid_input",
             CoreError::Crypto { .. } => "crypto_error",
             CoreError::Busy => "vault_busy",
+            CoreError::StateConflict { .. } => "state_conflict",
             CoreError::BackupInvalid(_) => "backup_invalid",
             CoreError::VaultCorrupted(_) => "vault_corrupted",
             CoreError::SchemaTooNew { .. } => "schema_too_new",

@@ -44,6 +44,86 @@ impl TestVault {
             .env("TETHRA_PASSWORD", MASTER_PW);
         cmd
     }
+
+    /// `gateway status --json`, parsed. This is also how the tests learn the
+    /// resolved service name and definition path without duplicating the
+    /// platform naming rules — if the CLI stopped reporting them, every
+    /// caller below would fail loudly rather than silently skip.
+    fn status_json(&self) -> serde_json::Value {
+        let out = self
+            .cmd()
+            .args(["--json", "gateway", "status"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&out).expect("gateway status --json emits JSON")
+    }
+}
+
+/// Plant a service definition in THIS environment's slot that points at a
+/// DIFFERENT data directory — exactly what a second Tethra environment (or a
+/// data directory that moved) leaves behind, and the condition under which
+/// `stop`/`restart`/`disable`/`uninstall` used to act on the other
+/// installation's job.
+///
+/// Only the file-based platforms are exercised: macOS and Linux keep the
+/// definition under the test's isolated `HOME`, so nothing outside the temp
+/// tree is ever written and no service manager is ever invoked. The Windows
+/// definition is an HKCU registry value, which a test must not create, so
+/// that platform is covered by the gateway crate's mocked lifecycle suite.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn plant_foreign_definition(v: &TestVault, other_data_dir: &std::path::Path) -> PathBuf {
+    let status = v.status_json();
+    let service = &status["service"];
+    let path = PathBuf::from(
+        service["definition_path"]
+            .as_str()
+            .expect("status reports the definition path"),
+    );
+    let name = service["service_name"]
+        .as_str()
+        .expect("status reports the resolved service name");
+    assert!(
+        path.starts_with(v.home()),
+        "the test must never write outside its isolated HOME: {path:?}"
+    );
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let other = other_data_dir.display();
+
+    #[cfg(target_os = "macos")]
+    let body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>{name}</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>{other}/bin/tethra-gateway-0.1.0</string>
+		<string>gateway</string>
+		<string>serve</string>
+		<string>--service</string>
+		<string>--data-dir</string>
+		<string>{other}</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
+"#
+    );
+    #[cfg(target_os = "linux")]
+    let body = format!(
+        "[Unit]\nDescription=Tethra Local Gateway ({name})\n\n[Service]\nType=simple\n\
+         ExecStart=\"{other}/bin/tethra-gateway-0.1.0\" gateway serve --service \
+         --data-dir \"{other}\"\n\n[Install]\nWantedBy=default.target\n"
+    );
+
+    std::fs::write(&path, body).unwrap();
+    path
 }
 
 #[test]
@@ -266,6 +346,153 @@ fn install_requires_confirmation_and_run_is_an_alias_for_serve() {
 }
 
 #[test]
+fn status_and_doctor_name_the_service_and_the_installation() {
+    // Two Tethra environments on one account control two different launchd
+    // labels / systemd units / registry values. Without the resolved name
+    // and the installation id in the output there is no way to tell which
+    // one a command just acted on — or to inspect it by hand.
+    let v = TestVault::new();
+    let status = v.status_json();
+    let name = status["service"]["service_name"].as_str().unwrap();
+    let id = status["service"]["installation_id"].as_str().unwrap();
+    assert!(
+        !name.is_empty(),
+        "the resolved service name must be reported"
+    );
+    assert!(
+        !id.is_empty() && name.contains(id),
+        "the service name must carry this installation's id: {name} / {id}"
+    );
+
+    // Human output carries both, even with nothing installed: the name is
+    // the slot this data directory WOULD claim.
+    v.cmd()
+        .args(["gateway", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("  name      {name}")))
+        .stdout(predicate::str::contains(format!("  id        {id}")));
+
+    v.cmd()
+        .args(["gateway", "doctor"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("service identity"))
+        .stdout(predicate::str::contains(format!("  name      {name}")))
+        .stdout(predicate::str::contains(format!("  id        {id}")));
+
+    // A second data directory under the same HOME must resolve to a
+    // DIFFERENT job, or the namespacing is not doing anything.
+    let other = TestVault::new();
+    let other_name = other.status_json()["service"]["service_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(
+        name, other_name,
+        "two data directories must control two different services"
+    );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn lifecycle_verbs_refuse_a_service_that_belongs_to_another_data_directory() {
+    // ZFT-014: these verbs gated only on `installed` and acted on whatever
+    // job held the slot; `uninstall` additionally deleted the other
+    // environment's definition file.
+    let v = TestVault::new();
+    let other_dir = v.home().join("other-tethra-data");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let definition = plant_foreign_definition(&v, &other_dir);
+    let planted = std::fs::read(&definition).unwrap();
+    let other = other_dir.display().to_string();
+
+    for args in [
+        vec!["gateway", "stop"],
+        vec!["gateway", "start"],
+        vec!["gateway", "restart"],
+        vec!["gateway", "disable", "--yes"],
+        vec!["gateway", "uninstall", "--yes"],
+        vec!["gateway", "repair", "--yes"],
+    ] {
+        let label = args.join(" ");
+        v.cmd()
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(
+                predicate::str::contains("different Tethra data directory")
+                    .and(predicate::str::contains(other.clone())),
+            )
+            .stderr(predicate::str::contains("--data-dir"));
+        // Nothing may have been torn down, and above all the other
+        // environment's definition must still be there, byte for byte.
+        assert_eq!(
+            std::fs::read(&definition).unwrap(),
+            planted,
+            "`{label}` must not touch another installation's definition"
+        );
+    }
+
+    // The refusal is also visible before the user runs anything.
+    v.cmd()
+        .args(["gateway", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DIFFERENT data"))
+        .stdout(predicate::str::contains(other.clone()));
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn install_force_discloses_what_it_replaces_and_still_needs_confirmation() {
+    let v = TestVault::new();
+    let other_dir = v.home().join("other-tethra-data");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let definition = plant_foreign_definition(&v, &other_dir);
+    let planted = std::fs::read(&definition).unwrap();
+    let other = other_dir.display().to_string();
+    let service_name = v.status_json()["service"]["service_name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Without --force: refuse immediately, BEFORE the consent wall, the
+    // vault unlock, and the port binding the engine's own refusal would
+    // otherwise have wasted.
+    v.cmd()
+        .args(["gateway", "install", "--yes"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("different Tethra data directory"))
+        .stderr(predicate::str::contains(other.clone()))
+        .stdout(predicate::str::contains("Tethra can run a local background gateway").not());
+
+    // With --force but without --yes: the replacement is spelled out (other
+    // data directory AND service name), and the run still stops at the
+    // confirmation. Nothing is installed and the planted definition stands.
+    v.cmd()
+        .args(["gateway", "install", "--force"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "REPLACES an existing service definition",
+        ))
+        .stdout(predicate::str::contains(other.clone()))
+        .stdout(predicate::str::contains(service_name))
+        .stderr(predicate::str::contains("--yes"));
+    assert_eq!(
+        std::fs::read(&definition).unwrap(),
+        planted,
+        "a --force run that was never confirmed must replace nothing"
+    );
+    assert!(
+        !v.data_dir.join("bin").exists(),
+        "no helper binary may be installed before the replacement is confirmed"
+    );
+}
+
+#[test]
 fn link_hint_uses_the_route_providers_variables_not_the_prefix() {
     // Regression for the Phase 2 bug where the .env variable lookup used
     // the ROUTE PREFIX instead of the route's provider id.
@@ -308,4 +535,37 @@ fn link_hint_uses_the_route_providers_variables_not_the_prefix() {
         written.contains("/oai/v1"),
         "the URL carries the route prefix: {written}"
     );
+}
+
+/// NEW-02: the installed service must never bind a port the configuration
+/// does not know about.
+///
+/// Service mode used to resolve its port with
+/// `port.or_else(port_hint).unwrap_or(0)` and then never write down what it
+/// actually bound, so an unreadable database or an installer that had not
+/// committed yet produced a gateway on an ephemeral port that no `.env`
+/// pointed at — and nothing anywhere compared the two afterwards. Here the
+/// directory starts with no port at all, which is the exact state the old
+/// code answered by binding a random one and forgetting it.
+#[test]
+fn service_mode_persists_the_port_it_is_going_to_bind() {
+    let v = TestVault::new();
+    assert!(
+        v.status_json()["configured_port"].is_null(),
+        "the fixture must start with no port chosen"
+    );
+
+    // Runs until the timeout kills it; the port decision is made and
+    // committed before the bind, so it survives the kill.
+    v.cmd()
+        .args(["gateway", "serve", "--service"])
+        .timeout(std::time::Duration::from_secs(12))
+        .assert()
+        .interrupted();
+
+    let port = v.status_json()["configured_port"].as_u64().expect(
+        "a service that bound a port must have persisted it, or every .env written \
+         against the configured port breaks on the next restart",
+    );
+    assert!(port > 0);
 }

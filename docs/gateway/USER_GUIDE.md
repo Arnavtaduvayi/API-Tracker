@@ -1,5 +1,20 @@
 # Local Gateway — User Guide
 
+> **Most people should not need this document.** The Local Gateway is the
+> infrastructure underneath **Track API activity** (desktop) and
+> `tethra track .` (terminal), both of which install the service, create
+> routes, edit environment files, and enable credential attribution for
+> you — no route prefixes, no linking step, no separate attribution
+> command. Start with
+> `docs/activity-onboarding/USER_GUIDE.md`.
+>
+> This document is the **advanced / expert** surface: the low-level
+> commands and the Gateway internals panel, for diagnostics,
+> troubleshooting, and configurations the automatic flow does not cover.
+> Everything here still works and is fully supported — the automatic flow
+> writes through these same APIs, so hand-made and automatic
+> configuration stay interoperable.
+
 How to enable, use, inspect, and remove the Local Gateway, as it actually
 works in this build. Companion documents: `TROUBLESHOOTING.md` (when
 something is wrong), `PRIVACY.md` and `SECURITY.md` (what is recorded and
@@ -79,7 +94,20 @@ tethra gateway route remove openai
 Providers with a fixed API origin (OpenAI, Anthropic) need no origin
 argument. Providers whose origin is per-project (Supabase) must be given
 their exact origin; it is validated (https, port 443, public address) and
-integrity-protected so a later database edit cannot redirect your traffic.
+bound into the route's authentication code, so a destination you never
+approved cannot be injected — a later edit to the stored origin makes the
+route stop forwarding rather than send your traffic somewhere new.
+
+That binding covers custom origins only, and only while the row stays a
+custom row. Built-in provider routes select their destination by a
+`provider_id` that is not bound the same way, so software that can already
+write your vault database can repoint one built-in prefix at a **different
+shipped provider's** origin with your credential still attached, or strip a
+custom route's authenticated columns to put it on that same path. Tethra does
+not claim to detect or resist tampering with its own database by something
+running as you — such a process can equally replace Tethra itself. See
+`SECURITY.md`, *"What database tampering can and cannot do to your routes"*
+(SEC-01).
 
 The desktop **Routes** tab does the same with a form, and explains when a
 provider requires a custom origin.

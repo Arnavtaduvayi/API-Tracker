@@ -1341,3 +1341,225 @@ export interface GatewayActivitySummary {
   first_event_at: string | null;
   last_event_at: string | null;
 }
+
+// --- Track API activity (ADR 0022) ------------------------------------
+
+/**
+ * detect::CoverageBucket — the ONE precedence that decides both the headline
+ * count an integration is included in and the label its own row carries
+ * (NEW-43). Confidence is asked first and unconditionally, so a `possible`
+ * provider is `low_confidence` whatever its `configurability` would otherwise
+ * have allowed.
+ */
+export type TrackingCoverageBucket =
+  | "tracked_automatically"
+  | "needs_origin_confirmation"
+  | "detected_unsupported"
+  | "low_confidence";
+
+export interface TrackingProvider {
+  provider_id: string;
+  display_name: string;
+  confidence: "confirmed" | "likely" | "possible";
+  configurability: "automatic" | "needs_origin_confirm" | "needs_origin_input" | "unsupported";
+  /**
+   * Which headline bucket this provider was counted under. The review screen
+   * groups and labels on THIS, never on `configurability` alone: that rule has
+   * no confidence guard, so it put a `possible`-confidence provider under
+   * "Tethra knows where these go" while the headline counted it as low
+   * confidence, and six rows could appear under a headline saying three
+   * (NEW-43).
+   */
+  bucket: TrackingCoverageBucket;
+  inferred_origin: string | null;
+  evidence: string[];
+  limitations: string[];
+  credential_candidates: string[];
+  selected_by_default: boolean;
+  /** Its destination came from project content: approved one at a time. */
+  needs_origin_approval: boolean;
+  /** A sentence, never an enum token. */
+  unsupported_reason: string | null;
+}
+
+/** detect::CoverageSummary — every integration in exactly one bucket. */
+export interface TrackingCoverage {
+  total: number;
+  tracked_automatically: number;
+  needs_origin_confirmation: number;
+  detected_unsupported: number;
+  unrecognized: number;
+  low_confidence: number;
+}
+
+/** detect::UnrecognizedCredential — a name and a file, never a value. */
+export interface TrackingUnrecognized {
+  var: string;
+  file: string;
+  name_hint: string | null;
+}
+
+export interface TrackingScan {
+  folder: string;
+  project_name: string;
+  project_exists: boolean;
+  providers: TrackingProvider[];
+  scanned_files: number;
+  skipped_oversized: number;
+  env_files: string[];
+  already_tracking: boolean;
+  coverage_lines: string[];
+  coverage: TrackingCoverage;
+  unrecognized: TrackingUnrecognized[];
+  scan_gaps: string | null;
+  git_warnings: string[];
+}
+
+/**
+ * origin::OriginApprovalRequest — one destination the user is asked to
+ * allow, with the question and the ordered disclosure rendered by the
+ * shared Rust type so the CLI and the desktop cannot drift (ADR 0024).
+ */
+export interface TrackingOriginRequest {
+  provider_id: string;
+  provider_display_name: string;
+  origin: string;
+  scheme: string;
+  host: string;
+  port: number;
+  network_class: "public" | "restricted";
+  source_file: string | null;
+  source_var: string | null;
+  forwards_credentials: boolean;
+  trust: "built_in_manifest" | "previously_approved" | "repository_discovered";
+  question: string;
+  disclosure: string[];
+  previously_approved_at: string | null;
+  approved_now: boolean;
+  refusal: string | null;
+}
+
+export interface TrackingFile {
+  path: string;
+  exists: boolean;
+  changed: boolean;
+  diff: string;
+}
+
+export interface TrackingPlan {
+  project_name: string;
+  creates_project: boolean;
+  service_actions: string[];
+  routes: string[];
+  files: TrackingFile[];
+  warnings: string[];
+  restart_expected: boolean;
+  port: number;
+  providers: string[];
+}
+
+export interface TrackingStep {
+  title: string;
+  outcome: "done" | "skipped" | "failed";
+  detail: string;
+}
+
+export interface TrackingApplyReport {
+  steps: TrackingStep[];
+  state: string;
+  setup_id: string | null;
+  install_blocked: boolean;
+  attribution_enabled: boolean;
+  failed: boolean;
+  restart_expected: boolean;
+}
+
+export interface TrackingFreshness {
+  provider_id: string;
+  last_observed_at: string | null;
+}
+
+/** state::CurrentHealth — what is true NOW. `sentence` is user-facing. */
+export interface TrackingHealth {
+  kind:
+    | "verified_and_active"
+    | "partially_tracked"
+    | "verified_previously_gateway_down"
+    | "verified_previously_idle"
+    | "waiting_for_first_request"
+    /**
+     * An apply that started and never reported an outcome. Its own kind
+     * because such a row is not waiting for anything the user can do by
+     * making a request — the apply is either running now or was interrupted
+     * (NEW-35).
+     */
+    | "apply_incomplete"
+    | "needs_restart"
+    | "configuration_changed"
+    | "gateway_unavailable"
+    | "needs_attention"
+    | "attribution_paused"
+    | "not_configured"
+    | "unsupported";
+  sentence: string;
+  /** Narrow by design: only traffic flowing right now counts as success. */
+  currently_working: boolean;
+}
+
+/** state::VerificationHistory — what was true before, never instead of now. */
+export interface TrackingHistory {
+  first_verified_at: string | null;
+  /** The FIRST observation of the current configuration — NOT the most
+   * recent one, which is per-provider in `TrackingStatus.providers`. */
+  session_first_observed_at: string | null;
+  verification_session: string | null;
+  config_generation: number;
+  sentence: string | null;
+}
+
+export interface TrackingStatus {
+  setup_id: string;
+  state: string;
+  project_id: string;
+  folder: string;
+  watch: "observed" | "partial" | "waiting" | "not_watchable";
+  observed_provider: string | null;
+  observed_latency_ms: number | null;
+  observed_model: string | null;
+  providers: TrackingFreshness[];
+  attribution_paused: boolean;
+  health: TrackingHealth;
+  history: TrackingHistory;
+}
+
+/** Three distinguishable outcomes, so a failed check is never "all fine". */
+export interface ForegroundStatus {
+  active: boolean;
+  stopped: boolean;
+  detail: string | null;
+}
+
+/** Locally observed gateway traffic for one project (ZFT-029). */
+export interface ProjectActivity {
+  project_id: string;
+  project_name: string | null;
+  total_requests: number;
+  success_count: number;
+  error_count: number;
+  transport_error_count: number;
+  first_event_at: string | null;
+  last_event_at: string | null;
+}
+
+export interface TrackingDiagnosis {
+  id: string;
+  severity: string;
+  message: string;
+}
+
+export interface TrackingUndoReport {
+  complete: boolean;
+  restored: string[];
+  removed_routes: string[];
+  kept_routes: string[];
+}

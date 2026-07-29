@@ -64,9 +64,33 @@ fn write_stub(dir: &Path) -> PathBuf {
         &stub,
         r#"#!/bin/sh
 [ -n "$STUB_PID_FILE" ] && echo $$ > "$STUB_PID_FILE"
-# Invocations look like: git -C <repo> <subcommand> ...
-if [ "$3" = "rev-parse" ] && [ "$4" = "--show-toplevel" ]; then
-  echo "$2"
+# Invocations look like:
+#   git --no-pager -c k=v ... --git-dir <sealed> <subcommand> ...
+# and, for the one read-through caller (config --get),
+#   git --no-pager -C <repo> config --get <key>
+# The hardening options (ADR 0023) and the sealed-directory selector
+# (ADR 0027) both sit before the subcommand, so the repository and the
+# subcommand are found by scanning argv rather than by position — a
+# positional stub would silently stop matching the moment the option list
+# changes, which is exactly how a fixture starts lying.
+REPO=""
+SUB=""
+SUBARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --no-pager) shift ;;
+    -c) shift 2 ;;
+    -C) REPO="$2"; shift 2 ;;
+    --git-dir) REPO="$2"; shift 2 ;;
+    *)
+      SUB="$1"; shift
+      SUBARG="$1"
+      break
+      ;;
+  esac
+done
+if [ "$SUB" = "rev-parse" ] && [ "$SUBARG" = "--show-toplevel" ]; then
+  echo "$REPO"
   exit 0
 fi
 case "$STUB_MODE" in
@@ -135,18 +159,40 @@ fn assert_stub_reaped(pid_file: &Path) {
     );
 }
 
+/// Run a real `git` command as test SETUP, retrying a transient failure.
+///
+/// These calls build the fixture; they are not the thing under test. On a
+/// hosted runner one of them failed once with `error: bad tree object HEAD`
+/// while writing the 53rd of 60 commits — an object-store hiccup in the
+/// fixture, not a finding about the scanner, which had not run yet. A flaky
+/// SETUP turns a required gate into noise, and noise is how a real failure
+/// gets waved through.
+///
+/// The retry is deliberately loud: every transient is printed, so a run that
+/// needed one says so in the log rather than looking clean. If git keeps
+/// failing the test fails exactly as it did before, with git's own stderr.
 fn git(repo: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let mut last = String::new();
+    for attempt in 0..3 {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        if out.status.success() {
+            if attempt > 0 {
+                eprintln!("note: git {args:?} succeeded on attempt {}", attempt + 1);
+            }
+            return;
+        }
+        last = String::from_utf8_lossy(&out.stderr).to_string();
+        eprintln!(
+            "note: transient git failure (attempt {}): {last}",
+            attempt + 1
+        );
+    }
+    panic!("git {args:?} failed three times: {last}");
 }
 
 fn init_repo(dir: &Path) {
@@ -161,6 +207,10 @@ fn init_repo(dir: &Path) {
 fn hung_git_times_out_incomplete_and_child_is_reaped() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -189,6 +239,10 @@ fn hung_git_times_out_incomplete_and_child_is_reaped() {
 fn short_git_commands_error_loudly_on_timeout() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -215,6 +269,10 @@ fn slow_git_yields_partial_findings_and_incomplete_coverage() {
     let _l = lock();
     let (_vault_dir, _paths, vault) = new_vault();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -245,6 +303,10 @@ fn slow_git_yields_partial_findings_and_incomplete_coverage() {
 fn infinite_output_hits_byte_cap_incomplete_and_reaped() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -282,6 +344,10 @@ fn infinite_output_hits_byte_cap_incomplete_and_reaped() {
 fn retained_content_cap_stops_the_scan_honestly() {
     let _l = lock();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let pid_file = dir.path().join("stub.pid");
     let _env = EnvGuard::set(&[
@@ -315,6 +381,10 @@ fn oversized_line_is_truncated_but_normal_findings_survive() {
     let _l = lock();
     let (_vault_dir, _paths, vault) = new_vault();
     let dir = TempDir::new().unwrap();
+    // A real repository, so the sealed-directory isolation (ADR 0027) has
+    // something to seal. The stub git is still what the product executes;
+    // this only gives the seal a genuine `.git` to mirror.
+    init_repo(dir.path());
     let stub = write_stub(dir.path());
     let _env = EnvGuard::set(&[
         ("API_TRACKER_GIT_BINARY", stub.display().to_string()),

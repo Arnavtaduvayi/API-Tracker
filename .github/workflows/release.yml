@@ -105,6 +105,8 @@ jobs:
       - name: Install frontend deps
         working-directory: apps/desktop
         run: npm ci
+      - name: Stage the bundled CLI sidecar (externalBin — the app ships its helper)
+        run: bash scripts/bundle_cli.sh
       # tauri-action builds the app and uploads the bundles to the release for
       # the tag that triggered this workflow. Artifacts are unsigned.
       - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2

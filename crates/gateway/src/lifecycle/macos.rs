@@ -19,14 +19,33 @@ use std::sync::Arc;
 
 use api_tracker_core::error::{CoreError, Result};
 
-use super::{CommandRunner, Definition, OsWillRun, RegistrationState, ServiceManager};
+use super::{
+    CommandRunner, Definition, DefinitionState, OsWillRun, RegistrationState, ServiceManager,
+};
 
-/// The LaunchAgent label. Fixed (one login slot per user), consistent with
-/// the preserved `dev.api-tracker.*` identifier family (rebrand policy).
-pub const LABEL: &str = "dev.api-tracker.gateway";
+/// The label used before per-installation namespacing. Kept ONLY so
+/// migration can recognise and take over an agent this machine already has
+/// (see [`LaunchAgent::reclaim_legacy`]); nothing new is ever registered
+/// under it.
+///
+/// It was a fixed global constant, which is precisely the defect: the plist
+/// PATH follows `$HOME`, but `bootout gui/<uid>/<label>` addresses the real
+/// session domain regardless of `HOME`, so a second environment installing
+/// its "own" service booted out the first one's running gateway (ZFT-014).
+pub const LEGACY_LABEL: &str = "dev.api-tracker.gateway";
+
+/// The label for one installation: the preserved `dev.api-tracker.*`
+/// identifier family (rebrand policy) plus the installation id, so each
+/// data directory owns a distinct job in `gui/<uid>`.
+pub fn label_for(installation_id: &str) -> String {
+    format!("{LEGACY_LABEL}.{installation_id}")
+}
 
 pub struct LaunchAgent {
     pub data_dir: PathBuf,
+    /// Namespace for the label and plist file name; see
+    /// [`super::installation_id`].
+    pub installation_id: String,
     /// `~/Library/LaunchAgents` on a real host; a temp dir in tests.
     pub launch_agents_dir: PathBuf,
     /// The user's numeric uid for the `gui/<uid>` domain target.
@@ -35,6 +54,24 @@ pub struct LaunchAgent {
 }
 
 impl LaunchAgent {
+    /// Derives the installation id from `data_dir` — always construct
+    /// through here (or [`LaunchAgent::for_host`]) so the id can never
+    /// disagree with the directory whose service it names.
+    pub fn new(
+        data_dir: &Path,
+        launch_agents_dir: PathBuf,
+        uid: String,
+        runner: Arc<dyn CommandRunner>,
+    ) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            installation_id: super::installation_id(data_dir),
+            launch_agents_dir,
+            uid,
+            runner,
+        }
+    }
+
     pub fn for_host(data_dir: &Path, runner: Arc<dyn CommandRunner>) -> Result<Self> {
         let home = std::env::var_os("HOME").ok_or_else(|| {
             CoreError::InvalidInput("HOME is not set; cannot locate ~/Library/LaunchAgents".into())
@@ -45,12 +82,18 @@ impl LaunchAgent {
                 "could not determine the current uid (`id -u` failed)".into(),
             ));
         }
-        Ok(Self {
-            data_dir: data_dir.to_path_buf(),
-            launch_agents_dir: PathBuf::from(home).join("Library").join("LaunchAgents"),
-            uid: uid_out.stdout.trim().to_string(),
+        let uid = uid_out.stdout.trim().to_string();
+        Ok(Self::new(
+            data_dir,
+            PathBuf::from(home).join("Library").join("LaunchAgents"),
+            uid,
             runner,
-        })
+        ))
+    }
+
+    /// This installation's launchd label.
+    pub fn label(&self) -> String {
+        label_for(&self.installation_id)
     }
 
     fn domain_target(&self) -> String {
@@ -58,7 +101,11 @@ impl LaunchAgent {
     }
 
     fn service_target(&self) -> String {
-        format!("gui/{}/{LABEL}", self.uid)
+        format!("gui/{}/{}", self.uid, self.label())
+    }
+
+    fn plist_path(&self, label: &str) -> PathBuf {
+        self.launch_agents_dir.join(format!("{label}.plist"))
     }
 
     /// Render the plist. Paths are XML-escaped; argv array form means
@@ -97,12 +144,21 @@ impl LaunchAgent {
 </dict>
 </plist>
 "#,
-            label = LABEL,
+            label = self.label(),
             bin = xml_escape(&binary.display().to_string()),
             dir = xml_escape(&self.data_dir.display().to_string()),
             log = xml_escape(&log.display().to_string()),
         )
     }
+}
+
+/// Whether a `launchctl bootout` left the label unloaded. A job that was
+/// not loaded in the first place is success for every caller here.
+fn bootout_settled(out: &super::RunOutput) -> bool {
+    out.ok()
+        || out.stderr.contains("No such process")
+        || out.stderr.contains("not find")
+        || out.status == 3
 }
 
 fn xml_escape(s: &str) -> String {
@@ -140,56 +196,99 @@ fn parse_program_arguments(plist: &str) -> Vec<String> {
     out
 }
 
+/// Read and parse a plist THIS module wrote, wherever it sits. Shared by
+/// the namespaced read and the legacy-migration probe.
+///
+/// Three states, not two: an absent plist and one we cannot read answered
+/// the same `None`, and `ensure_ours` acted on that `None` as "empty slot"
+/// (ADR 0026 D2).
+fn definition_at(path: &Path) -> DefinitionState {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        // ONLY "no such file" is genuinely absent — that is the clean
+        // machine, and install must still work there. Unreadable, not
+        // UTF-8, or a directory in the way all mean the same thing: there
+        // is something here and we cannot prove whose it is.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DefinitionState::Absent,
+        Err(_) => return DefinitionState::Unparseable,
+    };
+    let args = parse_program_arguments(&content);
+    let Some(binary) = args.first().map(PathBuf::from) else {
+        return DefinitionState::Unparseable;
+    };
+    let Some(data_dir) = args
+        .iter()
+        .position(|a| a == "--data-dir")
+        .and_then(|i| args.get(i + 1))
+        .map(PathBuf::from)
+    else {
+        return DefinitionState::Unparseable;
+    };
+    DefinitionState::Present(Definition { binary, data_dir })
+}
+
 impl ServiceManager for LaunchAgent {
     fn platform(&self) -> &'static str {
         "macos-launch-agent"
     }
 
+    fn owned_data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+
+    fn service_name(&self) -> String {
+        self.label()
+    }
+
+    fn reclaim_legacy(&self) -> Result<Option<String>> {
+        let path = self.plist_path(LEGACY_LABEL);
+        // Unreadable or unparseable means we cannot PROVE it is ours, which
+        // is the same answer as "someone else's": leave it.
+        let DefinitionState::Present(def) = definition_at(&path) else {
+            return Ok(None);
+        };
+        if !super::same_data_dir(&def.data_dir, &self.data_dir) {
+            return Ok(None);
+        }
+        // Ours, under the old global label. Unload it before the namespaced
+        // job claims the port, then delete the plist so login does not start
+        // two gateways against one vault.
+        let target = format!("gui/{}/{LEGACY_LABEL}", self.uid);
+        let out = self.runner.run("launchctl", &["bootout", &target])?;
+        if !bootout_settled(&out) {
+            return Err(CoreError::InvalidInput(format!(
+                "could not unload the legacy LaunchAgent {LEGACY_LABEL} (status {}): {}",
+                out.status,
+                out.stderr.trim()
+            )));
+        }
+        std::fs::remove_file(&path).map_err(CoreError::Io)?;
+        Ok(Some(LEGACY_LABEL.to_string()))
+    }
+
     fn definition_path(&self) -> PathBuf {
-        self.launch_agents_dir.join(format!("{LABEL}.plist"))
+        self.plist_path(&self.label())
     }
 
     fn write_definition(&self, binary: &Path) -> Result<()> {
-        use std::io::Write;
         std::fs::create_dir_all(&self.launch_agents_dir).map_err(CoreError::Io)?;
-        let path = self.definition_path();
-        // Fresh 0600 write; never follow a symlink planted at the path.
-        if std::fs::symlink_metadata(&path).is_ok() {
-            std::fs::remove_file(&path).map_err(CoreError::Io)?;
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut f = options.open(&path).map_err(CoreError::Io)?;
-        f.write_all(self.render_plist(binary).as_bytes())
-            .map_err(CoreError::Io)?;
-        f.sync_all().map_err(CoreError::Io)?;
-        Ok(())
+        // Temp + rename, never truncate-in-place: launchd loads every plist
+        // in this directory at login, and a reader that catches a partial
+        // write sees `Unparseable`, which every later verb then refuses
+        // (NEW-02). See `super::atomic_write_definition`.
+        super::atomic_write_definition(&self.definition_path(), &self.render_plist(binary))
     }
 
-    fn read_definition(&self) -> Result<Option<Definition>> {
-        let path = self.definition_path();
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            return Ok(None);
-        };
-        let args = parse_program_arguments(&content);
-        let binary = args.first().map(PathBuf::from);
-        let data_dir = args
-            .iter()
-            .position(|a| a == "--data-dir")
-            .and_then(|i| args.get(i + 1))
-            .map(PathBuf::from);
-        match (binary, data_dir) {
-            (Some(binary), Some(data_dir)) => Ok(Some(Definition { binary, data_dir })),
-            _ => Ok(None),
-        }
+    fn read_definition_state(&self) -> Result<DefinitionState> {
+        Ok(definition_at(&self.definition_path()))
     }
 
     fn remove_definition(&self) -> Result<()> {
+        self.ensure_ours("remove the service definition")?;
         let path = self.definition_path();
         if path.exists() {
             std::fs::remove_file(&path).map_err(CoreError::Io)?;
@@ -198,6 +297,10 @@ impl ServiceManager for LaunchAgent {
     }
 
     fn register(&self) -> Result<()> {
+        // Bootstrapping puts a definition into the LIVE gui/<uid> domain.
+        // Doing that to a plist we cannot prove is ours would hand another
+        // installation's gateway a login slot in this session.
+        self.ensure_ours("register")?;
         let plist = self.definition_path().display().to_string();
         let out = self
             .runner
@@ -210,7 +313,10 @@ impl ServiceManager for LaunchAgent {
         // rewritten the plist and is about to prune that binary. `bootstrap`
         // does not re-read a loaded job and `kickstart` (without -k) does not
         // restart a running one, so the only way to make the new definition
-        // take effect is to bootout first and bootstrap again.
+        // take effect is to bootout first and bootstrap again. The bootout
+        // goes through `unregister`, which proves the plist we are about to
+        // unload is ours — an "already bootstrapped" answer is not evidence
+        // that the loaded job belongs to this data directory.
         if out.stderr.contains("already bootstrapped") || out.status == 5 {
             self.unregister()?;
             let retry = self
@@ -233,15 +339,15 @@ impl ServiceManager for LaunchAgent {
     }
 
     fn unregister(&self) -> Result<()> {
+        // The bootout below removes a job from the LIVE session domain, so
+        // it must never run against a label whose plist points somewhere
+        // else — this is the exact call that took down another
+        // installation's gateway (ZFT-014).
+        self.ensure_ours("unregister the service")?;
         let out = self
             .runner
             .run("launchctl", &["bootout", &self.service_target()])?;
-        // Not-loaded is success for an unregister.
-        if !out.ok()
-            && !out.stderr.contains("No such process")
-            && !out.stderr.contains("not find")
-            && out.status != 3
-        {
+        if !bootout_settled(&out) {
             return Err(CoreError::InvalidInput(format!(
                 "launchctl bootout failed (status {}): {}",
                 out.status,
@@ -252,6 +358,10 @@ impl ServiceManager for LaunchAgent {
     }
 
     fn start(&self) -> Result<()> {
+        // Starting a foreign definition launches another installation's
+        // gateway against another vault. `start` is not destructive, but it
+        // is still "reconfigure another environment's service".
+        self.ensure_ours("start")?;
         let out = self
             .runner
             .run("launchctl", &["kickstart", &self.service_target()])?;
@@ -280,10 +390,16 @@ impl ServiceManager for LaunchAgent {
         // bootout stops AND unloads until next login; for a plain stop we
         // bootout then leave the plist in place — RunAtLoad re-registers at
         // next login, and `start`/`restart` re-bootstraps explicitly.
+        // Proven under this verb so the refusal names what the user asked
+        // for, not the internal unregister.
+        self.ensure_ours("stop the service")?;
         self.unregister()
     }
 
     fn restart(&self) -> Result<()> {
+        // kickstart -k KILLS the running instance, so it needs the same
+        // ownership proof as a stop.
+        self.ensure_ours("restart the service")?;
         // kickstart -k kills a running instance and starts a fresh one; if
         // the service is not currently bootstrapped, bootstrap it first.
         let out = self

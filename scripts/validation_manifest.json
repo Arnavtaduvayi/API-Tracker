@@ -1,0 +1,1479 @@
+{
+  "_comment": [
+    "TRUSTED CHECK MANIFEST — the acceptance criteria for a validation run.",
+    "",
+    "GENERATED. Do not edit by hand: scripts/gen_validation_manifest.py --check runs in",
+    "CI and fails on any difference between this file and what the harness sources",
+    "produce. Run --write after adding, removing, renaming or re-grouping a check, and",
+    "review the diff — it names the exact check that moved.",
+    "",
+    "VAL-01: a result may REPORT what it observed; it may not DEFINE what is",
+    "acceptable. Everything the validator enforces comes from this file and from",
+    "arguments the caller supplies, never from the artifact under test.",
+    "",
+    "VAL-05-R: counts are not identities. `required_checks` is the EXACT SET a scope",
+    "must execute, and the validator requires set equality in both directions — a",
+    "renamed check, a substituted check, a duplicate, an unknown one, or a missing one",
+    "all fail even when every count still adds up. `optional_checks` are the",
+    "environment-dependent checks of the gateway harness; they are validated as a",
+    "SUBSET (they may legitimately not run) and may never stand in for a required one.",
+    "",
+    "Each entry's identity is the STATIC PREFIX of its label — the part fixed at",
+    "authoring time, before any interpolation. Several prefixes on one entry mean the",
+    "check has sibling branches (an if/else pair, `A && ok .. || bad ..`, case arms)",
+    "that emit one check under one of several labels."
+  ],
+  "schema": "tethra.validation.manifest/2",
+  "results_schema": "tethra.validation.results/2",
+  "production_label": "dev.api-tracker.gateway",
+  "generated_by": "scripts/gen_validation_manifest.py",
+  "min_label_prefix": 12,
+  "scopes": {
+    "full:foreground": {
+      "description": "The unsigned-build fallback: a foreground gateway, no LaunchAgent. NOT a substitute for full:service.",
+      "harness": "scripts/tracking_validate_macos.sh",
+      "expected_total": 58,
+      "requires_service": false,
+      "groups": {
+        "APPLY": 9,
+        "BUNDLE": 6,
+        "DRYRUN": 6,
+        "FIXTURE": 3,
+        "FOREGROUND": 3,
+        "HARNESS": 5,
+        "IDEMPOTENCE": 4,
+        "NEGATIVE": 8,
+        "PRIVACY": 5,
+        "TRAFFIC": 5,
+        "UNDO": 4
+      },
+      "required_checks": [
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false shell condition is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true shell condition is reported as a PASS"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "two files differing only by a trailing newline are reported DIFFERENT"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the helper is a native Mach-O executable for ",
+            "the helper is not a native Mach-O executable for "
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the app bundle declares a version in Info.plist ("
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the helper's MEASURED version ("
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the in-bundle helper is byte-identical to the sidecar staged from this source tree"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "PATH is stripped to the system default and no developer tethra CLI is reachable on it"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the bundled helper answers the exec probe"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "the fixture .env really contains the fake key (the key search can find a present key)"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "the fixture .env really contains the canary (the canary search can find a present canary)"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "a vault was created through the bundled helper (exit "
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false database assertion is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true database assertion is reported as a PASS"
+          ]
+        },
+        {
+          "group": "FOREGROUND",
+          "label_prefixes": [
+            "the bundled helper serves the gateway in the foreground (port ",
+            "the foreground gateway did not start"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run exits 0 (got "
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run detected openai"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run showed the exact env diff"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run changed the .env not one byte"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run printed the key value",
+            "no key value appears in dry-run output"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run printed the unrelated env value",
+            "no unrelated env value appears in dry-run output"
+          ]
+        },
+        {
+          "group": "FOREGROUND",
+          "label_prefixes": [
+            "the dry run left ~/Library/LaunchAgents byte-identical"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "track exits 2 (configured, awaiting first request) — got "
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the automatic route step is reported and no error line was printed"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the .env now points at the local gateway"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the comment survived the rewrite verbatim"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "NO_PROXY was added for loopback"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "track printed shell-export choreography",
+            "no shell-export choreography anywhere in the flow"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the openai route exists in the database"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "exactly one project link was created"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "one tracking setup was recorded"
+          ]
+        },
+        {
+          "group": "FOREGROUND",
+          "label_prefixes": [
+            "the apply left ~/Library/LaunchAgents byte-identical (no login item was touched)"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "the setup is NOT marked traffic_observed before any request"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "no first-traffic timestamp exists before any request"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "track status exits 2 while unverified"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "the forged pre-apply gateway observation was really inserted (the control is armed)"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "track status STILL exits 2 with a forged pre-apply observation present"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "a forged pre-apply observation does not flip the setup to traffic_observed"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "a forged pre-apply observation does not set the first-traffic timestamp"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "the control removed exactly what it planted: no forged row survives, and the "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the provider answered ",
+            "the provider answered 200 through the gateway",
+            "unexpected status '"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "this request added a NEW gateway observation post-dating applied_at (was "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "track status exits 0 after real traffic (got "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the setup is marked traffic_observed ONLY after a real request"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the first-traffic timestamp is set"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "the searched inventory is non-empty and includes the vault database"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "the API key value appears in no file under the isolated data directory"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "the unrelated env value (canary) appears in no file under the isolated data directory"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "no authorization header line and no bearer token is stored"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "neither needle reached the shared desktop/CLI data directory",
+            "neither needle reached the shared desktop/CLI data directory (it does not exist)"
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "the second run exits 2 — a new verification session, not a crash and not a stale pass (got "
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "a second run changed the .env not one byte"
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "no duplicate link row"
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "no duplicate tracking setup"
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "track undo exits 0 (got "
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "undo restored the .env byte for byte (cmp, not string equality)"
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "the link row was removed"
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "recorded history was KEPT (undo never deletes the user's data)"
+          ]
+        }
+      ],
+      "optional_checks": [],
+      "required_facts": {}
+    },
+    "full:service": {
+      "description": "The packaged macOS service lifecycle: installs, exercises and removes a namespaced LaunchAgent.",
+      "harness": "scripts/tracking_validate_macos.sh",
+      "expected_total": 64,
+      "requires_service": true,
+      "groups": {
+        "APPLY": 9,
+        "BUNDLE": 6,
+        "DRYRUN": 6,
+        "FIXTURE": 3,
+        "HARNESS": 5,
+        "IDEMPOTENCE": 4,
+        "NEGATIVE": 8,
+        "PRIVACY": 5,
+        "SERVICE": 9,
+        "TRAFFIC": 5,
+        "UNDO": 4
+      },
+      "required_checks": [
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false shell condition is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true shell condition is reported as a PASS"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "two files differing only by a trailing newline are reported DIFFERENT"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the helper is a native Mach-O executable for ",
+            "the helper is not a native Mach-O executable for "
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the app bundle declares a version in Info.plist ("
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the helper's MEASURED version ("
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the in-bundle helper is byte-identical to the sidecar staged from this source tree"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "PATH is stripped to the system default and no developer tethra CLI is reachable on it"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the bundled helper answers the exec probe"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "the fixture .env really contains the fake key (the key search can find a present key)"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "the fixture .env really contains the canary (the canary search can find a present canary)"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "a vault was created through the bundled helper (exit "
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false database assertion is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true database assertion is reported as a PASS"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run exits 0 (got "
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run detected openai"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run showed the exact env diff"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run changed the .env not one byte"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run printed the key value",
+            "no key value appears in dry-run output"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run printed the unrelated env value",
+            "no unrelated env value appears in dry-run output"
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the dry run left ~/Library/LaunchAgents byte-identical (installed no LaunchAgent)"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "track exits 2 (configured, awaiting first request) — got "
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the automatic route step is reported and no error line was printed"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the .env now points at the local gateway"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the comment survived the rewrite verbatim"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "NO_PROXY was added for loopback"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "track printed shell-export choreography",
+            "no shell-export choreography anywhere in the flow"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "the openai route exists in the database"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "exactly one project link was created"
+          ]
+        },
+        {
+          "group": "APPLY",
+          "label_prefixes": [
+            "one tracking setup was recorded"
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the apply installed a real LaunchAgent the product can name (resolved: "
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the installed LaunchAgent declares the label the product reports ("
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the label is namespaced per data directory, not the global one ("
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the LaunchAgent runs the helper the product installed in this run's data directory, not a developer CLI"
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the installed helper is byte-identical to the in-bundle helper (the service runs the shipped program)"
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "launchd loaded the namespaced service gui/"
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the running service (pid "
+          ]
+        },
+        {
+          "group": "SERVICE",
+          "label_prefixes": [
+            "the service exposes its control endpoint at "
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "the setup is NOT marked traffic_observed before any request"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "no first-traffic timestamp exists before any request"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "track status exits 2 while unverified"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "the forged pre-apply gateway observation was really inserted (the control is armed)"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "track status STILL exits 2 with a forged pre-apply observation present"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "a forged pre-apply observation does not flip the setup to traffic_observed"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "a forged pre-apply observation does not set the first-traffic timestamp"
+          ]
+        },
+        {
+          "group": "NEGATIVE",
+          "label_prefixes": [
+            "the control removed exactly what it planted: no forged row survives, and the "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the provider answered ",
+            "the provider answered 200 through the gateway",
+            "unexpected status '"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "this request added a NEW gateway observation post-dating applied_at (was "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "track status exits 0 after real traffic (got "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the setup is marked traffic_observed ONLY after a real request"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the first-traffic timestamp is set"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "the searched inventory is non-empty and includes the vault database"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "the API key value appears in no file under the isolated data directory"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "the unrelated env value (canary) appears in no file under the isolated data directory"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "no authorization header line and no bearer token is stored"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "neither needle reached the shared desktop/CLI data directory",
+            "neither needle reached the shared desktop/CLI data directory (it does not exist)"
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "the second run exits 2 — a new verification session, not a crash and not a stale pass (got "
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "a second run changed the .env not one byte"
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "no duplicate link row"
+          ]
+        },
+        {
+          "group": "IDEMPOTENCE",
+          "label_prefixes": [
+            "no duplicate tracking setup"
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "track undo exits 0 (got "
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "undo restored the .env byte for byte (cmp, not string equality)"
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "the link row was removed"
+          ]
+        },
+        {
+          "group": "UNDO",
+          "label_prefixes": [
+            "recorded history was KEPT (undo never deletes the user's data)"
+          ]
+        }
+      ],
+      "optional_checks": [],
+      "required_facts": {
+        "service_created_by_this_run": true
+      }
+    },
+    "gateway:lifecycle": {
+      "description": "The Local Gateway lifecycle verbs (install, bootstrap, stop, restart, repair, uninstall) against a REAL per-user LaunchAgent.",
+      "harness": "scripts/gateway_validate_macos.sh",
+      "expected_total": 50,
+      "requires_service": true,
+      "groups": {
+        "ATTRIBUTION": 4,
+        "CONTROLS": 3,
+        "INSTALL": 9,
+        "ISOLATION": 2,
+        "LIFECYCLE": 2,
+        "PRIVACY": 1,
+        "RESILIENCE": 8,
+        "ROUTE": 7,
+        "TRAFFIC": 5,
+        "UNINSTALL": 9
+      },
+      "required_checks": [
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "init a fresh isolated vault",
+            "init did not create a fresh isolated vault"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "create project 'app'",
+            "project create"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "add a KNOWN fake credential to the vault",
+            "key add did not store the KNOWN fake credential"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "gateway install succeeded",
+            "gateway install (see install.log)"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "LaunchAgent plist written at ",
+            "no LaunchAgent plist was written by gateway install"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "plist has KeepAlive={Crashed:true}",
+            "plist KeepAlive"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "plist bakes --data-dir into argv",
+            "plist data-dir"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "launchctl knows the service (bootstrapped)",
+            "not bootstrapped"
+          ]
+        },
+        {
+          "group": "INSTALL",
+          "label_prefixes": [
+            "gateway is listening (port ",
+            "gateway never came up"
+          ]
+        },
+        {
+          "group": "LIFECYCLE",
+          "label_prefixes": [
+            "service still running after installer exited",
+            "service died with installer"
+          ]
+        },
+        {
+          "group": "LIFECYCLE",
+          "label_prefixes": [
+            "launchd owns the service process (pid ",
+            "no service pid"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "route 'openai' added",
+            "route add did not create the openai route"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "route resolves to api.openai.com",
+            "route origin"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "OPENAI_BASE_URL rewritten to the gateway",
+            "base url not written"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "OPENAI_API_BASE alias written",
+            "alias not written"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "NO_PROXY written",
+            "NO_PROXY missing"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "marker comment written",
+            "marker missing"
+          ]
+        },
+        {
+          "group": "ROUTE",
+          "label_prefixes": [
+            "existing OPENAI_API_KEY preserved",
+            "user key clobbered"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "curl reached OpenAI through the gateway (provider ",
+            "gateway answered locally (",
+            "unexpected curl result: "
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "Python reached OpenAI through the gateway (",
+            "python result: ",
+            "python3 is a preflight requirement of this script but is not on PATH, so the Python-through-the-gateway check could not run"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "metadata events recorded (status/latency/path — no bodies)"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "the recorded events are actually persisted"
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "no body/header/url/query column exists on the event table"
+          ]
+        },
+        {
+          "group": "ATTRIBUTION",
+          "label_prefixes": [
+            "expect(1) is unavailable, so the interactive push-key path cannot be driven here",
+            "push-key installed the credential-matching key (the product said so)",
+            "push-key did not install a credential-matching key"
+          ]
+        },
+        {
+          "group": "ATTRIBUTION",
+          "label_prefixes": [
+            "both known- and unknown-key exchanges were recorded"
+          ]
+        },
+        {
+          "group": "ATTRIBUTION",
+          "label_prefixes": [
+            "the known and unknown credentials attribute DISTINCTLY"
+          ]
+        },
+        {
+          "group": "ATTRIBUTION",
+          "label_prefixes": [
+            "the known fake credential was matched to a vault credential"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "forwarding continues with no unlocked vault (SI-11)",
+            "forwarding stopped without a vault"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "status works with the vault locked (SI: lock-free)",
+            "status needs the vault"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "queue/drop counters exposed for honest gap reporting"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "the run recorded at least one event (an empty status is a failure, not a pass)"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "gateway stop requested (graceful)",
+            "gateway stop did not exit 0 (graceful stop failed)"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "doctor diagnoses the stopped/running state",
+            "doctor unclear"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "restart requested",
+            "restart failed"
+          ]
+        },
+        {
+          "group": "RESILIENCE",
+          "label_prefixes": [
+            "gateway recovered after restart",
+            "no gateway is serving after the restart"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "unlink succeeded",
+            "unlink failed"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "unlink restored .env exactly (key kept, gateway lines gone)",
+            "unlink restore imperfect: "
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "uninstall succeeded",
+            "uninstall failed"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "LaunchAgent plist removed",
+            "plist remains"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "launchd still knows the service",
+            "service unregistered from launchd"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "control socket removed",
+            "socket remains"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "control nonce removed",
+            "nonce remains"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "service binaries removed",
+            "bin/ remains"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "direct provider networking still works (401 on the fake key)",
+            "direct networking broken"
+          ]
+        },
+        {
+          "group": "PRIVACY",
+          "label_prefixes": [
+            "privacy canary scan read NO files (vacuous); expected at least vault.db",
+            "privacy canary scan found a forbidden value on disk:",
+            "no credential or query canary in any on-disk artifact ("
+          ]
+        },
+        {
+          "group": "CONTROLS",
+          "label_prefixes": [
+            "assert_db itself rejects false, empty and erroring queries, and accepts a true one",
+            "assert_db did not behave as required (",
+            "negative control could not run (no readable database)"
+          ]
+        },
+        {
+          "group": "CONTROLS",
+          "label_prefixes": [
+            "assert_status itself rejects a stopped gateway (an empty response is a failure)",
+            "assert_status did not reject a stopped gateway (observed: "
+          ]
+        },
+        {
+          "group": "CONTROLS",
+          "label_prefixes": [
+            "assert_status rejects a property that evaluates false",
+            "assert_status accepted a property that is never true (observed: "
+          ]
+        },
+        {
+          "group": "ISOLATION",
+          "label_prefixes": [
+            "the production plist is exactly as this run found it (",
+            "the production plist CHANGED during this run ("
+          ]
+        },
+        {
+          "group": "ISOLATION",
+          "label_prefixes": [
+            "the PRODUCTION label is loaded in gui/",
+            "the production label was never registered in gui/"
+          ]
+        }
+      ],
+      "optional_checks": [
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "Node reached OpenAI through the gateway ("
+          ]
+        },
+        {
+          "group": "TRAFFIC",
+          "label_prefixes": [
+            "node result: "
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "no installed helper found under "
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "the installed helper was removed (damage staged: "
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "could not stage the damage"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "gateway repair completed"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "gateway repair failed"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "repair restored the installed helper binary"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "repair did not restore the installed helper"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "the gateway is serving again after repair"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "no gateway after repair"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "repair registered the PRODUCTION label"
+          ]
+        },
+        {
+          "group": "REPAIR",
+          "label_prefixes": [
+            "repair did not touch the production label"
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "something still listens on "
+          ]
+        },
+        {
+          "group": "UNINSTALL",
+          "label_prefixes": [
+            "no listener on the old port"
+          ]
+        }
+      ],
+      "required_facts": {
+        "service_created_by_this_run": true
+      }
+    },
+    "offline:none": {
+      "description": "No gateway is started and no network request is made.",
+      "harness": "scripts/tracking_validate_macos.sh",
+      "expected_total": 21,
+      "requires_service": false,
+      "groups": {
+        "BUNDLE": 6,
+        "DRYRUN": 6,
+        "FIXTURE": 3,
+        "HARNESS": 5,
+        "OFFLINE": 1
+      },
+      "required_checks": [
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false shell condition is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true shell condition is reported as a PASS"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "two files differing only by a trailing newline are reported DIFFERENT"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the helper is a native Mach-O executable for ",
+            "the helper is not a native Mach-O executable for "
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the app bundle declares a version in Info.plist ("
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the helper's MEASURED version ("
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the in-bundle helper is byte-identical to the sidecar staged from this source tree"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "PATH is stripped to the system default and no developer tethra CLI is reachable on it"
+          ]
+        },
+        {
+          "group": "BUNDLE",
+          "label_prefixes": [
+            "the bundled helper answers the exec probe"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "the fixture .env really contains the fake key (the key search can find a present key)"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "the fixture .env really contains the canary (the canary search can find a present canary)"
+          ]
+        },
+        {
+          "group": "FIXTURE",
+          "label_prefixes": [
+            "a vault was created through the bundled helper (exit "
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false database assertion is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true database assertion is reported as a PASS"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run exits 0 (got "
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run detected openai"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run showed the exact env diff"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run changed the .env not one byte"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run printed the key value",
+            "no key value appears in dry-run output"
+          ]
+        },
+        {
+          "group": "DRYRUN",
+          "label_prefixes": [
+            "the dry run printed the unrelated env value",
+            "no unrelated env value appears in dry-run output"
+          ]
+        },
+        {
+          "group": "OFFLINE",
+          "label_prefixes": [
+            "no LaunchAgent was installed or modified anywhere in this run"
+          ]
+        }
+      ],
+      "optional_checks": [],
+      "required_facts": {}
+    },
+    "selfcheck:none": {
+      "description": "Proves only that the harness reports a deliberately-broken control as a failure.",
+      "harness": "scripts/tracking_validate_macos.sh",
+      "expected_total": 5,
+      "requires_service": false,
+      "groups": {
+        "HARNESS": 5
+      },
+      "required_checks": [
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false shell condition is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true shell condition is reported as a PASS"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "two files differing only by a trailing newline are reported DIFFERENT"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-false database assertion is reported as a FAILURE"
+          ]
+        },
+        {
+          "group": "HARNESS",
+          "label_prefixes": [
+            "a known-true database assertion is reported as a PASS"
+          ]
+        }
+      ],
+      "optional_checks": [],
+      "required_facts": {}
+    }
+  }
+}

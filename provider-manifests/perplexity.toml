@@ -1,0 +1,49 @@
+# Perplexity provider manifest.
+id = "perplexity"
+name = "Perplexity"
+description = "Perplexity Sonar API (search-grounded chat completions)."
+website = "https://www.perplexity.ai"
+api_docs_url = "https://docs.perplexity.ai/api-reference"
+auth_docs_url = "https://docs.perplexity.ai/getting-started/quickstart"
+manage_url = "https://www.perplexity.ai/account/api/keys"
+pricing_url = "https://docs.perplexity.ai/getting-started/pricing"
+login_url = "https://www.perplexity.ai/"
+# Verified against the official perplexity-py client:
+# `api_key = os.environ.get("PERPLEXITY_API_KEY")`.
+env_vars = ["PERPLEXITY_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in the account portal."
+watch_docs = [
+    "https://docs.perplexity.ai/api-reference",
+    "https://docs.perplexity.ai/getting-started/quickstart",
+]
+# No detection pattern: the official documentation does not publish the key
+# format, so none is declared rather than guessing a prefix.
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# perplexity-py client:
+#   * base URL env var: `base_url = os.environ.get("PERPLEXITY_BASE_URL")`
+#   * default base URL: `https://api.perplexity.ai`
+#   * API key env var:  `PERPLEXITY_API_KEY`
+# The default base URL is a bare origin and route strings are appended by the
+# SDK, so base_path stays empty.
+[gateway]
+origins = ["https://api.perplexity.ai"]
+base_path = ""
+env_vars = ["PERPLEXITY_BASE_URL"]
+# /chat/completions is OpenAI-compatible and reports
+# usage.prompt_tokens / usage.completion_tokens. Perplexity's extra
+# search-cost fields are outside the bounded extractor and are not read.
+usage_shape = "openai"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated request to the completions endpoint would confirm the key; Tethra has no Perplexity connector yet, and it will not spend tokens to test a key without an explicit lightweight endpoint." }
+fetch_metadata = { support = "manual_only", note = "Key metadata is shown in the account portal; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Usage and spend are shown in the account portal; no public usage API is documented. Per-response token counts remain observable locally through the Local Gateway." }
+read_permissions = { support = "unsupported", note = "Perplexity API keys carry no documented per-key scopes." }
+change_permissions = { support = "unsupported", note = "There are no documented per-key scopes to change." }
+create_credential = { support = "manual_only", note = "Keys are created in the account portal; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the account portal; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the account portal, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published in the documentation; there is no official pricing API." }

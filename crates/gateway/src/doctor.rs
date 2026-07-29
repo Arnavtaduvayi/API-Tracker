@@ -92,12 +92,18 @@ pub fn diagnose(data_dir: &Path) -> Doctor {
 fn placeholder_service(why: String) -> lifecycle::ServiceStatus {
     lifecycle::ServiceStatus {
         platform: "unknown",
+        // We could not build a lifecycle at all, so we cannot say which
+        // installation this would have controlled. Empty is the honest
+        // answer; diagnostics render it as "unknown", never as "default".
+        installation_id: String::new(),
+        service_name: String::new(),
         installed: false,
         definition_path: String::new(),
         definition: None,
         matches_data_dir: false,
         binary_exists: false,
         binary_version: None,
+        binary_version_measured: false,
         registered: false,
         running: false,
         pid: None,
@@ -249,14 +255,21 @@ pub fn diagnose_with(data_dir: &Path, service: lifecycle::ServiceStatus) -> Doct
             "running",
             Severity::Ok,
             "installed and running",
-            format!(
-                "the service is installed and the gateway is serving on port {}",
-                gateway_status
-                    .as_ref()
-                    .map(|s| s.port)
-                    .or(config.port)
-                    .unwrap_or(0)
-            ),
+            match (gateway_status.as_ref().map(|s| s.port), config.port) {
+                // Naming only the LIVE port here is what let the drift hide
+                // in plain sight: the line read as healthy while the number
+                // it printed was not the number any `.env` carried. When the
+                // two disagree, say both (`port_drift` below carries the
+                // severity).
+                (Some(live), Some(configured)) if live != configured => format!(
+                    "the service is installed and the gateway is serving on port {live}, \
+                     but configuration says {configured}"
+                ),
+                (live, configured) => format!(
+                    "the service is installed and the gateway is serving on port {}",
+                    live.or(configured).unwrap_or(0)
+                ),
+            },
             None,
         ));
     } else if service.installed && !live {
@@ -277,6 +290,38 @@ pub fn diagnose_with(data_dir: &Path, service: lifecycle::ServiceStatus) -> Doct
              installed; it will not survive this terminal session",
             Some("tethra gateway install"),
         ));
+    }
+
+    // --- the port the gateway BOUND vs the port everything else uses ---
+    //
+    // A gateway that came up on a different port than the persisted one is
+    // invisible to every other check in this function, which is why the
+    // audit had to call the resulting CI failure "unexplained" (NEW-02):
+    // the control channel answers regardless of which TCP port was bound,
+    // so `live` is true and the classification above emits `running`; the
+    // identity probe on `config.port` returns `NoListener`, which is not a
+    // finding; and `link_health` compares the `.env` against `config.port`
+    // — the same value the `.env` was written from, so it always agrees.
+    // Comparing the two ports directly is the only way to see it.
+    if let (Some(configured), Some(status)) = (config.port, gateway_status.as_ref()) {
+        if status.port != configured {
+            findings.push(finding(
+                "port_drift",
+                Severity::Error,
+                format!(
+                    "the running gateway is on port {} but configuration says {configured}",
+                    status.port
+                ),
+                format!(
+                    "every linked .env was written with 127.0.0.1:{configured}, so those \
+                     projects get connection-refused while this process serves {}. The \
+                     persisted port is the authority: restarting makes the service bind it \
+                     again and the existing .env files become correct with no re-link.",
+                    status.port
+                ),
+                Some("tethra gateway restart"),
+            ));
+        }
     }
 
     if service.installed && !service.matches_data_dir {
@@ -524,7 +569,12 @@ pub fn diagnose_with(data_dir: &Path, service: lifecycle::ServiceStatus) -> Doct
     if let Some(conn) = &conn {
         if let Ok(rows) = routes::list_project_links(conn) {
             for row in rows {
-                links.push(link_health(&row, &config, live));
+                links.push(link_health(
+                    &row,
+                    &config,
+                    live,
+                    gateway_status.as_ref().map(|s| s.port),
+                ));
             }
         }
     }
@@ -575,6 +625,7 @@ fn link_health(
     row: &routes::ProjectLinkRow,
     config: &store::GatewayConfig,
     live: bool,
+    live_port: Option<u16>,
 ) -> LinkHealth {
     let mut issues = Vec::new();
     let env_path = row.env_path.clone();
@@ -603,6 +654,20 @@ fn link_health(
                             "the .env points at a different port than the persisted {port} \
                              (the gateway moved; re-link the project)"
                         ));
+                    } else if let Some(live_port) = live_port {
+                        // The check above compares the `.env` against the
+                        // value the `.env` was written from, so it agrees
+                        // with itself no matter which port the gateway
+                        // actually bound. That is why the per-link view
+                        // reported healthy through the whole NEW-02 failure.
+                        if live_port != port {
+                            issues.push(format!(
+                                "this .env points at the persisted port {port}, but the \
+                                 running gateway bound {live_port} — SDK calls get \
+                                 connection-refused until the service binds {port} again \
+                                 (`tethra gateway restart`; no re-link needed)"
+                            ));
+                        }
                     }
                 }
                 let has_no_proxy = content

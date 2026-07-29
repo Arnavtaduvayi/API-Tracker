@@ -16,9 +16,19 @@ import type {
   GatewayFinding,
   GatewayLinkPlan,
   GatewayRouteList,
+  GatewayUnlinkReport,
   Project,
   ProviderManifest,
 } from "../types";
+import {
+  GATEWAY_ESTIMATED_COST,
+  GATEWAY_TOKENS,
+  formatCostMicros,
+  formatTokenPair,
+  gatewayCostAvailability,
+  gatewayTokenAvailability,
+  hasValue,
+} from "../usage";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ReauthDialog } from "./ReauthDialog";
 
@@ -651,6 +661,38 @@ function FindingCard({ finding }: { finding: GatewayFinding }) {
 // Routes
 // ---------------------------------------------------------------------------
 
+/**
+ * What the custom-origin MAC does and does not protect (NEW-49).
+ *
+ * The audited string said a custom origin "is integrity-protected against
+ * database tampering", which a reader generalises to the whole routing table.
+ * It is not true of the table. The MAC binds a destination the USER approved,
+ * so repository content cannot become authorization (ZFT-004, ZFT-012) — that
+ * is the adversary it was built for. Built-in manifest routes carry no such
+ * binding: `provider_id` is read straight from the row, so an attacker who can
+ * already write vault.db can point /openai/… at another SHIPPED provider's
+ * origin with the OpenAI credential still attached (SEC-01, confirmed by
+ * upstream fingerprint in the re-audit).
+ *
+ * That attacker is explicitly out of scope — anyone with local write access
+ * can replace the binary or read process memory — but the acceptance depends
+ * on the disclosure being honest here, not only in
+ * docs/activity-onboarding/SECURITY_AND_PRIVACY.md.
+ */
+function CustomOriginIntegrityNote() {
+  return (
+    <p className="muted">
+      A custom origin is bound into the route&apos;s authentication code, so a destination you
+      never approved cannot be injected or substituted for it. That binding covers custom
+      origins only. Built-in provider routes are not bound the same way, so software that can
+      already write this vault&apos;s database can repoint one built-in prefix at a DIFFERENT
+      shipped provider&apos;s origin, with your credential still attached. Tethra does not claim
+      to detect or resist tampering with its own database by something running as you — such a
+      process can equally replace Tethra itself.
+    </p>
+  );
+}
+
 function RoutesTab(props: {
   gatewayRunning: boolean;
   onError: (msg: string) => void;
@@ -712,8 +754,18 @@ function RoutesTab(props: {
   };
 
   const manifest = providers.find((p) => p.id === provider);
-  const needsCustomOrigin =
-    manifest != null && (!manifest.gateway || manifest.gateway.origins.length === 0);
+  // Two different reasons land in the same "type an origin" branch, and
+  // collapsing them told eight providers something false about themselves
+  // (NEW-39). A manifest WITH a `[gateway]` section and an empty `origins`
+  // list is genuinely origin-less: every account gets its own host
+  // (Supabase). A manifest with NO `[gateway]` section at all — Stripe,
+  // GitHub, Mistral, DeepSeek, xAI, OpenRouter, HuggingFace, AWS Bedrock —
+  // has a perfectly fixed public origin; what it lacks is a base-URL
+  // environment variable for their SDKs to read, which is what a built-in
+  // route would need in order to be applied to a project automatically.
+  const perAccountOrigin = manifest?.gateway != null && manifest.gateway.origins.length === 0;
+  const noBaseUrlEnvVar = manifest != null && manifest.gateway == null;
+  const needsCustomOrigin = perAccountOrigin || noBaseUrlEnvVar;
 
   return (
     <div>
@@ -824,13 +876,21 @@ function RoutesTab(props: {
             placeholder="https://xyzcompany.supabase.co"
           />
         </label>
-        {needsCustomOrigin && (
+        {perAccountOrigin && (
           <p className="muted">
-            {manifest?.name} has no fixed API origin — every project gets its own host — so the
-            exact origin must be given here and is integrity-protected against database
-            tampering.
+            {manifest?.name} has no fixed API origin — every account gets its own host — so the
+            exact origin must be given here.
           </p>
         )}
+        {noBaseUrlEnvVar && (
+          <p className="muted">
+            {manifest?.name} does have a fixed API origin, but Tethra ships no built-in route
+            for it: its SDKs read no base-URL environment variable, so a link cannot point a
+            project at the gateway on its own. Give the exact origin here and change the base
+            URL in your code.
+          </p>
+        )}
+        {needsCustomOrigin && <CustomOriginIntegrityNote />}
         {formError && <p className="error">{formError}</p>}
         <button disabled={busy}>Add route</button>
       </form>
@@ -865,6 +925,46 @@ function RoutesTab(props: {
 // Projects (link / unlink)
 // ---------------------------------------------------------------------------
 
+/**
+ * Read one `RestoreOutcome` out of an unlink report.
+ *
+ * `GatewayUnlinkReport.outcomes` is declared `Record<string, unknown>[]`: the
+ * Rust enum is serialized with `#[serde(tag = "outcome")]` and its seven
+ * variants carry different fields, so nothing here may assume a shape
+ * TypeScript never checked. Each field is read defensively and an unknown tag
+ * is printed as itself — a variant this build does not recognise must show up
+ * in the report rather than vanish from it.
+ */
+function restoreOutcomeLine(o: Record<string, unknown>): string {
+  const text = (k: string) => (typeof o[k] === "string" ? (o[k] as string) : "");
+  const path = text("path");
+  const key = text("key");
+  const where = key ? `${path} (${key})` : path;
+  switch (o.outcome) {
+    case "restored":
+      return `${where}: the value you had before linking is back.`;
+    case "already_restored":
+      return `${where}: already at its pre-link value — nothing to change.`;
+    case "created_file_removed":
+      return `${where}: this file was created by the link and held nothing else, so it was removed.`;
+    case "file_missing":
+      return `${where}: the file no longer exists, so there was nothing in it to restore.`;
+    case "left_user_edit":
+      return `${where}: left exactly as YOU changed it after linking — not overwritten, and no longer pointing at the gateway.`;
+    case "prior_not_recorded":
+      return `${where}: NOT restored. Tethra never recorded what this variable held before linking, so its gateway line is STILL in your file. Put your own value back by hand, then unlink again.`;
+    case "failed":
+      return `${where}: NOT restored — ${text("error")}`;
+    default:
+      return `${where}: ${String(o.outcome ?? "unrecognised outcome")}`;
+  }
+}
+
+/** Outcomes that leave the gateway's own line in the user's file. */
+function isUnrestored(o: Record<string, unknown>): boolean {
+  return o.outcome === "prior_not_recorded" || o.outcome === "failed";
+}
+
 function ProjectsTab(props: {
   report: GatewayDoctor;
   installed: boolean;
@@ -884,6 +984,15 @@ function ProjectsTab(props: {
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [unlinking, setUnlinking] = useState<{ project: string; route: string } | null>(null);
+  // The LAST unlink's per-variable outcomes. Kept so the panel can say what
+  // actually happened to each file: the previous code discarded
+  // `report.outcomes` and printed one of two fixed strings, so an unlink that
+  // restored nothing at all still read "Unlinked … (restored)" (RA-013).
+  const [unlinked, setUnlinked] = useState<{
+    project: string;
+    route: string;
+    report: GatewayUnlinkReport;
+  } | null>(null);
   const planRequest = useRef<{
     project: string;
     route: string;
@@ -957,6 +1066,40 @@ function ProjectsTab(props: {
         <div className="warnbox">
           The gateway is not running. Linking rewrites .env files to point at 127.0.0.1 — until
           the gateway starts, linked SDKs get connection refused.
+        </div>
+      )}
+
+      {unlinked && (
+        <div className={unlinked.report.complete ? undefined : "warnbox"}>
+          <h2>
+            {unlinked.report.complete
+              ? `Unlinked ${unlinked.project} from ${unlinked.route}`
+              : `${unlinked.project} is still linked to ${unlinked.route}`}
+          </h2>
+          {!unlinked.report.complete && (
+            <p role="alert">
+              {unlinked.report.outcomes.filter(isUnrestored).length} of{" "}
+              {unlinked.report.outcomes.length} item(s) could not be restored, so the link and
+              its restore record were kept. Fix the items below, then unlink again.
+            </p>
+          )}
+          {unlinked.report.outcomes.length === 0 ? (
+            <p className="muted">
+              Nothing was recorded for this link, so nothing was restored. Check the .env
+              yourself before assuming it is back to its pre-link state.
+            </p>
+          ) : (
+            <ul>
+              {unlinked.report.outcomes.map((o, i) => (
+                <li key={i} className="mono">
+                  {restoreOutcomeLine(o)}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="link" onClick={() => setUnlinked(null)}>
+            Dismiss
+          </button>
         </div>
       )}
 
@@ -1105,16 +1248,24 @@ function ProjectsTab(props: {
       {unlinking && (
         <ConfirmDialog
           title={`Unlink ${unlinking.project} from ${unlinking.route}?`}
-          body="The recorded pre-link .env state is restored: prior values come back, lines Tethra created are removed, and anything you edited after linking is left alone and reported."
+          body="The recorded pre-link .env state is restored: prior values come back, lines Tethra created are removed, and anything you edited after linking is left alone. Any variable whose prior value was never recorded is left pointing at the gateway — every file and variable is named in the report afterwards."
           confirmLabel="Unlink and restore"
           onConfirm={() => {
             void (async () => {
               try {
                 const report = await api.gatewayUnlink(unlinking.project, unlinking.route);
+                setUnlinked({
+                  project: unlinking.project,
+                  route: unlinking.route,
+                  report,
+                });
+                // The banner carries only the verdict; the per-variable
+                // outcomes are rendered above, because "restored" is a claim
+                // about specific files and has to name them.
                 props.onChanged(
                   report.complete
-                    ? `Unlinked ${unlinking.project} (restored).`
-                    : `Some files could not be restored; the link was kept for retry.`,
+                    ? `Unlinked ${unlinking.project} from ${unlinking.route}.`
+                    : `${unlinking.project} is STILL LINKED to ${unlinking.route}: not everything could be restored, so the link was kept for retry.`,
                 );
               } catch (e) {
                 props.onError(errText(e));
@@ -1185,16 +1336,29 @@ function ActivityTab({ onError }: { onError: (msg: string) => void }) {
           {summary.request_bytes} sent / {summary.response_bytes} received
         </dd>
         <dt>Tokens</dt>
+        {/* This panel's `usage_event_count > 0` guard was the only correct one
+            in the app, and the dashboard's absence of it was NEW-37. Both now
+            call the shared rule so the two surfaces cannot drift again, and so
+            the case this guard missed — tokens extracted, model unpriced — is
+            covered here too. */}
         <dd>
-          {summary.usage_event_count > 0
-            ? `${summary.input_tokens} in / ${summary.output_tokens} out (from ${summary.usage_event_count} response(s) that carried usage — absent usage is never counted as zero)`
-            : "none extracted (providers report usage only on some responses)"}
+          {formatTokenPair(
+            summary.input_tokens,
+            summary.output_tokens,
+            gatewayTokenAvailability(summary),
+            GATEWAY_TOKENS,
+          )}
         </dd>
         <dt>Estimated cost</dt>
         <dd>
-          {summary.usage_event_count > 0
-            ? `$${(summary.estimated_cost_micros / 1_000_000).toFixed(4)} (LOWER-bound estimate from local pricing; cache-read tokens excluded; never provider-billed truth)`
-            : "—"}
+          {formatCostMicros(
+            summary.estimated_cost_micros,
+            gatewayCostAvailability(summary),
+            GATEWAY_ESTIMATED_COST,
+            4,
+          )}
+          {hasValue(gatewayCostAvailability(summary)) &&
+            " (LOWER-bound estimate from local pricing; cache-read tokens excluded; never provider-billed truth)"}
         </dd>
         <dt>Freshness</dt>
         <dd>

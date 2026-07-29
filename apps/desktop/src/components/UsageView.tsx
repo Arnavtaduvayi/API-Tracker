@@ -13,6 +13,20 @@ import type {
   UsageSnapshot,
   UsageTotals,
 } from "../types";
+import {
+  RECORD_ESTIMATED_COST,
+  RECORD_REPORTED_COST,
+  RECORD_TOKENS,
+  type UsageAvailability,
+  availabilityNote,
+  availabilitySentence,
+  formatCostMicros,
+  formatCount,
+  hasValue,
+  markStale,
+  snapshotCostAvailability,
+  snapshotTokenAvailability,
+} from "../usage";
 import { formatMicros } from "../utils";
 
 type Target = { kind: "project"; id: string } | { kind: "credential"; id: string };
@@ -25,6 +39,13 @@ export function UsageView() {
   const [usage, setUsage] = useState<UsageTotals | null>(null);
   const [report, setReport] = useState<BudgetReport | null>(null);
   const [records, setRecords] = useState<UsageSnapshot[]>([]);
+  // The rows the monthly totals were folded over — every source, not just the
+  // one the table is filtered to. `UsageTotals` sums each Option with
+  // `unwrap_or(0)` and keeps no count of the rows that carried nothing, so
+  // this is the only place the completeness of those sums can be measured
+  // (NEW-37). `usage_records` with source=all is the same scope and period
+  // the totals query uses.
+  const [totalsBasis, setTotalsBasis] = useState<UsageSnapshot[] | null>(null);
   const [source, setSource] = useState<SourceChoice>("all");
   const [connections, setConnections] = useState<ProviderConnection[]>([]);
   const [costSource, setCostSource] = useState<string>("best_available");
@@ -62,15 +83,22 @@ export function UsageView() {
       api.budgetReport(project, credential),
       api.usageRecords({ project, credential, source }),
       api.activityList(credential ?? null, 25),
+      source === "all"
+        ? Promise.resolve(null)
+        : api.usageRecords({ project, credential, source: "all" }),
     ])
-      .then(([u, r, rec, a]) => {
+      .then(([u, r, rec, a, all]) => {
         setUsage(u);
         setReport(r);
         setRecords(rec);
+        setTotalsBasis(all ?? rec);
         setActivity(a);
         setBudgetInput(r.budget_micros != null ? (r.budget_micros / 1_000_000).toFixed(2) : "");
       })
-      .catch((e) => setError(isApiError(e) ? e.message : String(e)));
+      .catch((e) => {
+        setTotalsBasis(null);
+        setError(isApiError(e) ? e.message : String(e));
+      });
   }, [target, source]);
 
   const changeCostSource = async (value: string) => {
@@ -113,6 +141,49 @@ export function UsageView() {
     const [kind, id] = value.split(":");
     setTarget({ kind: kind as "project" | "credential", id });
   };
+
+  /**
+   * How complete one column of the monthly totals is. A sum that silently
+   * absorbed NULLs is a floor, and a stale connection means even the known
+   * rows stop short of now — neither may be rendered as a plain number
+   * (NEW-37). The stale mark applies only when synced rows actually
+   * contributed; a scope of hand-entered records is not made stale by an
+   * unrelated connection.
+   */
+  const staleConnection = connections.find((c) => c.stale) ?? null;
+  const columnAvailability = (
+    of: (rows: UsageSnapshot[]) => UsageAvailability,
+  ): UsageAvailability => {
+    if (totalsBasis === null) {
+      return {
+        kind: "unavailable",
+        reason: "the usage records these totals are folded over could not be read",
+      };
+    }
+    const availability = of(totalsBasis);
+    const syncedContributed = totalsBasis.some((r) => r.source !== "manual");
+    return staleConnection && syncedContributed
+      ? markStale(availability, staleConnection.last_success_at)
+      : availability;
+  };
+  const inputTokens = columnAvailability((r) => snapshotTokenAvailability(r, "input_tokens"));
+  const outputTokens = columnAvailability((r) => snapshotTokenAvailability(r, "output_tokens"));
+  const reportedCost = columnAvailability((r) =>
+    snapshotCostAvailability(r, "reported_cost_micros"),
+  );
+  const estimatedCost = columnAvailability((r) =>
+    snapshotCostAvailability(r, "estimated_cost_micros"),
+  );
+  // The budget's "used" figure is folded from the same snapshots and inherits
+  // their gaps, so an under-counted month can silently sit under a threshold
+  // it has really crossed. The number stays (it is a floor, and a floor is
+  // useful) but it is never presented as the whole spend.
+  const usedIsEstimated = report?.used_is_estimated ?? false;
+  const usedBasis = usedIsEstimated ? estimatedCost : reportedCost;
+  const usedSubject = usedIsEstimated ? RECORD_ESTIMATED_COST : RECORD_REPORTED_COST;
+  const usedCaveat = hasValue(usedBasis)
+    ? availabilityNote(usedBasis, usedSubject)
+    : availabilitySentence(usedBasis, usedSubject);
 
   return (
     <div>
@@ -160,21 +231,27 @@ export function UsageView() {
             <dt>Requests</dt>
             <dd>{usage.request_count}</dd>
             <dt>Input tokens</dt>
-            <dd>{usage.input_tokens.toLocaleString()}</dd>
+            <dd>{formatCount(usage.input_tokens, inputTokens, RECORD_TOKENS)}</dd>
             <dt>Output tokens</dt>
-            <dd>{usage.output_tokens.toLocaleString()}</dd>
+            <dd>{formatCount(usage.output_tokens, outputTokens, RECORD_TOKENS)}</dd>
             <dt>Reported cost</dt>
             <dd>
-              {formatMicros(usage.reported_cost_micros)}{" "}
-              <span className="muted">(provider-reported)</span>
+              {formatCostMicros(usage.reported_cost_micros, reportedCost, RECORD_REPORTED_COST)}{" "}
+              {hasValue(reportedCost) && <span className="muted">(provider-reported)</span>}
             </dd>
             <dt>Estimated cost</dt>
             <dd>
-              {formatMicros(usage.estimated_cost_micros)}{" "}
-              <span className="muted">
-                (estimated locally from token counts and a bundled price table — may differ from
-                the provider&apos;s bill)
-              </span>
+              {formatCostMicros(
+                usage.estimated_cost_micros,
+                estimatedCost,
+                RECORD_ESTIMATED_COST,
+              )}{" "}
+              {hasValue(estimatedCost) && (
+                <span className="muted">
+                  (estimated locally from token counts and a bundled price table — may differ
+                  from the provider&apos;s bill)
+                </span>
+              )}
             </dd>
             <dt>Attribution</dt>
             <dd>{usage.coarsest_attribution ?? "—"}</dd>
@@ -291,6 +368,11 @@ export function UsageView() {
               </>
             )}
           </p>
+          {usedCaveat && (
+            <p className="muted">
+              This is a lower bound, not the month&apos;s whole spend: {usedCaveat}
+            </p>
+          )}
         </>
       )}
 

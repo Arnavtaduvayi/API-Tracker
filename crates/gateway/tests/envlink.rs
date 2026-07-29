@@ -8,6 +8,33 @@ use api_tracker_gateway::{routes, store};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
+/// A deterministic restore-record key for tests.
+///
+/// Fixed rather than random so a single test can seal on `apply_link` and
+/// open on `unlink` and get the same key both times — and unmistakably fake,
+/// like every other credential in this suite.
+fn restore_crypto() -> api_tracker_core::envrestore::RestoreCrypto {
+    api_tracker_core::envrestore::RestoreCrypto::new(
+        "vault-test-0001".to_string(),
+        api_tracker_core::secret::SecretBytes::new(vec![0x2au8; 32]),
+    )
+}
+
+/// The raw `prior_env_json` column, exactly as it sits in the database.
+///
+/// Every RA-006 assertion reads THIS rather than the in-memory plan: the
+/// plan's `prior` is `#[serde(skip)]` and never persisted, so asserting on
+/// it proves nothing about what a backup, a disk image, or another process
+/// running as the user can see.
+fn stored_prior(conn: &Connection) -> String {
+    conn.query_row(
+        "SELECT prior_env_json FROM gateway_project_links WHERE project_id = 'p1'",
+        [],
+        |r| r.get(0),
+    )
+    .unwrap()
+}
+
 fn migrated(path: &std::path::Path) -> Connection {
     let mut conn = db::open(path).unwrap();
     db::migrate(&mut conn).unwrap();
@@ -50,7 +77,7 @@ fn request(env_file: &Path, project_dir: Option<PathBuf>) -> LinkRequest {
 
 fn plan_and_apply(conn: &Connection, req: &LinkRequest) -> envlink::LinkPlan {
     let plan = envlink::plan_link(conn, req).unwrap();
-    envlink::apply_link(conn, req, &plan).unwrap();
+    envlink::apply_link(conn, Some(&restore_crypto()), req, &plan).unwrap();
     plan
 }
 
@@ -124,21 +151,27 @@ fn relinking_is_idempotent_and_preserves_the_original_prior() {
     let replan = envlink::plan_link(&conn, &req).unwrap();
     assert!(replan.existing_link);
     assert!(!replan.files[0].changed, "idempotent re-link");
-    envlink::apply_link(&conn, &req, &replan).unwrap();
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &replan).unwrap();
     assert_eq!(std::fs::read_to_string(&env).unwrap(), first);
 
     // The recorded prior still holds the ORIGINAL pre-Tethra value.
     let link = routes::find_project_link(&conn, "p1", "openai")
         .unwrap()
         .unwrap();
-    let prior: envlink::PriorEnv =
-        serde_json::from_str(link.prior_env_json.as_deref().unwrap()).unwrap();
-    let base = prior.files[0]
-        .vars
-        .iter()
-        .find(|v| v.key == "OPENAI_BASE_URL")
-        .unwrap();
-    assert_eq!(base.prior.as_deref(), Some("https://corp-proxy.example/v1"));
+    let recorded = link.prior_env_json.as_deref().unwrap();
+    assert!(
+        !recorded.contains("corp-proxy.example"),
+        "the recorded prior must be sealed, not plaintext: {recorded}"
+    );
+    // Prove it is the ORIGINAL pre-Tethra value by restoring it: reading the
+    // ciphertext proves only that something is there.
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
+    assert!(
+        std::fs::read_to_string(&env)
+            .unwrap()
+            .contains("OPENAI_BASE_URL=https://corp-proxy.example/v1"),
+        "a re-link must not overwrite the original prior with Tethra's own write"
+    );
 }
 
 #[test]
@@ -153,7 +186,7 @@ fn unlink_restores_prior_values_removes_created_lines_and_the_row() {
     plan_and_apply(&conn, &req);
     assert_ne!(std::fs::read_to_string(&env).unwrap(), original);
 
-    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    let report = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(report.complete);
     let restored = std::fs::read_to_string(&env).unwrap();
     assert_eq!(
@@ -193,7 +226,7 @@ fn unlink_never_overwrites_a_user_edit_made_after_linking() {
     );
     std::fs::write(&env, &content).unwrap();
 
-    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    let report = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(report.complete);
     assert!(report.outcomes.iter().any(
         |o| matches!(o, RestoreOutcome::LeftUserEdit { key, .. } if key == "OPENAI_BASE_URL")
@@ -222,7 +255,7 @@ fn existing_no_proxy_is_extended_and_restored_not_replaced() {
         "no duplicate uppercase variable when a lowercase one exists: {written}"
     );
 
-    envlink::unlink(&conn, "p1", "openai").unwrap();
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(std::fs::read_to_string(&env)
         .unwrap()
         .contains("no_proxy=internal.example\n"));
@@ -246,7 +279,7 @@ fn crlf_duplicates_quoting_and_comments_survive_the_rewrite() {
         .warnings
         .iter()
         .any(|w| matches!(w, LinkWarning::DuplicateKey { key, .. } if key == "OPENAI_BASE_URL")));
-    envlink::apply_link(&conn, &req, &plan).unwrap();
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
 
     let written = std::fs::read_to_string(&env).unwrap();
     assert!(written.contains("A=\"quoted value\"\r\n"));
@@ -367,7 +400,7 @@ fn multiple_files_link_and_restore_together() {
             .contains("OPENAI_BASE_URL=http://127.0.0.1:49723/p/"));
     }
 
-    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    let report = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(report.complete);
     assert_eq!(std::fs::read_to_string(&a).unwrap(), "A=1\n");
     assert_eq!(std::fs::read_to_string(&b).unwrap(), "B=2\n");
@@ -390,7 +423,7 @@ fn a_missing_default_env_is_created_and_a_missing_port_refuses() {
     };
     let plan = envlink::plan_link(&conn, &req).unwrap();
     assert!(!plan.files[0].exists);
-    envlink::apply_link(&conn, &req, &plan).unwrap();
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
     assert!(proj.join(".env").exists());
 
     // Without a persisted port there is no stable URL to write.
@@ -414,8 +447,58 @@ fn apply_refuses_when_the_file_changed_after_the_preview() {
     let plan = envlink::plan_link(&conn, &req).unwrap();
     // The file changes between preview and apply.
     std::fs::write(&env, "A=1\nB=2\n").unwrap();
-    let e = envlink::apply_link(&conn, &req, &plan).unwrap_err();
+    let e = envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap_err();
     assert!(e.to_string().contains("changed since the preview"), "{e}");
+}
+
+/// The digest has to bind the previewed INPUT, not just the planned output.
+///
+/// The rewrite is not injective: the writer sets the same gateway URL
+/// whatever the variable held before, so a user who changed the value between
+/// preview and apply produced a byte-identical planned output. Hashing only
+/// that output made the documented refusal ("any file changed") silently
+/// untrue for exactly the edit a user is most likely to make — the value was
+/// overwritten without ever appearing in a diff (ZFT-023).
+#[test]
+fn apply_refuses_a_value_edit_the_rewrite_would_have_flattened() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = linkable(dir.path());
+    let env = dir.path().join(".env");
+    let previewed = "OPENAI_BASE_URL=https://old.internal-host.net/v1\n";
+    std::fs::write(&env, previewed).unwrap();
+
+    let req = request(&env, None);
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+
+    // The user repoints the variable after seeing the preview.
+    let edited = "OPENAI_BASE_URL=https://new.internal-host.net/v1\n";
+    std::fs::write(&env, edited).unwrap();
+
+    // Precondition, and the whole reason an output-only digest failed here:
+    // both inputs plan to the SAME bytes.
+    let after_edit = envlink::plan_link_with_slug(&conn, &req, &plan.link_slug).unwrap();
+    assert_eq!(
+        after_edit.files[0].new_content, plan.files[0].new_content,
+        "precondition: the rewrite flattens both prior values to one output"
+    );
+    assert_ne!(
+        after_edit.digest, plan.digest,
+        "the digest must distinguish the two previews"
+    );
+
+    let e = envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap_err();
+    assert!(e.to_string().contains("changed since the preview"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(&env).unwrap(),
+        edited,
+        "a refused apply must leave the user's edit exactly as it was"
+    );
+    assert!(
+        routes::find_project_link(&conn, "p1", "openai")
+            .unwrap()
+            .is_none(),
+        "and must not have recorded a link for a plan it never applied"
+    );
 }
 
 #[test]
@@ -481,7 +564,7 @@ fn unlink_reports_missing_files_and_still_completes() {
     plan_and_apply(&conn, &req);
     std::fs::remove_file(&env).unwrap();
 
-    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    let report = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(report.complete, "a missing file is not a retryable failure");
     assert!(report
         .outcomes
@@ -508,50 +591,225 @@ fn a_secret_looking_prior_value_is_never_stored_in_plaintext() {
     req.var_override = Some("OPENAI_API_KEY".into());
 
     let plan = envlink::plan_link(&conn, &req).unwrap();
-    let file = &plan.files[0];
+    assert!(
+        !plan.files[0].diff.contains("CANARYSECRET"),
+        "the consent diff must not print the prior secret: {}",
+        plan.files[0].diff
+    );
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
 
-    let recorded = serde_json::to_string(&file.prior).unwrap();
+    // The property that matters: what is DURABLE.
+    let recorded = stored_prior(&conn);
     assert!(
         !recorded.contains("CANARYSECRET"),
-        "the prior value must not reach the plaintext restore record: {recorded}"
+        "the prior value must not reach the database in the clear: {recorded}"
     );
     assert!(
-        file.prior
-            .vars
-            .iter()
-            .any(|v| v.key == "OPENAI_API_KEY" && v.prior.is_none() && v.prior_withheld),
-        "and it must be marked withheld, not silently absent"
+        recorded.contains("\"sealed\""),
+        "it must be recorded, sealed - withholding it would cost the user their \
+         undo for no security gain: {recorded}"
     );
     assert!(
-        file.warnings
-            .iter()
-            .any(|w| matches!(w, LinkWarning::PriorValueWithheld { .. })),
-        "the user must be warned they cannot rely on automatic restore: {:?}",
-        file.warnings
+        !recorded.contains("\"prior_withheld\":true"),
+        "and it must NOT be withheld: encryption is what protects it now, not \
+         a shape predicate: {recorded}"
     );
+
+    // And undo still works, which is the capability the old design lost.
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(
-        !file.diff.contains("CANARYSECRET"),
-        "the consent diff must not print the prior secret: {}",
-        file.diff
+        std::fs::read_to_string(&env)
+            .unwrap()
+            .contains("OPENAI_API_KEY=sk-proj-CANARYSECRET000000000000"),
+        "a sealed prior value must restore exactly"
     );
 }
 
 /// The same protection for a base URL that carries embedded credentials —
 /// this one needs no `--var` at all.
 #[test]
-fn a_base_url_with_embedded_credentials_is_withheld_too() {
+fn a_base_url_with_embedded_credentials_is_sealed_not_plaintext() {
     let dir = tempfile::tempdir().unwrap();
     let env = dir.path().join(".env");
-    std::fs::write(
-        &env,
-        "OPENAI_BASE_URL=https://user:CANARYPASSWORD@proxy.internal-host.net/v1\n",
+    let original = "OPENAI_BASE_URL=https://user:CANARYPASSWORD@proxy.internal-host.net/v1\n";
+    std::fs::write(&env, original).unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+    assert!(!plan.files[0].diff.contains("CANARYPASSWORD"));
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
+
+    let recorded = stored_prior(&conn);
+    assert!(
+        !recorded.contains("CANARYPASSWORD"),
+        "userinfo in a base URL must not reach the database in the clear: {recorded}"
+    );
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
+    assert!(
+        std::fs::read_to_string(&env)
+            .unwrap()
+            .contains("CANARYPASSWORD"),
+        "and it must still restore exactly"
+    );
+}
+
+/// Rows an EARLIER build wrote still hold what the tightened rule now
+/// refuses, and nothing else ever rewrites them — so the fix to the writer
+/// alone leaves the recovered value sitting in `vault.db` (ZFT-016).
+#[test]
+fn a_legacy_plaintext_restore_record_is_resealed_not_left_in_the_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_BASE_URL=https://api.openai.com/v1\n").unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+
+    // Exactly what a pre-fix build stored: a v1 document with the raw value.
+    // `written` has to be the value actually in the file, or restore reads the
+    // line as a user edit and correctly leaves it alone.
+    const LEGACY: &str = "https://api.internal-host.net/v1?api_key=CANARYLEGACY0123456789";
+    let written = std::fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("OPENAI_BASE_URL=").map(str::to_string))
+        .expect("the link wrote a base URL");
+    let v1 = format!(
+        r#"{{"v":1,"port":49723,"files":[{{"path":{:?},"existed":true,"vars":[{{"key":"OPENAI_BASE_URL","prior":{LEGACY:?},"prior_withheld":false,"written":{written:?}}}]}}]}}"#,
+        env.display().to_string()
+    );
+    conn.execute(
+        "UPDATE gateway_project_links SET prior_env_json = ?1 WHERE project_id = 'p1'",
+        [&v1],
     )
     .unwrap();
+    assert!(
+        stored_prior(&conn).contains("CANARYLEGACY"),
+        "precondition: the legacy value really is in the column"
+    );
+
+    assert_eq!(
+        envlink::scrub_stored_prior_env(&conn, Some(&restore_crypto())).unwrap(),
+        1,
+        "the row must be rewritten"
+    );
+    let after = stored_prior(&conn);
+    assert!(
+        !after.contains("CANARYLEGACY"),
+        "the legacy value must be gone from the plaintext column: {after}"
+    );
+    assert!(
+        after.contains("\"sealed\""),
+        "it must be RE-SEALED, not merely deleted - deleting it would silently \
+         take away an upgrading user's undo: {after}"
+    );
+    assert!(
+        after.contains("\"v\":2"),
+        "and the record must be upgraded to the sealed version: {after}"
+    );
+    assert_eq!(
+        envlink::scrub_stored_prior_env(&conn, Some(&restore_crypto())).unwrap(),
+        0,
+        "scrubbing is idempotent"
+    );
+
+    // The re-sealed value still restores.
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
+    assert!(
+        std::fs::read_to_string(&env)
+            .unwrap()
+            .contains("CANARYLEGACY"),
+        "a re-sealed legacy value must still restore exactly"
+    );
+}
+
+/// With no key, a legacy plaintext record is REDACTED rather than carried
+/// forward — and the marker is not set, so the real re-seal still happens on
+/// the next unlocked command.
+#[test]
+fn without_a_key_a_legacy_record_is_never_carried_forward_in_the_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    std::fs::write(&env, "OPENAI_BASE_URL=https://api.openai.com/v1\n").unwrap();
     let conn = linkable(dir.path());
-    let plan = envlink::plan_link(&conn, &request(&env, Some(dir.path().to_path_buf()))).unwrap();
-    let recorded = serde_json::to_string(&plan.files[0].prior).unwrap();
-    assert!(!recorded.contains("CANARYPASSWORD"), "{recorded}");
-    assert!(!plan.files[0].diff.contains("CANARYPASSWORD"));
+    let req = request(&env, Some(dir.path().to_path_buf()));
+    plan_and_apply(&conn, &req);
+    let written = std::fs::read_to_string(&env)
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("OPENAI_BASE_URL=").map(str::to_string))
+        .expect("the link wrote a base URL");
+    let v1 = format!(
+        r#"{{"v":1,"port":49723,"files":[{{"path":{:?},"existed":true,"vars":[{{"key":"OPENAI_BASE_URL","prior":"https://x/CANARYNOKEY","prior_withheld":false,"written":{written:?}}}]}}]}}"#,
+        env.display().to_string()
+    );
+    conn.execute(
+        "UPDATE gateway_project_links SET prior_env_json = ?1 WHERE project_id = 'p1'",
+        [&v1],
+    )
+    .unwrap();
+
+    // The keyless one-time scrub must be a NO-OP: redacting here would
+    // destroy the undo a later, unlocked call can still preserve.
+    assert_eq!(
+        envlink::scrub_stored_prior_env_once(&conn, None).unwrap(),
+        0,
+        "a keyless scrub must not touch the record"
+    );
+    assert!(stored_prior(&conn).contains("CANARYNOKEY"));
+
+    // A direct keyless scrub redacts rather than re-committing plaintext.
+    assert_eq!(envlink::scrub_stored_prior_env(&conn, None).unwrap(), 1);
+    let after = stored_prior(&conn);
+    assert!(!after.contains("CANARYNOKEY"), "{after}");
+    assert!(
+        after.contains("\"prior_withheld\":true"),
+        "and the loss of automatic restore must be recorded honestly: {after}"
+    );
+}
+
+/// A base URL that carries its key in a QUERY STRING is never written to the
+/// plaintext restore record, and the undo that this costs is degraded
+/// HONESTLY rather than guessed at (ZFT-016).
+///
+/// The old allowlist inspected only the authority, so everything after the
+/// host went into `vault.db` verbatim. There is no way to tell `?version=2`
+/// from `?api_key=…`, so nothing with a query is recorded — which means unlink
+/// must say so and leave the line alone, not delete it and not invent a value.
+#[test]
+fn a_query_bearing_base_url_is_sealed_and_restores_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = dir.path().join(".env");
+    let original =
+        "OPENAI_BASE_URL=https://api.internal-host.net/v1?api_key=CANARYQUERYKEY0123456789\n";
+    std::fs::write(&env, original).unwrap();
+    let conn = linkable(dir.path());
+    let req = request(&env, Some(dir.path().to_path_buf()));
+
+    let plan = envlink::plan_link(&conn, &req).unwrap();
+    assert!(
+        plan.warnings.iter().any(
+            |w| matches!(w, LinkWarning::ExistingValueRecorded { key, .. } if key == "OPENAI_BASE_URL")
+        ),
+        "the user must be told their existing value is being recorded: {:?}",
+        plan.warnings
+    );
+    envlink::apply_link(&conn, Some(&restore_crypto()), &req, &plan).unwrap();
+
+    let recorded = stored_prior(&conn);
+    assert!(
+        !recorded.contains("CANARYQUERYKEY"),
+        "a key carried in a query string must not reach the database in the \
+         clear - the old allowlist inspected only the authority: {recorded}"
+    );
+
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
+    let after = std::fs::read_to_string(&env).unwrap();
+    assert_eq!(
+        after, original,
+        "the file must come back byte-for-byte; the old design could only \
+         leave the gateway line in place and apologise"
+    );
 }
 
 /// An ordinary base URL still records and restores exactly — the withholding
@@ -564,7 +822,7 @@ fn an_ordinary_prior_base_url_is_still_recorded_and_restored() {
     let conn = linkable(dir.path());
     let req = request(&env, Some(dir.path().to_path_buf()));
     plan_and_apply(&conn, &req);
-    envlink::unlink(&conn, "p1", "openai").unwrap();
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(std::fs::read_to_string(&env)
         .unwrap()
         .contains("OPENAI_BASE_URL=https://api.openai.com/v1"));
@@ -586,7 +844,7 @@ fn duplicate_definitions_each_restore_to_their_own_prior_value() {
     let conn = linkable(dir.path());
     let req = request(&env, Some(dir.path().to_path_buf()));
     plan_and_apply(&conn, &req);
-    envlink::unlink(&conn, "p1", "openai").unwrap();
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
 
     let restored = std::fs::read_to_string(&env).unwrap();
     assert!(
@@ -610,7 +868,7 @@ fn a_created_env_file_is_removed_on_restore() {
     plan_and_apply(&conn, &req);
     assert!(env.exists(), "precondition: the link created the file");
 
-    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    let report = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(
         !env.exists(),
         "a file the link created, with nothing else in it, must not be left behind"
@@ -633,7 +891,7 @@ fn a_created_env_file_the_user_added_to_is_kept() {
     content.push_str("MY_OWN_SETTING=1\n");
     std::fs::write(&env, content).unwrap();
 
-    envlink::unlink(&conn, "p1", "openai").unwrap();
+    envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(env.exists(), "the user's own content must survive");
     assert!(std::fs::read_to_string(&env)
         .unwrap()
@@ -651,12 +909,12 @@ fn a_future_version_restore_record_is_refused() {
     plan_and_apply(&conn, &req);
     conn.execute(
         "UPDATE gateway_project_links
-         SET prior_env_json = replace(prior_env_json, \'\"v\":1\', \'\"v\":99\')",
+         SET prior_env_json = replace(prior_env_json, \'\"v\":2\', \'\"v\":99\')",
         [],
     )
     .unwrap();
 
-    let err = envlink::unlink(&conn, "p1", "openai").unwrap_err();
+    let err = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap_err();
     let text = format!("{err:?}");
     assert!(
         text.contains("99"),
@@ -686,7 +944,7 @@ fn restore_refuses_to_replace_a_file_that_became_a_symlink() {
     std::fs::rename(&env, &real).unwrap();
     std::os::unix::fs::symlink(&real, &env).unwrap();
 
-    let report = envlink::unlink(&conn, "p1", "openai").unwrap();
+    let report = envlink::unlink(&conn, Some(&restore_crypto()), "p1", "openai").unwrap();
     assert!(
         !report.complete,
         "a refused restore must keep the link row so it can be retried"

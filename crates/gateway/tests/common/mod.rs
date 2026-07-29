@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api_tracker_core::db;
-use api_tracker_gateway::forward::{BodyTap, Gateway};
+use api_tracker_gateway::forward::{BodyTap, ConnLimits, Gateway};
 use api_tracker_gateway::record::{ExchangeRecord, ObservationSink};
 use api_tracker_gateway::routes::{Route, RouteState, RouteTable, RouteTarget, UpstreamOrigin};
 use api_tracker_gateway::server::{self, Listener};
@@ -133,6 +133,33 @@ impl RunningGateway {
     }
 
     pub fn start_with_taps(routes: Arc<RouteState>, taps: server::TapFactory) -> Self {
+        Self::start_configured(routes, taps, |_| {})
+    }
+
+    /// Start with the per-connection limits shortened to test scale.
+    ///
+    /// The limits are DATA on `Gateway` rather than a `#[cfg(test)]` branch,
+    /// so these tests drive exactly the production connection engine — the
+    /// property NEW-51 found missing, where the shipped wiring could be
+    /// deleted with every test still green.
+    pub fn start_with_limits(routes: Arc<RouteState>, limits: ConnLimits) -> Self {
+        Self::start_configured(
+            routes,
+            Arc::new(|_: &str, _: bool, _: bool| {
+                Box::new(api_tracker_gateway::forward::NoTap) as Box<dyn BodyTap>
+            }),
+            move |gw| gw.limits = limits,
+        )
+    }
+
+    /// Start with arbitrary `Gateway` fields adjusted BEFORE the serve thread
+    /// clones it — the ordering that lets `max_connections` and `limits` be
+    /// set without restarting the listener.
+    pub fn start_configured(
+        routes: Arc<RouteState>,
+        taps: server::TapFactory,
+        configure: impl FnOnce(&mut Gateway),
+    ) -> Self {
         let sink = Arc::new(CollectingSink::default());
         let listener = Listener::bind(0).unwrap();
         let port = listener.port();
@@ -141,6 +168,7 @@ impl RunningGateway {
         // framing semantics under test are transport-independent, and the
         // production SSRF policy (which refuses loopback) stays intact.
         gateway.connector = Arc::new(InsecurePlainConnectorForTests);
+        configure(&mut gateway);
         let gw = gateway.clone();
         let handle = std::thread::spawn(move || server::serve_with_taps(gw, listener, taps));
         Self {

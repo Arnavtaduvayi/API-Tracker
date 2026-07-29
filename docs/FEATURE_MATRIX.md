@@ -240,7 +240,7 @@ preview redaction, import, example, export permissions, cleanup.
 
 ## 9. Provider/API catalog — Fully implemented
 
-Compile-time-embedded TOML manifests (5 providers) with validated detection
+Compile-time-embedded TOML manifests (21 providers) with validated detection
 regexes, a 10-capability honesty matrix, and changelog/pricing/permission
 URLs. CLI `provider list/show/docs/capabilities`; desktop catalog/detail.
 Manifest validation tests; smoke checks assert honest non-implemented

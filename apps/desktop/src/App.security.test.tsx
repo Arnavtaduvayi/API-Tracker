@@ -23,6 +23,11 @@ vi.mock("./api", async () => {
       // The lock screen renders the gateway status strip (lock-free on the
       // backend); rejecting here exercises its "stay silent" fallback.
       gatewayDoctor: vi.fn().mockRejectedValue({ code: "unavailable", message: "n/a" }),
+      // The unlocked shell lands on the Activity dashboard; these are its
+      // loads. Rejecting exercises the visible-error paths.
+      gatewayActivity: vi.fn().mockRejectedValue({ code: "unavailable", message: "n/a" }),
+      trackingList: vi.fn().mockResolvedValue([]),
+      trackingForegroundActive: vi.fn().mockResolvedValue(false),
     },
   };
 });

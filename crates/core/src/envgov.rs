@@ -38,6 +38,42 @@ pub enum GitStatus {
     Untracked,
     /// The directory is not a Git repository.
     NotInRepo,
+    /// Inside a repository whose index or ignore rules could not be read
+    /// within Tethra's bounds. Never guessed in either direction.
+    Unknown,
+}
+
+/// Whether a file appears in Git history.
+///
+/// Answering this requires walking the object database, which the
+/// non-executing reader deliberately does not do (ADR 0023). Discovery
+/// therefore reports [`GitHistory::NotChecked`] unless the caller asked
+/// for the hardened probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHistory {
+    /// The path appears in at least one commit reachable from any ref.
+    Present,
+    /// It does not.
+    Absent,
+    /// Not asked. The UI must not render this as "no".
+    NotChecked,
+}
+
+/// Whether discovery may run the hardened `git` probe for history.
+///
+/// [`HistoryProbe::Skip`] — the default for every automatic path
+/// (folder selection, provider detection, planning, apply, undo,
+/// diagnostics) — spawns nothing at all, so no repository-controlled Git
+/// configuration can execute (ZFT-001).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryProbe {
+    /// Never spawn a process.
+    Skip,
+    /// Ask `git` under [`crate::gitrepo`]'s argument and environment
+    /// hardening. Only for commands the user explicitly invoked against a
+    /// folder they chose for that purpose.
+    HardenedGit,
 }
 
 /// A discovered environment file.
@@ -51,16 +87,105 @@ pub struct EnvFileInfo {
     /// Environment inferred from the file name, if any.
     pub environment: Option<Environment>,
     pub git_status: GitStatus,
-    /// The file (at this path) appears in Git history — deleting it from the
-    /// working tree does not remove past commits.
-    pub in_git_history: bool,
+    /// Whether the file (at this path) appears in Git history — deleting
+    /// it from the working tree does not remove past commits.
+    pub git_history: GitHistory,
     pub entry_count: usize,
     pub problems: Vec<EnvProblem>,
+    /// The file was larger than the per-file byte cap, so `entry_count`
+    /// and `problems` were not computed. Its bytes were never read.
+    pub oversized: bool,
+}
+
+impl EnvFileInfo {
+    /// True only when history was checked AND the path is present. Callers
+    /// that need to distinguish "no" from "not asked" must read
+    /// [`Self::git_history`] directly.
+    pub fn in_git_history(&self) -> bool {
+        matches!(self.git_history, GitHistory::Present)
+    }
 }
 
 const TEMPLATE_SUFFIXES: [&str; 4] = ["example", "sample", "template", "dist"];
 const SKIP_DIRS: [&str; 6] = [".git", "node_modules", "target", "dist", "build", ".venv"];
 const MAX_DISCOVERY_DEPTH: usize = 6;
+
+/// Bounds one discovery pass must respect. Depth alone is not enough: a
+/// folder can hold unbounded files, unbounded bytes, and take unbounded
+/// time (ZFT-003, ZFT-028).
+#[derive(Debug, Clone, Copy)]
+pub struct DiscoveryLimits {
+    pub max_depth: usize,
+    /// Candidate `.env*` files inspected.
+    pub max_files: usize,
+    /// Directories descended into.
+    pub max_dirs: usize,
+    /// Bytes read from any single file. Checked from the directory entry's
+    /// metadata BEFORE the file is opened.
+    pub max_file_bytes: u64,
+    /// Bytes read across the whole pass.
+    pub max_total_bytes: u64,
+    /// Wall-clock budget for the whole pass.
+    pub max_duration: std::time::Duration,
+}
+
+impl Default for DiscoveryLimits {
+    fn default() -> Self {
+        DiscoveryLimits {
+            max_depth: MAX_DISCOVERY_DEPTH,
+            max_files: 2_000,
+            max_dirs: 20_000,
+            max_file_bytes: 262_144,
+            max_total_bytes: 64 * 1024 * 1024,
+            max_duration: std::time::Duration::from_secs(20),
+        }
+    }
+}
+
+/// Why a discovery pass stopped early. Always reported — a truncated scan
+/// is never presented as a complete one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryTruncation {
+    FileBudget,
+    DirectoryBudget,
+    ByteBudget,
+    TimeBudget,
+}
+
+impl DiscoveryTruncation {
+    pub fn describe(self) -> &'static str {
+        match self {
+            DiscoveryTruncation::FileBudget => {
+                "this folder holds more environment files than Tethra reads in one pass; \
+                 the rest were not inspected"
+            }
+            DiscoveryTruncation::DirectoryBudget => {
+                "this folder holds more directories than Tethra walks in one pass; \
+                 the rest were not inspected"
+            }
+            DiscoveryTruncation::ByteBudget => {
+                "the scan reached its total read budget; later files were not inspected"
+            }
+            DiscoveryTruncation::TimeBudget => {
+                "the scan reached its time budget; later files were not inspected"
+            }
+        }
+    }
+}
+
+/// Everything one discovery pass found, plus every bound it hit.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiscoveryReport {
+    pub files: Vec<EnvFileInfo>,
+    /// Files skipped because they exceeded [`DiscoveryLimits::max_file_bytes`].
+    /// Their bytes were never read.
+    pub skipped_oversized: Vec<String>,
+    /// Set when the pass stopped before exhausting the folder.
+    pub truncated: Option<DiscoveryTruncation>,
+    /// Bounds hit inside the Git reader (index too large, ignore budget).
+    pub git_warnings: Vec<String>,
+}
 
 /// Whether `file_name` is an environment file we govern, and its class.
 pub fn classify_file_name(file_name: &str) -> Option<EnvFileClass> {
@@ -97,62 +222,96 @@ pub fn environment_from_name(file_name: &str) -> Option<Environment> {
     None
 }
 
-// All git probes route through the bounded runner (CONC-06): a hung git —
-// dead network mount, wedged lock — must degrade to "no answer" for one
-// probe, never hang env governance forever or leave an orphan child.
-fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = crate::gitrepo::run_git_probe(dir, args).ok()?;
-    if out.success {
-        Some(String::from_utf8_lossy(&out.stdout).into_owned())
-    } else {
-        None
+/// History lookup for one path, under [`crate::gitrepo`]'s hardening.
+///
+/// Only reachable from [`HistoryProbe::HardenedGit`]. Every automatic
+/// scan path uses [`HistoryProbe::Skip`] and never gets here.
+fn history_probe(dir: &Path, rel: &str) -> GitHistory {
+    match crate::gitrepo::run_git_probe(dir, &["log", "--oneline", "-n", "1", "--all", "--", rel]) {
+        Ok(out) if out.success && !out.stdout.is_empty() => GitHistory::Present,
+        Ok(out) if out.success => GitHistory::Absent,
+        // A repository we cannot query is "not checked", never "no".
+        _ => GitHistory::NotChecked,
     }
 }
 
-fn git_probe_success(dir: &Path, args: &[&str]) -> bool {
-    crate::gitrepo::run_git_probe(dir, args)
-        .map(|o| o.success)
-        .unwrap_or(false)
-}
-
-fn git_status_of(dir: &Path, rel: &str) -> (GitStatus, bool) {
-    let inside = git_output(dir, &["rev-parse", "--is-inside-work-tree"])
-        .map(|s| s.trim() == "true")
-        .unwrap_or(false);
-    if !inside {
-        return (GitStatus::NotInRepo, false);
-    }
-    let tracked = git_probe_success(dir, &["ls-files", "--error-unmatch", "--", rel]);
-    let in_history =
-        crate::gitrepo::run_git_probe(dir, &["log", "--oneline", "-n", "1", "--all", "--", rel])
-            .map(|o| o.success && !o.stdout.is_empty())
-            .unwrap_or(false);
-    if tracked {
-        return (GitStatus::Tracked, true);
-    }
-    let ignored = git_probe_success(dir, &["check-ignore", "-q", "--", rel]);
-    if ignored {
-        (GitStatus::Ignored, in_history)
-    } else {
-        (GitStatus::Untracked, in_history)
-    }
-}
-
-/// Discover environment files under `root` (bounded depth, common build
-/// directories skipped). Reads each file to count entries and problems but
-/// never returns values.
+/// Discover environment files under `root`.
+///
+/// Bounded depth, common build directories skipped, symlinks never
+/// followed, per-file and whole-pass byte caps, and **no subprocess**:
+/// Git status comes from [`crate::gitsafe`]'s byte reader. Reads each
+/// file to count entries and problems but never returns values.
 pub fn discover(root: &Path) -> Result<Vec<EnvFileInfo>> {
+    Ok(discover_bounded(root, DiscoveryLimits::default(), HistoryProbe::Skip)?.files)
+}
+
+/// [`discover`] with explicit bounds and an explicit history policy.
+pub fn discover_bounded(
+    root: &Path,
+    limits: DiscoveryLimits,
+    probe: HistoryProbe,
+) -> Result<DiscoveryReport> {
     let root = root
         .canonicalize()
         .map_err(|e| CoreError::InvalidInput(format!("cannot access {}: {e}", root.display())))?;
+    let started = std::time::Instant::now();
+
+    // One repository open for the whole pass: an index parse and an ignore
+    // load, instead of four process spawns per file (ZFT-001, ZFT-028).
+    let repo = crate::gitsafe::RepoView::open(&root);
+    let mut git_warnings: Vec<String> = repo
+        .as_ref()
+        .map(|r| r.limits().iter().map(|l| l.describe()).collect())
+        .unwrap_or_default();
+    // The scanned folder may sit below the work-tree root; ignore rules and
+    // index paths are repo-relative, so carry that offset.
+    let root_rel = repo
+        .as_ref()
+        .and_then(|r| r.repo_relative(&root))
+        .unwrap_or_default();
+
     let mut found = Vec::new();
+    let mut skipped_oversized = Vec::new();
+    let mut truncated: Option<DiscoveryTruncation> = None;
+    let mut dirs_visited = 0usize;
+    let mut total_bytes = 0u64;
     let mut stack = vec![(root.clone(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
+
+    'walk: while let Some((dir, depth)) = stack.pop() {
+        if started.elapsed() > limits.max_duration {
+            truncated = Some(DiscoveryTruncation::TimeBudget);
+            break;
+        }
+        dirs_visited += 1;
+        if dirs_visited > limits.max_dirs {
+            truncated = Some(DiscoveryTruncation::DirectoryBudget);
+            break;
+        }
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(_) => continue,
         };
+        // Ignore rules are per-directory; load them once for this directory
+        // rather than once per candidate file.
+        let dir_rel_from_root = dir
+            .strip_prefix(&root)
+            .unwrap_or(Path::new(""))
+            .to_string_lossy()
+            .replace('\\', "/");
+        let dir_rel_in_repo = join_rel(&root_rel, &dir_rel_from_root);
+        let dir_view = repo.as_ref().map(|r| r.dir_view(&dir_rel_in_repo));
+
         for entry in entries.flatten() {
+            // The per-directory check above cannot preempt a single
+            // directory holding thousands of entries, each of which costs a
+            // metadata call, a read and an ignore-rule evaluation. Without a
+            // check here the 20-second budget was advisory for any wide
+            // folder, so a slow per-entry step ran to completion however
+            // long it took (RA-009).
+            if started.elapsed() > limits.max_duration {
+                truncated = Some(DiscoveryTruncation::TimeBudget);
+                break 'walk;
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             let file_type = match entry.file_type() {
@@ -160,7 +319,7 @@ pub fn discover(root: &Path) -> Result<Vec<EnvFileInfo>> {
                 Err(_) => continue,
             };
             if file_type.is_dir() {
-                if depth < MAX_DISCOVERY_DEPTH && !SKIP_DIRS.contains(&name.as_str()) {
+                if depth < limits.max_depth && !SKIP_DIRS.contains(&name.as_str()) {
                     stack.push((path, depth + 1));
                 }
                 continue;
@@ -171,31 +330,95 @@ pub fn discover(root: &Path) -> Result<Vec<EnvFileInfo>> {
             let Some(class) = classify_file_name(&name) else {
                 continue;
             };
-            // Relative paths are displayed, compared against git output, and
-            // stored — normalize to forward slashes so behavior is identical
-            // across platforms (git itself always reports forward slashes).
+            if found.len() + skipped_oversized.len() >= limits.max_files {
+                truncated = Some(DiscoveryTruncation::FileBudget);
+                break 'walk;
+            }
+            // Relative paths are displayed and stored — normalize to
+            // forward slashes so behaviour is identical across platforms.
             let rel = path
                 .strip_prefix(&root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
+
+            let git_status = match &dir_view {
+                None => GitStatus::NotInRepo,
+                Some(view) => match view.status_of_name(&name, false) {
+                    crate::gitsafe::PathStatus::Tracked => GitStatus::Tracked,
+                    crate::gitsafe::PathStatus::Ignored => GitStatus::Ignored,
+                    crate::gitsafe::PathStatus::Untracked => GitStatus::Untracked,
+                    crate::gitsafe::PathStatus::Unknown => GitStatus::Unknown,
+                },
+            };
+            let git_history = match probe {
+                HistoryProbe::Skip => GitHistory::NotChecked,
+                HistoryProbe::HardenedGit => history_probe(&root, &rel),
+            };
+
+            // The size check happens BEFORE the file is opened: a 2 GB file
+            // named `.env` must never enter memory (ZFT-003).
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+            if size > limits.max_file_bytes {
+                skipped_oversized.push(rel.clone());
+                found.push(EnvFileInfo {
+                    path: path.to_string_lossy().into_owned(),
+                    rel_path: rel,
+                    class,
+                    environment: environment_from_name(&name),
+                    git_status,
+                    git_history,
+                    entry_count: 0,
+                    problems: Vec::new(),
+                    oversized: true,
+                });
+                continue;
+            }
+            if total_bytes.saturating_add(size) > limits.max_total_bytes {
+                truncated = Some(DiscoveryTruncation::ByteBudget);
+                break 'walk;
+            }
             let content = std::fs::read_to_string(&path).unwrap_or_default();
+            total_bytes = total_bytes.saturating_add(content.len() as u64);
             let doc = EnvDocument::parse(&content);
-            let (git_status, in_history) = git_status_of(&root, &rel);
             found.push(EnvFileInfo {
                 path: path.to_string_lossy().into_owned(),
                 rel_path: rel,
                 class,
                 environment: environment_from_name(&name),
                 git_status,
-                in_git_history: in_history,
+                git_history,
                 entry_count: doc.entries().count(),
                 problems: doc.problems(),
+                oversized: false,
             });
+        }
+        if let Some(view) = &dir_view {
+            for limit in view.limits() {
+                let text = limit.describe();
+                if !git_warnings.contains(&text) {
+                    git_warnings.push(text);
+                }
+            }
         }
     }
     found.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-    Ok(found)
+    skipped_oversized.sort();
+    Ok(DiscoveryReport {
+        files: found,
+        skipped_oversized,
+        truncated,
+        git_warnings,
+    })
+}
+
+/// Join two forward-slash relative fragments, either of which may be empty.
+fn join_rel(base: &str, rest: &str) -> String {
+    match (base.is_empty(), rest.is_empty()) {
+        (true, _) => rest.to_string(),
+        (false, true) => base.to_string(),
+        (false, false) => format!("{base}/{rest}"),
+    }
 }
 
 /// One variable in a preview: everything displayable, nothing secret.
@@ -363,10 +586,135 @@ fn mask_assignment(line: &str) -> String {
     let value = line[eq + 1..]
         .trim()
         .trim_matches(|c| c == '"' || c == '\'');
-    if value.is_empty() || crate::scanner::is_placeholder_value(value) {
+    if value.is_empty() {
+        return line.to_string();
+    }
+    // The exemption here used to be `is_placeholder_value`, a SUBSTRING
+    // test: a `DATABASE_URL` whose host merely contained the word
+    // "example" was printed verbatim, credentials and all, to stdout and
+    // across IPC (ZFT-017).
+    //
+    // The first replacement for it was worse. "Short AND not key-shaped"
+    // is a DENYLIST wearing a length limit, and it let `DB_PASSWORD=Tr0ub4dor3`
+    // and `SHORT_KEY=9f2c8a71e45b30d6` through — values the ORIGINAL code
+    // masked. A rule that leaks more than the defect it replaces is not a
+    // fix, and it was caught by an adversarial reviewer running the two
+    // trees side by side, not by any test written for it.
+    //
+    // So: mask by DEFAULT, and exempt only values that are structurally
+    // incapable of carrying a secret. That is an allowlist, and an
+    // allowlist is the only shape that fails safe when someone invents a
+    // new secret format.
+    let name = line[..eq].trim();
+    if name_suggests_a_credential(name) {
+        // A variable NAMED for a secret is masked whatever its value looks
+        // like. No allowlist entry can override this.
+        return format!("{}={}", &line[..eq], mask_value(value));
+    }
+    if value_is_structurally_not_a_secret(value) {
         return line.to_string();
     }
     format!("{}={}", &line[..eq], mask_value(value))
+}
+
+/// Whether a variable NAME is one whose value must always be masked,
+/// regardless of shape.
+fn name_suggests_a_credential(name: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "TOKEN",
+        "API_KEY",
+        "APIKEY",
+        "CREDENTIAL",
+        "PRIVATE",
+        "AUTH",
+        "SIGNING",
+        "CERT",
+        "SALT",
+        "SESSION",
+        "COOKIE",
+    ];
+    let upper = name.to_ascii_uppercase();
+    upper.ends_with("_KEY") || NEEDLES.iter().any(|n| upper.contains(n))
+}
+
+/// Whether a value belongs to one of the few shapes that cannot be a
+/// credential, and may therefore stay legible in a diff.
+///
+/// The diff exists so a user can see what is about to change, so masking
+/// literally everything would damage the consent surface it serves —
+/// `NODE_ENV=production` and `PORT=3000` have to stay readable. This is
+/// the whole exemption, and it is deliberately tiny: an over-masked
+/// configuration value costs a reader one glance at the file, while an
+/// under-masked one prints a credential.
+fn value_is_structurally_not_a_secret(value: &str) -> bool {
+    let v = value.trim();
+    if v.is_empty() {
+        return true;
+    }
+    // A number, with optional sign, decimal point or unit-ish suffix.
+    if v.len() <= 12
+        && v.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.'))
+    {
+        return true;
+    }
+    // A boolean or a common single-word setting. Compared WHOLE, never as
+    // a substring — a substring test is what produced ZFT-017.
+    const WORDS: &[&str] = &[
+        "true",
+        "false",
+        "yes",
+        "no",
+        "on",
+        "off",
+        "none",
+        "null",
+        "development",
+        "dev",
+        "production",
+        "prod",
+        "staging",
+        "stage",
+        "test",
+        "testing",
+        "local",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "trace",
+        "silent",
+        "verbose",
+    ];
+    let lower = v.to_ascii_lowercase();
+    if WORDS.contains(&lower.as_str()) {
+        return true;
+    }
+    // A bare origin or base URL: scheme + host + optional port + a path of
+    // ordinary path words. No userinfo, no query, no fragment, and no
+    // segment that could be key material — all of which
+    // `looks_like_key_material` already rejects.
+    if (v.starts_with("https://") || v.starts_with("http://"))
+        && !crate::scanner::looks_like_key_material(v)
+    {
+        let rest = v.split_once("://").map(|(_, r)| r).unwrap_or(v);
+        let ordinary = rest
+            .split(['/', ':'])
+            .filter(|seg| !seg.is_empty())
+            .all(|seg| {
+                seg.len() <= 24
+                    && seg
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+            });
+        if ordinary {
+            return true;
+        }
+    }
+    false
 }
 
 /// Create `path` fresh with owner-only permissions, failing if it already
@@ -606,33 +954,66 @@ fn sweep_orphaned_temp_files(conn: &Connection) {
         .collect();
     parents.sort();
     parents.dedup();
-    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     for dir in parents {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        sweep_orphaned_temp_files_in(&dir);
+    }
+}
+
+/// The same sweep, scoped to ONE directory.
+///
+/// Public because the export cleanup above was the only caller, and it reads
+/// the directories to sweep from `env_exports` — a table the tracking link
+/// and unlink paths never write. Those paths call `atomic_write` on a
+/// project's `.env` just as export does, so they can orphan exactly the same
+/// credential-bearing temp file and nothing was ever going to remove it
+/// (`NEW-29`). Any caller that writes a file atomically should sweep the
+/// directory it wrote into.
+///
+/// Bounded exactly as before: one directory, never a walk; only files
+/// matching the temp-name pattern; and only when they are over an hour old,
+/// so an in-flight write in another process is never raced. Best-effort by
+/// design — a failure to clean up must never fail the operation that
+/// succeeded.
+pub fn sweep_orphaned_temp_files_in(dir: &Path) {
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_temp = name.starts_with('.') && name.contains(".api-tracker-tmp-");
+        if !is_temp {
             continue;
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_temp = name.starts_with('.') && name.contains(".api-tracker-tmp-");
-            if !is_temp {
-                continue;
-            }
-            let old_enough = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|m| m < hour_ago)
-                .unwrap_or(false);
-            if old_enough {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m < hour_ago)
+            .unwrap_or(false);
+        if old_enough {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
 /// Whether `path` inside `repo_dir` is protected by .gitignore (or the
 /// directory is not a repository, in which case Git cannot leak it).
+///
+/// Non-executing: the answer comes from [`crate::gitsafe`], so asking it
+/// about a hostile repository cannot run that repository's code.
 pub fn gitignore_protects(repo_dir: &Path, rel: &str) -> GitStatus {
-    git_status_of(repo_dir, rel).0
+    let Ok(canonical) = repo_dir.canonicalize() else {
+        return GitStatus::NotInRepo;
+    };
+    let Some(view) = crate::gitsafe::RepoView::open(&canonical) else {
+        return GitStatus::NotInRepo;
+    };
+    match view.status_of(&canonical.join(rel)) {
+        crate::gitsafe::PathStatus::Tracked => GitStatus::Tracked,
+        crate::gitsafe::PathStatus::Ignored => GitStatus::Ignored,
+        crate::gitsafe::PathStatus::Untracked => GitStatus::Untracked,
+        crate::gitsafe::PathStatus::Unknown => GitStatus::Unknown,
+    }
 }
 
 #[cfg(test)]
@@ -767,16 +1148,96 @@ mod tests {
         run(&["rm", "-q", "--cached", ".env.local"]);
         run(&["commit", "-q", "-m", "untrack"]);
 
+        // The default (automatic) path is NON-EXECUTING: status is read
+        // from `.git/index` and the ignore files, and history is not asked
+        // for at all — reported as NotChecked, never as "no".
         let found = discover(dir.path()).unwrap();
         let by_name = |n: &str| found.iter().find(|f| f.rel_path == n).unwrap();
         assert_eq!(by_name(".env").git_status, GitStatus::Ignored);
-        assert!(!by_name(".env").in_git_history);
         assert_eq!(by_name(".env.staging").git_status, GitStatus::Tracked);
-        assert!(by_name(".env.staging").in_git_history);
         assert_eq!(by_name(".env.local").git_status, GitStatus::Untracked);
-        assert!(
-            by_name(".env.local").in_git_history,
+        for name in [".env", ".env.staging", ".env.local"] {
+            assert_eq!(
+                by_name(name).git_history,
+                GitHistory::NotChecked,
+                "{name}: the automatic path must not claim a history answer it never asked for"
+            );
+            assert!(
+                !by_name(name).in_git_history(),
+                "{name}: NotChecked must never read as Present"
+            );
+        }
+
+        // The explicitly requested, hardened probe answers for real.
+        let probed = discover_bounded(
+            dir.path(),
+            DiscoveryLimits::default(),
+            HistoryProbe::HardenedGit,
+        )
+        .unwrap()
+        .files;
+        let probed_by = |n: &str| probed.iter().find(|f| f.rel_path == n).unwrap();
+        assert_eq!(probed_by(".env").git_history, GitHistory::Absent);
+        assert_eq!(probed_by(".env.staging").git_history, GitHistory::Present);
+        assert_eq!(
+            probed_by(".env.local").git_history,
+            GitHistory::Present,
             "deleting from tracking must not hide history"
+        );
+    }
+
+    /// The time budget used to be checked once per DIRECTORY, so a folder
+    /// holding many files ran its whole entry loop however long that took —
+    /// which is what made a single slow `is_ignored` call unpreemptable
+    /// (RA-009). A budget that only fires between directories is not a
+    /// budget for a wide folder.
+    #[test]
+    fn the_time_budget_is_enforced_inside_a_single_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        // One directory, no subdirectories: the ONLY places the walk can
+        // stop are the per-directory check (before any file is inspected)
+        // and the per-entry check. A non-empty result therefore proves the
+        // per-entry check is what stopped it.
+        let mut body = String::new();
+        while body.len() < 64 * 1024 {
+            body.push_str("SOME_KEY_NAME_HERE=some-value-goes-here-0123456789\n");
+        }
+        let total = 200;
+        for i in 0..total {
+            std::fs::write(dir.path().join(format!(".env.f{i:04}")), &body).unwrap();
+        }
+        // Big enough that no OTHER bound can be the one that fires.
+        let generous = DiscoveryLimits {
+            max_files: 100_000,
+            max_total_bytes: 4 * 1024 * 1024 * 1024,
+            max_duration: std::time::Duration::from_secs(3600),
+            ..DiscoveryLimits::default()
+        };
+
+        // Negative control first: with time to spare the same fixture is
+        // read completely and reports no truncation at all.
+        let full = discover_bounded(dir.path(), generous, HistoryProbe::Skip).unwrap();
+        assert_eq!(full.files.len(), total);
+        assert_eq!(full.truncated, None);
+
+        let budgeted = DiscoveryLimits {
+            max_duration: std::time::Duration::from_millis(25),
+            ..generous
+        };
+        let report = discover_bounded(dir.path(), budgeted, HistoryProbe::Skip).unwrap();
+        assert_eq!(
+            report.truncated,
+            Some(DiscoveryTruncation::TimeBudget),
+            "reading {total} files must not overrun the budget silently"
+        );
+        assert!(
+            report.files.len() < total,
+            "the pass must have stopped early"
+        );
+        assert!(
+            !report.files.is_empty(),
+            "the walk reached the entry loop and stopped inside it, so some files must have \
+             been inspected; an empty result would mean only the per-directory check ran"
         );
     }
 

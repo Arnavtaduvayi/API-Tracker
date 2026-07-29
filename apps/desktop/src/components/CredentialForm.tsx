@@ -31,12 +31,24 @@ export function CredentialForm(props: {
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(!editing);
   const [reuseWarnings, setReuseWarnings] = useState<ReuseWarning[] | null>(null);
+  const [providersError, setProvidersError] = useState<string | null>(null);
 
   useEffect(() => {
+    // A swallowed failure here emptied the dropdown, which then made every
+    // real provider look like an unknown one and pushed the user into the
+    // "Custom…" branch — silently storing a credential under a free-text
+    // provider that no manifest backs (NEW-41). The list is either read or
+    // said to be unread.
     api
       .providersList()
-      .then(setProviders)
-      .catch(() => setProviders([]));
+      .then((p) => {
+        setProviders(p);
+        setProvidersError(null);
+      })
+      .catch((e) => {
+        setProviders([]);
+        setProvidersError(isApiError(e) ? e.message : String(e));
+      });
     if (props.editId) {
       api
         .credentialGet(props.editId)
@@ -131,6 +143,13 @@ export function CredentialForm(props: {
           Name (unique within the project)
           <input value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
         </label>
+        {providersError && (
+          <p className="error" role="alert">
+            The provider list could not be loaded: {providersError}. The choices below are
+            incomplete — this is not a sign that the provider you want is unsupported, and
+            saving now would record it as a custom name.
+          </p>
+        )}
         <label className="field">
           Provider
           <select

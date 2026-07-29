@@ -181,3 +181,13 @@ dialog {
   color: #666;
   font-size: 0.85rem;
 }
+
+/* Navigation group labels (ACTIVITY / VAULT / SECURITY / ADVANCED). */
+.navgroup {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+  margin-left: 0.75rem;
+  align-self: center;
+}

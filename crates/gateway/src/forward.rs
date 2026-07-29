@@ -36,6 +36,21 @@ pub const CLIENT_HEAD_DEADLINE: Duration = Duration::from_secs(15);
 pub const CLIENT_HEAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle budget while streaming a request body from the client.
 pub const CLIENT_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Absolute ceiling on how long ONE request body may take to arrive, however
+/// steadily it trickles (`SEC-02`).
+///
+/// The idle timeout above bounds the gap between two reads; it does not bound
+/// the total, so a client sending one byte every five seconds held a
+/// connection open for as long as it liked. Generous enough for a real upload
+/// over a slow link, far below "forever". Applies to the REQUEST body only —
+/// a streaming response is a legitimate long-lived read and is not bounded by
+/// this.
+///
+/// This bounds ONE request. On its own it bounds nothing about a CONNECTION:
+/// it is re-armed per request, so it is clamped by
+/// `CLIENT_CONNECTION_TIME_BUDGET` below (`NEW-48`).
+pub const CLIENT_BODY_DEADLINE: Duration = Duration::from_secs(300);
 /// Idle budget on a kept-alive connection between requests.
 pub const CLIENT_KEEPALIVE_IDLE: Duration = Duration::from_secs(120);
 /// Budget for one blocking write toward the client. Bounds a client that
@@ -44,6 +59,173 @@ pub const CLIENT_WRITE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Concurrent client connections; further connections get 503 immediately
 /// rather than queueing without bound.
 pub const MAX_CONNECTIONS: usize = 128;
+
+/// Cumulative ceiling on CLIENT-PACED time for one CONNECTION (`SEC-02`,
+/// `NEW-48`). This is the bound that makes slot residency stateable at all.
+///
+/// Every client-facing budget above is per REQUEST and is re-armed from
+/// `Instant::now()` on each keep-alive iteration, so a client that keeps
+/// *completing* slow work is never idle and never out of time. The audit held
+/// one of `MAX_CONNECTIONS` slots for 422 seconds across twenty slow bodies on
+/// a single connection, and would have held it for as long as it cared to: the
+/// bound was not merely large, it was not expressible. This budget is charged
+/// cumulatively across every request the connection serves and is never
+/// renewed.
+///
+/// Only client-paced time is charged: idling between requests, reading a
+/// request head, reading a request body. Upstream-paced time — connecting to
+/// the provider, waiting for its response head, streaming its response body —
+/// is deliberately NOT charged, because the origin comes from the route table
+/// and never from the request, so a client cannot lengthen it. Charging it
+/// would truncate a long model completion, which is the one thing this fix
+/// must not do.
+///
+/// 600s covers one full `CLIENT_BODY_DEADLINE` upload plus a retry, or several
+/// minutes of pooled idling; an SDK connection spends milliseconds per request
+/// in the charged phases.
+///
+/// The budget is observed BETWEEN phases, so residency overshoots it by at
+/// most one in-flight idle budget: `CLIENT_KEEPALIVE_IDLE` (120s) if the wait
+/// for the next head was running, or `CLIENT_BODY_IDLE_TIMEOUT` (60s) if the
+/// body relay was. The head deadline is deliberately NOT clamped to the
+/// remaining budget — clamping could expire mid-head and turn a legitimately
+/// arriving request into a spurious 400. **The worst case is therefore 720s,
+/// not 600s, and every document that states a bound must state 720s.** An
+/// attacker who dribbles is worth nothing after that, so holding 128 slots
+/// means re-opening 128 connections every twelve minutes, each subject to the
+/// 15s first-head deadline.
+pub const CLIENT_CONNECTION_TIME_BUDGET: Duration = Duration::from_secs(600);
+
+/// Absolute age past which a connection serves no NEW request (`NEW-48`).
+///
+/// Enforced at the top of the keep-alive loop and folded into the keep-alive
+/// decision — never mid-exchange. A hard wall-clock lifetime would sever a
+/// legitimate long SSE completion, which is precisely the failure this whole
+/// design exists to avoid; applied between requests it means "this connection
+/// will not serve another", the preceding response carries `Connection: close`
+/// and the client reconnects transparently.
+///
+/// It bounds the one residency channel the time budget cannot see: a
+/// connection kept alive indefinitely by work that is legitimately UNCHARGED.
+/// Back-to-back multi-minute streaming completions spend almost no client-paced
+/// time, so a single socket could otherwise be reused for days. That is not an
+/// attack — which is why the bound is an hour rather than minutes, and why it
+/// never interrupts the exchange in progress — but "forever" is not a number a
+/// document can state. One hour matches nginx's `keepalive_time` default.
+pub const CLIENT_CONNECTION_MAX_AGE: Duration = Duration::from_secs(3600);
+
+/// Requests served on one keep-alive connection before it is closed cleanly.
+///
+/// Belt-and-braces, not the primary defence — the time budget and the maximum
+/// age above are what bound a slot. A cap forces periodic reconnection, which
+/// re-arms the 15s first-head deadline and lets the connection cap rebalance
+/// across clients rather than being permanently owned by whoever connected
+/// first. 10_000 is five times the busiest single-socket loop in this
+/// repository's own perf suite and ten times nginx's `keepalive_requests`
+/// default, so no legitimate client meets it by accident.
+pub const MAX_REQUESTS_PER_CONNECTION: u32 = 10_000;
+
+// There is deliberately NO cumulative request-body BYTE ceiling. A slot is the
+// scarce resource here, not bandwidth: the body relay is a blocking copy, so a
+// client uploading at line rate is using the gateway for its purpose and frees
+// the slot by finishing. A byte cap would break repeated large uploads on a
+// pooled connection (audio transcription, file endpoints) and would bound
+// nothing that CLIENT_CONNECTION_TIME_BUDGET does not already bound. Recorded
+// here so the omission reads as a decision rather than an oversight.
+
+/// The per-connection bounds, as data rather than as literals in the engine.
+///
+/// Production values are the module constants above; `Gateway::new` is the
+/// only constructor, there is no setter, no environment variable and no
+/// configuration file, so a user cannot weaken a bound the documentation
+/// promises. The struct exists so the connection engine can be driven at
+/// millisecond scale by tests WITHOUT a `#[cfg(test)]` branch — `NEW-51` is
+/// exactly the failure where the tested code and the shipped code are not the
+/// same code, and a test-only shortcut would reintroduce it while appearing to
+/// fix it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnLimits {
+    pub head_deadline: Duration,
+    pub head_read_timeout: Duration,
+    pub keepalive_idle: Duration,
+    pub body_idle: Duration,
+    pub body_deadline: Duration,
+    pub client_time_budget: Duration,
+    pub max_age: Duration,
+    pub max_requests: u32,
+}
+
+impl Default for ConnLimits {
+    fn default() -> Self {
+        Self {
+            head_deadline: CLIENT_HEAD_DEADLINE,
+            head_read_timeout: CLIENT_HEAD_READ_TIMEOUT,
+            keepalive_idle: CLIENT_KEEPALIVE_IDLE,
+            body_idle: CLIENT_BODY_IDLE_TIMEOUT,
+            body_deadline: CLIENT_BODY_DEADLINE,
+            client_time_budget: CLIENT_CONNECTION_TIME_BUDGET,
+            max_age: CLIENT_CONNECTION_MAX_AGE,
+            max_requests: MAX_REQUESTS_PER_CONNECTION,
+        }
+    }
+}
+
+/// Per-CONNECTION resource state (`SEC-02` / `NEW-48`) — the accumulator whose
+/// absence was the defect.
+///
+/// `serve_connection` previously carried no state that outlived a request
+/// other than the upstream pool and the carryover buffer, so nothing could
+/// possibly accumulate and every bound restarted at each keep-alive iteration.
+/// This is the one place connection-scoped cost is remembered.
+struct ConnBudget {
+    limits: ConnLimits,
+    opened: Instant,
+    /// Cumulative time spent waiting on the CLIENT: idle between requests,
+    /// reading a request head, reading a request body. Response streaming is
+    /// upstream-paced and is never added here — see
+    /// `CLIENT_CONNECTION_TIME_BUDGET`.
+    client_time: Duration,
+    requests: u32,
+}
+
+impl ConnBudget {
+    fn new(limits: ConnLimits) -> Self {
+        Self {
+            limits,
+            opened: Instant::now(),
+            client_time: Duration::ZERO,
+            requests: 0,
+        }
+    }
+
+    /// What is left of the connection's client-paced allowance. A per-request
+    /// deadline is clamped to this so completing a request cannot renew it.
+    fn remaining_client_time(&self) -> Duration {
+        self.limits
+            .client_time_budget
+            .saturating_sub(self.client_time)
+    }
+
+    fn charge(&mut self, spent: Duration) {
+        self.client_time = self.client_time.saturating_add(spent);
+    }
+
+    fn count_request(&mut self) {
+        self.requests = self.requests.saturating_add(1);
+    }
+
+    /// Whether this connection may begin ANOTHER request.
+    ///
+    /// Consulted only between exchanges — at the top of the keep-alive loop
+    /// and when deciding whether the response head says `keep-alive` or
+    /// `close`. Never mid-exchange: an in-flight response, which may be a
+    /// legitimate multi-minute stream, is finished intact.
+    fn may_serve_another(&self) -> bool {
+        !self.remaining_client_time().is_zero()
+            && self.opened.elapsed() < self.limits.max_age
+            && self.requests < self.limits.max_requests
+    }
+}
 
 /// A tap fed with response body bytes AS THEY STREAM, for bounded usage
 /// extraction. It never buffers the body and never affects the relay.
@@ -74,6 +256,10 @@ pub struct Gateway {
     pub shutdown: Arc<AtomicBool>,
     pub connections: Arc<AtomicUsize>,
     pub max_connections: usize,
+    /// Per-connection time/count bounds. Defaults to the module constants;
+    /// carried as data so the connection engine is testable at millisecond
+    /// scale without a production-path branch (`ConnLimits`).
+    pub limits: ConnLimits,
     /// Whether bounded usage extraction is enabled (Stage E).
     pub extraction_enabled: bool,
     /// How upstream connections are established. Production is always
@@ -103,6 +289,7 @@ impl Gateway {
             shutdown: Arc::new(AtomicBool::new(false)),
             connections: Arc::new(AtomicUsize::new(0)),
             max_connections: MAX_CONNECTIONS,
+            limits: ConnLimits::default(),
             extraction_enabled: true,
             connector: Arc::new(TlsConnector),
             matching_key: Arc::new(RwLock::new(None)),
@@ -410,24 +597,50 @@ pub fn serve_connection(
     let mut pool = UpstreamPool::new();
     let mut carry: Carryover = Zeroizing::new(Vec::new());
     let mut first = true;
+    // SEC-02 / NEW-48: the only state that outlives a request and therefore
+    // the only place a CONNECTION-scoped bound can live. The slot is held for
+    // the whole of `serve_connection` and nothing outside it can reclaim one.
+    let mut budget = ConnBudget::new(gw.limits);
 
     loop {
         if gw.shutdown.load(Ordering::Relaxed) {
             break;
         }
+        // Retirement is decided BETWEEN requests only, so nothing in flight is
+        // ever truncated. Closing here is byte-identical to the existing idle
+        // close below: no request has been read, so no 400 is manufactured for
+        // a request nobody made. Whenever the bound was already visible while
+        // the previous response head was being built, that response said
+        // `Connection: close` and this is merely the client's own close
+        // arriving first.
+        if !budget.may_serve_another() {
+            break;
+        }
         // The per-read timeout is short so the loop wakes to observe the
         // absolute deadline. A FIRST request must complete its head within
         // CLIENT_HEAD_DEADLINE (that bound is what stops a Slowloris); a
-        // kept-alive connection may sit idle longer between requests, but
-        // once any byte of a head arrives the same head deadline applies.
-        let _ = client.set_read_timeout(Some(CLIENT_HEAD_READ_TIMEOUT));
+        // kept-alive connection gets CLIENT_KEEPALIVE_IDLE for the whole head,
+        // idle wait included, because the deadline is armed before the read
+        // and is not re-armed when the first byte lands.
+        let _ = client.set_read_timeout(Some(gw.limits.head_read_timeout));
         let idle_budget = if first {
-            CLIENT_HEAD_DEADLINE
+            gw.limits.head_deadline
         } else {
-            CLIENT_KEEPALIVE_IDLE
+            gw.limits.keepalive_idle
         };
         let deadline = Instant::now() + idle_budget;
+        // Head-phase time — the idle wait included — is client-paced and is
+        // charged. Without this, dribbling a HEAD for a full keep-alive idle
+        // budget per request renews connection residency exactly the way
+        // NEW-48 describes for bodies, and the body budget alone would not
+        // notice. The head DEADLINE is deliberately not clamped to what is
+        // left: clamping could expire in the middle of a head that is
+        // legitimately arriving and turn it into a spurious 400, so the
+        // overshoot of at most one idle budget is stated instead of
+        // engineered away.
+        let head_started = Instant::now();
         let read = head::read_request_head(&mut client, std::mem::take(&mut carry), Some(deadline));
+        budget.charge(head_started.elapsed());
         first = false;
         let (head, body_carry) = match read {
             Ok(Some(v)) => v,
@@ -448,8 +661,17 @@ pub fn serve_connection(
                 break;
             }
         };
-        let _ = client.set_read_timeout(Some(CLIENT_BODY_IDLE_TIMEOUT));
-        match handle_request(gw, &mut client, &mut pool, head, body_carry, tap_factory) {
+        budget.count_request();
+        let _ = client.set_read_timeout(Some(gw.limits.body_idle));
+        match handle_request(
+            gw,
+            &mut client,
+            &mut pool,
+            head,
+            body_carry,
+            tap_factory,
+            &mut budget,
+        ) {
             Next::KeepAlive(next) => carry = next,
             Next::Close => break,
         }
@@ -465,6 +687,7 @@ fn handle_request(
     head: RequestHead,
     body_carry: Carryover,
     tap_factory: &dyn Fn(&str, bool, bool) -> Box<dyn BodyTap>,
+    budget: &mut ConnBudget,
 ) -> Next {
     // --- request gate (order is security-relevant; see module docs) ---
 
@@ -662,6 +885,7 @@ fn handle_request(
         &shape,
         tap_factory,
         &mut record,
+        budget,
     );
 
     record.latency_ms = Some(started.elapsed().as_millis() as i64);
@@ -694,6 +918,7 @@ fn forward_exchange(
     usage_shape: &str,
     tap_factory: &dyn Fn(&str, bool, bool) -> Box<dyn BodyTap>,
     record: &mut ExchangeRecord,
+    budget: &mut ConnBudget,
 ) -> Next {
     // 1. Upstream socket for THIS route (never shared across routes).
     let cached = pool.take(route_prefix, origin);
@@ -835,29 +1060,60 @@ fn forward_exchange(
     //    for the next request on a kept-alive connection.
     let mut client_carry: Vec<u8> = Vec::new();
     if !skip_body {
-        let relayed = match head.framing {
-            Framing::None => Ok((0u64, body_carry.to_vec())),
-            // Strict CRLF chunk framing toward the upstream: a bare-LF chunk
-            // body is REJECTED, never forwarded (SI-15). `observe::relay`
-            // deliberately tolerates bare LF — safe for the observation
-            // proxy, a smuggling primitive for a gateway.
-            Framing::Chunked => crate::stream::relay_chunked_strict(
-                client,
-                &mut upstream,
-                body_carry.to_vec(),
-                None,
-            ),
-            Framing::ContentLength(n) => crate::stream::relay_plain(
-                client,
-                &mut upstream,
-                Some(n),
-                body_carry.to_vec(),
-                None,
-            ),
-            Framing::UntilClose => {
-                crate::stream::relay_plain(client, &mut upstream, None, body_carry.to_vec(), None)
-            }
+        // SEC-02 / NEW-48: the ceiling on THIS upload is the per-request
+        // deadline CLAMPED by whatever is left of the connection's budget.
+        // Computing it from `Instant::now()` and the constant alone was the
+        // whole defect: this runs once per keep-alive iteration, so twenty
+        // sequential slow bodies each received a fresh 300 seconds and the
+        // connection was never idle, holding a slot for as long as the client
+        // cared to keep completing requests.
+        let remaining = budget.remaining_client_time();
+        // Which of the two bounds is the binding one, so the record can say
+        // "your upload was too slow" rather than "this connection is spent"
+        // (NEW-52) — they call for different fixes by the caller.
+        let connection_bound = remaining < gw.limits.body_deadline;
+        let body_started = Instant::now();
+        let body_deadline = body_started + std::cmp::min(gw.limits.body_deadline, remaining);
+        // The reader is scoped to the relay itself so the error paths below
+        // still see the raw stream and can answer on it; `stop` is copied out
+        // by value before the borrow ends.
+        let (relayed, stop) = {
+            let mut bounded = crate::stream::DeadlineReader::new(&mut *client, body_deadline);
+            let out = match head.framing {
+                Framing::None => Ok((0u64, body_carry.to_vec())),
+                // Strict CRLF chunk framing toward the upstream: a bare-LF chunk
+                // body is REJECTED, never forwarded (SI-15). `observe::relay`
+                // deliberately tolerates bare LF — safe for the observation
+                // proxy, a smuggling primitive for a gateway.
+                Framing::Chunked => crate::stream::relay_chunked_strict(
+                    &mut bounded,
+                    &mut upstream,
+                    body_carry.to_vec(),
+                    None,
+                ),
+                Framing::ContentLength(n) => crate::stream::relay_plain(
+                    &mut bounded,
+                    &mut upstream,
+                    Some(n),
+                    body_carry.to_vec(),
+                    None,
+                ),
+                Framing::UntilClose => crate::stream::relay_plain(
+                    &mut bounded,
+                    &mut upstream,
+                    None,
+                    body_carry.to_vec(),
+                    None,
+                ),
+            };
+            (out, bounded.stop())
         };
+        // Charged on the success path AND the failure path: an upload that
+        // ended badly still occupied the slot for as long as it ran. The
+        // measurement spans the upstream writes too, which is conservative in
+        // the safe direction — a stalled upstream can only shorten the
+        // connection's remaining allowance, never lengthen it.
+        budget.charge(body_started.elapsed());
         match relayed {
             Ok((bytes, carry)) => {
                 record.request_bytes = Some(bytes as i64);
@@ -875,12 +1131,40 @@ fn forward_exchange(
             }
             Err(e) => {
                 let malformed = matches!(e, CoreError::InvalidInput(_));
-                record.completion = if malformed {
-                    Completion::RejectedLocally
+                // NEW-52: "we cut this client off at a limit we chose" and
+                // "this client went away" were recorded identically, as
+                // ClientDisconnected + Reset, so nobody could tell a policy
+                // decision from a peer failure — and the client was reset
+                // without ever being told which had happened. Only the
+                // client-side reader can attribute a stop, because an error
+                // raised WRITING to the upstream surfaces on this same
+                // `Result` and must not be mistaken for either.
+                let limit_hit = if malformed {
+                    None
                 } else {
-                    Completion::ClientDisconnected
+                    match stop {
+                        crate::stream::ReaderStop::DeadlineExceeded if connection_bound => {
+                            Some(Completion::ConnectionBudgetExceeded)
+                        }
+                        crate::stream::ReaderStop::DeadlineExceeded => {
+                            Some(Completion::ClientBodyDeadlineExceeded)
+                        }
+                        crate::stream::ReaderStop::IdleTimeout => {
+                            Some(Completion::ClientBodyIdleTimeout)
+                        }
+                        crate::stream::ReaderStop::None | crate::stream::ReaderStop::Failed => None,
+                    }
                 };
-                record.transport_error = TransportError::Reset;
+                record.completion = match (malformed, limit_hit) {
+                    (true, _) => Completion::RejectedLocally,
+                    (false, Some(imposed)) => imposed,
+                    (false, None) => Completion::ClientDisconnected,
+                };
+                record.transport_error = if limit_hit.is_some() {
+                    TransportError::Timeout
+                } else {
+                    TransportError::Reset
+                };
                 if malformed {
                     // Nothing has been written to the CLIENT yet, so a local
                     // diagnostic is safe here. Note this says nothing about
@@ -898,6 +1182,25 @@ fn forward_exchange(
                          aborted; the upstream connection is closed without a complete \
                          body, so the request cannot have been applied as a whole — but \
                          part of it may already have reached the provider.",
+                    );
+                } else if limit_hit.is_some() {
+                    // Safe here and ONLY here: the request-body phase has
+                    // written no byte of the provider's answer, so the "never
+                    // inject a synthetic body once provider streaming started"
+                    // rule is not in play (an Expect interim may legally
+                    // precede a final status). A client that was cut off by
+                    // our own limit is told so instead of being reset in
+                    // silence.
+                    local_response(
+                        client,
+                        408,
+                        "Request Timeout",
+                        "the request body did not finish within the upload deadline, or \
+                         within this connection's total client-time budget. The exchange \
+                         was aborted; the provider connection is closed without a \
+                         complete body, so the request cannot have been applied as a \
+                         whole — but part of it may already have reached the provider. \
+                         Retry on a new connection.",
                     );
                 }
                 return Next::Close;
@@ -957,7 +1260,13 @@ fn forward_exchange(
     let client_keep_alive = !head.client_wants_close
         && !terminal_framing
         && !skip_body
-        && !gw.shutdown.load(Ordering::Relaxed);
+        && !gw.shutdown.load(Ordering::Relaxed)
+        // NEW-48: a connection that has reached one of its per-connection
+        // bounds is TOLD to close, on an otherwise entirely normal response,
+        // rather than discovering it later as a silent close mid-pool. The
+        // check belongs here and not in the body relay: this exchange, and any
+        // response streaming that follows, completes intact.
+        && budget.may_serve_another();
 
     let out = head::build_client_response_head(&resp, framing, client_keep_alive);
     if client.write_all(&out).and_then(|_| client.flush()).is_err() {
@@ -970,6 +1279,16 @@ fn forward_exchange(
     //    mode is decided from the response's OWN declared headers: a
     //    compressed body is counted `unsupported_shape` rather than scanned,
     //    because the relay never decompresses (zip-bomb surface).
+    //
+    //    Nothing from here on is charged to `budget`, deliberately (SEC-02 /
+    //    NEW-48). This loop blocks on the UPSTREAM socket, whose origin comes
+    //    from the route table and never from the request, so its pace is not
+    //    attacker-controlled and a limit here would buy no availability while
+    //    truncating an eight-minute model completion. Request upload and
+    //    response streaming are different questions and get different answers:
+    //    the upload is bounded absolutely and cumulatively; the response is
+    //    bounded only per-read (UPSTREAM_IDLE_TIMEOUT) and per-write toward a
+    //    client that stopped reading (CLIENT_WRITE_TIMEOUT).
     let (streaming, compressed) = crate::usage::mode_for_response(
         resp.header_str("content-type"),
         resp.header_str("content-encoding"),
@@ -1110,6 +1429,72 @@ mod tests {
         assert!(!path_is_safe("/openai/%2e%2e/anthropic"));
         assert!(!path_is_safe("/openai/%2E%2E/anthropic"));
         assert!(!path_is_safe("/openai\\..\\anthropic"));
+    }
+
+    /// The limits a `Gateway` actually runs with must be the constants the
+    /// documentation quotes. `ConnLimits` exists so tests can shorten these;
+    /// this is the guard that a future edit to a constant, or to a `Default`
+    /// field, cannot silently make the shipped bound differ from the stated
+    /// one — the one real hazard of carrying limits as data.
+    #[test]
+    fn production_limits_are_exactly_the_documented_constants() {
+        let l = ConnLimits::default();
+        assert_eq!(l.head_deadline, CLIENT_HEAD_DEADLINE);
+        assert_eq!(l.head_read_timeout, CLIENT_HEAD_READ_TIMEOUT);
+        assert_eq!(l.keepalive_idle, CLIENT_KEEPALIVE_IDLE);
+        assert_eq!(l.body_idle, CLIENT_BODY_IDLE_TIMEOUT);
+        assert_eq!(l.body_deadline, CLIENT_BODY_DEADLINE);
+        assert_eq!(l.client_time_budget, CLIENT_CONNECTION_TIME_BUDGET);
+        assert_eq!(l.max_age, CLIENT_CONNECTION_MAX_AGE);
+        assert_eq!(l.max_requests, MAX_REQUESTS_PER_CONNECTION);
+
+        // A `Gateway` built the only way one can be built carries them.
+        let gw = Gateway::new(
+            Arc::new(RouteState::from_table_for_test(
+                crate::routes::RouteTable::default(),
+            )),
+            Arc::new(crate::record::NullSink),
+            7,
+        );
+        assert_eq!(gw.limits, ConnLimits::default());
+
+        // The cumulative budget must be able to absorb a whole legitimate
+        // upload, or a single large request would be unservable.
+        assert!(l.client_time_budget >= l.body_deadline);
+        // And the connection must be retired for age long before an unbounded
+        // number of idle cycles, each just short of the idle timeout, could
+        // accumulate silently.
+        assert!(l.max_age > l.keepalive_idle);
+    }
+
+    #[test]
+    fn a_connection_budget_is_cumulative_and_never_renewed_by_a_completed_request() {
+        // The property NEW-48 is about, at the level of the accumulator
+        // itself: charging twice adds, it does not reset.
+        let limits = ConnLimits {
+            client_time_budget: Duration::from_millis(100),
+            max_age: Duration::from_secs(3600),
+            max_requests: 3,
+            ..ConnLimits::default()
+        };
+        let mut budget = ConnBudget::new(limits);
+        assert!(budget.may_serve_another());
+        budget.charge(Duration::from_millis(60));
+        assert_eq!(budget.remaining_client_time(), Duration::from_millis(40));
+        budget.charge(Duration::from_millis(60));
+        assert!(
+            budget.remaining_client_time().is_zero(),
+            "a second slow request must draw on the SAME budget"
+        );
+        assert!(!budget.may_serve_another());
+
+        // The request cap retires a connection that is otherwise free.
+        let mut budget = ConnBudget::new(limits);
+        for _ in 0..3 {
+            assert!(budget.may_serve_another());
+            budget.count_request();
+        }
+        assert!(!budget.may_serve_another());
     }
 
     #[test]

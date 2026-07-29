@@ -95,6 +95,14 @@ bundling `tethra-gateway` as an `externalBin` (inheriting the app's
 quarantine state) is deferred until the signing path exists.
 **Close at:** Stage 5/6. Changes if `externalBin` bundling lands earlier.
 
+**CLOSED 2026-07-27, superseding the default above.** `externalBin` bundling
+landed: `Tethra.app/Contents/MacOS/` now carries a byte-identical `tethra`
+sidecar, `locate_cli` prefers it, and the quarantine concern is handled by
+`fresh_byte_write` plus the exec probe rather than by waiting for signing.
+The default recorded above is what v1 was *going* to do and is retained for
+the record; it is not what ships. This record was left reading as open after
+the mechanism shipped (audit finding `ZFT-VAL-13`).
+
 ## O11. Manifest base-path and variable set per provider
 
 The `/v1` placement differs per SDK (OpenAI joins base + `/chat/completions`

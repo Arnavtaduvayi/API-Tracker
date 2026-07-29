@@ -30,19 +30,91 @@ use std::sync::Arc;
 
 use api_tracker_core::error::{CoreError, Result};
 
-use super::{CommandRunner, Definition, OsWillRun, RegistrationState, ServiceManager};
+use super::{
+    CommandRunner, Definition, DefinitionState, OsWillRun, RegistrationState, ServiceManager,
+};
 
 pub const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-pub const VALUE_NAME: &str = "TethraGateway";
+
+/// The `Run` value name used before per-installation namespacing. Kept ONLY
+/// for migration (see [`RunKey::reclaim_legacy`]); nothing new is written
+/// under it. HKCU is per-USER, so a fixed value name let a second Tethra
+/// environment overwrite and delete the first one's login entry (ZFT-014).
+pub const LEGACY_VALUE_NAME: &str = "TethraGateway";
+
+/// The `Run` value name for one installation.
+pub fn value_name_for(installation_id: &str) -> String {
+    format!("TethraGateway-{installation_id}")
+}
 
 pub struct RunKey {
     pub data_dir: PathBuf,
+    /// Namespace for the `Run` value name; see [`super::installation_id`].
+    pub installation_id: String,
     pub runner: Arc<dyn CommandRunner>,
 }
 
 impl RunKey {
+    /// Derives the installation id from `data_dir` — always construct
+    /// through here so the value name can never disagree with the directory
+    /// it serves.
     pub fn new(data_dir: PathBuf, runner: Arc<dyn CommandRunner>) -> Self {
-        Self { data_dir, runner }
+        Self {
+            installation_id: super::installation_id(&data_dir),
+            data_dir,
+            runner,
+        }
+    }
+
+    /// This installation's `Run` value name.
+    pub fn value_name(&self) -> String {
+        value_name_for(&self.installation_id)
+    }
+
+    /// Read one `Run` value back as a definition. Shared by the namespaced
+    /// read and the legacy-migration probe.
+    ///
+    /// Three states (ADR 0026 D2), but the absent/unparseable line is drawn
+    /// differently here than on macOS and Linux, deliberately. There the
+    /// filesystem gives a typed `NotFound`; here the only signal is
+    /// `reg.exe`'s exit status, which is non-zero for "no such value" AND
+    /// for every other failure, and whose accompanying message is LOCALIZED.
+    /// Calling a failed query "unparseable" would therefore make every verb
+    /// — including the first install — refuse on a machine whose only sin is
+    /// a non-English Windows. So a failed query stays absent, exactly as
+    /// before, and `Unparseable` is reserved for the case this platform can
+    /// prove: the value IS there and its command line is not one we wrote.
+    /// That is also the only case an attacker or a hand-edit can create.
+    fn read_value(&self, value_name: &str) -> DefinitionState {
+        let Ok(out) = self
+            .runner
+            .run("reg", &["query", RUN_KEY, "/v", value_name])
+        else {
+            return DefinitionState::Absent;
+        };
+        if !out.ok() {
+            return DefinitionState::Absent;
+        }
+        // reg query output: `    TethraGateway-<id>    REG_SZ    "C:\...\bin.exe" ...`
+        // Match the name as a WHOLE token: the legacy name is a prefix of
+        // every namespaced one, and a prefix match would let a legacy probe
+        // read a namespaced value (and call it legacy).
+        let value = out.stdout.lines().find_map(|l| {
+            let t = l.trim();
+            if t.split_whitespace().next() != Some(value_name) {
+                return None;
+            }
+            t.find("REG_SZ")
+                .map(|i| t[i + "REG_SZ".len()..].trim().to_string())
+        });
+        // A SUCCESSFUL query that carries no row for the name we asked
+        // about, or a row we cannot parse, is not an empty slot: `reg query
+        // /v` exits non-zero when the value is missing, so reaching here
+        // means something answers to our name that we cannot identify.
+        match value.as_deref().and_then(RunKey::parse_run_value) {
+            Some(def) => DefinitionState::Present(def),
+            None => DefinitionState::Unparseable,
+        }
     }
 
     /// The command line stored in the Run value. Windows command-line
@@ -98,8 +170,46 @@ impl ServiceManager for RunKey {
         "windows-run-key (compile-validated only; never executed on Windows)"
     }
 
+    fn owned_data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    fn installation_id(&self) -> &str {
+        &self.installation_id
+    }
+
+    fn service_name(&self) -> String {
+        self.value_name()
+    }
+
+    fn reclaim_legacy(&self) -> Result<Option<String>> {
+        // Unreadable or unparseable means we cannot PROVE it is ours, which
+        // is the same answer as "someone else's": leave it.
+        let DefinitionState::Present(def) = self.read_value(LEGACY_VALUE_NAME) else {
+            return Ok(None);
+        };
+        if !super::same_data_dir(&def.data_dir, &self.data_dir) {
+            return Ok(None);
+        }
+        // Ours, under the old global value name. The value IS the
+        // registration, so deleting it is the whole migration; the process
+        // it started (if any) keeps running until the user logs out, and the
+        // namespaced value takes over at next login.
+        let out = self
+            .runner
+            .run("reg", &["delete", RUN_KEY, "/v", LEGACY_VALUE_NAME, "/f"])?;
+        if !out.ok() && !out.stderr.contains("unable to find") {
+            return Err(CoreError::InvalidInput(format!(
+                "could not delete the legacy Run value {LEGACY_VALUE_NAME} (status {}): {}",
+                out.status,
+                out.stderr.trim()
+            )));
+        }
+        Ok(Some(LEGACY_VALUE_NAME.to_string()))
+    }
+
     fn definition_path(&self) -> PathBuf {
-        PathBuf::from(format!(r"{RUN_KEY}\{VALUE_NAME}"))
+        PathBuf::from(format!(r"{RUN_KEY}\{}", self.value_name()))
     }
 
     fn write_definition(&self, binary: &Path) -> Result<()> {
@@ -107,7 +217,15 @@ impl ServiceManager for RunKey {
         let out = self.runner.run(
             "reg",
             &[
-                "add", RUN_KEY, "/v", VALUE_NAME, "/t", "REG_SZ", "/d", &value, "/f",
+                "add",
+                RUN_KEY,
+                "/v",
+                &self.value_name(),
+                "/t",
+                "REG_SZ",
+                "/d",
+                &value,
+                "/f",
             ],
         )?;
         if !out.ok() {
@@ -120,32 +238,15 @@ impl ServiceManager for RunKey {
         Ok(())
     }
 
-    fn read_definition(&self) -> Result<Option<Definition>> {
-        let Ok(out) = self
-            .runner
-            .run("reg", &["query", RUN_KEY, "/v", VALUE_NAME])
-        else {
-            return Ok(None);
-        };
-        if !out.ok() {
-            return Ok(None);
-        }
-        // reg query output: `    TethraGateway    REG_SZ    "C:\...\bin.exe" ...`
-        let value = out.stdout.lines().find_map(|l| {
-            let t = l.trim();
-            if !t.starts_with(VALUE_NAME) {
-                return None;
-            }
-            t.find("REG_SZ")
-                .map(|i| t[i + "REG_SZ".len()..].trim().to_string())
-        });
-        Ok(value.as_deref().and_then(RunKey::parse_run_value))
+    fn read_definition_state(&self) -> Result<DefinitionState> {
+        Ok(self.read_value(&self.value_name()))
     }
 
     fn remove_definition(&self) -> Result<()> {
+        self.ensure_ours("remove the service definition")?;
         let out = self
             .runner
-            .run("reg", &["delete", RUN_KEY, "/v", VALUE_NAME, "/f"])?;
+            .run("reg", &["delete", RUN_KEY, "/v", &self.value_name(), "/f"])?;
         // A missing value is success for a removal.
         if !out.ok() && !out.stderr.contains("unable to find") {
             return Err(CoreError::InvalidInput(format!(
@@ -163,10 +264,17 @@ impl ServiceManager for RunKey {
     }
 
     fn unregister(&self) -> Result<()> {
+        // Deleting the value IS the unregistration; `remove_definition`
+        // carries the ownership proof.
+        self.ensure_ours("unregister the service")?;
         self.remove_definition()
     }
 
     fn start(&self) -> Result<()> {
+        // Spawning `def.binary --data-dir def.data_dir` for a value we
+        // cannot prove is ours would launch another installation's gateway
+        // against another vault.
+        self.ensure_ours("start")?;
         let Some(def) = self.read_definition()? else {
             return Err(CoreError::InvalidInput(
                 "no gateway service is installed (the Run value is absent)".into(),
@@ -185,9 +293,11 @@ impl ServiceManager for RunKey {
     }
 
     fn stop(&self) -> Result<()> {
-        // No control socket on Windows: verify the listener answers THIS
-        // data directory's nonce before killing the recorded pid, so a
-        // recycled pid or a foreign process is never the target.
+        // Two independent proofs, because this verb kills a process: the
+        // Run value must name OUR data directory (ZFT-014), and the
+        // listener must answer THIS data directory's nonce, so a recycled
+        // pid or a foreign process is never the target.
+        self.ensure_ours("stop the service")?;
         let port = crate::store::port_hint(&self.data_dir);
         let Some(port) = port else {
             return Err(CoreError::InvalidInput(
@@ -228,6 +338,10 @@ impl ServiceManager for RunKey {
     }
 
     fn restart(&self) -> Result<()> {
+        // `stop` proves ownership too, but its result is deliberately
+        // ignored below (a stopped service still restarts), so the proof
+        // has to be made here or a foreign value would still be started.
+        self.ensure_ours("restart the service")?;
         let _ = self.stop();
         self.start()
     }

@@ -67,13 +67,17 @@ impl Ctx {
     /// password-driven command.)
     pub fn unlocked(&self) -> Result<(UnlockedVault, Option<SessionToken>)> {
         let session_err = match self.session_unlocked() {
-            Ok(Some(ok)) => return Ok(ok),
+            Ok(Some(mut ok)) => {
+                upgrade_restore_records(&mut ok.0);
+                return Ok(ok);
+            }
             Ok(None) => None,
             Err(err) => Some(err),
         };
         if envcompat::is_set(ENV_PASSWORD) {
             let password = env_secret(ENV_PASSWORD)?;
-            let vault = vault::unlock_vault(&self.paths, &password)?;
+            let mut vault = vault::unlock_vault(&self.paths, &password)?;
+            upgrade_restore_records(&mut vault);
             return Ok((vault, None));
         }
         if let Some(err) = session_err {
@@ -187,6 +191,17 @@ pub fn master_password() -> Result<SecretString> {
     prompt_hidden("Master password")
 }
 
+/// The master password from the environment only — `None` when unset.
+/// `track --yes` uses this so a non-interactive run can include
+/// attribution WITHOUT ever prompting or failing over its absence (O-22-3).
+pub fn master_password_from_env() -> Option<SecretString> {
+    if envcompat::is_set(ENV_PASSWORD) {
+        env_secret(ENV_PASSWORD).ok()
+    } else {
+        None
+    }
+}
+
 /// A newly chosen password, confirmed twice when prompted interactively.
 /// `env_suffix` names the `TETHRA_*`/`API_TRACKER_*` pair consulted first.
 pub fn new_password(what: &str, env_suffix: &str) -> Result<SecretString> {
@@ -259,6 +274,27 @@ pub fn provider_admin_key(key_stdin: bool) -> Result<SecretString> {
     prompt_hidden("Administrative key (hidden)")
 }
 
+/// Interactive yes/no confirmation that CANNOT be pre-answered.
+///
+/// Deliberately takes no `assume_yes`: it is used for decisions that a
+/// blanket "proceed" must not cover — approving a network destination the
+/// project chose (ADR 0024). Default is no, and a non-terminal answers no
+/// rather than erroring, so the caller can report which destinations were
+/// left unconfigured and continue with the rest.
+pub fn confirm_default_no(question: &str) -> Result<bool> {
+    if !std::io::stdin().is_terminal() {
+        return Ok(false);
+    }
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
 /// Interactive yes/no confirmation. Non-interactive runs must pass `--yes`.
 pub fn confirm(question: &str, assume_yes: bool) -> Result<bool> {
     if assume_yes {
@@ -275,4 +311,31 @@ pub fn confirm(question: &str, assume_yes: bool) -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+/// Re-seal any `.env` restore record an earlier build stored in plaintext
+/// (RA-006).
+///
+/// Runs at unlock because that is the only moment a key is definitionally
+/// available: the read-only entry points (`track status`, `track doctor`)
+/// hold no vault, and redacting a legacy record without a key would destroy
+/// the user's ability to undo the link. Best-effort and once per vault — it
+/// must never stop the command the user actually asked for.
+pub fn upgrade_restore_records(vault: &mut UnlockedVault) {
+    // The migration itself lives in the gateway crate so the desktop runs the
+    // SAME code (`ENC-01`): ADR 0028 claimed both front ends ran it, and only
+    // this one did, which left a GUI-only user's plaintext in place forever.
+    match api_tracker_gateway::envlink::upgrade_restore_records(vault) {
+        Ok(_) => {}
+        Err(e) => {
+            // Actionable, and value-free: the user is told the upgrade did not
+            // complete and that it will be retried, not what was in the row.
+            eprintln!(
+                "warning: could not re-seal legacy rollback records ({}); \
+                 they remain readable in the vault database and Tethra will try \
+                 again at the next unlock",
+                e.code()
+            );
+        }
+    }
 }

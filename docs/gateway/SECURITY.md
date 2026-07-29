@@ -37,14 +37,71 @@ each enforced by construction and tests) and `THREAT_MODEL.md`
 - The gateway terminates **no TLS toward clients** and holds no CA key —
   unlike the interception proxy, it has no man-in-the-middle surface.
 
-## Why database tampering cannot redirect your credentials
+## What database tampering can and cannot do to your routes
 
-Manifest routes store **no origin in the database at all** — the upstream
-is resolved from the compiled-in manifest at forward time. Custom origins
-are stored only next to a MAC computed under a vault-derived key over the
-origin's full identity; the gateway verifies the MAC before forwarding and
-never obeys the bare row. A same-user process editing SQLite cannot make
-`/openai/...` (with your key attached) go anywhere else.
+This section used to claim that editing `vault.db` could not redirect your
+credentials. That claim was wrong, and correcting it is finding **NEW-49**
+(the underlying behaviour is **SEC-01**). What follows is the measured
+behaviour.
+
+**What the route table cannot do.** No free-form destination can be injected
+into it. `gateway_routes` holds no origin that is obeyed as typed: a built-in
+route resolves its upstream from the compiled-in provider manifest in the
+install tree, and a custom origin is stored next to a MAC computed under a
+vault-derived key over the route's full identity (vault id, route prefix,
+provider id, origin host, port, consent timestamp). The gateway verifies that
+MAC before forwarding and never obeys the bare row, so **editing a stored
+custom origin stops the route rather than redirecting it** — the route reports
+`MacMismatch` and forwards nowhere. An attacker cannot write
+`custom_origin = 'attacker.example.com'` and have traffic follow it, and
+cannot invent a provider that does not ship with Tethra (an unrecognized
+`provider_id` fails closed and the route is skipped).
+
+**What it can do.** A built-in route selects its destination by `provider_id`,
+and `provider_id` is read straight from the row without any authenticated
+binding. So software that can already write your `vault.db` can:
+
+- **reassign a built-in route to a different shipped provider.**
+  `UPDATE gateway_routes SET provider_id='anthropic' WHERE route_prefix='openai'`
+  makes `/openai/...` forward to `api.anthropic.com` — with your OpenAI
+  credential still attached, because the gateway is a pass-through and relays
+  the credential your client sent. The reachable destinations are the eleven
+  forwardable origins compiled into the shipped provider manifests, not an
+  attacker-chosen host; but a credential arriving at the wrong trusted provider
+  is still a credential disclosure.
+- **downgrade a custom route to that same unauthenticated path.** The MAC is
+  selected by the *shape* of the row, not by a recorded route kind: nulling
+  `custom_origin`, `custom_origin_port`, `custom_origin_mac` and
+  `custom_origin_consent_at` together (which the schema's CHECK constraints
+  permit) moves the row onto the built-in path, where the MAC is never
+  consulted. The attacker does not forge the MAC; they delete it. So "the
+  custom origin is integrity-protected" holds **only for as long as the row is
+  still a custom row**.
+
+These are genuinely different capabilities and this document keeps them
+distinct: arbitrary custom-destination injection is prevented; reassignment
+among origins Tethra already trusts is not.
+
+**Disposition: accepted risk, not a defence.** Every path above requires local
+write access to `vault.db`. An attacker who has that can equally replace the
+Tethra binary, rewrite the LaunchAgent definition, edit the compiled-in
+manifests in the install tree, or read the running process's memory — the
+credential is reachable by simpler means than a `provider_id` swap. That
+adversary is out of scope for this product, not defended against by it:
+`THREAT_MODEL.md` records that metadata edits are **not** cryptographically
+detected, and `provider_id` is metadata. The full statement is
+`docs/activity-onboarding/SECURITY_AND_PRIVACY.md`, section *"Correction
+(2026-07-28, post-final-re-audit): the local-database attacker"*.
+
+**Tethra does not claim to detect or resist tampering with its own database by
+software already running as you.**
+
+*Follow-up, deliberately not bundled here:* an additive `route_kind` column
+would let a stripped custom row fail closed instead of silently downgrading.
+It would close the accident and raise the bar by one step; it would **not**
+move the threat boundary, because `route_kind` is itself unauthenticated. It
+is tracked separately so that a partial mitigation is never again described as
+protection — that is how the claim this section replaces came to be written.
 
 ## The control channel
 
@@ -83,7 +140,10 @@ rejected in design as unimplementable without races.
 ## Honest residual risks
 
 - **Same-user malware.** Anything running as your user can read your files
-  and memory; the gateway does not change that and does not claim to.
+  and memory; the gateway does not change that and does not claim to. It can
+  also rewrite `gateway_routes` to point a built-in prefix at a different
+  shipped provider, or strip a custom route's authenticated columns — see
+  *What database tampering can and cannot do to your routes* above (SEC-01).
 - **The memory oracle while attribution is on.** Documented in
   `PRIVACY.md`; default off, revocable, dropped on lock.
 - **A standing local egress relay.** Any local program can use the loopback

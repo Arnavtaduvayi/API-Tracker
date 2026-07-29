@@ -1,0 +1,57 @@
+# Hugging Face provider manifest.
+#
+# NO [gateway] SECTION — deliberately, and this one is genuinely close.
+# `huggingface_hub` documents two endpoint variables, and neither does what
+# Tethra would need:
+#   * HF_ENDPOINT overrides the HUB endpoint (default https://huggingface.co)
+#     — repository metadata, uploads and downloads, not inference. File
+#     downloads additionally redirect to a CDN host, so forwarding the Hub
+#     origin would observe the redirect and nothing else.
+#   * HF_INFERENCE_ENDPOINT is documented as "the inference api base url"
+#     (default https://api-inference.huggingface.co), but the current
+#     `InferenceClient` builds its URL from the hardcoded
+#     `INFERENCE_PROXY_TEMPLATE = "https://router.huggingface.co/{provider}"`
+#     and does not read that variable. Writing it would produce a route that
+#     silently never carries traffic — the worst possible outcome for a tool
+#     whose promise is honest observation.
+# So Hugging Face is detected, listed, and labelled unsupported until an
+# official inference base-URL variable exists that the client actually reads.
+id = "huggingface"
+name = "Hugging Face"
+description = "Hugging Face Hub and Inference Providers (user access tokens)."
+website = "https://huggingface.co"
+api_docs_url = "https://huggingface.co/docs/inference-providers"
+auth_docs_url = "https://huggingface.co/docs/hub/security-tokens"
+manage_url = "https://huggingface.co/settings/tokens"
+pricing_url = "https://huggingface.co/pricing"
+login_url = "https://huggingface.co/login"
+billing_url = "https://huggingface.co/settings/billing"
+# HF_TOKEN is the current name; HUGGING_FACE_HUB_TOKEN is documented as
+# deprecated but still functional, so a repository containing it still holds a
+# live credential and must be detected.
+env_vars = ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"]
+credential_types = ["read_token", "write_token", "fine_grained_token"]
+expiration = "No token expiration is documented; tokens stay valid until deleted, denied or revoked by an organization administrator."
+watch_docs = [
+    "https://huggingface.co/docs/hub/security-tokens",
+    "https://huggingface.co/docs/huggingface_hub/package_reference/environment_variables",
+]
+
+# The `hf_` prefix is shown in Hugging Face's official token documentation
+# (`access_token = "hf_..."`), so this is a documented format marker.
+[[detection]]
+name = "huggingface-user-access-token"
+regex = "hf_[A-Za-z0-9]{30,}"
+confidence = "high"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /api/whoami-v2 would confirm the token; Tethra has no Hugging Face connector yet." }
+fetch_metadata = { support = "supported_not_implemented", attribution = "exact_credential", note = "GET /api/whoami-v2 reports the calling token's own role and organizations; it does not enumerate a user's other tokens." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Inference Providers usage and spend are shown in the billing settings; no public usage API is documented, and the Local Gateway cannot observe inference traffic (see the header note)." }
+read_permissions = { support = "supported_not_implemented", attribution = "exact_credential", note = "A token's coarse role (read/write/fine-grained) is reported by whoami-v2; the individual resource grants of a fine-grained token are shown only in settings." }
+change_permissions = { support = "manual_only", note = "Token roles and fine-grained grants are edited on the token settings page." }
+create_credential = { support = "manual_only", note = "Tokens are created on the token settings page; no token-creation API is documented." }
+disable_credential = { support = "unsupported", note = "A user cannot disable their own token; organization administrators can deny or revoke a token's access to that organization's resources only." }
+revoke_credential = { support = "manual_only", note = "Tokens are deleted on the token settings page; no token-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "The settings page offers a refresh action; deploy the new value before discarding the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }
