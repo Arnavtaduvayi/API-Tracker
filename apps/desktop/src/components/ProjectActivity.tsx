@@ -182,8 +182,11 @@ function SummaryCards(props: { snap: ProjectActivitySnapshot }) {
   const tokens = projectTokenAvailability(snap.cost);
   const cost = projectCostAvailability(snap.cost);
   const m = snap.metrics;
-  const inputTokens = snap.cost.priced_input_tokens;
-  const outputTokens = snap.cost.priced_output_tokens;
+  // Every REPORTED token, priced or not. The priced figures are billable input
+  // (cache reads excluded) and exclude unpriced models, so using them here would
+  // understate a project's actual usage.
+  const inputTokens = snap.cost.known_input_tokens;
+  const outputTokens = snap.cost.known_output_tokens;
 
   return (
     <dl className="cards" data-testid="summary-cards">

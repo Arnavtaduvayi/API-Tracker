@@ -1751,8 +1751,12 @@ export interface ProjectCostCoverage {
   estimated_micros: number;
   currency: string;
   priced_requests: number;
+  /** Billable input the estimate was computed over (cache reads excluded). */
   priced_input_tokens: number;
   priced_output_tokens: number;
+  /** Every reported token, priced or not. What a token surface should show. */
+  known_input_tokens: number;
+  known_output_tokens: number;
   unpriced_requests: number;
   unpriced_tokens: number;
   requests_with_unknown_usage: number;

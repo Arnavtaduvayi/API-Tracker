@@ -126,8 +126,20 @@ pub struct ProjectCostCoverage {
     pub estimated_micros: i64,
     pub currency: String,
     pub priced_requests: i64,
+    /// Input tokens the estimate was computed over — BILLABLE input, i.e. after
+    /// cache reads are excluded. Correct for cost, and deliberately not the
+    /// figure to display as "input tokens": see `known_input_tokens`.
     pub priced_input_tokens: i64,
     pub priced_output_tokens: i64,
+    /// Every input token any request REPORTED in this window, priced or not,
+    /// including cache reads.
+    ///
+    /// Separate from `priced_input_tokens` because a token surface and a cost
+    /// surface want different numbers: showing the priced figure as "input
+    /// tokens" understates a project whose model has no local price, and also
+    /// silently omits cache reads.
+    pub known_input_tokens: i64,
+    pub known_output_tokens: i64,
     /// Requests with known tokens that no record could price.
     pub unpriced_requests: i64,
     /// Tokens that are known but unpriced. Excludes anything unknown.
@@ -248,6 +260,8 @@ pub fn project_cost_coverage(
         priced_requests: 0,
         priced_input_tokens: 0,
         priced_output_tokens: 0,
+        known_input_tokens: 0,
+        known_output_tokens: 0,
         unpriced_requests: 0,
         unpriced_tokens: 0,
         requests_with_unknown_usage: 0,
@@ -287,6 +301,11 @@ pub fn project_cost_coverage(
             );
             continue;
         };
+        // Reported tokens are counted here, once, whatever happens to pricing
+        // below. A token total must not depend on whether a price was found.
+        out.known_input_tokens += input;
+        out.known_output_tokens += output;
+
         // Tokens are known but no model was reported, so no record can be
         // selected. These tokens ARE known, so they count as unpriced tokens
         // rather than disappearing into "unknown usage".
@@ -725,6 +744,43 @@ mod tests {
         // total at all.
         assert!(!unpriced.complete);
         assert_eq!(unpriced.micros_if_complete(), None);
+    }
+
+    /// A token total must not depend on whether a price was found, and must not
+    /// silently become the cache-excluded billable figure.
+    #[test]
+    fn known_tokens_are_counted_whether_or_not_they_could_be_priced() {
+        let conn = mem();
+        // Priced, with a cache read: billable input is lower than reported input.
+        usage(
+            &conn,
+            "2026-07-18T12:00:00Z",
+            "openai",
+            Some("gpt-4o"),
+            Some(1_000),
+            Some(500),
+            Some(400),
+        );
+        // Unpriced, so it contributes nothing to the estimate.
+        usage(
+            &conn,
+            "2026-07-18T12:05:00Z",
+            "openai",
+            Some("gpt-unpriced"),
+            Some(70),
+            Some(30),
+            None,
+        );
+        let c = coverage(&conn);
+
+        assert_eq!(c.known_input_tokens, 1_070, "every reported input token");
+        assert_eq!(c.known_output_tokens, 530);
+        assert_eq!(
+            c.priced_input_tokens, 600,
+            "the estimate is over billable input only (1000 - 400 cached)"
+        );
+        assert_eq!(c.priced_output_tokens, 500);
+        assert!(!c.complete);
     }
 
     #[test]

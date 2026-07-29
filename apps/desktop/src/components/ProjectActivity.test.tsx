@@ -34,6 +34,8 @@ function cost(over: Partial<ProjectCostCoverage> = {}): ProjectCostCoverage {
     priced_requests: 0,
     priced_input_tokens: 0,
     priced_output_tokens: 0,
+    known_input_tokens: 0,
+    known_output_tokens: 0,
     unpriced_requests: 0,
     unpriced_tokens: 0,
     requests_with_unknown_usage: 0,
@@ -134,6 +136,8 @@ describe("ProjectActivity", () => {
           priced_requests: 5,
           priced_input_tokens: 1000,
           priced_output_tokens: 500,
+          known_input_tokens: 1000,
+          known_output_tokens: 500,
           estimated_micros: 2_500_000,
           token_coverage: 1,
           complete: true,
@@ -184,6 +188,31 @@ describe("ProjectActivity", () => {
     expect(coverage.textContent).toContain("5 request(s)");
   });
 
+  /** Showing only PRICED tokens understates a project whose model has no local
+   *  price, and silently drops cache reads. */
+  it("reports every known token, not only the priced ones", async () => {
+    mocked.projectActivity.mockResolvedValue(
+      snapshot({
+        cost: cost({
+          priced_requests: 1,
+          priced_input_tokens: 600,
+          priced_output_tokens: 500,
+          known_input_tokens: 1_070,
+          known_output_tokens: 530,
+          unpriced_requests: 1,
+          unpriced_tokens: 100,
+          token_coverage: 0.9,
+          complete: false,
+        }),
+      }),
+    );
+    render(<ProjectActivity projectIdent="p1" enabled />);
+    const cards = await screen.findByTestId("summary-cards");
+    expect(cards.textContent).toContain("1,070");
+    expect(cards.textContent).toContain("530");
+    expect(cards.textContent).not.toContain("600");
+  });
+
   it("states the priced-token coverage percentage", async () => {
     mocked.projectActivity.mockResolvedValue(
       snapshot({
@@ -192,6 +221,8 @@ describe("ProjectActivity", () => {
           priced_requests: 8,
           priced_input_tokens: 60_000,
           priced_output_tokens: 16_000,
+          known_input_tokens: 68_000,
+          known_output_tokens: 20_400,
           unpriced_requests: 3,
           unpriced_tokens: 12_400,
           token_coverage: 0.86,
@@ -264,6 +295,8 @@ describe("ProjectActivity", () => {
           priced_requests: 5,
           priced_input_tokens: 10,
           priced_output_tokens: 10,
+          known_input_tokens: 10,
+          known_output_tokens: 10,
           estimated_micros: 500,
           token_coverage: 1,
           complete: true,
