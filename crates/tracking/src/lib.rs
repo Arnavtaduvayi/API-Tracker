@@ -26,6 +26,7 @@ pub mod diagnose;
 pub mod health;
 pub mod origin;
 pub mod plan;
+pub mod project;
 pub mod state;
 pub mod undo;
 pub mod verify;
