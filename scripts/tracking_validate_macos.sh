@@ -605,6 +605,47 @@ la_digest() {
   fi
 }
 
+# Ask the PRODUCT for one field of `gateway status --json`, exactly.
+#
+# This used to be `sed -n 's/.*"definition_path":"\([^"]*\)".*/\1/p'`, which
+# required no space after the colon. The product renders with
+# `serde_json::to_string_pretty`, which emits `"definition_path": "…"` — with
+# one. The expression therefore never matched a byte on any run, every run
+# fell through to a `$LA_DIR/dev.api-tracker.gateway.*.plist` glob, and the
+# ownership doctrine two hundred lines above calls that glob "the REM-001
+# mistake with a different verb" (`VAL-02`).
+#
+# A regex over pretty-printed JSON is what created that defect, so this does
+# not use one. `python3` is already required by this pipeline
+# (`ci_assert_service_results.py`, `gateway_validate_macos.sh`) and preflight
+# proves it is present before anything is created.
+#
+# Prints nothing and returns non-zero when the field is absent, empty, or the
+# output is not parseable — every caller treats that as a hard failure rather
+# than falling back to a name pattern.
+product_status_field() {   # product_status_field <field>
+  local out
+  out="$("$HELPER" gateway status --json 2>/dev/null | python3 -c '
+import sys, json
+raw = sys.stdin.read()
+if not raw.strip():
+    sys.exit(1)
+try:
+    d = json.loads(raw)
+except Exception:
+    sys.exit(1)
+# `gateway status --json` renders the service object at the top level or under
+# "service" depending on the sub-report; take whichever carries the field.
+for scope in (d, d.get("service") or {}, d.get("gateway") or {}):
+    if isinstance(scope, dict) and scope.get(sys.argv[1]):
+        sys.stdout.write(str(scope[sys.argv[1]]))
+        sys.exit(0)
+sys.exit(1)
+' "$1")" || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out"
+}
+
 die() {
   echo
   echo "FATAL: $1"
@@ -740,6 +781,29 @@ EOF
   rm -f "$LEDGER" 2>/dev/null
 }
 
+# ---------------------------------------------------------------------------
+# LIBRARY MODE — everything above this line is a definition; everything below
+# it acts.
+#
+# `. tracking_validate_macos.sh` with TETHRA_VALIDATE_LIB_ONLY=1 stops here,
+# so `scripts/validation_ownership_tests.sh` can drive the ownership
+# primitives — `plist_is_ours`, `ledger_add`/`ledger_values`, `cleanup`,
+# `product_status_field` — directly.
+#
+# That matters because those primitives bound a `bootout` and an `rm -f`, and
+# the only scope that exercises them end-to-end is `--scope full --mode
+# service`, which cannot be run on a developer machine beside a live
+# production gateway. Without this seam the ownership logic was reachable ONLY
+# from the one path nobody can run locally, which is how a dead extractor
+# (`VAL-02`) survived: two comments in this file cited
+# `crates/tracking/tests/validation_script_safety.rs` and
+# `tests/service_namespace_scripts.rs` as covering it, and neither file has
+# ever existed.
+# ---------------------------------------------------------------------------
+if [ "${TETHRA_VALIDATE_LIB_ONLY:-0}" = "1" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # ===========================================================================
 # PREFLIGHT — every refusal lives here, ABOVE the trap, and writes nothing.
 # ===========================================================================
@@ -758,13 +822,20 @@ EOF
 # independent layers, one of which masked the other in mutation testing
 # (RA-004). They are now separated: this ordering is the first layer, the
 # ledger is the second, and each is tested on its own
-# (tests/service_namespace_scripts.rs).
+# (scripts/validation_ownership_tests.sh, and crates/gateway/tests/service_namespace.rs).
 #
 # A refusal from here leaves the machine byte-identical to how it was found:
 # no directory, no ledger, no trap, no launchctl call.
 
 # 2. Resolve the namespace, and refuse to ADOPT anything.
 [ -n "${HOME:-}" ] || die "HOME is not set; cannot locate ~/Library/LaunchAgents"
+# Service ownership is resolved by asking the product and parsing its JSON
+# exactly (`product_status_field`, `VAL-02`). A missing interpreter would send
+# that helper down its failure path on every call, and this run would then
+# report "no LaunchAgent" for a service it had really installed — and, worse,
+# tear down nothing. It is a precondition, not a check.
+command -v python3 >/dev/null 2>&1 \
+  || die "python3 is required to read the product's JSON status exactly (see product_status_field)"
 [ -e "$DIR" ] && die "the isolated data directory $DIR already exists.
 This run neither adopts nor deletes a directory it did not create."
 [ -e "$COPIES" ] && die "the snapshot directory $COPIES already exists."
@@ -1118,7 +1189,7 @@ if [ "$MODE" = "service" ]; then
   # after the trap, so a refusal fired a destructive teardown. It survived
   # only because the ledger happened to be empty at that moment — one layer
   # masking the other. Ordering and ownership are now separate defences and
-  # are tested separately (crates/tracking/tests/validation_script_safety.rs).
+  # are tested separately (scripts/validation_ownership_tests.sh).
   #
   # It remains a PRECONDITION rather than a check: awarding a counted pass
   # for "the machine happened to be clean" is the shape ZFT-VAL-7 objected to.
@@ -1173,8 +1244,17 @@ if [ "$MODE" = "foreground" ]; then
   check $? "the dry run left ~/Library/LaunchAgents byte-identical"
 elif [ "$MODE" = "service" ]; then
   group SERVICE
-  [ ! -f "$PLIST" ]
-  check $? "the dry run installed no LaunchAgent"
+  # `[ ! -f "$PLIST" ]` tested the LEGACY path — which preflight has already
+  # proved absent and which this product can never write, since ADR 0026
+  # namespaces every label. It therefore could not fail, and it missed the
+  # namespaced plist it purported to exclude (`VAL-03`).
+  #
+  # The foreground twin twenty lines above compares `la_digest()`; so does
+  # this now. That is the semantic claim being made — "a dry run installs
+  # nothing" — and it observes the whole directory, so a namespaced install
+  # breaks it.
+  [ "$(la_digest)" = "$LA_BEFORE" ]
+  check $? "the dry run left ~/Library/LaunchAgents byte-identical (installed no LaunchAgent)"
 fi
 
 if [ "$SCOPE" = "offline" ]; then
@@ -1227,33 +1307,47 @@ elif [ "$MODE" = "service" ]; then
   group SERVICE
   # Service names are namespaced per data directory (ADR 0026), so the
   # installed file is `dev.api-tracker.gateway.<installation-id>.plist` and
-  # its exact name is not knowable here. Resolve it by asking the product —
-  # `gateway status --json` reports `service_name` and `definition_path` —
-  # and fall back to a glob. Hard-coding the legacy path made this assertion
-  # unable to fire AND left cleanup unable to remove what the run installed.
-  INSTALLED_PLIST="$("$HELPER" gateway status --json 2>/dev/null \
-    | sed -n 's/.*"definition_path":"\([^"]*\)".*/\1/p' | head -1)"
-  if [ -z "$INSTALLED_PLIST" ] || [ ! -f "$INSTALLED_PLIST" ]; then
-    INSTALLED_PLIST="$(ls -1 "$LA_DIR/$LEGACY_LABEL".*.plist 2>/dev/null | head -1)"
-  fi
-  [ -n "$INSTALLED_PLIST" ] && [ -f "$INSTALLED_PLIST" ] && SERVICE_INSTALLED="$INSTALLED_PLIST"
-  # Record it in the ownership ledger the moment it is resolved, with the
-  # label as the proof term. Everything teardown later does to this plist and
-  # this launchd job is bounded by these two rows: nothing is ever inferred
-  # from `$LA_DIR/dev.api-tracker.gateway.*.plist`, which would match a second
-  # environment's live agent just as well as it matches ours.
-  if [ -n "${SERVICE_INSTALLED:-}" ]; then
-    ledger_add plist "$SERVICE_INSTALLED" "$(basename "$SERVICE_INSTALLED" .plist)"
-    ledger_add label "$(basename "$SERVICE_INSTALLED" .plist)"
+  # its exact name is not knowable here.
+  #
+  # OWNERSHIP COMES FROM THE PRODUCT, NEVER FROM A NAME PATTERN (`VAL-02`).
+  # There is no glob fallback: `ls "$LA_DIR/$LEGACY_LABEL".*.plist` matches a
+  # SECOND environment's live agent exactly as well as it matches ours, and
+  # the two ledger rows below bound everything teardown later does — a
+  # `bootout` and an `rm -f`. Deriving those from a filename pattern is the
+  # `REM-001` mistake with a different verb, which is what this file's own
+  # doctrine says. If the product cannot name what it installed, this run does
+  # not know what it owns, and the honest outcome is a failed check with an
+  # empty ledger rather than a sweep of everything that looks similar.
+  INSTALLED_PLIST="$(product_status_field definition_path || true)"
+  PRODUCT_LABEL="$(product_status_field service_name || true)"
+  if [ -n "$INSTALLED_PLIST" ] && [ -f "$INSTALLED_PLIST" ] && [ -n "$PRODUCT_LABEL" ]; then
+    SERVICE_INSTALLED="$INSTALLED_PLIST"
+    # Recorded with the label the PRODUCT reported as the proof term, so
+    # `plist_is_ours` re-proves against the product's own identity rather than
+    # against a basename this script derived.
+    ledger_add plist "$SERVICE_INSTALLED" "$PRODUCT_LABEL"
+    ledger_add label "$PRODUCT_LABEL"
   fi
   [ -n "${SERVICE_INSTALLED:-}" ]
-  check $? "the apply installed a real LaunchAgent (resolved: ${SERVICE_INSTALLED:-none})"
-  INSTALLED_LABEL="$(basename "${SERVICE_INSTALLED:-none}" .plist)"
-  grep -q "$INSTALLED_LABEL" "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null
-  check $? "the installed LaunchAgent declares its own namespaced label"
-  # ADR 0026: the label must be namespaced, not the pre-namespacing global.
-  [ "$INSTALLED_LABEL" != "$LEGACY_LABEL" ]
-  check $? "the label is namespaced per data directory, not the global one"
+  check $? "the apply installed a real LaunchAgent the product can name (resolved: ${SERVICE_INSTALLED:-none})"
+  INSTALLED_LABEL="${PRODUCT_LABEL:-none}"
+  grep -q "<string>$INSTALLED_LABEL</string>" "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null
+  check $? "the installed LaunchAgent declares the label the product reports ($INSTALLED_LABEL)"
+  # ADR 0026: the label must be namespaced per data directory.
+  #
+  # This used to compare `basename` of a GLOB that mandates a suffix against
+  # the bare legacy label, so it could never be equal — and the `none`
+  # fallback passed too (`VAL-03`). It now asserts the product's own value,
+  # and asserts the three things that actually make it namespaced: it is not
+  # the global label, it IS derived from it, and the installation id it
+  # carries is non-empty and is the one this run's data directory produced.
+  SERVICE_SUFFIX="${INSTALLED_LABEL#"$LEGACY_LABEL".}"
+  [ "$INSTALLED_LABEL" != "$LEGACY_LABEL" ] \
+    && [ "$INSTALLED_LABEL" != "${INSTALLED_LABEL#"$LEGACY_LABEL".}" ] \
+    && [ -n "$SERVICE_SUFFIX" ] \
+    && [ "$SERVICE_SUFFIX" != "$INSTALLED_LABEL" ] \
+    && [ "$(basename "$SERVICE_INSTALLED" .plist)" = "$INSTALLED_LABEL" ]
+  check $? "the label is namespaced per data directory, not the global one ($INSTALLED_LABEL)"
   # WHAT THE PLIST ACTUALLY POINTS AT, measured rather than assumed.
   #
   # This assertion used to be `grep -qF "$HELPER"` — "the plist names the path

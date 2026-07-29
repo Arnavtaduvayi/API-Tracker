@@ -191,6 +191,15 @@ jobs:
       # copies under mktemp; starts no service and touches no repository file.
       - name: Validation harness mutation test (the gate must kill its mutants)
         run: bash scripts/validation_harness_mutants.sh
+      # The harness's teardown does a `launchctl bootout` and an `rm -f`, both
+      # bounded entirely by the ownership ledger. Until now that boundary was
+      # reachable only from `--scope full --mode service`, which cannot run on
+      # a developer machine beside a live gateway — so a dead field extractor
+      # sent every run through a filename glob for months without anything
+      # noticing (VAL-02). These drive the primitives directly against a fake
+      # $HOME: no gateway, no service, no launchctl.
+      - name: Validation ownership tests (cleanup authority, never a glob)
+        run: bash scripts/validation_ownership_tests.sh
       - name: Install frontend deps
         working-directory: apps/desktop
         run: npm ci
