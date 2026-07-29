@@ -255,6 +255,22 @@ pub enum CurrentHealth {
     },
     /// Applied, gateway up, waiting for the first request of this session.
     WaitingForFirstRequest,
+    /// An apply STARTED and never reported an outcome (`NEW-35`).
+    ///
+    /// [`TrackingState::Applying`] is written by `apply` before its first
+    /// side effect and replaced by every path that finishes — success,
+    /// failure, or undo. A row still sitting in it is therefore either an
+    /// apply running at this instant or one that was interrupted (a crash, a
+    /// quit, a power loss), and in both cases nothing has been verified and
+    /// no request will be observed yet.
+    ///
+    /// It has its own variant because `Applying` is not in `refresh_once`'s
+    /// watchable set, so it falls through to [`health_without_evidence`],
+    /// where it used to be answered by the catch-all "waiting for the first
+    /// request" — advice that only makes sense for a setup that finished
+    /// applying, and which sends the user off to make a request that nothing
+    /// is configured to observe.
+    ApplyIncomplete,
     /// Applied but the app has not been restarted yet.
     NeedsRestart,
     /// A route or link this setup configured has gone away.
@@ -291,6 +307,12 @@ impl CurrentHealth {
                 format!("verified previously — last observed {last_observed_at}")
             }
             CurrentHealth::WaitingForFirstRequest => "waiting for the first request".into(),
+            CurrentHealth::ApplyIncomplete => "setup has not finished applying — nothing is \
+                                               verified yet and no request will be observed; if \
+                                               no setup is running right now it was interrupted, \
+                                               so start tracking for this folder again to finish \
+                                               it"
+            .into(),
             CurrentHealth::NeedsRestart => "restart your project, then make one request".into(),
             CurrentHealth::ConfigurationChanged { detail } => {
                 format!("configuration changed since verification — {detail}")
@@ -306,7 +328,9 @@ impl CurrentHealth {
     }
 
     /// Whether this is a present-tense success. Deliberately narrow: only
-    /// the two states that actually mean traffic is flowing right now.
+    /// the two states that actually mean traffic is flowing right now — an
+    /// apply that never finished ([`CurrentHealth::ApplyIncomplete`]) is not
+    /// one of them, whatever the cached row still claims (`NEW-35`).
     pub fn is_currently_working(&self) -> bool {
         matches!(
             self,
@@ -372,6 +396,29 @@ pub struct PlanSummary {
     pub installed_service: bool,
     /// The port the plan was built against.
     pub port: u16,
+    /// Whether this summary describes an apply that RAN TO COMPLETION.
+    ///
+    /// Route provenance is now persisted the moment the routes exist
+    /// ([`record_routes_created`], NEW-32) rather than at the last apply
+    /// step, so "a summary is present" no longer means "the apply
+    /// finished". Only [`record_applied`] sets this flag. `undo` keys its
+    /// ZFT-007 refusal on it instead of on the presence of the column, so
+    /// undo still refuses to claim success after a partial apply while
+    /// finally being able to remove the routes that apply created.
+    ///
+    /// Defaults to **true** on deserialize, and only on deserialize: before
+    /// this field existed, [`record_applied`] was the only writer of
+    /// `plan_summary_json`, so every summary already on disk describes a
+    /// completed apply. Defaulting to `false` would tell every existing
+    /// user's undo that their finished setup was a partial one.
+    #[serde(default = "summary_written_by_an_earlier_build")]
+    pub apply_completed: bool,
+}
+
+/// See [`PlanSummary::apply_completed`]. `Default::default()` for the struct
+/// still yields `false`, which is what a freshly-built partial summary wants.
+fn summary_written_by_an_earlier_build() -> bool {
+    true
 }
 
 const COLS: &str = "id, project_id, folder_path, state, detection_json, plan_summary_json, \
@@ -577,26 +624,114 @@ pub fn transition(
     })
 }
 
+/// Persist route provenance the moment it becomes true, before the apply has
+/// finished (`NEW-32`).
+///
+/// `created_routes` used to be written only by [`record_applied`], the LAST
+/// apply step, and [`upsert_setup`] nulls the column on every re-run. An
+/// apply that failed at any step between the two therefore erased the record
+/// of the routes it had just created and wrote no replacement. The retry saw
+/// `add_manifest_route` return `AlreadyExists`, classified those routes as
+/// "reused", and `undo` then stranded them with the reason *"existed before
+/// this setup (only reused)"* — the exact opposite of the truth, and ZFT-018
+/// reappearing through the failure path.
+///
+/// The summary written here is deliberately partial: `apply_completed` stays
+/// `false`, so undo can use the route provenance without reading it as
+/// evidence that the apply finished (that is the ZFT-007 refusal, which must
+/// keep refusing).
+///
+/// Guarded by the row version for the same reason [`record_applied`] is —
+/// see below.
+pub fn record_routes_created(
+    conn: &Connection,
+    setup: &mut TrackingSetup,
+    created_routes: &[String],
+    re_enabled_routes: &[String],
+) -> Result<()> {
+    let partial = PlanSummary {
+        created_routes: created_routes.to_vec(),
+        re_enabled_routes: re_enabled_routes.to_vec(),
+        apply_completed: false,
+        ..PlanSummary::default()
+    };
+    let json = serde_json::to_string(&partial)?;
+    cas_write_summary(conn, setup, &json, None)
+}
+
 /// Record a completed apply: plan summary + applied_at timestamp.
-pub fn record_applied(conn: &Connection, setup_id: &str, plan_summary: &PlanSummary) -> Result<()> {
-    let now = clock::now_rfc3339();
+pub fn record_applied(
+    conn: &Connection,
+    setup: &mut TrackingSetup,
+    plan_summary: &PlanSummary,
+) -> Result<()> {
     // Stamp the insertion-ordered watermark in the SAME statement as the
     // wall-clock one. Only observations recorded after this point can
     // verify this session, and that fact is now anchored to something the
     // writer's clock cannot influence (RA-005).
     let rowid = newest_event_rowid(conn)?;
-    // Bumping the row version here is what makes a refresh that is mid-flight
-    // across an apply re-read instead of committing (`VER-01`): `applied_at`
-    // and `applied_event_rowid` are the two inputs that decide which
-    // observations are admissible at all, so a conclusion reached before this
-    // statement is a conclusion about a different verification session.
-    conn.execute(
-        "UPDATE tracking_setups
-         SET plan_summary_json = ?2, applied_at = ?3, applied_event_rowid = ?4,
-             row_version = row_version + 1
-         WHERE id = ?1",
-        params![setup_id, serde_json::to_string(plan_summary)?, now, rowid],
-    )?;
+    // Completion is decided here and nowhere else, whatever the caller
+    // passed: this is the only writer that runs after every apply step.
+    let completed = PlanSummary {
+        apply_completed: true,
+        ..plan_summary.clone()
+    };
+    let json = serde_json::to_string(&completed)?;
+    cas_write_summary(conn, setup, &json, Some(rowid))
+}
+
+/// The ONE statement that writes a setup's apply artifacts, guarded like
+/// every other write that decides from a row the caller read earlier
+/// (`VER-01`, `NEW-31`).
+///
+/// This was the single health write with no `row_version` predicate. It
+/// **bumped** the version — deliberately, so an in-flight refresh re-reads —
+/// but bumping without comparing is last-writer-wins, and the three columns
+/// it writes are exactly the ones that decide which observations are
+/// admissible (`applied_at`, `applied_event_rowid`) and what undo will act on
+/// (`plan_summary_json`). Two applies racing on one folder — the desktop and
+/// the CLI — therefore left run A's plan summary describing run B's session,
+/// after which undo removed or kept the wrong `created_routes`. A conflict is
+/// now [`CoreError::StateConflict`], which the apply path reports as a failed
+/// step rather than silently mis-recording.
+///
+/// `applied_rowid` is `Some` only for a completed apply: a partial provenance
+/// write must not move the admissibility watermark, because no session has
+/// been opened for verification yet.
+fn cas_write_summary(
+    conn: &Connection,
+    setup: &mut TrackingSetup,
+    summary_json: &str,
+    applied_rowid: Option<i64>,
+) -> Result<()> {
+    let now = clock::now_rfc3339();
+    let changed = match applied_rowid {
+        Some(rowid) => conn.execute(
+            "UPDATE tracking_setups
+             SET plan_summary_json = ?2, applied_at = ?3, applied_event_rowid = ?4,
+                 row_version = row_version + 1
+             WHERE id = ?1 AND row_version = ?5",
+            params![setup.id, summary_json, now, rowid, setup.row_version],
+        )?,
+        None => conn.execute(
+            "UPDATE tracking_setups
+             SET plan_summary_json = ?2, row_version = row_version + 1
+             WHERE id = ?1 AND row_version = ?3",
+            params![setup.id, summary_json, setup.row_version],
+        )?,
+    };
+    if changed == 0 {
+        return Err(CoreError::StateConflict {
+            kind: "tracking setup",
+            ident: setup.id.clone(),
+        });
+    }
+    setup.plan_summary_json = Some(summary_json.to_string());
+    if let Some(rowid) = applied_rowid {
+        setup.applied_at = Some(now);
+        setup.applied_event_rowid = rowid;
+    }
+    setup.row_version += 1;
     Ok(())
 }
 
@@ -672,7 +807,11 @@ pub fn refresh_with(
     // it is to look again: re-read the row and re-derive, because the newer
     // row may well change the conclusion (that is the whole point when the
     // change was a freshly-recorded failure).
-    for _ in 0..REFRESH_CAS_ATTEMPTS {
+    for _attempt in 0..REFRESH_CAS_ATTEMPTS {
+        // `_attempt` carries the underscore because the only reader is the
+        // test seam below, which a release build does not compile.
+        #[cfg(any(test, feature = "test-hooks"))]
+        cas_test_hook::before_attempt(_attempt);
         match refresh_once(conn, setup, liveness, true) {
             Err(CoreError::StateConflict { .. }) => {
                 let Some(fresh) = get_setup(conn, &setup.id)? else {
@@ -703,7 +842,90 @@ pub fn refresh_with(
 /// on writing a correction. Three is enough for any realistic contention on a
 /// single-user machine (the competing writers are the desktop, the CLI and
 /// the gateway) and is bounded so a pathological writer cannot spin a reader.
+///
+/// Falsifiable: `crates/tracking/tests/verification_cas_retry.rs` fails, by
+/// name, if this is lowered to 2 or to 1. It used to survive being set to 1
+/// with all 158 tests green (`NEW-05`), because no test created enough
+/// contention to need a second attempt.
 const REFRESH_CAS_ATTEMPTS: usize = 3;
+
+/// The seam that makes a compare-and-swap conflict DETERMINISTIC in a test.
+///
+/// # Why this exists
+///
+/// The retry budget above was unfalsifiable. Lowering it to one attempt left
+/// every test green, because a conflict can only be *observed* through what
+/// gets persisted, and no existing test could schedule a competing write into
+/// the window between [`refresh_once`]'s read and its guarded write more than
+/// once — [`refresh_with`] re-reads the row itself, so there is no second
+/// window a test can reach from outside. One hook wide is exactly the gap.
+///
+/// # Why it is public rather than `#[cfg(test)]`
+///
+/// Every test in this crate is an integration test under `tests/`, which
+/// links the crate as an ordinary dependency and therefore never sees
+/// `cfg(test)`. The two ways out are a Cargo feature enabled through a
+/// self-referencing dev-dependency, or a `#[doc(hidden)]` public item. This
+/// is the latter, because the feature route requires editing
+/// `crates/tracking/Cargo.toml`, and a feature that a workspace test build
+/// unifies into `apps/cli` is not obviously better than an item that is
+/// hidden from the docs, unreachable without an explicit `install` call, and
+/// compiles to a single `thread_local` read on the retry path.
+///
+/// # Why thread-local
+///
+/// `cargo test` runs test functions on parallel threads inside one binary. A
+/// global would leak one test's hook into another and make the suite
+/// order-dependent; thread-local also means a hooked test cannot disturb the
+/// existing `Barrier` tests running beside it.
+/// Present only under `cfg(test)` or the `test-hooks` feature, so a release
+/// build carries no settable callback inside the writer that decides whether
+/// a tracking setup is healthy. Integration tests reach it through the
+/// crate's self-dependency in `[dev-dependencies]`; nothing else can.
+#[cfg(any(test, feature = "test-hooks"))]
+#[doc(hidden)]
+pub mod cas_test_hook {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(usize)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    }
+
+    /// Uninstalls the hook when dropped, so a test that panics mid-way
+    /// cannot leave the seam armed for whatever runs next on this thread.
+    pub struct Guard(());
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            HOOK.with(|h| *h.borrow_mut() = None);
+        }
+    }
+
+    /// Run `f` with the zero-based attempt index immediately before each
+    /// [`super::refresh_with`] attempt on THIS thread. A test installs a
+    /// closure that moves the row from a second connection — as a second
+    /// process would — at exactly the attempts it wants to lose.
+    pub fn install(f: impl FnMut(usize) + 'static) -> Guard {
+        HOOK.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+        Guard(())
+    }
+
+    /// `try_borrow_mut`, not `borrow_mut`: a hook that re-entered
+    /// `refresh_with` would otherwise panic inside production code. Skipping
+    /// the call is the safe direction — the seam is allowed to do nothing,
+    /// it is never allowed to break the caller.
+    pub(super) fn before_attempt(attempt: usize) {
+        HOOK.with(|h| {
+            if let Ok(mut slot) = h.try_borrow_mut() {
+                if let Some(f) = slot.as_mut() {
+                    f(attempt);
+                }
+            }
+        });
+    }
+}
 
 /// One attempt at [`refresh_with`].
 ///
@@ -1141,6 +1363,11 @@ fn health_without_evidence(setup: &TrackingSetup, liveness: GatewayLiveness) -> 
                 .unwrap_or_else(|| "setup did not complete".to_string()),
         },
         TrackingState::AwaitingRestart => CurrentHealth::NeedsRestart,
+        // Ahead of the liveness arms on purpose (`NEW-35`): for a setup whose
+        // apply never finished, "the local tracking service is not running"
+        // describes a symptom of the unfinished apply and points the user at
+        // the service, while the thing to do is to run the setup again.
+        TrackingState::Applying => CurrentHealth::ApplyIncomplete,
         _ if liveness == GatewayLiveness::Down => CurrentHealth::GatewayUnavailable,
         _ => CurrentHealth::WaitingForFirstRequest,
     }

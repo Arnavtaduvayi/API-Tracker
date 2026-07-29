@@ -132,7 +132,7 @@ fn a_complete_undo_still_reports_success_and_closes_the_session() {
     // The control: the fix must not turn every undo into a refusal.
     let (_db, conn) = test_conn();
     insert_project(&conn, "p1", "one");
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -143,7 +143,7 @@ fn a_complete_undo_still_reports_success_and_closes_the_session() {
     // A properly recorded apply with nothing left to restore.
     state::record_applied(
         &conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".into()],
             port: 49152,
@@ -174,7 +174,7 @@ fn a_complete_undo_still_reports_success_and_closes_the_session() {
 fn an_incomplete_undo_keeps_the_apply_watermark_so_status_stays_honest() {
     let (_db, conn) = test_conn();
     insert_project(&conn, "p1", "one");
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -184,7 +184,7 @@ fn an_incomplete_undo_keeps_the_apply_watermark_so_status_stays_honest() {
     .unwrap();
     state::record_applied(
         &conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".into()],
             port: 49152,
@@ -225,7 +225,7 @@ fn a_re_apply_keeps_the_first_applys_route_provenance() {
     insert_project(&conn, "p1", "one");
 
     // First apply: the setup CREATED the route.
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -235,7 +235,7 @@ fn a_re_apply_keeps_the_first_applys_route_provenance() {
     .unwrap();
     state::record_applied(
         &conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".into()],
             created_routes: vec!["openai".into()],
@@ -256,7 +256,7 @@ fn a_re_apply_keeps_the_first_applys_route_provenance() {
          session clears them"
     );
 
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -274,7 +274,7 @@ fn a_re_apply_keeps_the_first_applys_route_provenance() {
     }
     state::record_applied(
         &conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".into()],
             created_routes: created,
@@ -318,7 +318,7 @@ fn undo_returns_a_re_enabled_route_to_disabled() {
     )
     .unwrap();
 
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -329,7 +329,7 @@ fn undo_returns_a_re_enabled_route_to_disabled() {
     // What apply records when it re-enables an existing, disabled route.
     state::record_applied(
         &conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".into()],
             re_enabled_routes: vec!["openai".into()],
@@ -401,7 +401,7 @@ fn undo_does_not_disable_a_re_enabled_route_another_project_still_links() {
     )
     .unwrap();
 
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -411,7 +411,7 @@ fn undo_does_not_disable_a_re_enabled_route_another_project_still_links() {
     .unwrap();
     state::record_applied(
         &conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".into()],
             re_enabled_routes: vec!["openai".into()],

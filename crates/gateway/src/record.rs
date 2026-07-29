@@ -26,6 +26,23 @@ pub enum Completion {
     RejectedLocally,
     /// A transport or TLS failure reaching the upstream.
     UpstreamFailed,
+    /// The request body was still arriving when its own absolute upload
+    /// deadline (`CLIENT_BODY_DEADLINE`) ran out.
+    ///
+    /// `NEW-52`: this used to be recorded as `ClientDisconnected` + `Reset` —
+    /// byte-identical to the peer vanishing — so an operator could not tell
+    /// "our limit cut this client off" from "this client died". The three
+    /// variants below are all OUR decision; `ClientDisconnected` now means
+    /// only the peer's.
+    ClientBodyDeadlineExceeded,
+    /// The request body was cut short because the CONNECTION's cumulative
+    /// client-paced budget (`CLIENT_CONNECTION_TIME_BUDGET`) ran out, not this
+    /// request's own deadline. Distinct because the remedy differs: the client
+    /// should open a fresh connection, not send a smaller body.
+    ConnectionBudgetExceeded,
+    /// No byte of the request body arrived for `CLIENT_BODY_IDLE_TIMEOUT`.
+    /// The client is still connected; it simply stopped sending.
+    ClientBodyIdleTimeout,
 }
 
 impl Completion {
@@ -37,7 +54,24 @@ impl Completion {
             Completion::Truncated => "truncated",
             Completion::RejectedLocally => "rejected_locally",
             Completion::UpstreamFailed => "upstream_failed",
+            Completion::ClientBodyDeadlineExceeded => "client_body_deadline_exceeded",
+            Completion::ConnectionBudgetExceeded => "connection_budget_exceeded",
+            Completion::ClientBodyIdleTimeout => "client_body_idle_timeout",
         }
+    }
+
+    /// Whether the gateway itself ended the exchange by enforcing one of its
+    /// own client-facing limits, rather than the peer ending it.
+    ///
+    /// `NEW-52`: the wire answer differs too — these get a 408, a client
+    /// disconnect gets nothing, because there is nobody left to answer.
+    pub fn is_gateway_imposed_limit(self) -> bool {
+        matches!(
+            self,
+            Completion::ClientBodyDeadlineExceeded
+                | Completion::ConnectionBudgetExceeded
+                | Completion::ClientBodyIdleTimeout
+        )
     }
     /// Whether the recorded metadata covers the whole exchange. A partial
     /// exchange is labeled partial rather than presented as complete.

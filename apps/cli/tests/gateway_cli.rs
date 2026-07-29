@@ -536,3 +536,36 @@ fn link_hint_uses_the_route_providers_variables_not_the_prefix() {
         "the URL carries the route prefix: {written}"
     );
 }
+
+/// NEW-02: the installed service must never bind a port the configuration
+/// does not know about.
+///
+/// Service mode used to resolve its port with
+/// `port.or_else(port_hint).unwrap_or(0)` and then never write down what it
+/// actually bound, so an unreadable database or an installer that had not
+/// committed yet produced a gateway on an ephemeral port that no `.env`
+/// pointed at — and nothing anywhere compared the two afterwards. Here the
+/// directory starts with no port at all, which is the exact state the old
+/// code answered by binding a random one and forgetting it.
+#[test]
+fn service_mode_persists_the_port_it_is_going_to_bind() {
+    let v = TestVault::new();
+    assert!(
+        v.status_json()["configured_port"].is_null(),
+        "the fixture must start with no port chosen"
+    );
+
+    // Runs until the timeout kills it; the port decision is made and
+    // committed before the bind, so it survives the kill.
+    v.cmd()
+        .args(["gateway", "serve", "--service"])
+        .timeout(std::time::Duration::from_secs(12))
+        .assert()
+        .interrupted();
+
+    let port = v.status_json()["configured_port"].as_u64().expect(
+        "a service that bound a port must have persisted it, or every .env written \
+         against the configured port breaks on the next restart",
+    );
+    assert!(port > 0);
+}

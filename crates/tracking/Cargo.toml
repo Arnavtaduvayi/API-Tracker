@@ -34,5 +34,17 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["derive"] }
 
+[features]
+# The `state::cas_test_hook` seam: a thread-local callback invoked between the
+# read and the compare-and-swap in `refresh_with`, so a test can lose a CAS at
+# a chosen attempt without sleeps (`NEW-05`). OFF by default, so a release
+# build carries no settable hook inside the writer that decides whether a
+# tracking setup is healthy.
+test-hooks = []
+
 [dev-dependencies]
 tempfile = "3"
+# Self-dependency with the feature on: integration tests under tests/ link the
+# crate as an external dependency and do NOT get `cfg(test)`, so this is how
+# they reach the seam while `cargo build --release` does not compile it.
+api-tracker-tracking = { path = ".", features = ["test-hooks"] }

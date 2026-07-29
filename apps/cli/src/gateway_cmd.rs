@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
+use api_tracker_gateway::lifecycle::provision;
 use api_tracker_gateway::{control, doctor, envlink, lifecycle, routes, service::Service, store};
 use clap::Subcommand;
 
@@ -395,66 +396,104 @@ fn install(ctx: &Ctx, force: bool, yes: bool) -> Result<()> {
 
     let (vault, token) = ctx.unlocked()?;
 
-    // The stable port is chosen at enable time (random high port, ADR O3)
-    // so .env base URLs survive restarts.
-    let mut config = store::load_config(vault.connection())?;
-    if config.port.is_none() {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-            .context("choosing a stable local port")?;
-        config.port = Some(listener.local_addr()?.port());
-        drop(listener);
-    }
-    let port = config.port.expect("just ensured");
-
+    // Everything past this point — choosing the port, committing it BEFORE
+    // the service that will read it is started, writing the definition,
+    // starting, verifying, rolling back — is the shared install primitive
+    // (NEW-02). It used to live here as a hand-ordered sequence, and this
+    // command had it wrong: it started the service and committed the port
+    // afterwards, so a service booting in that window read a NULL port and
+    // bound an unrelated ephemeral one. The ordering is a property of the
+    // operation now, not of this function.
     let source = std::env::current_exe().context("locating this binary")?;
-    let report = lc.install(&source, force)?;
-    // Before the up-to-ten-second wait, not after it: the notes are where
-    // the engine records that it took over a legacy agent or replaced
-    // another data directory's definition, and a user who is about to stare
-    // at a progress spinner should already know that happened.
-    print_install_report(&report);
-
-    config.enabled = true;
-    config.service_version = Some(env!("CARGO_PKG_VERSION").to_string());
-    store::save_config(vault.connection(), &config)?;
-    api_tracker_core::audit::record(
+    let version = env!("CARGO_PKG_VERSION");
+    let outcome = provision::install_gateway(
+        &lc,
         vault.connection(),
-        "gateway_service_installed",
-        None,
-        None,
-        &format!("port={port} definition={}", report.definition),
-    )?;
-    ctx.persist_session(&vault, &token)?;
+        &CliInstallHost::new(),
+        &provision::InstallRequest::new(&source, force, version),
+    );
+    // The session is persisted whatever happened: an install that failed
+    // its verification still consumed the unlock, and making the user
+    // re-enter the passphrase to run `tethra gateway doctor` is a second
+    // punishment for the same failure. Reported rather than swallowed —
+    // the install's own error must not be the reason a second one goes
+    // unmentioned.
+    // Closes the progress line whichever way the probe went; the failure
+    // path must not leave the user's error message glued to a row of dots.
+    println!();
+    if let Err(why) = ctx.persist_session(&vault, &token) {
+        println!("warning: the unlocked session could not be persisted ({why});");
+        println!("         the next command will ask for the passphrase again.");
+    }
+    let outcome = outcome?;
+    let port = outcome.port;
 
-    // Verify the service actually came up, identity-checked (D11): never
-    // report healthy on the strength of an exit code alone.
-    print!("waiting for the gateway to come up");
-    let mut verified = false;
-    for _ in 0..40 {
-        std::thread::sleep(std::time::Duration::from_millis(250));
-        if matches!(
-            control::verify_listener(data_dir, port),
-            control::ListenerIdentity::Verified { .. }
-        ) {
-            verified = true;
-            break;
+    println!("gateway service installed and running on http://127.0.0.1:{port}");
+    println!();
+    println!("Next: link a project so its SDK uses the gateway:");
+    println!("  tethra gateway route add openai");
+    println!("  tethra gateway link --project <name> --route openai");
+    Ok(())
+}
+
+/// The CLI's [`provision::InstallHost`]: the real environment plus the
+/// progress a person staring at a terminal needs.
+///
+/// The stages are printed as they happen rather than summarized at the end,
+/// because the ones that matter most — a legacy agent taken over, another
+/// data directory's definition replaced, a rollback — are exactly the ones
+/// a failed install would otherwise swallow.
+struct CliInstallHost {
+    inner: provision::HostEnvironment,
+}
+
+impl CliInstallHost {
+    fn new() -> Self {
+        Self {
+            inner: provision::HostEnvironment::quiet(),
         }
+    }
+}
+
+impl provision::InstallHost for CliInstallHost {
+    fn reserve_port(&self) -> api_tracker_core::error::Result<provision::PortReservation> {
+        self.inner.reserve_port()
+    }
+
+    fn verify_listener(&self, data_dir: &std::path::Path, port: u16) -> control::ListenerIdentity {
+        self.inner.verify_listener(data_dir, port)
+    }
+
+    fn control_status(&self, data_dir: &std::path::Path) -> Option<control::Status> {
+        self.inner.control_status(data_dir)
+    }
+
+    fn sleep(&self, d: std::time::Duration) {
+        self.inner.sleep(d);
         print!(".");
         use std::io::Write;
         let _ = std::io::stdout().flush();
     }
-    println!();
-    if verified {
-        println!("gateway service installed and running on http://127.0.0.1:{port}");
-        println!();
-        println!("Next: link a project so its SDK uses the gateway:");
-        println!("  tethra gateway route add openai");
-        println!("  tethra gateway link --project <name> --route openai");
-    } else {
-        println!("The service was installed but did not answer its identity probe yet.");
-        println!("Diagnose with: tethra gateway doctor");
+
+    fn observe(&self, stage: provision::InstallStage) {
+        use provision::InstallStage as S;
+        match stage {
+            S::Note(note) => println!("note: {}", render::sanitize(&note)),
+            S::RolledBack { action } => {
+                println!("rolled back: {}", render::sanitize(&action))
+            }
+            S::ServiceStarted { .. } => {
+                print!("waiting for the gateway to come up");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            }
+            S::PlanValidated
+            | S::PortSelected { .. }
+            | S::PortCommitted { .. }
+            | S::ListenerVerified { .. }
+            | S::Enabled { .. } => {}
+        }
     }
-    Ok(())
 }
 
 /// Everything the install/repair engine reported, including the parts that
@@ -699,20 +738,37 @@ fn repair(ctx: &Ctx, yes: bool) -> Result<()> {
         bail!("cancelled");
     }
     let source = std::env::current_exe().context("locating this binary")?;
-    let report = lc.repair(&source)?;
-    // Keep the recorded version in step (plain config write, same trust
-    // level as serve's port persistence).
-    if let Ok(conn) = api_tracker_core::db::open_at_current_version(&ctx.paths.db_path()) {
-        if let Ok(mut config) = store::load_config(&conn) {
-            config.service_version = Some(env!("CARGO_PKG_VERSION").to_string());
-            let _ = store::save_config(&conn, &config);
-        }
-    }
-    println!(
-        "repaired: binary {}, definition {}",
-        report.binary, report.definition
+    // Repair goes through the same ordered primitive as install. It is
+    // `install(force = false)` underneath, so it starts a service that
+    // resolves its port from the database — which means repairing an
+    // installation whose `gateway_config.port` was still NULL produced the
+    // same bind-a-random-port service NEW-02 describes, from a path
+    // `tethra track` reaches automatically. The primitive commits a port
+    // first; the recorded version is written there too, and no longer
+    // swallowed (a failed version write is what makes `doctor` report a
+    // drift the repair has just fixed).
+    let conn = api_tracker_core::db::open_at_current_version(&ctx.paths.db_path())
+        .context("opening the vault database to record the repair")?;
+    let outcome = provision::repair_gateway(
+        &lc,
+        &conn,
+        &CliInstallHost::new(),
+        &provision::InstallRequest::new(&source, false, env!("CARGO_PKG_VERSION")),
     );
-    print_install_report(&report);
+    println!();
+    let outcome = outcome?;
+    println!(
+        "repaired: binary {}, definition {}, port {}",
+        outcome.report.binary, outcome.report.definition, outcome.port
+    );
+    if outcome.port_was_new {
+        println!(
+            "note: no gateway port had been chosen for this data directory; {} is now \
+             persisted and the service reads it at boot.",
+            outcome.port
+        );
+    }
+    print_install_report(&outcome.report);
     Ok(())
 }
 
@@ -846,6 +902,21 @@ fn status(ctx: &Ctx) -> Result<()> {
                     "gateway     running v{} on http://127.0.0.1:{}",
                     g.version, g.port
                 );
+                // A gateway serving a port nobody linked against reads as
+                // perfectly healthy on every other line of this report
+                // (NEW-02). Printing only the LIVE port is what made the
+                // divergence invisible here, so say both whenever they
+                // disagree — doctor's `port_drift` finding carries the
+                // severity and the remedy.
+                if let Some(configured) = report.configured_port {
+                    if configured != g.port {
+                        println!(
+                            "  WARNING   configuration says port {configured}; every linked \
+                             .env points there and gets connection-refused"
+                        );
+                        println!("            fix with: tethra gateway restart");
+                    }
+                }
                 match &report.listener {
                     Some(control::ListenerIdentity::Verified { .. }) => {
                         println!("  identity  verified (answers this data directory's nonce)");
@@ -1059,7 +1130,6 @@ fn serve(ctx: &Ctx, port: Option<u16>, with_attribution: bool) -> Result<()> {
 /// stdout to the same file; on Windows nothing else captures it).
 fn serve_service_mode(ctx: &Ctx, port: Option<u16>) -> Result<()> {
     let data_dir = ctx.paths.data_dir.clone();
-    let configured = port.or_else(|| store::port_hint(&data_dir)).unwrap_or(0);
     let log_path = lifecycle::logs_dir(&data_dir).join("gateway.log");
     let _ = std::fs::create_dir_all(lifecycle::logs_dir(&data_dir));
 
@@ -1076,11 +1146,155 @@ fn serve_service_mode(ctx: &Ctx, port: Option<u16>) -> Result<()> {
         }
     };
 
+    let configured = resolve_service_port(&data_dir, port, &write_log);
     let exit = api_tracker_gateway::service::run_as_service(&data_dir, configured, write_log);
     // Both exits are CLEAN by design: KeepAlive={Crashed:true} and
     // Restart=on-failure must not respawn us.
     let _ = exit;
     Ok(())
+}
+
+/// How long service mode waits for a readable, decided port before acting
+/// on its own: 12 × 250 ms = 3 s. Long enough to ride out a busy database or
+/// an installer from an older build that is still mid-commit (the window the
+/// fixed installer no longer has is process-startup sized), short enough
+/// that a genuinely unconfigured directory still gets a gateway promptly.
+const SERVICE_PORT_ROUNDS: u32 = 12;
+const SERVICE_PORT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The installed service's boot-time port decision, and the persistence of
+/// whatever it decides.
+///
+/// The predecessor was `port.or_else(port_hint).unwrap_or(0)`. Both halves
+/// were wrong in the same direction (NEW-02): `port_hint` collapsed "no port
+/// has been chosen" and "the database could not be read" into one `None`,
+/// and `unwrap_or(0)` answered that `None` with a fresh ephemeral port —
+/// silently invalidating every `.env` already written against the persisted
+/// one. Each state now gets the response it deserves, and the port this
+/// process is going to bind is committed BEFORE it binds, so the config row
+/// and the running service cannot diverge. `run_as_service` retries the
+/// exact port it is given (with backoff, never exiting), so a non-zero
+/// argument is a guarantee about what will eventually be bound, not a wish.
+fn resolve_service_port(
+    data_dir: &std::path::Path,
+    explicit: Option<u16>,
+    log: &impl Fn(&str),
+) -> u16 {
+    if let Some(port) = explicit {
+        // An explicit `--port` in the service definition's argv is the
+        // strongest statement of intent there is; it wins, and it fills in
+        // an unset config row so the two agree from the first boot.
+        fill_in_unset_port(data_dir, port, log);
+        return port;
+    }
+
+    let mut last = store::PortState::NoneYet;
+    let mut announced_unreadable = false;
+    for round in 0..SERVICE_PORT_ROUNDS {
+        last = store::port_state(data_dir);
+        match &last {
+            store::PortState::Persisted(port) => return *port,
+            store::PortState::NoneYet => {}
+            store::PortState::Unavailable(why) => {
+                if !announced_unreadable {
+                    announced_unreadable = true;
+                    log(&format!(
+                        "degraded: the configured gateway port could not be read ({why}); \
+                         retrying rather than choosing a new one"
+                    ));
+                }
+            }
+        }
+        if round + 1 < SERVICE_PORT_ROUNDS {
+            std::thread::sleep(SERVICE_PORT_INTERVAL);
+        }
+    }
+
+    match last {
+        store::PortState::Persisted(port) => port,
+        // Readable, and genuinely undecided: this boot IS the decision, so
+        // make it explicitly and write it down before binding.
+        store::PortState::NoneYet => match choose_and_commit_port(data_dir) {
+            Ok(port) => {
+                log(&format!(
+                    "no gateway port was configured; chose {port} and persisted it"
+                ));
+                port
+            }
+            Err(why) => {
+                log(&format!(
+                    "DEGRADED: no port was configured and one could not be persisted \
+                     ({why}); binding an ephemeral port for this run. Any .env written \
+                     against a different port will get connection-refused — fix with \
+                     `tethra gateway doctor`"
+                ));
+                0
+            }
+        },
+        // Never readable. We cannot prove no port exists, so choosing one
+        // could invalidate `.env` files we simply could not see. Say so at
+        // full volume and take the ephemeral port for this run only; the
+        // `port_drift` doctor finding makes the result visible instead of
+        // leaving it to be discovered by a connection-refused in an SDK.
+        store::PortState::Unavailable(why) => {
+            log(&format!(
+                "DEGRADED: the configured gateway port was still unreadable after {}s \
+                 ({why}); binding an ephemeral port for this run WITHOUT persisting it, \
+                 because a port may exist that this process cannot see. Linked projects \
+                 may get connection-refused until `tethra gateway restart` succeeds",
+                (SERVICE_PORT_ROUNDS as u64 * SERVICE_PORT_INTERVAL.as_millis() as u64) / 1000
+            ));
+            0
+        }
+    }
+}
+
+/// Persist `port` only when nothing has been decided yet.
+///
+/// The asymmetry is the point: a service may FILL IN an unset port, but it
+/// may never CHANGE a set one. The persisted port is what `.env` base URLs
+/// were built from, so moving it is a re-link decision belonging to the
+/// installer — a symmetric "persist whatever I bound" would let one
+/// transient `EADDRINUSE` silently break every linked project.
+fn fill_in_unset_port(data_dir: &std::path::Path, port: u16, log: &impl Fn(&str)) {
+    match store::port_state(data_dir) {
+        store::PortState::Persisted(existing) if existing == port => {}
+        store::PortState::Persisted(existing) => log(&format!(
+            "configuration says port {existing} but this service was told to bind {port}; \
+             not overwriting the configured port. Linked projects point at {existing} — \
+             fix with `tethra gateway restart`"
+        )),
+        store::PortState::NoneYet => match choose_and_commit_port_value(data_dir, port) {
+            Ok(committed) if committed == port => {
+                log(&format!("persisted port {port} (none was configured)"))
+            }
+            Ok(committed) => log(&format!(
+                "another writer configured port {committed} first; this service was told \
+                 to bind {port} and will, so `tethra gateway restart` is needed to converge"
+            )),
+            Err(why) => log(&format!(
+                "DEGRADED: bound {port} but could not persist it ({why}); a restart would \
+                 move the port and every linked .env would break"
+            )),
+        },
+        store::PortState::Unavailable(why) => log(&format!(
+            "could not read the configured port ({why}); binding {port} without persisting it"
+        )),
+    }
+}
+
+/// Reserve a free loopback port and commit it, returning the port that is
+/// now authoritative (another writer may have won the race).
+fn choose_and_commit_port(data_dir: &std::path::Path) -> Result<u16> {
+    let reservation = api_tracker_gateway::lifecycle::provision::PortReservation::fresh()
+        .context("choosing a stable local port")?;
+    choose_and_commit_port_value(data_dir, reservation.port())
+}
+
+fn choose_and_commit_port_value(data_dir: &std::path::Path, port: u16) -> Result<u16> {
+    let conn = api_tracker_core::db::open_at_current_version(&data_dir.join("vault.db"))
+        .context("opening the vault database to persist the gateway port")?;
+    store::commit_port(&conn, port).context("persisting the gateway port")
 }
 
 fn persist_port(ctx: &Ctx, port: u16) -> Result<()> {
@@ -1501,6 +1715,18 @@ fn link(
     Ok(())
 }
 
+/// The port a live gateway for this data directory says it bound, over the
+/// control channel — which answers regardless of which TCP port was taken,
+/// and is therefore the only way to tell "nothing is running" from "something
+/// is running somewhere else".
+fn live_gateway_port(ctx: &Ctx) -> Option<u16> {
+    provision::InstallHost::control_status(
+        &provision::HostEnvironment::quiet(),
+        &ctx.paths.data_dir,
+    )
+    .map(|s| s.port)
+}
+
 /// The link-time keyless probe (D9/GW-13): one credential-free GET through
 /// the gateway. A provider 401/403 PROVES the path end to end; a gateway
 /// 404/503 or connection failure is reported honestly instead.
@@ -1511,12 +1737,35 @@ fn probe_after_link(ctx: &Ctx, plan: &envlink::LinkPlan) {
         control::ListenerIdentity::Verified { .. } => {}
         control::ListenerIdentity::NoListener => {
             println!();
-            println!("note: the gateway is not running, so the link was not probed.");
-            println!("      Start it (`tethra gateway start` or `serve`) — until then the");
-            println!(
-                "      project's SDK will get connection refused on 127.0.0.1:{}.",
-                plan.port
-            );
+            // "Not running" was the wrong diagnosis for the failure this
+            // note is most likely to be describing. Nothing answering on
+            // the PERSISTED port is exactly what a gateway that bound a
+            // different port looks like from here (NEW-02), and the remedy
+            // for that is a restart, not a start — so ask the control
+            // channel which it is before naming a cause.
+            match live_gateway_port(ctx) {
+                Some(live) if live != plan.port => {
+                    println!(
+                        "WARNING: a gateway IS running for this data directory, but on port \
+                         {live},"
+                    );
+                    println!(
+                        "         not the persisted {} this .env was just written with.",
+                        plan.port
+                    );
+                    println!("         The persisted port is the authority — restarting makes");
+                    println!("         the service bind it and this link becomes correct with");
+                    println!("         no re-link: tethra gateway restart");
+                }
+                _ => {
+                    println!("note: the gateway is not running, so the link was not probed.");
+                    println!("      Start it (`tethra gateway start` or `serve`) — until then the");
+                    println!(
+                        "      project's SDK will get connection refused on 127.0.0.1:{}.",
+                        plan.port
+                    );
+                }
+            }
             return;
         }
         other => {

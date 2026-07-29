@@ -134,8 +134,34 @@ pub enum WatchStatus {
     NotWatchable { state: TrackingState },
 }
 
+/// The most recent qualifying observation for this setup, for surfaces that
+/// want to quote one.
+///
+/// Split out of [`check_traffic`] so a caller that has already resolved
+/// present-tense health through [`crate::health::resolve`] can quote an
+/// exchange **without** going back through the cached-state ladder. That
+/// ladder is liveness-blind by construction, and `NEW-01` was a caller that
+/// used it to decide whether to make a success claim rather than only to
+/// decorate one.
+pub fn latest_observed_exchange(
+    conn: &Connection,
+    setup: &TrackingSetup,
+) -> Result<Option<ObservedExchange>> {
+    latest_exchange(conn, setup)
+}
+
 /// One poll: refresh the derived state and report it. The caller decides
 /// cadence (2 s UI, 5 s CLI) and timeout handling.
+///
+/// # This is not a health check
+///
+/// The returned [`WatchStatus`] switches on the **cached** `state` column
+/// after a [`state::GatewayLiveness::Unknown`] refresh. `Observed` therefore
+/// means "a qualifying exchange was recorded at some point in this
+/// verification session", not "tracking is working now": it survives the
+/// gateway being stopped, the route being removed and the link being
+/// deleted. A surface that makes a present-tense claim — a headline, an exit
+/// code — must use [`crate::health::resolve`] instead (`NEW-01`/`VER-02`).
 pub fn check_traffic(conn: &Connection, setup: &mut TrackingSetup) -> Result<WatchStatus> {
     let freshness = state::refresh(conn, setup)?;
     match setup.state {

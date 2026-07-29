@@ -184,6 +184,30 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64> {
     u64::from_str_radix(text, 16).map_err(|_| CoreError::InvalidInput("bad chunk size".into()))
 }
 
+/// Why a [`DeadlineReader`] stopped reading, when it did (`NEW-52`).
+///
+/// The relay cannot recover this from the `io::Error` alone. A socket idle
+/// timeout and the absolute deadline both surface as `TimedOut`/`WouldBlock`
+/// inside `CoreError::Io`, and an error raised while WRITING the body to the
+/// upstream arrives on the very same `Result`. Conflating the three is exactly
+/// what made a policy decision indistinguishable from a peer failure in the
+/// observation record, so the reader that made the decision reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReaderStop {
+    /// No read from the wrapped stream has failed. An error seen by the caller
+    /// therefore came from somewhere else — the upstream write, or framing.
+    #[default]
+    None,
+    /// The absolute deadline was reached between two reads: the gateway ended
+    /// this body.
+    DeadlineExceeded,
+    /// One read stalled past the socket's per-read idle timeout: the client is
+    /// still connected but stopped sending.
+    IdleTimeout,
+    /// The wrapped stream failed (reset, or an unclassified I/O error).
+    Failed,
+}
+
 /// A reader that refuses to continue past an ABSOLUTE deadline (`SEC-02`).
 ///
 /// The head phase has always had an absolute bound — that is what stops a
@@ -194,10 +218,12 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64> {
 /// user's own applications: availability only, loopback-only, fails closed
 /// with 503, and recovers — but a bound the user cannot state is not a bound.
 ///
-/// The check is BETWEEN reads, so the true worst case is the deadline plus one
-/// idle timeout. That is bounded and stateable, which is the property that was
-/// missing; making it exact would mean a non-blocking rewrite of the relay for
-/// no additional safety.
+/// The check is BETWEEN reads, so one body overruns its deadline by at most
+/// one idle timeout. That bounds ONE request and nothing more: this reader is
+/// constructed per request, so on its own it says nothing about how long a
+/// connection may live (`NEW-48`). The caller must clamp the deadline it
+/// passes here by the CONNECTION's remaining budget — `forward::ConnBudget` —
+/// or a client that keeps completing slow bodies renews this bound forever.
 ///
 /// This wraps the CLIENT while its REQUEST body is being read. Response
 /// streaming is deliberately untouched: a long model response is a legitimate
@@ -205,23 +231,47 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64> {
 pub struct DeadlineReader<'a, R> {
     inner: &'a mut R,
     deadline: Instant,
+    stop: ReaderStop,
 }
 
 impl<'a, R: Read> DeadlineReader<'a, R> {
     pub fn new(inner: &'a mut R, deadline: Instant) -> Self {
-        Self { inner, deadline }
+        Self {
+            inner,
+            deadline,
+            stop: ReaderStop::None,
+        }
+    }
+
+    /// Why reading stopped, for honest recording (`NEW-52`).
+    pub fn stop(&self) -> ReaderStop {
+        self.stop
     }
 }
 
 impl<R: Read> Read for DeadlineReader<'_, R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if Instant::now() >= self.deadline {
+            self.stop = ReaderStop::DeadlineExceeded;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "the request body exceeded the absolute upload deadline",
             ));
         }
-        self.inner.read(buf)
+        match self.inner.read(buf) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                self.stop = if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) {
+                    ReaderStop::IdleTimeout
+                } else {
+                    ReaderStop::Failed
+                };
+                Err(e)
+            }
+        }
     }
 }
 
@@ -349,7 +399,7 @@ pub fn relay_plain<R: Read, W: Write>(
 
 #[cfg(test)]
 mod tests {
-    use super::DeadlineReader;
+    use super::{DeadlineReader, ReaderStop};
     use std::io::Read;
     use std::time::{Duration, Instant};
 
@@ -376,6 +426,46 @@ mod tests {
         let mut buf = [0u8; 5];
         assert_eq!(bounded.read(&mut buf).unwrap(), 5);
         assert_eq!(&buf, b"hello");
+        assert_eq!(
+            bounded.stop(),
+            ReaderStop::None,
+            "a reader that never failed must not claim it hit a limit"
+        );
+    }
+
+    /// `NEW-52`: the reader must say WHICH bound it hit, because the caller
+    /// cannot recover that from the `io::Error` — an idle timeout, the
+    /// absolute deadline and a peer reset are indistinguishable downstream,
+    /// and the observation record has to tell "we cut them off" from "they
+    /// left".
+    #[test]
+    fn a_stopped_reader_reports_which_bound_ended_the_body() {
+        let mut src: &[u8] = b"whatever";
+        let mut expired = DeadlineReader::new(&mut src, Instant::now() - Duration::from_secs(1));
+        let _ = expired.read(&mut [0u8; 4]);
+        assert_eq!(expired.stop(), ReaderStop::DeadlineExceeded);
+
+        // A socket whose per-read timeout fired: `WouldBlock`/`TimedOut` with
+        // the deadline still in the future is the client going quiet, not the
+        // gateway ending the upload.
+        struct Stalled(std::io::ErrorKind);
+        impl Read for Stalled {
+            fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::new(self.0, "stalled"))
+            }
+        }
+        for kind in [std::io::ErrorKind::WouldBlock, std::io::ErrorKind::TimedOut] {
+            let mut stalled = Stalled(kind);
+            let mut idle =
+                DeadlineReader::new(&mut stalled, Instant::now() + Duration::from_secs(60));
+            let _ = idle.read(&mut [0u8; 4]);
+            assert_eq!(idle.stop(), ReaderStop::IdleTimeout, "for {kind:?}");
+        }
+
+        let mut reset = Stalled(std::io::ErrorKind::ConnectionReset);
+        let mut gone = DeadlineReader::new(&mut reset, Instant::now() + Duration::from_secs(60));
+        let _ = gone.read(&mut [0u8; 4]);
+        assert_eq!(gone.stop(), ReaderStop::Failed);
     }
 
     use super::*;

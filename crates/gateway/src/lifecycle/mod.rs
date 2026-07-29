@@ -38,6 +38,7 @@
 
 pub mod linux;
 pub mod macos;
+pub mod provision;
 pub mod windows;
 
 use std::path::{Path, PathBuf};
@@ -477,6 +478,69 @@ pub fn helper_answers_probe(runner: &dyn CommandRunner, candidate: &Path) -> boo
         )
         .map(|out| out.ok() && out.stdout.contains(PROBE_MARKER))
         .unwrap_or(false)
+}
+
+/// Write a service definition so that the path NEVER holds a partial file:
+/// a 0600 temp file in the same directory, `sync_all`, then `rename` over
+/// the target, then an fsync of the directory entry.
+///
+/// The previous unlink-then-`create_new`-then-`write_all` sequence left two
+/// observable bad states behind a crash or a concurrent reader: the slot
+/// momentarily ABSENT (a login in that window starts no gateway at all) and
+/// the file momentarily TRUNCATED. A truncated definition parses to
+/// [`DefinitionState::Unparseable`], and that state is deliberately
+/// unrecoverable without a hand `rm` — `install` refuses without `--force`
+/// and [`ServiceManager::ensure_ours`] refuses every destructive verb — so a
+/// crash mid-write cost the user a manual repair (NEW-02, "retry after
+/// partial install"). `rename` within one directory is atomic, so neither
+/// state is reachable now.
+///
+/// The temp name is dot-prefixed and does not end in the platform's
+/// definition extension, so a launchd/systemd scan that races the rename
+/// ignores it rather than trying to load half a definition.
+pub fn atomic_write_definition(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .ok_or_else(|| CoreError::InvalidInput(format!("{} has no parent", path.display())))?;
+    std::fs::create_dir_all(dir).map_err(CoreError::Io)?;
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "definition".to_string());
+    let tmp = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    // Never follow a symlink planted at either path.
+    if std::fs::symlink_metadata(&tmp).is_ok() {
+        std::fs::remove_file(&tmp).map_err(CoreError::Io)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let write = (|| -> Result<()> {
+        let mut f = options.open(&tmp).map_err(CoreError::Io)?;
+        f.write_all(contents.as_bytes()).map_err(CoreError::Io)?;
+        f.sync_all().map_err(CoreError::Io)?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    // `rename` replaces a regular file atomically; a symlink at the target
+    // is replaced rather than followed, which is the behaviour we want.
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(CoreError::Io(e));
+    }
+    // The rename is only durable once the DIRECTORY entry is fsynced.
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 /// Fresh byte-write of `src` to `dst` (never `fs::copy`: quarantine and

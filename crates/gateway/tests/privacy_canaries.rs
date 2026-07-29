@@ -77,6 +77,89 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Caps that keep the sweep bounded (NEW-53). A data directory this deep or
+/// this wide means something is wrong, and a sweep that silently stopped at a
+/// cap would be a canary that quietly stopped looking — so breaching either
+/// cap FAILS the test rather than truncating the walk.
+const SWEEP_MAX_DEPTH: usize = 16;
+const SWEEP_MAX_FILES: usize = 4096;
+
+/// Recursively scan every byte the gateway left under `root`.
+///
+/// NEW-53: this sweep used to read ONE directory level, so anything the
+/// gateway wrote into a subdirectory was outside every canary in this file —
+/// most importantly `<data-dir>/logs/gateway.log`, which is exactly the
+/// artifact a leaked credential would land in, and exactly what these canaries
+/// exist to catch. A one-level `read_dir` could not have failed on it.
+///
+/// Bounded on purpose: the walk never follows a symlink, because a link
+/// planted in the data directory would drag the scan across the whole
+/// filesystem and turn a privacy canary into an unbounded disk read. A link's
+/// own content is its target path, so that is scanned; a link that points back
+/// inside `root` costs nothing, since the walk reaches the real file on its
+/// own.
+///
+/// Returns the number of regular files read, so callers can assert the sweep
+/// was not vacuous.
+fn sweep_data_dir(root: &std::path::Path, what: &str) -> usize {
+    sweep_data_dir_with(root, what, &mut assert_absent)
+}
+
+/// `sweep_data_dir` with a caller-supplied check, for canaries that are not in
+/// `all_canaries()` (the matching key is its own canary, SI-21).
+fn sweep_data_dir_with(
+    root: &std::path::Path,
+    what: &str,
+    check: &mut dyn FnMut(&str, &[u8]),
+) -> usize {
+    let mut scanned = 0usize;
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = pending.pop() {
+        assert!(
+            depth <= SWEEP_MAX_DEPTH,
+            "{what}: {} is deeper than the sweep's {SWEEP_MAX_DEPTH}-level cap, \
+             so bytes below it would go unscanned",
+            dir.display()
+        );
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            // `symlink_metadata` describes the link itself; `metadata` would
+            // follow it and could report a directory living outside `root`.
+            let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
+            if kind.is_symlink() {
+                let target = std::fs::read_link(&path).unwrap();
+                check(
+                    &format!("{what}: symlink target of {}", path.display()),
+                    target.as_os_str().as_encoded_bytes(),
+                );
+                continue;
+            }
+            // The name is an artifact too: a marker used as a filename leaks
+            // just as loudly as one written inside a file.
+            if let Some(name) = path.file_name() {
+                check(
+                    &format!("{what}: the name of {}", path.display()),
+                    name.as_encoded_bytes(),
+                );
+            }
+            if kind.is_dir() {
+                pending.push((path, depth + 1));
+            } else if kind.is_file() {
+                let bytes = std::fs::read(&path).unwrap();
+                check(&format!("{what}: {}", path.display()), &bytes);
+                scanned += 1;
+                assert!(
+                    scanned <= SWEEP_MAX_FILES,
+                    "{what}: more than {SWEEP_MAX_FILES} files under {}; the \
+                     sweep would no longer be bounded",
+                    root.display()
+                );
+            }
+        }
+    }
+    scanned
+}
+
 /// Run one exchange carrying every canary, with attribution and extraction
 /// both fully enabled, and hand back the record the writer would persist.
 #[test]
@@ -259,14 +342,10 @@ fn no_canary_survives_a_live_exchange_into_any_artifact() {
             assert_absent(&format!("{name} (after checkpoint)"), &bytes);
         }
     }
-    // Every other file the gateway could have written into its data dir.
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            let bytes = std::fs::read(&path).unwrap();
-            assert_absent(&format!("data-dir file {}", path.display()), &bytes);
-        }
-    }
+    // Every other file the gateway could have written into its data dir, at
+    // ANY depth — `logs/gateway.log` lives one level down (NEW-53).
+    let scanned = sweep_data_dir(dir.path(), "the data directory");
+    assert!(scanned >= 1, "scanning nothing is not a pass");
 }
 
 /// The 32-byte matching key is its own canary: it must never reach disk or
@@ -301,18 +380,14 @@ fn the_matching_key_never_reaches_disk_argv_or_environ() {
     let _ = read_to_close(&mut c);
     gw.wait_records(1);
 
-    // Disk: the whole data directory.
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            let bytes = std::fs::read(&path).unwrap();
-            assert!(
-                !contains(&bytes, &key_bytes),
-                "the matching key must never reach disk: found in {}",
-                path.display()
-            );
-        }
-    }
+    // Disk: the whole data directory, recursively (NEW-53).
+    let scanned = sweep_data_dir_with(dir.path(), "the data directory", &mut |where_, bytes| {
+        assert!(
+            !contains(bytes, &key_bytes),
+            "the matching key must never reach disk: found in {where_}"
+        );
+    });
+    assert!(scanned >= 1, "scanning nothing is not a pass");
 
     // argv and environ of THIS process (the gateway runs in-process here).
     let argv: Vec<u8> = std::env::args().collect::<Vec<_>>().join("\0").into_bytes();
@@ -664,14 +739,7 @@ fn no_canary_survives_the_real_persistence_path() {
             scanned += 1;
         }
     }
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            let bytes = std::fs::read(&path).unwrap();
-            assert_absent(&format!("data-dir file {}", path.display()), &bytes);
-            scanned += 1;
-        }
-    }
+    scanned += sweep_data_dir(dir.path(), "the data directory (real persistence path)");
     assert!(
         scanned >= 2,
         "expected to scan at least the database and one sidecar/file; \
@@ -759,15 +827,10 @@ fn no_env_value_canary_survives_the_link_writers_restore_record() {
     db::checkpoint_truncate(&conn);
     drop(conn);
 
-    let mut scanned = 0usize;
-    for entry in std::fs::read_dir(dir.path()).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_file() {
-            let bytes = std::fs::read(&path).unwrap();
-            assert_absent(&format!("data-dir file {}", path.display()), &bytes);
-            scanned += 1;
-        }
-    }
+    // Recursive (NEW-53): the rewritten `.env` itself lives at
+    // `<data-dir>/proj/.env`, one level below the root the old sweep read, so
+    // the file this test is actually about was never scanned at all.
+    let scanned = sweep_data_dir(dir.path(), "the data directory (link writer)");
     assert!(scanned >= 1, "scanning nothing is not a pass");
 
     // Recording must be VISIBLE, not silent. The value is kept — sealed —
@@ -789,6 +852,76 @@ fn no_env_value_canary_survives_the_link_writers_restore_record() {
     assert!(
         stored.contains("\"sealed\""),
         "and the record must hold ciphertext, not a withheld marker: {stored}"
+    );
+}
+
+/// Negative control for the sweep's REACH (NEW-53).
+///
+/// The audit found the raw-artifact sweep read a single directory level, so
+/// `<data-dir>/logs/gateway.log` — the gateway's own log, and the likeliest
+/// place for a credential to surface — was never scanned. A credential written
+/// there would have been reported as a clean scan by every canary above.
+///
+/// This plants a credential in exactly that path and asserts the sweep fails.
+/// It also pins that the root holds no files at all, so the only way to reach
+/// the planted marker is by descending: a regression to a one-level `read_dir`
+/// cannot pass this test, it can only report a vacuous clean sweep.
+#[test]
+#[should_panic(expected = "privacy invariant violation")]
+fn the_sweep_reaches_a_canary_planted_in_a_nested_log_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let logs = dir.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(
+        logs.join("gateway.log"),
+        format!(
+            "2026-01-01T00:00:00Z forward openai 200 \
+             authorization=\"Bearer {CANARY_CREDENTIAL}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let top_level_files = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().is_file())
+        .count();
+    assert_eq!(
+        top_level_files, 0,
+        "the planted marker must be reachable ONLY by recursion, else this \
+         control would pass even with the old one-level sweep"
+    );
+
+    sweep_data_dir(dir.path(), "a data directory with a nested gateway log");
+}
+
+/// The recursion is bounded (NEW-53): it descends the data directory to any
+/// realistic depth, but a symlink is read as a link and never traversed. A
+/// followed link would walk the whole filesystem from a temp directory and
+/// would make the canary sweep unbounded; here the link points at a directory
+/// holding a marker, so a sweep that followed it would fail this test.
+#[test]
+fn the_sweep_descends_but_never_follows_a_symlink_out_of_the_data_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(
+        outside.path().join("not-ours.txt"),
+        format!("{CANARY_PROMPT} {CANARY_CREDENTIAL}"),
+    )
+    .unwrap();
+
+    std::fs::write(dir.path().join("vault.db"), b"clean").unwrap();
+    let nested = dir.path().join("logs").join("archive").join("2026");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(dir.path().join("logs").join("gateway.log"), b"clean").unwrap();
+    std::fs::write(nested.join("gateway.log.1"), b"clean").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("escape")).unwrap();
+
+    let scanned = sweep_data_dir(dir.path(), "a nested data directory");
+    assert_eq!(
+        scanned, 3,
+        "the sweep must read every regular file it owns (3 levels deep) and \
+         nothing beyond the data directory"
     );
 }
 

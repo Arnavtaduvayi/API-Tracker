@@ -991,8 +991,17 @@ pub fn proposal_template(conn: &Connection, provider: &str) -> Result<String> {
 }
 
 /// The outcome of estimating a cost.
+///
+/// A pricing record does not have to price every dimension it is used for:
+/// a record carrying only `input_price_per_m` prices output tokens at
+/// nothing. `micros` used to absorb that silently via `unwrap_or(0)`, so a
+/// half-priced estimate was indistinguishable from a complete one and read
+/// downstream as the whole cost (NEW-37). The estimate now carries its own
+/// completeness, so a partial price cannot be presented as a total.
 #[derive(Debug, Clone, Serialize)]
 pub struct CostEstimate {
+    /// The derived amount. A LOWER BOUND when `complete` is false: the
+    /// dimensions in `unpriced_dimensions` contributed nothing to it.
     pub micros: i64,
     pub pricing_source: String,
     pub effective_from: String,
@@ -1000,6 +1009,34 @@ pub struct CostEstimate {
     pub is_override: bool,
     pub stale: bool,
     pub note: String,
+    /// True when every dimension with non-zero usage had a price, i.e.
+    /// `micros` is the whole estimate rather than a floor.
+    pub complete: bool,
+    /// Dimensions that had usage but no price in this record, named for
+    /// display. Empty exactly when `complete` is true.
+    pub unpriced_dimensions: Vec<String>,
+}
+
+impl CostEstimate {
+    /// The amount, but only when it can stand as a complete estimate.
+    /// Callers that must not present a floor as a total read this instead
+    /// of `micros`, and render "not reported" for `None` — never `$0.00`.
+    pub fn micros_if_complete(&self) -> Option<i64> {
+        self.complete.then_some(self.micros)
+    }
+
+    /// A sentence naming what was not priced, or None when nothing is
+    /// missing.
+    pub fn incompleteness_note(&self) -> Option<String> {
+        if self.complete {
+            return None;
+        }
+        Some(format!(
+            "partial estimate — this pricing record has no price for {}, \
+             so that usage contributed nothing; the amount is a floor, not a total",
+            self.unpriced_dimensions.join(" or ")
+        ))
+    }
 }
 
 /// Estimate token cost as of a usage date (RFC 3339 or YYYY-MM-DD).
@@ -1018,6 +1055,21 @@ pub fn estimate_token_cost_as_of(
     if rec.unit != Unit::Tokens {
         return Ok(None);
     }
+    // A record with no token price at all prices nothing; returning a
+    // $0.00 estimate here would invent a number, so there is no estimate.
+    if rec.input_price_per_m_micros.is_none() && rec.output_price_per_m_micros.is_none() {
+        return Ok(None);
+    }
+    // A missing price is not a price of zero. Track every dimension that
+    // had usage but no price: those tokens contribute nothing to `micros`,
+    // which makes the result a floor rather than a total.
+    let mut unpriced_dimensions = Vec::new();
+    if input_tokens > 0 && rec.input_price_per_m_micros.is_none() {
+        unpriced_dimensions.push("input tokens".to_string());
+    }
+    if output_tokens > 0 && rec.output_price_per_m_micros.is_none() {
+        unpriced_dimensions.push("output tokens".to_string());
+    }
     let inp = rec.input_price_per_m_micros.unwrap_or(0);
     let out = rec.output_price_per_m_micros.unwrap_or(0);
     // micros = tokens * price_per_million_micros / 1_000_000
@@ -1031,6 +1083,8 @@ pub fn estimate_token_cost_as_of(
         is_override: rec.origin == Origin::Override,
         stale: rec.stale,
         note: rec.note.clone(),
+        complete: unpriced_dimensions.is_empty(),
+        unpriced_dimensions,
     }))
 }
 
@@ -1057,6 +1111,10 @@ pub fn estimate_request_cost_as_of(
         is_override: rec.origin == Origin::Override,
         stale: rec.stale,
         note: rec.note.clone(),
+        // Request pricing has a single dimension, and the destructuring
+        // above already required it to be present.
+        complete: true,
+        unpriced_dimensions: Vec::new(),
     }))
 }
 

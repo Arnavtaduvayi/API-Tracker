@@ -45,11 +45,36 @@ pub struct UndoReport {
 /// summary is absent AND link rows exist, the route side cannot be
 /// reconstructed (we cannot tell created from reused), so undo restores
 /// what it can and REFUSES to report completion.
+///
+/// ## Why the compare-and-swap comes first (`NEW-34`)
+///
+/// `setup` is a snapshot the caller read earlier. Undo used to restore every
+/// `.env`, delete the link rows and remove the routes, and only THEN
+/// compare-and-swap the state column — so a stale undo dismantled a *newer*
+/// setup's configuration and reported `state_conflict` after the damage was
+/// done, with the CLI's `?` discarding the report that said what had been
+/// destroyed. The check now happens before the first destructive step, where
+/// refusing costs the user nothing, and the closing transition can no longer
+/// throw the report away.
 pub fn undo(
     conn: &Connection,
     crypto: Option<&api_tracker_core::envrestore::RestoreCrypto>,
     setup: &TrackingSetup,
 ) -> Result<UndoReport> {
+    // Refuse BEFORE anything is torn down. Every step below this line
+    // rewrites the user's files or removes rows; a conflict discovered
+    // afterwards is a conflict discovered too late.
+    let live = state::get_setup(conn, &setup.id)?.ok_or(CoreError::NotFound {
+        kind: "tracking setup",
+        ident: setup.id.clone(),
+    })?;
+    if live.row_version != setup.row_version {
+        return Err(CoreError::StateConflict {
+            kind: "tracking setup",
+            ident: setup.id.clone(),
+        });
+    }
+
     let recorded: Option<PlanSummary> = setup
         .plan_summary_json
         .as_deref()
@@ -68,7 +93,14 @@ pub fn undo(
         out
     };
 
-    let summary_missing = recorded.is_none();
+    // "The plan was never fully recorded" is now a property of the summary,
+    // not of the column being NULL. Apply persists route provenance the
+    // moment the routes exist (`NEW-32`), so a summary can be present and
+    // still describe an apply that died three steps later. Undo uses that
+    // provenance to remove the routes — which it previously could not — and
+    // keeps refusing to claim completion, which is the ZFT-007 property.
+    let plan_incomplete = !recorded.as_ref().is_some_and(|s| s.apply_completed);
+    let summary_absent = recorded.is_none();
     let mut summary = recorded.unwrap_or_default();
     // Union: the summary's order matters (chained multi-provider plans over
     // one file must unwind last-to-first), so keep it and append anything
@@ -82,14 +114,20 @@ pub fn undo(
     let mut links = Vec::new();
     let mut complete = true;
     let mut notes: Vec<String> = Vec::new();
-    if summary_missing && !live_links.is_empty() {
+    if plan_incomplete && !live_links.is_empty() {
         complete = false;
-        notes.push(
+        notes.push(if summary_absent {
             "this setup failed before its plan was recorded, so Tethra cannot tell which routes \
              it created from which it reused. Environment files were restored from the recorded \
              link state; routes were left in place. Review them under Advanced → Gateway."
-                .to_string(),
-        );
+                .to_string()
+        } else {
+            "this setup failed part-way through. Environment files were restored from the \
+             recorded link state and the routes Tethra had recorded creating were removed, but \
+             the rest of the plan was never recorded, so this teardown cannot be called \
+             complete. Review the remainder under Advanced → Gateway."
+                .to_string()
+        });
     }
     // Reverse order: apply chained multi-provider plans over one file
     // (provider N planned over N−1's output), so restoring last-to-first
@@ -162,18 +200,35 @@ pub fn undo(
         ));
     }
 
-    if complete {
+    // Everything destructive is behind us. A conflict from here on means the
+    // row moved while we worked; the answer is to SAY SO, never to return an
+    // error that throws away the record of what was just restored and
+    // removed. `track_cmd` and the desktop command both use `?` on this
+    // call, so an `Err` here shows the user a bare `state_conflict` and none
+    // of the per-file restore outcomes.
+    let closed = if complete {
         // Return the row to not_configured (legal from any state) and
         // clear apply artifacts so a later setup starts clean. The session
         // is closed too: nothing observed under it may verify a later one.
-        state::transition(conn, setup, TrackingState::NotConfigured, None)?;
-        conn.execute(
-            "UPDATE tracking_setups
-             SET plan_summary_json = NULL, applied_at = NULL, first_traffic_at = NULL,
-                 verification_session = NULL, row_version = row_version + 1
-             WHERE id = ?1",
-            [&setup.id],
-        )?;
+        state::transition(conn, setup, TrackingState::NotConfigured, None).and_then(|after| {
+            // Guarded by the version the transition just produced, so this
+            // second statement cannot be the unpredicated write the first
+            // one stopped being (`VER-01`).
+            let cleared = conn.execute(
+                "UPDATE tracking_setups
+                 SET plan_summary_json = NULL, applied_at = NULL, first_traffic_at = NULL,
+                     verification_session = NULL, row_version = row_version + 1
+                 WHERE id = ?1 AND row_version = ?2",
+                rusqlite::params![setup.id, after.row_version],
+            )?;
+            if cleared == 0 {
+                return Err(CoreError::StateConflict {
+                    kind: "tracking setup",
+                    ident: setup.id.clone(),
+                });
+            }
+            Ok(())
+        })
     } else {
         // An incomplete undo must NOT clear the apply artifacts: leaving
         // `applied_at` in place is what keeps the next status read honest
@@ -182,12 +237,21 @@ pub fn undo(
             conn,
             setup,
             TrackingState::NeedsAttention,
-            Some(if summary_missing {
+            Some(if plan_incomplete {
                 "undo_incomplete_plan_unknown"
             } else {
                 "undo_incomplete"
             }),
-        )?;
+        )
+        .map(|_| ())
+    };
+    if let Err(e) = closed {
+        complete = false;
+        notes.push(format!(
+            "this setup changed while it was being stopped ({e}). The environment files and \
+             routes listed above were restored, but the setup's own status could not be updated \
+             — run `tethra track status` and stop it again if it is still listed."
+        ));
     }
     audit::record(
         conn,

@@ -14,7 +14,9 @@
 
 mod common;
 
-use api_tracker_tracking::detect::{self, Configurability, ProjectDetection};
+use api_tracker_tracking::detect::{
+    self, Configurability, CoverageBucket, CoverageSummary, DetectionConfidence, ProjectDetection,
+};
 use api_tracker_tracking::plan::Selections;
 use common::*;
 use std::path::Path;
@@ -324,6 +326,120 @@ fn one_unsupported_provider_never_blocks_the_supported_ones() {
             "an unsupported provider must not be selected either: {id}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// NEW-43 — one precedence for the headline and the rows
+// ---------------------------------------------------------------------------
+//
+// The headline asked about confidence first; the per-provider row labels
+// asked only about `Configurability`, with no confidence guard at all. The
+// buckets still summed to the total, which is exactly why nobody noticed
+// that six rows could read "needs approval" under a headline saying three
+// needed approval.
+
+/// A project whose only evidence for a provider is a base URL: one signal
+/// class, no key, no SDK dependency. That is `Possible` confidence and a
+/// custom origin — the combination where the two classifications used to
+/// disagree.
+fn base_url_only_fixture(dir: &Path) {
+    write_project(
+        dir,
+        &[(".env", "SUPABASE_URL=https://abcdefghijkl.supabase.co\n")],
+    );
+}
+
+#[test]
+fn every_row_is_labelled_as_the_bucket_the_headline_counted_it_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    thirty_api_fixture(tmp.path());
+    let detection = detect_folder(tmp.path());
+
+    // Re-tally from the rows the screen actually renders. If this differs
+    // from `coverage`, then some row is describing itself as something the
+    // headline did not count it as.
+    //
+    // Stated honestly: while ONE function feeds both, this cannot fail — it
+    // is a structural guard against the two being split apart again, not a
+    // test of the precedence itself. The precedence is falsified by
+    // `a_low_confidence_provider_is_never_labelled_as_needing_approval`
+    // below, which fails the moment the confidence guard is removed.
+    let mut from_rows = CoverageSummary {
+        unrecognized: detection.unrecognized.len(),
+        ..CoverageSummary::default()
+    };
+    for p in &detection.providers {
+        match p.bucket() {
+            CoverageBucket::TrackedAutomatically => from_rows.tracked_automatically += 1,
+            CoverageBucket::NeedsOriginConfirmation => from_rows.needs_origin_confirmation += 1,
+            CoverageBucket::DetectedUnsupported => from_rows.detected_unsupported += 1,
+            CoverageBucket::LowConfidence => from_rows.low_confidence += 1,
+        }
+    }
+    assert_eq!(
+        from_rows, detection.coverage,
+        "the rows and the headline must be the same decision made once"
+    );
+}
+
+#[test]
+fn a_low_confidence_provider_is_never_labelled_as_needing_approval() {
+    let tmp = tempfile::tempdir().unwrap();
+    base_url_only_fixture(tmp.path());
+    let detection = detect_folder(tmp.path());
+
+    let p = detection
+        .providers
+        .iter()
+        .find(|p| p.provider_id == "supabase")
+        .expect("a base URL is evidence, so supabase must appear at all");
+
+    // The fixture has to actually produce the disagreeing combination, or
+    // this test proves nothing.
+    assert_eq!(p.confidence, DetectionConfidence::Possible);
+    assert!(
+        matches!(
+            p.configurability,
+            Configurability::NeedsOriginConfirm { .. }
+        ),
+        "{:?}",
+        p.configurability
+    );
+
+    assert_eq!(
+        p.bucket(),
+        CoverageBucket::LowConfidence,
+        "confidence decides, because confidence is what the planner obeys"
+    );
+    assert_eq!(p.bucket().label(), "low confidence");
+    assert_eq!(detection.coverage.needs_origin_confirmation, 0);
+    assert_eq!(detection.coverage.low_confidence, 1);
+
+    // And the reason the old label was not merely inconsistent but false:
+    // the product will never ask.
+    assert!(
+        Selections::pending_origin_approvals(&detection).is_empty(),
+        "a row reading 'needs approval' promises a question the planner \
+         never asks"
+    );
+    assert!(!Selections::defaults(&detection)
+        .include
+        .contains("supabase"));
+}
+
+#[test]
+fn rows_are_ordered_by_the_bucket_the_headline_reads_them_out_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    thirty_api_fixture(tmp.path());
+    let detection = detect_folder(tmp.path());
+    let buckets: Vec<CoverageBucket> = detection.providers.iter().map(|p| p.bucket()).collect();
+    let mut sorted = buckets.clone();
+    sorted.sort();
+    assert_eq!(
+        buckets, sorted,
+        "the list has to be grouped the way the headline enumerates the \
+         buckets, or the reader cannot tell which rows make up which count"
+    );
 }
 
 #[test]

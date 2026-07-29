@@ -40,12 +40,119 @@ pub struct GatewayConfig {
 pub const DEFAULT_USAGE_EVENT_RETENTION_DAYS: u32 = 7;
 pub const DEFAULT_USAGE_DAILY_RETENTION_DAYS: u32 = 90;
 
+/// What a read of the persisted port actually found.
+///
+/// [`port_hint`] collapses all three answers into `None`, and its consumer
+/// — the installed service's boot-time port resolution — answered `None` by
+/// binding a fresh ephemeral port. That is the most destructive reading of
+/// an ambiguous result: a busy database, a schema from another build, or an
+/// unreadable file silently invalidated every `.env` already written against
+/// the persisted port, and nothing compared the two afterwards (NEW-02).
+///
+/// Any caller that is about to CHOOSE a port must be able to tell "nobody
+/// has chosen yet" from "we could not look", because only the first is a
+/// licence to choose. `Unavailable` is a retryable condition, never a
+/// licence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortState {
+    /// A port has been committed; it is the authority and `.env` files may
+    /// already carry it.
+    Persisted(u16),
+    /// The database is readable and no port has been chosen yet — the only
+    /// state in which choosing one is correct.
+    NoneYet,
+    /// The database could not be read (missing, busy past the 5s
+    /// `busy_timeout`, schema mismatch, permissions, corruption). Says
+    /// nothing about whether a port exists.
+    Unavailable(String),
+}
+
+/// The persisted gateway port, distinguishing "not chosen" from "could not
+/// read" — see [`PortState`].
+pub fn port_state(data_dir: &std::path::Path) -> PortState {
+    let conn = match api_tracker_core::db::open_at_current_version(&data_dir.join("vault.db")) {
+        Ok(conn) => conn,
+        Err(e) => return PortState::Unavailable(e.to_string()),
+    };
+    match load_config(&conn) {
+        Ok(config) => match config.port {
+            Some(p) => PortState::Persisted(p),
+            None => PortState::NoneYet,
+        },
+        Err(e) => PortState::Unavailable(e.to_string()),
+    }
+}
+
 /// The persisted gateway port, read without a vault through the
 /// schema-checked open. `None` when the database, schema, or config row is
 /// unavailable — callers treat that as "no stable port exists yet".
+///
+/// Retained for callers that genuinely only need a hint and cannot act on
+/// the difference. Anything that would CHOOSE a port on `None` must use
+/// [`port_state`] instead: this signature cannot express the distinction
+/// that NEW-02 turned on.
 pub fn port_hint(data_dir: &std::path::Path) -> Option<u16> {
-    let conn = api_tracker_core::db::open_at_current_version(&data_dir.join("vault.db")).ok()?;
-    load_config(&conn).ok().and_then(|c| c.port)
+    match port_state(data_dir) {
+        PortState::Persisted(p) => Some(p),
+        PortState::NoneYet | PortState::Unavailable(_) => None,
+    }
+}
+
+/// Commit `port` as THE gateway port, and return the port that is now
+/// authoritative — which is the existing one when another writer got there
+/// first.
+///
+/// Three properties, each load-bearing for NEW-02:
+///
+/// * `BEGIN IMMEDIATE` takes the write lock up front, so two installers
+///   racing on one vault serialize instead of losing one another's
+///   read-modify-write. The loser re-reads inside the transaction and
+///   CONVERGES on the winner's port rather than writing a second one that
+///   half the `.env` files would point at.
+/// * The `UPDATE` names only `port` and `updated_at`. [`save_config`]
+///   rewrites the whole row from a struct loaded earlier, so using it here
+///   would clobber a concurrent [`set_match_while_locked`] — a consent
+///   toggle — as a side effect of choosing a port.
+/// * It never overwrites an existing port. The persisted port is the
+///   authority that `.env` base URLs were built from; moving it is a
+///   re-link, not a config write.
+pub fn commit_port(conn: &Connection, port: u16) -> Result<u16> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let committed = (|| -> Result<u16> {
+        let existing: Option<u16> = conn
+            .query_row(
+                "SELECT port FROM gateway_config WHERE id = 'gateway'",
+                [],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .optional()?
+            .flatten()
+            .and_then(|p| u16::try_from(p).ok());
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+        let now = clock::now_rfc3339();
+        conn.execute(
+            "INSERT INTO gateway_config (id, enabled, port, match_while_locked,
+                 created_at, updated_at)
+             VALUES ('gateway', 0, ?1, 0, ?2, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+                port = excluded.port,
+                updated_at = excluded.updated_at",
+            params![port as i64, now],
+        )?;
+        Ok(port)
+    })();
+    match committed {
+        Ok(port) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(port)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 pub fn load_config(conn: &Connection) -> Result<GatewayConfig> {

@@ -170,9 +170,14 @@ pub mod aad {
         format!("api-tracker:v1:fingerprint-key:{vault_id}")
     }
     /// The gateway route-MAC key (ADR 0019 D3): a matching/MAC-only key that
-    /// authenticates custom-origin route rows so a same-uid `UPDATE` of the
-    /// plaintext gateway_routes table cannot redirect a live pass-through
-    /// credential. Like the fingerprint key it can never decrypt anything.
+    /// authenticates CUSTOM-ORIGIN route rows, so a same-uid `UPDATE` of a
+    /// stored custom origin in the plaintext gateway_routes table stops the
+    /// route rather than redirecting it, and no destination the user never
+    /// approved can be injected. It does not cover built-in routes, whose
+    /// `provider_id` selector is unauthenticated, and it is not consulted for
+    /// a row whose custom columns have been nulled (SEC-01 / NEW-49 — accepted
+    /// exclusion, see docs/gateway/SECURITY.md). Like the fingerprint key it
+    /// can never decrypt anything.
     pub fn gateway_mac_key(vault_id: &str) -> String {
         format!("api-tracker:v1:gateway-mac-key:{vault_id}")
     }

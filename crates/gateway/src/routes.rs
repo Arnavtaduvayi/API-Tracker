@@ -3,12 +3,35 @@
 //! Trust model: the first path segment selects a route, and the route's
 //! upstream origin comes from exactly one of two places — the compiled-in
 //! provider manifest (install tree), or a user-consented custom origin whose
-//! row carries a MAC under a vault-derived key. The plaintext, same-uid-
-//! writable `gateway_routes` table is NEVER the trust root: a bare `UPDATE`
-//! cannot redirect a live pass-through credential (the Phase 1 adversarial
-//! review's route-row-tampering blocker). Origins are additionally re-checked
-//! against the observe SSRF policy at load AND resolved-address-checked at
-//! connect time (two-phase, `crate::forward`).
+//! row carries a MAC under a vault-derived key. Neither is a free-form string
+//! from the plaintext, same-uid-writable `gateway_routes` table: a bare
+//! `UPDATE` of a stored custom origin fails the MAC and makes the route
+//! `Unforwardable` rather than moving it, and an unrecognized `provider_id`
+//! fails closed (the Phase 1 adversarial review's route-row-tampering
+//! blocker). Origins are additionally re-checked against the observe SSRF
+//! policy at load AND resolved-address-checked at connect time (two-phase,
+//! `crate::forward`).
+//!
+//! SCOPE LIMIT — SEC-01 / NEW-49, stated here because this module doc used to
+//! claim more than the code does. The *selector* for a built-in route is
+//! `provider_id`, read straight from the untrusted row at `load_route_table`
+//! and bound into nothing; `route_mac` is verified only in the
+//! `(Some, Some, Some, Some)` arm below. So an attacker who can write
+//! `vault.db` can (a) `UPDATE gateway_routes SET provider_id='anthropic'
+//! WHERE route_prefix='openai'` and have `/openai/*` forward to
+//! `api.anthropic.com` with the client's OpenAI credential still attached
+//! (the gateway is a pass-through; it injects nothing), and (b) null all four
+//! custom columns together — which the CHECK constraints permit — to move a
+//! MAC'd custom row onto that same unauthenticated arm, because the arm is
+//! chosen by column SHAPE and no route kind is recorded. The destinations
+//! reachable that way are only the origins compiled into the shipped
+//! manifests, never an attacker-chosen host; that distinction is real and is
+//! kept in the docs. It is nonetheless an accepted, out-of-scope risk, not a
+//! defence: see `docs/gateway/SECURITY.md` ("What database tampering can and
+//! cannot do to your routes"), `docs/gateway/THREAT_MODEL.md` GW-3, and
+//! `docs/activity-onboarding/SECURITY_AND_PRIVACY.md` ("the local-database
+//! attacker"). `crates/gateway/tests/documentation_claims.rs` fails the build
+//! if the retired absolute claim comes back.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -627,7 +650,12 @@ pub fn load_route_table(conn: &Connection, mac_key: Option<&SecretBytes>) -> Res
 
         let route = match (origin, port, mac, consent) {
             (None, None, None, None) => {
-                // Manifest route: the compiled-in manifest is the trust root.
+                // Manifest route: the compiled-in manifest is the trust root
+                // for the DESTINATION, but `provider_id` — the selector that
+                // picks which manifest — comes from this untrusted row and is
+                // authenticated by nothing (SEC-01; module doc). An unknown id
+                // fails closed just below; a KNOWN one resolves, which is the
+                // accepted exclusion.
                 let Some(manifest) = providers::find(&provider_id) else {
                     table
                         .skipped

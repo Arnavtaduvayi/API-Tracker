@@ -555,11 +555,16 @@ impl UnlockedVault {
 
     /// The gateway route-MAC key (ADR 0019 D3), created on first use and
     /// stored vault-key-wrapped in `vault_meta` — the exact fingerprint-key
-    /// pattern. It authenticates custom-origin gateway routes (a keyed MAC
+    /// pattern. It authenticates CUSTOM-ORIGIN gateway routes (a keyed MAC
     /// over the route's identity fields) so the plaintext, same-uid-writable
-    /// `gateway_routes` table is never the trust root for where a live
-    /// pass-through credential is forwarded. Like the fingerprint key it can
-    /// verify/produce MACs only; it can never decrypt anything.
+    /// `gateway_routes` table is never a source of free-form destinations: an
+    /// edited stored origin fails verification and the route stops forwarding
+    /// instead of moving. Scope limit (SEC-01 / NEW-49): built-in routes are
+    /// selected by an unauthenticated `provider_id` and carry no MAC, and a
+    /// row whose custom columns are nulled is not checked against this key at
+    /// all — an accepted, documented exclusion, see docs/gateway/SECURITY.md.
+    /// Like the fingerprint key it can verify/produce MACs only; it can never
+    /// decrypt anything.
     pub fn gateway_route_mac_key(&mut self) -> Result<SecretBytes> {
         if let Some(wrapped_hex) = meta_get(&self.conn, "wrapped_gateway_mac_key")? {
             let wrapped = hex::decode(wrapped_hex).map_err(|_| {

@@ -275,25 +275,12 @@ impl ServiceManager for LaunchAgent {
     }
 
     fn write_definition(&self, binary: &Path) -> Result<()> {
-        use std::io::Write;
         std::fs::create_dir_all(&self.launch_agents_dir).map_err(CoreError::Io)?;
-        let path = self.definition_path();
-        // Fresh 0600 write; never follow a symlink planted at the path.
-        if std::fs::symlink_metadata(&path).is_ok() {
-            std::fs::remove_file(&path).map_err(CoreError::Io)?;
-        }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut f = options.open(&path).map_err(CoreError::Io)?;
-        f.write_all(self.render_plist(binary).as_bytes())
-            .map_err(CoreError::Io)?;
-        f.sync_all().map_err(CoreError::Io)?;
-        Ok(())
+        // Temp + rename, never truncate-in-place: launchd loads every plist
+        // in this directory at login, and a reader that catches a partial
+        // write sees `Unparseable`, which every later verb then refuses
+        // (NEW-02). See `super::atomic_write_definition`.
+        super::atomic_write_definition(&self.definition_path(), &self.render_plist(binary))
     }
 
     fn read_definition_state(&self) -> Result<DefinitionState> {

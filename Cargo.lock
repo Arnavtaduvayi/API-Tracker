@@ -234,6 +234,7 @@ version = "0.1.0"
 dependencies = [
  "api-tracker-core",
  "api-tracker-gateway",
+ "api-tracker-tracking",
  "blake3",
  "rusqlite",
  "serde",

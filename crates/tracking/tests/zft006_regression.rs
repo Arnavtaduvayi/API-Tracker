@@ -81,7 +81,7 @@ fn backdate_apply(conn: &Connection, id: &str, secs: i64) {
 fn verified_project(conn: &Connection) -> TrackingSetup {
     insert_project(conn, "p1", "one");
     wire(conn);
-    let s = state::upsert_setup(
+    let mut s = state::upsert_setup(
         conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -89,7 +89,7 @@ fn verified_project(conn: &Connection) -> TrackingSetup {
         "{}",
     )
     .unwrap();
-    state::record_applied(conn, &s.id, &summary()).unwrap();
+    state::record_applied(conn, &mut s, &summary()).unwrap();
     backdate_apply(conn, &s.id, 3600);
     insert_gateway_event(conn, "p1", "api.openai.com", &ago(1800));
 
@@ -111,7 +111,7 @@ fn verified_project(conn: &Connection) -> TrackingSetup {
 /// then fails. The traffic pre-dates the failure — which is the whole point,
 /// and exactly the ordering v15 got wrong.
 fn failed_repair(conn: &Connection, verified: &TrackingSetup) -> TrackingSetup {
-    let reopened = state::upsert_setup(
+    let mut reopened = state::upsert_setup(
         conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -120,7 +120,7 @@ fn failed_repair(conn: &Connection, verified: &TrackingSetup) -> TrackingSetup {
     )
     .unwrap();
     assert_eq!(reopened.id, verified.id, "same (project, folder) row");
-    state::record_applied(conn, &reopened.id, &summary()).unwrap();
+    state::record_applied(conn, &mut reopened, &summary()).unwrap();
     backdate_apply(conn, &reopened.id, 600);
 
     // Traffic recorded during this attempt, BEFORE it failed.
@@ -324,7 +324,7 @@ fn traffic_from_the_previous_session_cannot_verify_the_failed_one() {
     let (_d, conn) = test_conn();
     let verified = verified_project(&conn);
 
-    let reopened = state::upsert_setup(
+    let mut reopened = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -332,7 +332,7 @@ fn traffic_from_the_previous_session_cannot_verify_the_failed_one() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &reopened.id, &summary()).unwrap();
+    state::record_applied(&conn, &mut reopened, &summary()).unwrap();
     backdate_apply(&conn, &reopened.id, 600);
     let current = state::get_setup(&conn, &reopened.id).unwrap().unwrap();
     state::transition(

@@ -633,6 +633,16 @@ pub fn apply_link(
         } else {
             envgov::write_new(Path::new(&file.path), &file.new_content)?;
         }
+        // An `atomic_write` that dies between write and rename leaves a temp
+        // file holding the COMPLETE new `.env`, credential values included.
+        // Only the export cleanup ever swept for those, and it sweeps
+        // directories read from `env_exports` — a table this path never
+        // writes, so a link's orphan was never collected by anything
+        // (`NEW-29`). Best-effort: a failed sweep must not fail a link that
+        // succeeded.
+        if let Some(dir) = Path::new(&file.path).parent() {
+            envgov::sweep_orphaned_temp_files_in(dir);
+        }
     }
     audit::record(
         conn,
@@ -1627,6 +1637,11 @@ fn restore_file(file: &PriorFile, outcomes: &mut Vec<RestoreOutcome>, any_failur
                 key: String::new(),
                 error: e.to_string(),
             });
+        }
+        // Same reason as the link path above (`NEW-29`): unlink rewrites the
+        // user's `.env` atomically and can orphan the same temp file.
+        if let Some(dir) = path.parent() {
+            envgov::sweep_orphaned_temp_files_in(dir);
         }
     }
 }

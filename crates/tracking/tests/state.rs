@@ -104,7 +104,7 @@ fn an_overclaiming_row_is_downgraded_on_refresh() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["openai"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["openai"])).unwrap();
     // Forge the overclaim directly, as a corrupted/stale row would.
     conn.execute(
         "UPDATE tracking_setups SET state = 'traffic_observed' WHERE id = ?1",
@@ -135,7 +135,7 @@ fn traffic_after_apply_verifies_and_watch_reports_it() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["openai"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["openai"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
     let applied_at = setup.applied_at.clone().unwrap();
 
@@ -184,7 +184,7 @@ fn pre_existing_traffic_never_verifies_a_new_setup() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["openai"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["openai"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
     state::refresh(&conn, &mut setup).unwrap();
@@ -208,7 +208,7 @@ fn partial_observation_is_derived_per_provider() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["openai", "anthropic"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["openai", "anthropic"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
     insert_gateway_event(&conn, "p1", "api.openai.com", &just_after_apply());
@@ -244,7 +244,7 @@ fn another_projects_traffic_never_verifies_this_setup() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["openai"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["openai"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
     insert_gateway_event(&conn, "p2", "api.openai.com", &just_after_apply());
@@ -273,7 +273,7 @@ fn custom_origin_hosts_map_through_the_route_table() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["supabase"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["supabase"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
     // The host is NOT in the compiled-in host table (".example"), so only
@@ -307,4 +307,76 @@ fn unknown_state_strings_render_as_needs_attention_never_observed() {
     .unwrap();
     let loaded = state::get_setup(&conn, &setup.id).unwrap().unwrap();
     assert_eq!(loaded.state, TrackingState::NeedsAttention);
+}
+
+// ---------------------------------------------------------------------------
+// NEW-35 — an apply that never finished must not read as a healthy wait
+// ---------------------------------------------------------------------------
+
+/// `Applying` is not in `refresh_once`'s watchable set, so it falls through
+/// to `health_without_evidence`. It used to be answered there by the
+/// catch-all "waiting for the first request" — which tells a user whose setup
+/// died halfway to go and make a request that nothing is configured to
+/// observe, and then to disbelieve the tracking when nothing shows up.
+///
+/// Reverting the `TrackingState::Applying` arm in `health_without_evidence`
+/// fails this test on the first assertion.
+#[test]
+fn an_interrupted_apply_is_its_own_health_not_a_wait_for_the_first_request() {
+    let (_db, conn) = test_conn();
+    insert_project(&conn, "p1", "one");
+    let mut setup = state::upsert_setup(
+        &conn,
+        "p1",
+        Path::new("/tmp/fixture"),
+        TrackingState::Applying,
+        "{}",
+    )
+    .unwrap();
+
+    // A gateway that is answering perfectly well is not evidence about an
+    // apply that never finished, so the verdict must not depend on it.
+    for liveness in [
+        state::GatewayLiveness::Verified,
+        state::GatewayLiveness::Down,
+        state::GatewayLiveness::Unknown,
+    ] {
+        let report = state::refresh_with(&conn, &mut setup, liveness).unwrap();
+        assert_eq!(
+            report.current,
+            state::CurrentHealth::ApplyIncomplete,
+            "an apply that started and never reported an outcome has its own health \
+             ({liveness:?})"
+        );
+        assert_eq!(
+            setup.state,
+            TrackingState::Applying,
+            "reading the row must not move it"
+        );
+    }
+}
+
+/// The sentence a status surface renders. Every consumer shares it, so it
+/// has to say what happened and what to do — the desktop's local patch is
+/// what proved the shared one was wrong, not a place to keep the fix.
+#[test]
+fn the_interrupted_apply_sentence_says_what_happened_and_is_not_a_success() {
+    let health = state::CurrentHealth::ApplyIncomplete;
+    let sentence = health.describe();
+    assert!(
+        !health.is_currently_working(),
+        "an unfinished apply has verified nothing"
+    );
+    assert!(
+        !sentence.contains("waiting for the first request"),
+        "got: {sentence}"
+    );
+    assert!(
+        sentence.contains("not finished applying"),
+        "the sentence must name what happened, got: {sentence}"
+    );
+    assert!(
+        sentence.contains("start tracking for this folder again"),
+        "the sentence must say what to do about it, got: {sentence}"
+    );
 }

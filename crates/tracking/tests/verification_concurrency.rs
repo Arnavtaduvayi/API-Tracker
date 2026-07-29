@@ -88,7 +88,7 @@ fn wire(conn: &Connection) {
 /// A setup applied two days ago, wired, with no observations yet.
 fn applied(conn: &Connection) -> TrackingSetup {
     insert_project(conn, "p1", "one");
-    let s = state::upsert_setup(
+    let mut s = state::upsert_setup(
         conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -96,7 +96,7 @@ fn applied(conn: &Connection) -> TrackingSetup {
         "{}",
     )
     .unwrap();
-    state::record_applied(conn, &s.id, &summary()).unwrap();
+    state::record_applied(conn, &mut s, &summary()).unwrap();
     let two_days_ago = clock::rfc3339_minus_seconds(&clock::now_rfc3339(), 2 * 24 * 3600);
     conn.execute(
         "UPDATE tracking_setups SET applied_at = ?2 WHERE id = ?1",
@@ -415,7 +415,7 @@ fn an_old_verification_session_cannot_verify_the_new_one() {
     let session_before = first.verification_session.clone();
 
     let other = second_conn(&path);
-    let reopened = state::upsert_setup(
+    let mut reopened = state::upsert_setup(
         &other,
         "p1",
         Path::new("/tmp/fixture"),
@@ -423,7 +423,7 @@ fn an_old_verification_session_cannot_verify_the_new_one() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&other, &reopened.id, &summary()).unwrap();
+    state::record_applied(&other, &mut reopened, &summary()).unwrap();
     assert_ne!(
         reopened.verification_session, session_before,
         "a re-apply must mint a new session"

@@ -45,7 +45,7 @@ fn setup_for(conn: &rusqlite::Connection, dir: &TempDir) -> state::TrackingSetup
         },
     )
     .unwrap();
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         conn,
         "p1",
         &detection.folder,
@@ -55,7 +55,7 @@ fn setup_for(conn: &rusqlite::Connection, dir: &TempDir) -> state::TrackingSetup
     .unwrap();
     state::record_applied(
         conn,
-        &setup.id,
+        &mut setup,
         &PlanSummary {
             providers: vec!["openai".to_string()],
             links: vec!["openai".to_string()],

@@ -892,12 +892,21 @@ CREATE TABLE gateway_config (
 
 -- Registered routes, keyed by the first path segment. Manifest routes store
 -- NO origin at all — the upstream is resolved from the compiled-in provider
--- manifest at forward time, so a direct UPDATE of this same-uid-writable
--- table cannot redirect a live pass-through credential (ADR 0019 D3, the
--- route-row-tampering blocker). Custom-origin routes store the origin string
--- ONLY next to a MAC over (vault_id, provider_id, origin, port, consent_ts)
+-- manifest at forward time, so no attacker-chosen destination can be written
+-- into this same-uid-writable table (ADR 0019 D3, the route-row-tampering
+-- blocker). Custom-origin routes store the origin string ONLY next to a MAC
+-- over (vault_id, route_prefix, provider_id, origin, port, consent_ts)
 -- computed under a vault-derived key at consent time; the gateway verifies
--- the MAC before forwarding and never obeys the bare DB value.
+-- the MAC before forwarding and never obeys the bare DB value, so an edited
+-- stored origin STOPS the route instead of redirecting it.
+--
+-- Scope limit (SEC-01 / NEW-49): provider_id IS stored here, is not covered
+-- by any MAC for a manifest row, and selects which compiled-in origin a
+-- built-in route resolves to. The three CHECK constraints below also let all
+-- four custom columns go NULL together, which downgrades a MAC'd custom row
+-- to the unauthenticated manifest path. Both need local write access to
+-- vault.db and are an accepted, documented exclusion, not a defence — see
+-- docs/gateway/SECURITY.md and docs/gateway/THREAT_MODEL.md GW-3.
 CREATE TABLE gateway_routes (
     route_prefix             TEXT PRIMARY KEY,
     provider_id              TEXT NOT NULL,

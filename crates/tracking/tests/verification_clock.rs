@@ -71,7 +71,7 @@ fn wire(conn: &Connection) {
 /// audit's reproduction builds it.
 fn applied(conn: &Connection) -> state::TrackingSetup {
     insert_project(conn, "p1", "one");
-    let s = state::upsert_setup(
+    let mut s = state::upsert_setup(
         conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -79,7 +79,7 @@ fn applied(conn: &Connection) -> state::TrackingSetup {
         "{}",
     )
     .unwrap();
-    state::record_applied(conn, &s.id, &summary()).unwrap();
+    state::record_applied(conn, &mut s, &summary()).unwrap();
     let two_days_ago = clock::rfc3339_minus_seconds(&clock::now_rfc3339(), 2 * 24 * 3600);
     conn.execute(
         "UPDATE tracking_setups SET applied_at = ?2 WHERE id = ?1",
@@ -386,7 +386,7 @@ fn an_observation_from_a_previous_session_cannot_verify_this_one() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &reapplied.id, &summary()).unwrap();
+    state::record_applied(&conn, &mut reapplied, &summary()).unwrap();
     reapplied = state::get_setup(&conn, &reapplied.id).unwrap().unwrap();
 
     let r = state::refresh_with(&conn, &mut reapplied, GatewayLiveness::Verified).unwrap();
@@ -410,7 +410,7 @@ fn a_row_inserted_before_apply_cannot_verify_however_it_is_dated() {
     // every timestamp window the reader applies.
     insert_gateway_event(&conn, "p1", "api.openai.com", &shifted(60));
 
-    let s = state::upsert_setup(
+    let mut s = state::upsert_setup(
         &conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -418,7 +418,7 @@ fn a_row_inserted_before_apply_cannot_verify_however_it_is_dated() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &s.id, &summary()).unwrap();
+    state::record_applied(&conn, &mut s, &summary()).unwrap();
     // Back-date the apply watermark so the TIMESTAMP condition would admit
     // the row; only the rowid watermark can exclude it.
     conn.execute(

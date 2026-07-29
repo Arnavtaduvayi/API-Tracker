@@ -25,9 +25,11 @@
 use std::path::{Path, PathBuf};
 
 use api_tracker_core::secret::{SecretBytes, SecretString};
-use api_tracker_core::vault::{NewProject, UnlockedVault, UpdateProject};
+use api_tracker_core::vault::{NewProject, UnlockedVault, UpdateProject, VaultPaths};
 use api_tracker_core::{audit, CoreError, Result};
+use api_tracker_gateway::lifecycle::provision;
 use api_tracker_gateway::{control, envlink, lifecycle, routes, store};
+use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::detect::ProjectDetection;
@@ -136,9 +138,82 @@ pub struct HostServiceOps {
     pub port: u16,
 }
 
+/// The install/repair half of step 3, expressed against injected seams.
+///
+/// # Why it is a free function (`NEW-02`)
+///
+/// The step pair here was already ordered correctly by hand — port persisted
+/// in step 2, service started in step 3 — but ordering by hand is exactly
+/// what [`provision`] exists to stop every caller having to do. Driving
+/// `lc.install` / `lc.repair` directly also inherited the two gaps the
+/// primitive closes: nothing proved the started service had actually bound
+/// the port the plan was built against (an exit code is not evidence — D11),
+/// and `repair` re-started a service that resolves its port from the database
+/// without first guaranteeing that a port is there to resolve. `track` reaches
+/// the repair path automatically, with no user decision behind it.
+///
+/// It takes the lifecycle, the connection and the host rather than reading
+/// them from `self` so a test can drive the real ordered algorithm against a
+/// mock `CommandRunner` and a fake [`provision::InstallHost`]: `cargo test`
+/// must never write a service definition or install a real launchd job.
+pub fn ensure_service_steps(
+    lc: &lifecycle::Lifecycle,
+    conn: &Connection,
+    host: &dyn provision::InstallHost,
+    helper_source: &Path,
+    actions: &[ServiceAction],
+) -> Result<()> {
+    for action in actions {
+        match action {
+            ServiceAction::AlreadyRunning => {}
+            ServiceAction::StartService => lc.start()?,
+            ServiceAction::InstallService => {
+                provision::install_gateway(
+                    lc,
+                    conn,
+                    host,
+                    &provision::InstallRequest::new(
+                        helper_source,
+                        false,
+                        env!("CARGO_PKG_VERSION"),
+                    ),
+                )?;
+            }
+            ServiceAction::RepairService { .. } => {
+                provision::repair_gateway(
+                    lc,
+                    conn,
+                    host,
+                    &provision::InstallRequest::new(
+                        helper_source,
+                        false,
+                        env!("CARGO_PKG_VERSION"),
+                    ),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl HostServiceOps {
     fn lifecycle(&self) -> Result<lifecycle::Lifecycle> {
         lifecycle::Lifecycle::for_host(&self.data_dir)
+    }
+
+    /// A second connection to the vault database, for the ordered install
+    /// primitive.
+    ///
+    /// [`ServiceOps`] deliberately carries no connection — the apply engine
+    /// holds the vault's own, and threading it through this trait would put
+    /// a database handle in every mock. A separate handle is safe for what
+    /// the primitive does: WAL with a five-second busy timeout, and each of
+    /// its writes is one transaction. It is the same shape `tethra gateway
+    /// repair` uses.
+    fn connection(&self) -> Result<Connection> {
+        api_tracker_core::db::open_at_current_version(
+            &VaultPaths::new(self.data_dir.clone()).db_path(),
+        )
     }
 
     fn wait_for_listener(&self) -> ServiceEnsureOutcome {
@@ -163,32 +238,35 @@ impl HostServiceOps {
 
 impl ServiceOps for HostServiceOps {
     fn ensure_service(&self, actions: &[ServiceAction]) -> ServiceEnsureOutcome {
-        for action in actions {
-            let result = match action {
-                ServiceAction::AlreadyRunning => Ok(()),
-                ServiceAction::StartService => self.lifecycle().and_then(|lc| lc.start()),
-                ServiceAction::InstallService => self
-                    .lifecycle()
-                    .and_then(|lc| lc.install(&self.helper_source, false).map(|_| ())),
-                ServiceAction::RepairService { .. } => self
-                    .lifecycle()
-                    .and_then(|lc| lc.repair(&self.helper_source).map(|_| ())),
-            };
-            if let Err(e) = result {
-                let text = e.to_string();
-                // ONLY the exec-probe refusal is the Gatekeeper signature.
-                // Every service-lifecycle error used to come back as
-                // `InstallBlocked`, which both frontends render as "macOS
-                // blocked the background service (this build is unsigned)"
-                // — so a full disk, a missing HOME, a foreign definition in
-                // our slot and a launchd failure all told the user the same
-                // wrong thing (ZFT-039).
-                if text.contains("execution probe") {
-                    return ServiceEnsureOutcome::InstallBlocked { error: text };
-                }
-                return ServiceEnsureOutcome::Unverified { detail: text };
+        let result = (|| -> Result<()> {
+            let lc = self.lifecycle()?;
+            let conn = self.connection()?;
+            ensure_service_steps(
+                &lc,
+                &conn,
+                &provision::HostEnvironment::quiet(),
+                &self.helper_source,
+                actions,
+            )
+        })();
+        if let Err(e) = result {
+            let text = e.to_string();
+            // ONLY the exec-probe refusal is the Gatekeeper signature.
+            // Every service-lifecycle error used to come back as
+            // `InstallBlocked`, which both frontends render as "macOS
+            // blocked the background service (this build is unsigned)"
+            // — so a full disk, a missing HOME, a foreign definition in
+            // our slot and a launchd failure all told the user the same
+            // wrong thing (ZFT-039).
+            if text.contains("execution probe") {
+                return ServiceEnsureOutcome::InstallBlocked { error: text };
             }
+            return ServiceEnsureOutcome::Unverified { detail: text };
         }
+        // Kept even though the primitive verifies the listener itself: it
+        // is the ONLY verification on the `StartService` and `AlreadyRunning`
+        // paths, which do not go near the primitive, and on the install path
+        // it costs one probe that has just succeeded.
         self.wait_for_listener()
     }
 
@@ -285,6 +363,17 @@ pub fn apply(
                 // the conflict without a retry would trade that for the opposite
                 // defect, silently losing the failure record — which is the
                 // ZFT-006 outcome by omission rather than by overwrite.
+                //
+                // Every arm below is spelled out because the catch-all used
+                // to swallow `CoreError::InvalidInput` from the legality gate
+                // (`state.rs`) as if it were a success (`NEW-33`). A
+                // concurrent `track undo` that completes mid-apply leaves the
+                // row at `not_configured`, from which `NeedsAttention` is an
+                // illegal transition — so the failure record silently went
+                // nowhere and a later `track status` said "not configured"
+                // instead of "the last attempt failed". When it cannot be
+                // written, the report has to say so.
+                let mut unrecorded: Option<String> = None;
                 for _ in 0..3 {
                     match state::get_setup(conn, setup_id) {
                         Ok(Some(setup)) => {
@@ -294,14 +383,49 @@ pub fn apply(
                                 TrackingState::NeedsAttention,
                                 Some(&reason),
                             ) {
-                                Err(api_tracker_core::CoreError::StateConflict { .. }) => continue,
-                                _ => break,
+                                Ok(_) => {
+                                    unrecorded = None;
+                                    break;
+                                }
+                                Err(api_tracker_core::CoreError::StateConflict { .. }) => {
+                                    unrecorded = Some(
+                                        "the setup row kept changing underneath this attempt"
+                                            .to_string(),
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    unrecorded = Some(e.to_string());
+                                    break;
+                                }
                             }
                         }
-                        // The row is gone (undo removed it) or unreadable:
-                        // there is nothing to record the failure against.
-                        _ => break,
+                        // The row is gone — undo removed it. There is nothing
+                        // to record the failure against, and nothing wrong:
+                        // the setup the failure would describe no longer
+                        // exists.
+                        Ok(None) => break,
+                        // A database error is NOT the same thing, and must
+                        // not be reported as though the row had been tidied
+                        // away.
+                        Err(e) => {
+                            unrecorded = Some(e.to_string());
+                            break;
+                        }
                     }
+                }
+                if let Some(why) = unrecorded {
+                    steps.push(StepReport {
+                        id: StepId::RecordSetup,
+                        title: StepId::RecordSetup.title(),
+                        outcome: StepOutcome::Skipped {
+                            reason: format!(
+                                "this failure could not be recorded on the setup row ({why}), so \
+                                 `tethra track status` may not mention it — re-run setup or run \
+                                 `tethra track doctor`"
+                            ),
+                        },
+                    });
                 }
             }
             return ApplyReport {
@@ -343,16 +467,29 @@ pub fn apply(
     // really had created, with the false reason "existed before this setup
     // (only reused)" (ZFT-018). The union below keeps the first apply's
     // answer, which is the true one.
-    let previously_created: Vec<String> = {
+    //
+    // `re_enabled_routes` is carried across for the same reason and by the
+    // same mechanism: on the second run the route is already enabled, so the
+    // planner emits `ReuseRoute` and nothing records that this product turned
+    // the flag on — which is how a deliberately-disabled route stayed
+    // permanently enabled (ZFT-019).
+    let (previously_created, previously_re_enabled): (Vec<String>, Vec<String>) = {
         let conn = vault.connection();
         state::find_setup(conn, &project_id, folder)
             .ok()
             .flatten()
-            .map(|prior| state::plan_summary_of(&prior).created_routes)
+            .map(|prior| {
+                let summary = state::plan_summary_of(&prior);
+                (summary.created_routes, summary.re_enabled_routes)
+            })
             .unwrap_or_default()
     };
 
-    let setup_id: Option<String> = {
+    // The row is carried, not just its id: every guarded write below updates
+    // this handle in place, so the compare-and-swap on the last one compares
+    // against the version THIS apply left the row at rather than against a
+    // re-read of whatever a concurrent apply has since written (`NEW-31`).
+    let mut setup_row = {
         let conn = vault.connection();
         let detection_json = serde_json::to_string(detection).unwrap_or_else(|_| "{}".to_string());
         match state::upsert_setup(
@@ -362,7 +499,7 @@ pub fn apply(
             TrackingState::Applying,
             &detection_json,
         ) {
-            Ok(setup) => Some(setup.id),
+            Ok(setup) => setup,
             Err(e) => fail!(
                 StepId::EnsureProject,
                 e.to_string(),
@@ -371,6 +508,7 @@ pub fn apply(
             ),
         }
     };
+    let setup_id: Option<String> = Some(setup_row.id.clone());
 
     // -- 2. ensure port ---------------------------------------------------
     {
@@ -513,9 +651,56 @@ pub fn apply(
         id: StepId::EnsureRoutes,
         title: StepId::EnsureRoutes.title(),
         outcome: StepOutcome::Done {
+            // What THIS run did, which is what the step line is about; the
+            // union with earlier runs' provenance happens immediately below
+            // and is a record for undo, not a claim about this run.
             detail: route_detail(&created_routes, &reused_routes),
         },
     });
+
+    // A route this setup created on an EARLIER apply is still one it
+    // created; the current run only sees it as pre-existing.
+    for prefix in previously_created {
+        if !created_routes.contains(&prefix) {
+            created_routes.push(prefix);
+        }
+    }
+    for prefix in previously_re_enabled {
+        if !re_enabled_routes.contains(&prefix) && !created_routes.contains(&prefix) {
+            re_enabled_routes.push(prefix);
+        }
+    }
+    let reused_routes: Vec<String> = reused_routes
+        .into_iter()
+        .filter(|p| !created_routes.contains(p))
+        .collect();
+
+    // `NEW-32`: persist the provenance NOW, not at step 10.
+    //
+    // Everything above this line has already changed the machine — the
+    // routes exist. Recording that only at the end meant an apply that
+    // failed at any of steps 5-9 left `plan_summary_json` NULL (the re-apply
+    // upsert had just cleared the previous run's), so the routes this
+    // product had created became indistinguishable from routes the user had
+    // always had. The retry classified them as "reused" and undo refused to
+    // remove them, telling the user they "existed before this setup" —
+    // which was false, and left the machine dirty with no way to find out.
+    {
+        let recorded = state::record_routes_created(
+            vault.connection(),
+            &mut setup_row,
+            &created_routes,
+            &re_enabled_routes,
+        );
+        if let Err(e) = recorded {
+            fail!(
+                StepId::EnsureRoutes,
+                format!("could not record which routes this setup created: {e}"),
+                project_id,
+                setup_id
+            );
+        }
+    }
 
     // Custom routes may also pre-exist (reused), so check the table, not
     // just this plan's created set.
@@ -731,17 +916,6 @@ pub fn apply(
     }
 
     // -- 10. record setup -------------------------------------------------
-    // A route this setup created on an EARLIER apply is still one it
-    // created; the current run only sees it as pre-existing.
-    for prefix in previously_created {
-        if !created_routes.contains(&prefix) {
-            created_routes.push(prefix);
-        }
-    }
-    let reused_routes: Vec<String> = reused_routes
-        .into_iter()
-        .filter(|p| !created_routes.contains(p))
-        .collect();
     let summary = PlanSummary {
         providers: plan
             .route_actions
@@ -759,6 +933,8 @@ pub fn apply(
             .iter()
             .any(|a| matches!(a, ServiceAction::InstallService)),
         port: plan.port,
+        // `record_applied` owns this flag; see `PlanSummary::apply_completed`.
+        apply_completed: false,
     };
     let end_state = match plan.restart_expectation {
         RestartExpectation::NotNeeded => TrackingState::AwaitingFirstRequest,
@@ -768,14 +944,14 @@ pub fn apply(
     };
     {
         let conn = vault.connection();
-        let setup_ref = setup_id.clone().unwrap_or_default();
         let recorded: Result<()> = (|| {
-            state::record_applied(conn, &setup_ref, &summary)?;
-            let setup = state::get_setup(conn, &setup_ref)?.ok_or(CoreError::NotFound {
-                kind: "tracking setup",
-                ident: setup_ref.clone(),
-            })?;
-            state::transition(conn, &setup, end_state, None)?;
+            // The in-memory row has been kept at the version every guarded
+            // write left it at, so this is the caller's own snapshot rather
+            // than a re-read — which is the whole point of the CAS: a
+            // re-read here would compare the row against itself and guard
+            // nothing (`NEW-31`).
+            state::record_applied(conn, &mut setup_row, &summary)?;
+            state::transition(conn, &setup_row, end_state, None)?;
             audit::record(
                 conn,
                 "tracking_setup_applied",

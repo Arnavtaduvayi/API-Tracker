@@ -665,19 +665,31 @@ fn nothing_selected_is_an_explicit_error_not_an_empty_plan() {
     assert!(err.to_string().contains("nothing to configure"), "{err}");
 }
 
+/// `NEW-44`: this test was called
+/// `thirty_detected_providers_stay_one_plan_with_no_per_provider_forms` and
+/// planned three providers. Its own comment conceded the trick ("simulate
+/// scale with repeated known providers"), so the suite carried a test whose
+/// name claimed more than it proved — the same complaint the audit made
+/// about the four-provider "thirty-provider test" that
+/// `detect_coverage.rs::built_in_providers_are_still_bulk_configured_at_thirty_api_scale`
+/// was written to replace.
+///
+/// Scale at DETECTION is that test's job, on the real thirty-integration
+/// fixture. What only this file can prove is the property one layer down:
+/// however many providers a plan covers, the plan API has no per-provider
+/// interaction in it — everything configurable lands in one `TrackingPlan`,
+/// and the only extra input is the explicit origin approval ADR 0024
+/// requires. So this test now says that, and its assertions are tied to
+/// what the fixture actually contains rather than to a number in its name.
 #[test]
-fn thirty_detected_providers_stay_one_plan_with_no_per_provider_forms() {
-    // Provider scale: the fusion + plan layers must aggregate arbitrarily
-    // many detections into ONE plan. Only manifest providers can be
-    // configured today, but the detection list may be large; the plan API
-    // has no per-provider interaction anywhere.
+fn several_providers_and_one_origin_approval_still_make_exactly_one_plan() {
     let tv = test_vault();
     let dir = TempDir::new().unwrap();
     let mut env = String::new();
-    // 26 unknown-but-detected "providers" via lockfile-style config
-    // mentions cannot exist without manifests; instead simulate scale with
-    // repeated known providers across many env files plus unknowns in
-    // package.json deps (which map to no manifest and simply vanish).
+    // Filler that is deliberately NOT an integration: base-URL-shaped
+    // variables for services no manifest knows. They must not become
+    // providers, must not become route actions, and must not turn into
+    // questions — which is itself part of the property under test.
     for i in 0..26 {
         env.push_str(&format!("SERVICE_{i}_URL=https://svc{i}.example.com\n"));
     }
@@ -696,6 +708,27 @@ fn thirty_detected_providers_stay_one_plan_with_no_per_provider_forms() {
         },
     )
     .unwrap();
+    // Anchor the claim to the fixture: the filler is invisible to the
+    // planner, and the configurable set is what the assertions below count.
+    assert!(
+        !detection
+            .providers
+            .iter()
+            .any(|p| p.provider_id.starts_with("service_")),
+        "the filler variables must not have become providers: {:?}",
+        detection
+            .providers
+            .iter()
+            .map(|p| &p.provider_id)
+            .collect::<Vec<_>>()
+    );
+    let configurable = detection.configurable().count();
+    assert!(
+        configurable >= 3,
+        "the fixture must contain more than one configurable provider or \
+         'one plan for many' is not being tested: {configurable}"
+    );
+
     let mut selections = Selections::defaults(&detection);
     // Supabase needs its one confirmation; that is the ONLY extra input.
     selections.include.insert("supabase".to_string());
@@ -715,9 +748,16 @@ fn thirty_detected_providers_stay_one_plan_with_no_per_provider_forms() {
         false,
     )
     .unwrap();
-    // One combined plan: all three configurable providers in one shot.
+    // One combined plan: every configurable provider in one shot, with no
+    // per-provider step anywhere in the API that produced it.
     assert_eq!(tracking_plan.route_actions.len(), 3);
     assert_eq!(tracking_plan.link_plans.len(), 3);
+    assert_eq!(
+        Selections::pending_origin_approvals(&detection).len(),
+        1,
+        "exactly one destination came from the project's own files, so \
+         exactly one question is asked — the rest are configured together"
+    );
     // The unsupported provider is a warning, not a blocker.
     assert!(tracking_plan
         .warnings

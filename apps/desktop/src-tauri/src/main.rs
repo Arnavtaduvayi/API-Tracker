@@ -2520,8 +2520,8 @@ use api_tracker_gateway::{
 };
 use api_tracker_tracking::{
     apply as tracking_apply, detect as tracking_detect, diagnose as tracking_diagnose,
-    origin as tracking_origin, plan as tracking_plan, state as tracking_state,
-    undo as tracking_undo, verify as tracking_verify,
+    health as tracking_health, origin as tracking_origin, plan as tracking_plan,
+    state as tracking_state, undo as tracking_undo, verify as tracking_verify,
 };
 
 #[tauri::command]
@@ -2587,35 +2587,36 @@ fn gateway_install(
                 .into(),
         });
     };
-    // The stable port is chosen and persisted BEFORE the service starts
-    // (the service reads it from the database at boot — ADR 0019 O3).
-    with_vault(&state, |vault| {
-        let mut config = gw_store::load_config(vault.connection())?;
-        if config.port.is_none() {
-            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(CoreError::Io)?;
-            config.port = Some(listener.local_addr().map_err(CoreError::Io)?.port());
-        }
-        gw_store::save_config(vault.connection(), &config)
-    })?;
+    // Installing is one ordered operation, not a sequence this command gets
+    // to arrange (`NEW-02`). Hand-ordering it here happened to be correct —
+    // port first, then start — but nothing verified that the service came up
+    // on the port that was written, the audit row recorded a definition and
+    // no port, and the next person to edit these twenty lines had only a
+    // comment stopping them from reordering it.
+    //
+    // Locking is deliberately unchanged in shape: `with_vault` still gates
+    // the command on an unlocked vault (and on inactivity auto-lock), and the
+    // slow OS work still happens outside the vault mutex. The primitive needs
+    // a connection for the WHOLE sequence — including the up-to-ten-second
+    // identity probe — so holding the mutex around it would stall every other
+    // command, the lock-screen status strip among them, for as long as the
+    // service takes to come up. It therefore runs on its own connection to
+    // the same database, exactly as `tethra gateway repair` does: WAL with a
+    // five-second busy timeout, and every write it makes is a single
+    // transaction.
+    with_vault(&state, |_vault| Ok::<(), CoreError>(()))?;
 
-    // The slow OS work happens OUTSIDE the vault mutex.
     let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
-    let report = lc.install(&source, force).map_err(ErrDto::from)?;
-
-    with_vault(&state, |vault| {
-        let mut config = gw_store::load_config(vault.connection())?;
-        config.enabled = true;
-        config.service_version = Some(env!("CARGO_PKG_VERSION").to_string());
-        gw_store::save_config(vault.connection(), &config)?;
-        api_tracker_core::audit::record(
-            vault.connection(),
-            "gateway_service_installed",
-            None,
-            None,
-            &format!("definition={}", report.definition),
-        )
-    })?;
-    Ok(report)
+    let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .map_err(ErrDto::from)?;
+    let outcome = gw_lifecycle::provision::install_gateway(
+        &lc,
+        &conn,
+        &gw_lifecycle::provision::HostEnvironment::quiet(),
+        &gw_lifecycle::provision::InstallRequest::new(&source, force, env!("CARGO_PKG_VERSION")),
+    )
+    .map_err(ErrDto::from)?;
+    Ok(outcome.report)
 }
 
 #[tauri::command]
@@ -2694,7 +2695,29 @@ fn gateway_repair(state: State<'_, AppState>) -> CmdResult<gw_lifecycle::Install
         });
     };
     let lc = gw_lifecycle::Lifecycle::for_host(&state.data_dir).map_err(ErrDto::from)?;
-    lc.repair(&source).map_err(ErrDto::from)
+    // Repair is `install(force = false)` underneath, so it starts a service
+    // that resolves its port from the database at boot: repairing an
+    // installation whose `gateway_config.port` is still NULL produced the
+    // same bind-an-unrelated-port service `NEW-02` describes, and nothing
+    // afterwards compared the bound port with the persisted one. The ordered
+    // primitive commits a port first and then proves the service answers on
+    // it.
+    //
+    // Still lock-free, which is the point of this half of the panel: the
+    // status strip and its repair button have to work from the lock screen.
+    // The rows the primitive writes are non-secret gateway configuration
+    // (`port`, `service_version`), so its own connection is enough — the same
+    // shape `tethra gateway repair` uses.
+    let conn = api_tracker_core::db::open_at_current_version(&state.paths().db_path())
+        .map_err(ErrDto::from)?;
+    let outcome = gw_lifecycle::provision::repair_gateway(
+        &lc,
+        &conn,
+        &gw_lifecycle::provision::HostEnvironment::quiet(),
+        &gw_lifecycle::provision::InstallRequest::new(&source, false, env!("CARGO_PKG_VERSION")),
+    )
+    .map_err(ErrDto::from)?;
+    Ok(outcome.report)
 }
 
 #[derive(Serialize)]
@@ -3228,6 +3251,16 @@ struct TrackingProviderDto {
     /// "automatic" | "needs_origin_confirm" | "needs_origin_input" |
     /// "unsupported"
     configurability: String,
+    /// The ONE precedence that decides both the headline count this provider
+    /// is included in and the label its row must carry (`NEW-43`).
+    ///
+    /// Serialized from the shared `CoverageBucket` — "tracked_automatically",
+    /// "needs_origin_confirmation", "detected_unsupported", "low_confidence"
+    /// — so the row grouping cannot drift from the counts the way grouping by
+    /// `configurability` alone did: that rule has no confidence guard, so a
+    /// `Possible`-confidence provider was listed under "Tethra knows where
+    /// these go" while being counted as "not confidently enough to configure".
+    bucket: tracking_detect::CoverageBucket,
     inferred_origin: Option<String>,
     evidence: Vec<String>,
     limitations: Vec<String>,
@@ -3372,6 +3405,7 @@ fn tracking_scan(state: State<'_, AppState>, folder: String) -> CmdResult<Tracki
                     display_name: p.display_name.clone(),
                     confidence: confidence_str(p.confidence),
                     configurability,
+                    bucket: p.bucket(),
                     inferred_origin,
                     evidence: p.evidence.iter().map(|e| e.describe()).collect(),
                     limitations: p.limitations.clone(),
@@ -3985,6 +4019,10 @@ fn health_kind(health: &tracking_state::CurrentHealth) -> &'static str {
         H::VerifiedPreviouslyGatewayDown => "verified_previously_gateway_down",
         H::VerifiedPreviouslyIdle { .. } => "verified_previously_idle",
         H::WaitingForFirstRequest => "waiting_for_first_request",
+        // An apply that started and never reported an outcome. It is its own
+        // kind because the row it describes is not waiting for anything the
+        // user can do by making a request (`NEW-35`).
+        H::ApplyIncomplete => "apply_incomplete",
         H::NeedsRestart => "needs_restart",
         H::ConfigurationChanged { .. } => "configuration_changed",
         H::GatewayUnavailable => "gateway_unavailable",
@@ -4036,9 +4074,11 @@ fn history_dto(history: &tracking_state::VerificationHistory) -> TrackingHistory
 
 /// Probe whether this vault's gateway is answering right now.
 ///
-/// `GatewayLiveness::Unknown` is the honest answer when we did not probe;
-/// `refresh_with` treats it as "cannot confirm health", so historical facts
-/// survive but present-tense claims do not.
+/// One shared implementation with `track status` and the CLI's verify loop
+/// (`tracking_health::probe_liveness`, `NEW-01`): three surfaces asking the
+/// same question must not be able to answer it differently. A port that
+/// cannot be read is [`GatewayLiveness::Down`] — the honest answer when the
+/// user's application is pointed at a loopback socket we cannot confirm.
 fn gateway_liveness(state: &AppState) -> tracking_state::GatewayLiveness {
     let port = match api_tracker_core::db::open_at_current_version(&state.paths().db_path())
         .ok()
@@ -4048,10 +4088,7 @@ fn gateway_liveness(state: &AppState) -> tracking_state::GatewayLiveness {
         Some(port) => port,
         None => return tracking_state::GatewayLiveness::Down,
     };
-    match gw_control::verify_listener(&state.data_dir, port) {
-        gw_control::ListenerIdentity::Verified { .. } => tracking_state::GatewayLiveness::Verified,
-        _ => tracking_state::GatewayLiveness::Down,
-    }
+    tracking_health::liveness_at(&state.data_dir, port)
 }
 
 #[derive(Serialize)]
@@ -4076,7 +4113,7 @@ fn tracking_status(state: State<'_, AppState>, setup_id: String) -> CmdResult<Tr
         // Derived AFTER `check_traffic`, which re-derives the row itself:
         // health must describe the row the user is about to be shown, and
         // this pass is the one that knows whether the gateway answered.
-        let report = tracking_state::refresh_with(vault.connection(), &mut setup, liveness)?;
+        let report = tracking_health::resolve_with(vault.connection(), &mut setup, liveness)?;
         let (watch, exchange, freshness) = match status {
             tracking_verify::WatchStatus::Observed {
                 exchange,
@@ -4118,24 +4155,11 @@ fn tracking_status(state: State<'_, AppState>, setup_id: String) -> CmdResult<Tr
 
 /// Attribution is "paused" when the gateway is live and forwarding but
 /// holds no matching key — traffic is still recorded (SI-11/12/13).
+///
+/// Shared with the CLI so both frontends agree on what "paused" means, and
+/// on the fact that it is reported BESIDE health rather than folded into it.
 fn attribution_is_paused(state: &AppState) -> bool {
-    if !gw_control::instance_is_live(&state.data_dir) {
-        return false;
-    }
-    let Ok(nonce) = gw_control::read_nonce(&state.data_dir) else {
-        return false;
-    };
-    match gw_control::send(
-        &state.data_dir,
-        &gw_control::Request::Status {
-            nonce: nonce.to_string(),
-        },
-    ) {
-        Ok(gw_control::Response::Status(status)) => {
-            !status.matching_key_present || status.matching_key_expired
-        }
-        _ => false,
-    }
+    tracking_health::attribution_is_paused(&state.data_dir)
 }
 
 /// Every tracking setup, for the dashboard's per-project cards.
@@ -4150,7 +4174,7 @@ fn tracking_list(state: State<'_, AppState>) -> CmdResult<Vec<TrackingStatusDto>
     with_vault(&state, |vault| {
         let mut out = Vec::new();
         for mut setup in tracking_state::list_setups(vault.connection())? {
-            let report = tracking_state::refresh_with(vault.connection(), &mut setup, liveness)?;
+            let report = tracking_health::resolve_with(vault.connection(), &mut setup, liveness)?;
             out.push(TrackingStatusDto {
                 setup_id: setup.id.clone(),
                 state: setup.state.as_str().to_string(),

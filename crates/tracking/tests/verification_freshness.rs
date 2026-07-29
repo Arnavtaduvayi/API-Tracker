@@ -64,7 +64,7 @@ fn wire_route_and_link(conn: &Connection, project_id: &str, provider: &str) {
 /// watermark, which is what makes the freshness assertions mean anything.
 fn applied_setup(conn: &Connection) -> state::TrackingSetup {
     insert_project(conn, "p1", "one");
-    let setup = state::upsert_setup(
+    let mut setup = state::upsert_setup(
         conn,
         "p1",
         Path::new("/tmp/fixture"),
@@ -72,7 +72,7 @@ fn applied_setup(conn: &Connection) -> state::TrackingSetup {
         "{}",
     )
     .unwrap();
-    state::record_applied(conn, &setup.id, &summary(&["openai"])).unwrap();
+    state::record_applied(conn, &mut setup, &summary(&["openai"])).unwrap();
     let two_days_ago = api_tracker_core::clock::rfc3339_minus_seconds(
         &api_tracker_core::clock::now_rfc3339(),
         2 * 24 * 3600,
@@ -515,7 +515,7 @@ fn history_survives_a_re_apply_while_session_evidence_does_not() {
         "{}",
     )
     .unwrap();
-    state::record_applied(&conn, &setup.id, &summary(&["openai"])).unwrap();
+    state::record_applied(&conn, &mut setup, &summary(&["openai"])).unwrap();
     setup = state::get_setup(&conn, &setup.id).unwrap().unwrap();
 
     let report = state::refresh_with(&conn, &mut setup, GatewayLiveness::Verified).unwrap();

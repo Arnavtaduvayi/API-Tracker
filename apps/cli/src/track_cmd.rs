@@ -19,13 +19,14 @@ use api_tracker_core::vault::{self, UnlockedVault};
 use api_tracker_tracking::apply::{self, ApplyOptions, HostServiceOps, StepOutcome};
 use api_tracker_tracking::detect::{self, Configurability, DetectionInput};
 use api_tracker_tracking::diagnose;
+use api_tracker_tracking::health;
 use api_tracker_tracking::origin;
 use api_tracker_tracking::plan::{
     self, ensure_port, AttributionPlan, PlanWarning, ProjectRef, RestartExpectation, Selections,
 };
 use api_tracker_tracking::state;
 use api_tracker_tracking::undo as track_undo;
-use api_tracker_tracking::verify::{self, WatchStatus};
+use api_tracker_tracking::verify;
 use clap::{Args, Subcommand};
 
 use crate::ctx::Ctx;
@@ -34,6 +35,30 @@ use crate::render;
 /// How long the post-apply wait watches for the first request before
 /// reporting "needs attention" and exiting 2 (tracking stays on).
 const WAIT_WINDOW_SECS: u64 = 120;
+
+/// Test-only pacing overrides for the verify loop.
+///
+/// The loop's *decision* is never overridable — only how long it waits
+/// between polls and before giving up. Without this a regression test for
+/// `NEW-01` would have to sit through a two-minute window per failure case,
+/// which is the reason the CLI had no test on this path at all. Read in the
+/// CLI and nowhere else: no crate under `crates/` consults these, so the
+/// derivation this loop depends on has no test seam of any kind.
+fn secs_from_env(var: &str, default: u64) -> std::time::Duration {
+    let secs = std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default);
+    std::time::Duration::from_secs(secs)
+}
+
+fn wait_window() -> std::time::Duration {
+    secs_from_env("TETHRA_TRACK_WAIT_SECS", WAIT_WINDOW_SECS)
+}
+
+fn poll_interval() -> std::time::Duration {
+    secs_from_env("TETHRA_TRACK_POLL_SECS", POLL_INTERVAL_SECS)
+}
 
 /// How many unrecognised credentials to list before summarising the rest.
 /// The COUNT is always exact; only the enumeration is bounded, so a
@@ -123,6 +148,17 @@ fn unlocked(ctx: &Ctx) -> Result<UnlockedVault> {
         ctx.persist_session(&vault, &token)?;
         return Ok(vault);
     }
+    // NEW-42: `ctx.unlocked()` fails identically for a MISSING vault and a
+    // locked one, so a first-time user with TETHRA_PASSWORD already set was
+    // told to set TETHRA_PASSWORD — advice that cannot work, for a problem
+    // they do not have. Name the real one.
+    if !ctx.paths.db_path().exists() {
+        bail!(
+            "no vault exists yet at {}. Run `tethra init` to create one, then `tethra track` \
+             again.",
+            ctx.paths.db_path().display()
+        );
+    }
     if !std::io::stdin().is_terminal() {
         bail!(
             "the vault is locked. Set TETHRA_PASSWORD or run this command interactively \
@@ -130,8 +166,12 @@ fn unlocked(ctx: &Ctx) -> Result<UnlockedVault> {
         );
     }
     let password = crate::ctx::prompt_secret("Master password")?;
-    let vault = vault::unlock_vault(&ctx.paths, &password)
+    let mut vault = vault::unlock_vault(&ctx.paths, &password)
         .context("unlocking the vault with that password")?;
+    // NEW-07: the interactive fallback unlocks directly rather than through
+    // `Ctx::unlocked`, so it was the one successful unlock that never
+    // re-sealed legacy rollback records (`ENC-01`).
+    crate::ctx::upgrade_restore_records(&mut vault);
     Ok(vault)
 }
 
@@ -314,13 +354,12 @@ fn track(
         println!("Recognised:");
         for p in &detection.providers {
             let evidence: Vec<String> = p.evidence.iter().take(2).map(|e| e.describe()).collect();
-            let label = match &p.configurability {
-                Configurability::Unsupported { .. } => "unsupported".to_string(),
-                Configurability::NeedsOriginConfirm { .. } | Configurability::NeedsOriginInput => {
-                    "needs approval".to_string()
-                }
-                _ => p.confidence.label().to_string(),
-            };
+            // NEW-43: label the row with the bucket the HEADLINE counted it
+            // in. This used to switch on configurability alone, with no
+            // confidence guard, while the headline ranked confidence first —
+            // so six rows could render under a headline that said three. One
+            // precedence, in one place, for both.
+            let label = p.bucket().label().to_string();
             println!(
                 "  {:<12}{:<15}{}",
                 render::sanitize(&p.provider_id),
@@ -434,14 +473,24 @@ fn track(
                     .flatten()
             });
             if let Some(prior) = already {
-                println!(
-                    "  ✓ {} — you approved {} on {}",
-                    render::sanitize(provider_id),
-                    render::sanitize(&prior.origin),
-                    render::sanitize(&prior.approved_at)
-                );
-                selections.approve_origin(provider_id, inferred);
-                continue;
+                // NEW-15: route the decision through the shared predicate
+                // rather than restating it. `OriginTrust`'s doc comment
+                // called itself "the single place that decision is made"
+                // while having no production caller at all — a false claim
+                // about the code, in the code, on the consent path.
+                let trust = origin::OriginTrust::PreviouslyApproved {
+                    approved_at: prior.approved_at.clone(),
+                };
+                if trust.may_configure_without_asking() {
+                    println!(
+                        "  ✓ {} — you approved {} on {}",
+                        render::sanitize(provider_id),
+                        render::sanitize(&prior.origin),
+                        render::sanitize(&prior.approved_at)
+                    );
+                    selections.approve_origin(provider_id, inferred);
+                    continue;
+                }
             }
 
             println!();
@@ -453,6 +502,16 @@ fn track(
             // Explicit pre-approval on the command line.
             if args_allows(allow_origins, inferred) {
                 println!("    → approved by --allow-origin");
+                // NEW-12: the approval is REMEMBERED for this vault, so a
+                // later run — including one without `--allow-origin` — will
+                // configure this destination without asking again. The
+                // disclosure above never said so, which made a one-off flag
+                // look like a one-off decision.
+                println!(
+                    "      (remembered for this vault: a later `tethra track` will configure \
+                     {} without asking again)",
+                    render::sanitize(inferred)
+                );
                 selections.approve_origin(provider_id, inferred);
                 approvals_to_persist.push((provider_id.clone(), inferred.clone()));
                 continue;
@@ -714,69 +773,94 @@ fn track(
         _ => println!("Restart your app, then make one API request."),
     }
     println!(
-        "Waiting for traffic (up to {WAIT_WINDOW_SECS} s; Ctrl-C stops waiting — tracking stays on)…"
+        "Waiting for traffic (up to {} s; Ctrl-C stops waiting — tracking stays on)…",
+        wait_window().as_secs()
     );
     let setup_id = report.setup_id.clone().unwrap_or_default();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(WAIT_WINDOW_SECS);
+    let deadline = std::time::Instant::now() + wait_window();
     loop {
         let Some(mut setup) = state::get_setup(vault.connection(), &setup_id)? else {
             bail!("the tracking setup disappeared mid-verification");
         };
-        match verify::check_traffic(vault.connection(), &mut setup)? {
-            WatchStatus::Observed { exchange, .. } => {
-                let detail = exchange
-                    .map(|ex| {
-                        let mut parts = vec![format!(
-                            "{} request observed from {}",
-                            ex.provider_id.unwrap_or_else(|| ex.host.clone()),
-                            render::sanitize(&plan_final.project.name)
-                        )];
-                        if let Some(ms) = ex.latency_ms {
-                            parts.push(format!("{ms} ms"));
-                        }
-                        if let Some(model) = ex.model {
-                            parts.push(model);
-                        }
-                        parts.join(", ")
-                    })
-                    .unwrap_or_else(|| "traffic observed".to_string());
-                println!("✓ Tracking verified — {}", render::sanitize(&detail));
-                println!("\nDashboard: open the Tethra app, or run `tethra track status`.");
-                return Ok(());
+        // NEW-01/VER-02: the ONE authoritative present-tense answer, shared
+        // with `track status`, the desktop's tracking commands and the core
+        // derivation. This loop used to gate its banner and its exit status
+        // on `verify::check_traffic`, which switches on the cached `state`
+        // column after a liveness-blind refresh — so "✓ Tracking verified"
+        // and exit 0 survived stopping the gateway, removing the route and
+        // deleting the link. A script that gates on `tethra track` must not
+        // be told yes while the user's requests are failing.
+        let health = health::resolve(vault.connection(), &ctx.paths.data_dir, &mut setup)?;
+        if health.current.is_currently_working() {
+            let exchange = verify::latest_observed_exchange(vault.connection(), &setup)?;
+            let detail = exchange
+                .map(|ex| {
+                    let mut parts = vec![format!(
+                        "{} request observed from {}",
+                        ex.provider_id.unwrap_or_else(|| ex.host.clone()),
+                        render::sanitize(&plan_final.project.name)
+                    )];
+                    if let Some(ms) = ex.latency_ms {
+                        parts.push(format!("{ms} ms"));
+                    }
+                    if let Some(model) = ex.model {
+                        parts.push(model);
+                    }
+                    parts.join(", ")
+                })
+                .unwrap_or_else(|| "traffic observed".to_string());
+            println!("✓ Tracking verified — {}", render::sanitize(&detail));
+            if let state::CurrentHealth::PartiallyTracked { observed, total } = &health.current {
+                let unseen: Vec<String> = health
+                    .freshness
+                    .iter()
+                    .filter(|f| !f.fresh)
+                    .map(|f| f.provider_id.clone())
+                    .collect();
+                println!("  {observed} of {total} configured providers are active right now.");
+                if !unseen.is_empty() {
+                    println!(
+                        "  No recent {} traffic — this is normal if the app hasn't called \
+                         it. Tethra keeps watching.",
+                        render::sanitize(&unseen.join(", "))
+                    );
+                }
             }
-            WatchStatus::PartiallyObserved { freshness, .. } => {
-                let seen: Vec<String> = freshness
-                    .iter()
-                    .filter(|f| f.last_observed_at.is_some())
-                    .map(|f| f.provider_id.clone())
-                    .collect();
-                let unseen: Vec<String> = freshness
-                    .iter()
-                    .filter(|f| f.last_observed_at.is_none())
-                    .map(|f| f.provider_id.clone())
-                    .collect();
-                println!("✓ Tracking verified for {}.", seen.join(", "));
+            if health::attribution_is_paused(&ctx.paths.data_dir) {
+                // Forwarding is healthy; only credential attribution is
+                // degraded. Reported beside the success, never folded into
+                // it (SI-11/SI-12).
                 println!(
-                    "No {} traffic observed yet — this is normal if the app hasn't called \
-                     it. Tethra keeps watching.",
-                    unseen.join(", ")
+                    "  (credential attribution is paused — the vault is locked, so requests are \
+                     tracked but not attributed to a stored credential)"
                 );
-                return Ok(());
             }
-            _ => {}
+            println!("\nDashboard: open the Tethra app, or run `tethra track status`.");
+            return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            println!("\nNo traffic observed yet. Tracking stays on; when a request arrives it");
-            println!("will be recorded. Checked causes, in order:");
-            let Some(setup) = state::get_setup(vault.connection(), &setup_id)? else {
-                std::process::exit(2);
-            };
+            // The present-tense answer first, then history, then the ranked
+            // diagnosis. "Traffic was observed previously" is a fact worth
+            // printing and is deliberately NOT a success: the exit status
+            // below reflects the state now.
+            println!("\nNot verified. Now: {}", health.current.describe());
+            if let Some(at) = &health.history.first_verified_at {
+                println!("History: first verified {}", render::sanitize(at));
+            }
+            if let Some(at) = &health.history.session_first_observed_at {
+                println!(
+                    "History: traffic was observed previously — first seen here {}",
+                    render::sanitize(at)
+                );
+            }
+            println!("Tracking stays on; when a request arrives it will be recorded.");
+            println!("Checked causes, in order:");
             for d in diagnose::diagnose(vault.connection(), &ctx.paths.data_dir, &setup)? {
                 println!("  - {}", render::sanitize(&d.message));
             }
             std::process::exit(2);
         }
-        std::thread::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
+        std::thread::sleep(poll_interval());
     }
 }
 
@@ -897,21 +981,11 @@ fn status(ctx: &Ctx, path: Option<PathBuf>) -> Result<()> {
     // verified — traffic observed": the derivation consulted only
     // historical event rows, so it kept reporting success while the user's
     // application was pointed at a loopback port with nothing listening
-    // (ZFT-005). Liveness is now an input, not an afterthought.
-    let port = api_tracker_gateway::store::load_config(&conn)?
-        .port
-        .unwrap_or(0);
-    let liveness = if port == 0 {
-        state::GatewayLiveness::Down
-    } else {
-        match api_tracker_gateway::control::verify_listener(&ctx.paths.data_dir, port) {
-            api_tracker_gateway::control::ListenerIdentity::Verified { .. } => {
-                state::GatewayLiveness::Verified
-            }
-            _ => state::GatewayLiveness::Down,
-        }
-    };
-    let report = state::refresh_with(&conn, &mut setup, liveness)?;
+    // (ZFT-005). Liveness is now an input, not an afterthought — and the
+    // probe-then-derive pair lives in ONE place, shared with the verify
+    // loop above and the desktop's tracking commands (NEW-01).
+    let liveness = health::probe_liveness(&conn, &ctx.paths.data_dir);
+    let report = health::resolve_with(&conn, &mut setup, liveness)?;
     let freshness = report.freshness.clone();
     #[derive(serde::Serialize)]
     struct StatusOut<'a> {

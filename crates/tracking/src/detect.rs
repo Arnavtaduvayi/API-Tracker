@@ -149,6 +149,29 @@ pub struct ProviderDetection {
     pub limitations: Vec<String>,
 }
 
+impl ProviderDetection {
+    /// Which headline bucket this provider is counted under, and therefore
+    /// which label its row must carry (`NEW-43`).
+    ///
+    /// Confidence is asked first and unconditionally: below
+    /// [`DetectionConfidence::Likely`] the planner will not configure the
+    /// provider and will not even offer its origin for approval, so no row
+    /// may present it as tracked or as awaiting a decision the user will
+    /// never be asked to make.
+    pub fn bucket(&self) -> CoverageBucket {
+        if self.confidence < DetectionConfidence::Likely {
+            return CoverageBucket::LowConfidence;
+        }
+        match self.configurability {
+            Configurability::Automatic => CoverageBucket::TrackedAutomatically,
+            Configurability::NeedsOriginConfirm { .. } | Configurability::NeedsOriginInput => {
+                CoverageBucket::NeedsOriginConfirmation
+            }
+            Configurability::Unsupported { .. } => CoverageBucket::DetectedUnsupported,
+        }
+    }
+}
+
 /// Folder-level signals that feed restart guidance and diagnosis.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectSignals {
@@ -193,6 +216,58 @@ pub struct UnrecognizedCredential {
     pub name_hint: Option<String>,
 }
 
+/// The ONE precedence that decides which coverage bucket an integration
+/// belongs to — and therefore both the headline count it is included in and
+/// the label its own row must carry (`NEW-43`).
+///
+/// The two used to be computed separately. The headline asked about
+/// confidence first (`detect.rs`, the `coverage` tally); the row labels asked
+/// only about `Configurability`, with no confidence guard at all — so the CLI
+/// printed six rows reading `needs approval` under a headline saying three
+/// needed approval, and the desktop listed a `Possible`-confidence provider
+/// under "Tethra knows where these go" while counting it as "detected but not
+/// confidently enough to configure". The totals still summed, which is
+/// exactly why nobody noticed.
+///
+/// Confidence comes first because that is the precedence the *planner*
+/// already uses: `Selections::defaults` and
+/// `Selections::pending_origin_approvals` both require
+/// [`DetectionConfidence::Likely`] before a provider can be configured or
+/// even offered for approval. A row that says "needs approval" for something
+/// the planner will never offer is a row that lies.
+///
+/// The variant order is the order [`CoverageSummary::lines`] states the
+/// buckets in, so sorting by it groups the rows the way the headline reads
+/// them out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageBucket {
+    /// Supported, confident enough, destination from a Tethra manifest.
+    TrackedAutomatically,
+    /// Supported and confident enough, but the destination came from this
+    /// project's own files and needs an explicit approval.
+    NeedsOriginConfirmation,
+    /// Recognised provider whose SDK exposes no base-URL variable.
+    DetectedUnsupported,
+    /// Real evidence, not enough of it to act on — whatever its
+    /// configurability would otherwise have allowed.
+    LowConfidence,
+}
+
+impl CoverageBucket {
+    /// The short label a per-provider row carries. One string per bucket, so
+    /// a row can never describe itself as something the headline did not
+    /// count it as.
+    pub fn label(self) -> &'static str {
+        match self {
+            CoverageBucket::TrackedAutomatically => "tracked",
+            CoverageBucket::NeedsOriginConfirmation => "needs approval",
+            CoverageBucket::DetectedUnsupported => "unsupported",
+            CoverageBucket::LowConfidence => "low confidence",
+        }
+    }
+}
+
 /// The honest coverage summary a review screen must render.
 ///
 /// Every integration the scan saw lands in exactly one bucket, and the
@@ -217,6 +292,17 @@ pub struct CoverageSummary {
 }
 
 impl CoverageSummary {
+    /// Count one provider into its bucket. The tally and the row label are
+    /// then the same decision made once ([`CoverageBucket`], `NEW-43`).
+    fn count(&mut self, bucket: CoverageBucket) {
+        match bucket {
+            CoverageBucket::TrackedAutomatically => self.tracked_automatically += 1,
+            CoverageBucket::NeedsOriginConfirmation => self.needs_origin_confirmation += 1,
+            CoverageBucket::DetectedUnsupported => self.detected_unsupported += 1,
+            CoverageBucket::LowConfidence => self.low_confidence += 1,
+        }
+    }
+
     pub fn total(&self) -> usize {
         self.tracked_automatically
             + self.needs_origin_confirmation
@@ -1185,16 +1271,19 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
         });
     }
 
-    // Confirmed first, then Likely, then Possible; unsupported last within
-    // each band; stable by id. Unsupported providers never suppress
-    // supported ones — they are simply listed after them.
+    // Grouped by the bucket the headline counts them in, then by confidence
+    // within the group, then stable by id.
+    //
+    // The old order was confidence-first, which put a `Confirmed`
+    // low-confidence-impossible provider above a `Likely` automatic one and
+    // interleaved the groups the headline had just enumerated separately —
+    // the reader had no way to see which rows made up which count
+    // (`NEW-43`). Unsupported providers still never suppress supported ones;
+    // they are simply listed after them, as their bucket's position says.
     detections.sort_by(|a, b| {
-        let unsupported = |p: &ProviderDetection| {
-            matches!(p.configurability, Configurability::Unsupported { .. })
-        };
-        b.confidence
-            .cmp(&a.confidence)
-            .then(unsupported(a).cmp(&unsupported(b)))
+        a.bucket()
+            .cmp(&b.bucket())
+            .then(b.confidence.cmp(&a.confidence))
             .then(a.provider_id.cmp(&b.provider_id))
     });
 
@@ -1212,14 +1301,7 @@ pub fn detect(conn: &Connection, input: &DetectionInput) -> Result<ProjectDetect
         ..CoverageSummary::default()
     };
     for p in &detections {
-        match &p.configurability {
-            _ if p.confidence < DetectionConfidence::Likely => coverage.low_confidence += 1,
-            Configurability::Automatic => coverage.tracked_automatically += 1,
-            Configurability::NeedsOriginConfirm { .. } | Configurability::NeedsOriginInput => {
-                coverage.needs_origin_confirmation += 1
-            }
-            Configurability::Unsupported { .. } => coverage.detected_unsupported += 1,
-        }
+        coverage.count(p.bucket());
     }
 
     // One accounting across BOTH readers. `scanned_files` keeps its old

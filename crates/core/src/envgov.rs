@@ -954,25 +954,44 @@ fn sweep_orphaned_temp_files(conn: &Connection) {
         .collect();
     parents.sort();
     parents.dedup();
-    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
     for dir in parents {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        sweep_orphaned_temp_files_in(&dir);
+    }
+}
+
+/// The same sweep, scoped to ONE directory.
+///
+/// Public because the export cleanup above was the only caller, and it reads
+/// the directories to sweep from `env_exports` — a table the tracking link
+/// and unlink paths never write. Those paths call `atomic_write` on a
+/// project's `.env` just as export does, so they can orphan exactly the same
+/// credential-bearing temp file and nothing was ever going to remove it
+/// (`NEW-29`). Any caller that writes a file atomically should sweep the
+/// directory it wrote into.
+///
+/// Bounded exactly as before: one directory, never a walk; only files
+/// matching the temp-name pattern; and only when they are over an hour old,
+/// so an in-flight write in another process is never raced. Best-effort by
+/// design — a failure to clean up must never fail the operation that
+/// succeeded.
+pub fn sweep_orphaned_temp_files_in(dir: &Path) {
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_temp = name.starts_with('.') && name.contains(".api-tracker-tmp-");
+        if !is_temp {
             continue;
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let is_temp = name.starts_with('.') && name.contains(".api-tracker-tmp-");
-            if !is_temp {
-                continue;
-            }
-            let old_enough = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .map(|m| m < hour_ago)
-                .unwrap_or(false);
-            if old_enough {
-                let _ = std::fs::remove_file(entry.path());
-            }
+        }
+        let old_enough = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| m < hour_ago)
+            .unwrap_or(false);
+        if old_enough {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }

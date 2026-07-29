@@ -321,7 +321,7 @@ pub fn confirm(question: &str, assume_yes: bool) -> Result<bool> {
 /// hold no vault, and redacting a legacy record without a key would destroy
 /// the user's ability to undo the link. Best-effort and once per vault — it
 /// must never stop the command the user actually asked for.
-fn upgrade_restore_records(vault: &mut UnlockedVault) {
+pub fn upgrade_restore_records(vault: &mut UnlockedVault) {
     // The migration itself lives in the gateway crate so the desktop runs the
     // SAME code (`ENC-01`): ADR 0028 claimed both front ends ran it, and only
     // this one did, which left a GUI-only user's plaintext in place forever.
