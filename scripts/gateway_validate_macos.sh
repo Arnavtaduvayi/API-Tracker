@@ -722,22 +722,32 @@ step "30. Negative controls: prove the assertions can FAIL"
 # A control that does not call the thing it certifies is certifying nothing.
 # These now invoke the REAL primitives and capture what they actually did.
 
-# Run a primitive with the tally and the register detached, and report only
-# whether it recorded a pass. This is the whole trick: the primitive executes
-# exactly as it does in production — same function, same body — but its
-# verdict is OBSERVED instead of counted.
-probe_primitive() {   # probe_primitive <fn> <args...>  -> prints "pass"|"fail"
-  local before_pass=$pass before_fail=$fail out
-  out="$("$@" 2>&1)"
+# Run a primitive with the tally detached, and record only whether it counted
+# a pass. This is the whole trick: the primitive executes exactly as it does in
+# production — same function, same body — but its verdict is OBSERVED instead
+# of counted.
+#
+# The result is left in $PROBE_VERDICT rather than printed, and the primitive's
+# own output is redirected to a file rather than captured. Both are deliberate:
+# `v="$(probe_primitive …)"` would run the whole thing in a SUBSHELL, and a
+# subshell's increments to `pass`/`fail` do not reach the parent — so every
+# probe would read as `+0p/+0f` and every control would fail. (It did, on the
+# first CI run that executed this: the fix for a control that never called its
+# primitive must not itself be a control that never observes one.)
+PROBE_VERDICT=""
+PROBE_LOG="${TMPDIR:-/tmp}/tethra-gw-probe-$$.log"
+probe_primitive() {   # probe_primitive <fn> <args...>  -> sets PROBE_VERDICT
+  local before_pass=$pass before_fail=$fail
+  "$@" >>"$PROBE_LOG" 2>&1
   local gained_pass=$((pass - before_pass)) gained_fail=$((fail - before_fail))
   pass=$before_pass
   fail=$before_fail
   if [ "$gained_pass" -eq 1 ] && [ "$gained_fail" -eq 0 ]; then
-    printf 'pass'
+    PROBE_VERDICT="pass"
   elif [ "$gained_fail" -eq 1 ] && [ "$gained_pass" -eq 0 ]; then
-    printf 'fail'
+    PROBE_VERDICT="fail"
   else
-    printf 'malformed(+%dp/+%df) %s' "$gained_pass" "$gained_fail" "$out"
+    PROBE_VERDICT="malformed(+${gained_pass}p/+${gained_fail}f)"
   fi
 }
 
@@ -746,14 +756,14 @@ if db "SELECT 0" >/dev/null 2>&1; then
   # assert_db must REJECT a query returning 0, one returning nothing, and one
   # that errors — and must ACCEPT a true one. All four through assert_db
   # itself, so neutering it breaks this control.
-  v="$(probe_primitive assert_db "SELECT 0" "control: false query")"
-  [ "$v" = "fail" ] || NEG_DETAIL="$NEG_DETAIL false-query:$v"
-  v="$(probe_primitive assert_db "SELECT 1 WHERE 0" "control: empty query")"
-  [ "$v" = "fail" ] || NEG_DETAIL="$NEG_DETAIL empty-query:$v"
-  v="$(probe_primitive assert_db "SELECT FROM nowhere" "control: erroring query")"
-  [ "$v" = "fail" ] || NEG_DETAIL="$NEG_DETAIL erroring-query:$v"
-  v="$(probe_primitive assert_db "SELECT 1" "control: true query")"
-  [ "$v" = "pass" ] || NEG_DETAIL="$NEG_DETAIL true-query:$v"
+  probe_primitive assert_db "SELECT 0" "control: false query"
+  [ "$PROBE_VERDICT" = "fail" ] || NEG_DETAIL="$NEG_DETAIL false-query:$PROBE_VERDICT"
+  probe_primitive assert_db "SELECT 1 WHERE 0" "control: empty query"
+  [ "$PROBE_VERDICT" = "fail" ] || NEG_DETAIL="$NEG_DETAIL empty-query:$PROBE_VERDICT"
+  probe_primitive assert_db "SELECT FROM nowhere" "control: erroring query"
+  [ "$PROBE_VERDICT" = "fail" ] || NEG_DETAIL="$NEG_DETAIL erroring-query:$PROBE_VERDICT"
+  probe_primitive assert_db "SELECT 1" "control: true query"
+  [ "$PROBE_VERDICT" = "pass" ] || NEG_DETAIL="$NEG_DETAIL true-query:$PROBE_VERDICT"
   if [ -z "$NEG_DETAIL" ]; then
     ok "assert_db itself rejects false, empty and erroring queries, and accepts a true one"
   else
@@ -766,19 +776,19 @@ fi
 # assert_status must reject an absent gateway. Nothing is running at this
 # point, so the REAL primitive must record a failure — and it is called here,
 # rather than its python re-implemented inline as before.
-v="$(probe_primitive assert_status 'True' "control: any status property, gateway stopped")"
-if [ "$v" = "fail" ]; then
+probe_primitive assert_status 'True' "control: any status property, gateway stopped"
+if [ "$PROBE_VERDICT" = "fail" ]; then
   ok "assert_status itself rejects a stopped gateway (an empty response is a failure)"
 else
-  bad "assert_status did not reject a stopped gateway (observed: $v)"
+  bad "assert_status did not reject a stopped gateway (observed: $PROBE_VERDICT)"
 fi
 # ...and it must reject a FALSE property even when a gateway IS answering,
 # which is the other half of "this primitive consults its argument".
-v="$(probe_primitive assert_status 'False' "control: a property that is never true")"
-if [ "$v" = "fail" ]; then
+probe_primitive assert_status 'False' "control: a property that is never true"
+if [ "$PROBE_VERDICT" = "fail" ]; then
   ok "assert_status rejects a property that evaluates false"
 else
-  bad "assert_status accepted a property that is never true (observed: $v)"
+  bad "assert_status accepted a property that is never true (observed: $PROBE_VERDICT)"
 fi
 
 step "31. Isolation invariant: the user's production service was never touched"
