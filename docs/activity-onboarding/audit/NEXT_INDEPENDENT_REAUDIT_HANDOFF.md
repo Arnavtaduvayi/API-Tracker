@@ -35,26 +35,37 @@ fixing is exactly the thing you should distrust.
 
 ## What is NOT fixed, in priority order
 
-### 1. `VAL-05` — the gateway script has no anti-vacuity apparatus (PARTIAL)
+### 1. `VAL-05` — the gateway gate binds a COUNT, not IDENTITIES
 
-`scripts/gateway_validate_macos.sh` still has no inventory, group table,
-register, enumerator, per-check IDs, machine-readable output, or equality
-gate. What changed: the floor moved 32 → 45, the script now prints that it is
-a floor and not an equality gate, and the three documents that quoted "56
-checks" as a fixed property were corrected.
+The floor is gone. `scripts/gateway_validate_macos.sh` now enforces an
+**equality** on its required set: the three machine-dependent sites the audit
+named (`node` presence, the repair staging block, the port re-check) route
+through `opt_ok`/`opt_bad` and are excluded, and everything else must total
+exactly `REQUIRED_CHECKS=50`.
 
-**Roughly 12 checks can still vanish below the new floor with zero recorded
-failures and exit 0.**
+**What is still missing.** That equality binds how MANY required checks ran,
+not WHICH. This script still has:
 
-Why it was not ported: an enumerator has to be proved against a real
-`--scope full` run, and that run installs a LaunchAgent. `launchctl` addresses
-`gui/<uid>` regardless of `$HOME`, so the script cannot be executed on a
-machine carrying a live production gateway — which is the machine this work
-was done on. Guessing the required count would have been an unfalsifiable
-claim of exactly the kind under audit.
+* no check register,
+* no per-check IDs,
+* no required-vs-optional declaration per check (only per call site),
+* no machine-readable results,
+* no duplicate/missing/skip rejection,
+* no external result validation,
+* **no mutation suite** — there is no counterpart to
+  `scripts/validation_harness_mutants.sh`.
 
-**What to check:** whether 45 is itself defensible, or whether it is the same
-arbitrary number as 32 with a better comment.
+So a required check **swapped for a different one** keeps the count and passes.
+That is strictly weaker than `tracking_validate_macos.sh`, which has a declared
+group table, a fail-closed enumerator that reads the script itself, a per-group
+equality gate, and a register with named checks.
+
+**What to check:** whether `REQUIRED_CHECKS=50` is itself defensible. It was
+derived from one measured CI run (57 total on `141152d`, minus 1 node, 5 repair,
+1 port), not from an enumerator that reads the source. Count the call sites
+yourself and see whether you get 50. If you get a different number, the constant
+is wrong and the gate has been passing for the wrong reason — or failing for
+one.
 
 ### 2. `VAL-04` was fixed but never executed
 
@@ -182,8 +193,9 @@ Stated so you can judge what was and was not observed:
 
 ## What would make the next verdict clean
 
-1. Port the register, per-check IDs and equality gate to
-   `gateway_validate_macos.sh`, proved on a disposable runner (`VAL-05`).
+1. Port the register, per-check IDs and machine-readable results to
+   `gateway_validate_macos.sh`, proved on a disposable runner. The equality
+   gate exists now but binds a count, not identities (`VAL-05`).
 2. Give that script a mutation suite (`VAL-04`).
 3. Bind `prior_env_json` with a `had_prior` flag or a MAC (`ENC-02`).
 4. Per-check IDs for the trusted manifest, replacing label prefixes
