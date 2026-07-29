@@ -534,6 +534,49 @@ fn every_health_write_advances_the_row_version() {
     assert_eq!(again.row_version, v0 + 2);
 }
 
+/// An apply failure must reach the row even when the row moved underneath the
+/// attempt.
+///
+/// `apply`'s failure path re-reads the setup and then transitions. Because
+/// `transition` is a CAS that does not retry on its own, a concurrent write in
+/// that window would make the write a no-op — and swallowing it would trade the
+/// pre-CAS defect (force the write, clobber newer state) for its mirror image:
+/// silently losing the record that an apply failed. That is the ZFT-006 outcome
+/// by omission rather than by overwrite, so the failure path retries.
+///
+/// This drives the same shape directly: take a snapshot, let someone else move
+/// the row, then record the failure the way `apply` does.
+#[test]
+fn an_apply_failure_is_recorded_even_when_the_row_moved_first() {
+    let (_d, conn, path) = test_conn_at();
+    let setup = applied(&conn);
+    let other = second_conn(&path);
+
+    // Somebody else moves the row after our snapshot was taken.
+    state::transition(&other, &setup, TrackingState::NeedsAttention, Some("other")).unwrap();
+
+    // The apply failure path: re-read, transition, retry on conflict.
+    let reason = "apply_failed:EnsureService";
+    let mut recorded = false;
+    for _ in 0..3 {
+        let fresh = state::get_setup(&conn, &setup.id).unwrap().unwrap();
+        match state::transition(&conn, &fresh, TrackingState::NeedsAttention, Some(reason)) {
+            Err(CoreError::StateConflict { .. }) => continue,
+            Ok(_) => {
+                recorded = true;
+                break;
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        }
+    }
+    assert!(recorded, "the failure must reach the row");
+    assert_eq!(
+        reason_of(&conn, &setup.id).as_deref(),
+        Some(reason),
+        "an apply failure must not be lost to a concurrent write"
+    );
+}
+
 /// Mutation control for the whole file.
 ///
 /// It performs the write the way the audited head did — no predicate on the

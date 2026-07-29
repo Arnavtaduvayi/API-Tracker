@@ -148,8 +148,11 @@ and the validator are only tied together by
 whether a caller can be starved into that path in practice, and whether the
 resulting stale cached row is observable to a user.
 
-Also: `transition` does not retry, by design. Confirm every production caller
-handles `CoreError::StateConflict` rather than surfacing it as a raw error.
+Also: `transition` does not retry, by design. All four production callers were
+checked — three propagate with `?`; `apply.rs`'s failure path swallowed the
+result with `let _ =` and now retries, because a swallowed conflict there loses
+the record that an apply failed. Confirm that retry is bounded and that no
+caller surfaces `StateConflict` as a raw driver string to a user.
 
 ### `ENC-01` — the desktop call site
 

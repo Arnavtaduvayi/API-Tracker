@@ -57,6 +57,7 @@ itself and is called out as such.
 | **Mutation** | Removing the CAS predicate (`WHERE id = ?1`, parameter dropped so it still compiles) fails 5 tests including the headline reproduction. |
 | **Disposition** | **FIXED** |
 | **Residual risk** | Under sustained contention the third attempt reports without writing, so a cached correction can lag by one read. Safe by construction (it never overwrites) and it converges on the next call. |
+| **Follow-up found while writing the handoff** | `apply.rs`'s failure path called `transition` with `let _ =`. With the CAS in place a concurrent write in the re-read → transition window would make that a no-op, trading the pre-CAS defect (force the write, clobber newer state) for its mirror image: silently losing the record that an apply failed — ZFT-006 by omission rather than by overwrite. The failure path now retries on conflict, because "this apply failed" is unconditional and a conflict means only "say it again", never "reconsider". Pinned by `an_apply_failure_is_recorded_even_when_the_row_moved_first`. The three other production `transition` callers propagate with `?`, which is loud and correct. |
 | **Commit** | `bf17ce9` |
 
 ### VER-02 — the literal ZFT-006 regression survives all tests

@@ -268,16 +268,40 @@ pub fn apply(
             });
             if let (Some(setup_id), true) = (&$setup_id, true) {
                 let conn = vault.connection();
-                if let Ok(Some(setup)) = state::get_setup(conn, setup_id) {
-                    let _ = state::transition(
-                        conn,
-                        &setup,
-                        TrackingState::NeedsAttention,
-                        Some(&format!(
-                            "apply_failed:{}",
-                            serde_json::to_string(&$id).unwrap_or_default()
-                        )),
-                    );
+                let reason = format!(
+                    "apply_failed:{}",
+                    serde_json::to_string(&$id).unwrap_or_default()
+                );
+                // "This apply failed" is a fact that has to reach the row.
+                //
+                // `transition` is a compare-and-swap (`VER-01`) and deliberately
+                // does not retry on its own, because its legality check encodes
+                // an intent that generally has to be re-judged. Here the intent
+                // is unconditional — the step DID fail — so a conflict means
+                // only "re-read and say it again", never "reconsider".
+                //
+                // Retrying matters more than it looks. Before the CAS this write
+                // was forced through and could clobber newer state; swallowing
+                // the conflict without a retry would trade that for the opposite
+                // defect, silently losing the failure record — which is the
+                // ZFT-006 outcome by omission rather than by overwrite.
+                for _ in 0..3 {
+                    match state::get_setup(conn, setup_id) {
+                        Ok(Some(setup)) => {
+                            match state::transition(
+                                conn,
+                                &setup,
+                                TrackingState::NeedsAttention,
+                                Some(&reason),
+                            ) {
+                                Err(api_tracker_core::CoreError::StateConflict { .. }) => continue,
+                                _ => break,
+                            }
+                        }
+                        // The row is gone (undo removed it) or unreadable:
+                        // there is nothing to record the failure against.
+                        _ => break,
+                    }
                 }
             }
             return ApplyReport {
