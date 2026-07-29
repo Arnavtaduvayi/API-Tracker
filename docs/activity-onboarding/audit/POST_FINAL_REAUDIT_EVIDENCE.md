@@ -306,7 +306,36 @@ loaded, and nothing this work did created an agent.
 
 ## 6. Test counts on the final head
 
-Filled from the final run; see §5 for the commands.
+```text
+cargo fmt --all --check                                PASS
+cargo +stable clippy --workspace --all-targets -D warnings   PASS — 0 warnings
+cargo test --workspace --all-targets                   40 binaries, 552 passed,
+                                                       0 failed, 9 ignored
+cargo build --workspace --release                      PASS
+bash scripts/smoke.sh                                  140 passed, 0 failed
+
+apps/desktop:
+  npm ci                                               PASS (lockfile)
+  prettier --check src                                 PASS
+  eslint src                                           PASS — 0 problems
+  tsc --noEmit                                         PASS
+  vitest                                               11 files, 102 passed, 0 failed
+  vite build                                           PASS
+```
+
+Validation scripts (all wired into `ci.yml`):
+
+```text
+tracking_validate_macos.sh --scope selfcheck    5/5 checks, 0 failed
+validation_harness_mutants.sh                   8 mutants, 8 killed, 0 survived
+validation_ownership_tests.sh                  29 passed, 0 failed
+validation_manifest_check.sh                   37 passed, 0 failed
+validation_asserter_tests.sh                   33 passed, 0 failed
+```
+
+Not run locally, for the reason in §5: `gateway_validate_macos.sh`,
+`--scope full`, `--require-service`, and the packaged macOS service lifecycle.
+Those run only on the disposable CI runner.
 
 * New test files added by this remediation:
   * `crates/tracking/tests/verification_concurrency.rs` — 12
