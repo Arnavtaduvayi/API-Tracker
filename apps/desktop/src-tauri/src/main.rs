@@ -259,6 +259,27 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
         install_gateway_route_key(&state, vault, false);
         Ok(())
     });
+    // Re-seal any `.env` restore record an earlier build stored in plaintext
+    // (RA-006). ADR 0028 has always said this runs in "the desktop's unlocked
+    // commands"; until ENC-01 it did not, so a user who never opens a terminal
+    // — the persona this whole feature exists for — kept that plaintext in
+    // `vault.db` indefinitely. The CLI runs the same function at its own
+    // unlock, so the two cannot diverge again.
+    //
+    // Best-effort by design: a vault that cannot be migrated right now (a
+    // concurrent writer, a read-only volume) must not make unlocking fail.
+    // It is marker-guarded, so a completed vault is never re-scanned, and the
+    // next unlock retries anything left undone.
+    if let Err(e) = with_vault(&state, |vault| {
+        api_tracker_gateway::envlink::upgrade_restore_records(vault).map(|_| ())
+    }) {
+        // The code, never the value, and never the row it came from.
+        eprintln!(
+            "warning: legacy rollback records were not re-sealed ({}); \
+             Tethra will try again at the next unlock",
+            e.code
+        );
+    }
     Ok(())
 }
 

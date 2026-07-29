@@ -28,6 +28,7 @@ use api_tracker_core::envfile::{EnvDocument, GATEWAY_MARKER_TAG};
 use api_tracker_core::envrestore::{RestoreCrypto, SealedValue};
 use api_tracker_core::error::{CoreError, Result};
 use api_tracker_core::secret::SecretString;
+use api_tracker_core::vault::UnlockedVault;
 use api_tracker_core::{audit, envgov, providers, scanner};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -1108,11 +1109,10 @@ pub fn scrub_stored_prior_env_once(
     conn: &Connection,
     crypto: Option<&RestoreCrypto>,
 ) -> Result<usize> {
-    const MARKER: &str = "envlink_prior_scrub_v1";
     let done: Option<String> = conn
         .query_row(
             "SELECT value FROM vault_meta WHERE key = ?1",
-            [MARKER],
+            [SCRUB_MARKER],
             |r| r.get(0),
         )
         .optional()?;
@@ -1127,12 +1127,140 @@ pub fn scrub_stored_prior_env_once(
     if crypto.is_none() {
         return Ok(0);
     }
-    let scrubbed = scrub_stored_prior_env(conn, crypto)?;
-    conn.execute(
-        "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
-        rusqlite::params![MARKER, api_tracker_core::clock::now_rfc3339()],
-    )?;
-    Ok(scrubbed)
+
+    // ONE TRANSACTION over the rewrite AND the marker (`ENC-01`).
+    //
+    // Without it the loop committed each row on its own and the marker was a
+    // separate statement afterwards, so an interruption could leave the vault
+    // half-migrated with nothing recording that. Half-migrated is not itself
+    // dangerous here — the rewrite is idempotent and the lazy path in
+    // `existing_prior` still redacts whatever a pass missed — but "the marker
+    // says done" and "every row is sealed" have to be the same fact, or a
+    // resumed run will skip the remainder.
+    //
+    // BEGIN IMMEDIATE rather than DEFERRED: this is a read-modify-write over
+    // rows the desktop, the CLI and the gateway all touch, and taking the
+    // write lock up front turns a lost update into an honest `Busy`.
+    //
+    // No plaintext is deleted before its sealed replacement is committed:
+    // every row is rewritten in place with the sealed form, and the old bytes
+    // are only released when this transaction commits.
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let outcome = (|| -> Result<usize> {
+        let scrubbed = scrub_stored_prior_env(conn, crypto)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![SCRUB_MARKER, api_tracker_core::clock::now_rfc3339()],
+        )?;
+        // A version alongside the timestamp, so a future build can tell "this
+        // vault was migrated by the v1 rule" from "never migrated" without
+        // re-scanning every link row.
+        conn.execute(
+            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![SCRUB_VERSION_KEY, PRIOR_ENV_VERSION.to_string()],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO vault_meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![SCRUB_COUNT_KEY, scrubbed.to_string()],
+        )?;
+        Ok(scrubbed)
+    })();
+    match outcome {
+        Ok(scrubbed) => {
+            conn.execute_batch("COMMIT")?;
+            // The rows are sealed, but the pages holding their plaintext can
+            // still sit in the write-ahead log. `secure_delete` (set in
+            // `db::configure`) overwrites freed pages inside the database
+            // file; the WAL is a separate file and needs the checkpoint.
+            // Documented honestly in KNOWN_LIMITATIONS.md: this reduces
+            // residue, it does not overwrite free space elsewhere on the
+            // volume, and it cannot reach a filesystem snapshot or a backup
+            // taken before the upgrade.
+            api_tracker_core::db::checkpoint_truncate(conn);
+            Ok(scrubbed)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// `vault_meta` keys recording that the legacy-rollback migration ran, what
+/// rule it applied, and how much it rewrote. Values are counts and
+/// timestamps; no key material and no restore value is ever recorded here.
+const SCRUB_MARKER: &str = "envlink_prior_scrub_v1";
+const SCRUB_VERSION_KEY: &str = "envlink_prior_scrub_version";
+const SCRUB_COUNT_KEY: &str = "envlink_prior_scrub_rows";
+
+/// What one legacy-rollback migration pass did. Carries counts and a status —
+/// never a value, and never a reason a value could be reconstructed from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreUpgrade {
+    /// The migration ran to completion in this call.
+    pub ran: bool,
+    /// Link rows re-sealed. Zero is normal: most vaults have no legacy rows.
+    pub rewritten: usize,
+    /// A previous run already completed it; nothing was scanned.
+    pub already_done: bool,
+    /// Why it did not run, when it did not. Safe to show a user verbatim.
+    pub deferred: Option<&'static str>,
+}
+
+/// Re-seal any `.env` restore record an earlier build stored in plaintext
+/// (`RA-006`), from whichever front end reaches an unlocked vault first.
+///
+/// # Why this is here and not in each application
+///
+/// ADR 0028 states the scrub runs at unlock in "`Ctx::unlocked`, and the
+/// desktop's unlocked commands", and that this closes the gap for a user who
+/// only ever uses the GUI. The desktop call site did not exist (`ENC-01`), so
+/// the persona the ADR names as the reason this feature exists was the one
+/// persona whose plaintext was never re-sealed. Both front ends now call THIS
+/// function, so the claim cannot drift from one of them again.
+///
+/// Unlock is the right moment because it is the only one at which a key is
+/// definitionally available: the read-only entry points hold no vault, and
+/// redacting a legacy record without a key would destroy the user's ability
+/// to undo the link.
+///
+/// Idempotent, transactional, resumable, and guarded by a marker so a
+/// completed vault is never re-scanned. Best-effort at the call site: it must
+/// never stop the command the user actually asked for — but it returns what
+/// happened so a caller can surface a failure rather than swallow it.
+pub fn upgrade_restore_records(vault: &mut UnlockedVault) -> Result<RestoreUpgrade> {
+    let already: Option<String> = vault
+        .connection()
+        .query_row(
+            "SELECT value FROM vault_meta WHERE key = ?1",
+            [SCRUB_MARKER],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if already.is_some() {
+        return Ok(RestoreUpgrade {
+            already_done: true,
+            ..Default::default()
+        });
+    }
+    let crypto = match vault.env_restore_crypto() {
+        Ok(c) => c,
+        Err(_) => {
+            return Ok(RestoreUpgrade {
+                deferred: Some(
+                    "the restore-encryption key was not available; \
+                     legacy rollback records will be re-sealed at the next unlock",
+                ),
+                ..Default::default()
+            })
+        }
+    };
+    let rewritten = scrub_stored_prior_env_once(vault.connection(), Some(&crypto))?;
+    Ok(RestoreUpgrade {
+        ran: true,
+        rewritten,
+        ..Default::default()
+    })
 }
 
 /// Upgrade every stored restore record so it holds no plaintext value.

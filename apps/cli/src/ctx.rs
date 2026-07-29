@@ -322,11 +322,20 @@ pub fn confirm(question: &str, assume_yes: bool) -> Result<bool> {
 /// the user's ability to undo the link. Best-effort and once per vault — it
 /// must never stop the command the user actually asked for.
 fn upgrade_restore_records(vault: &mut UnlockedVault) {
-    let Ok(crypto) = vault.env_restore_crypto() else {
-        return;
-    };
-    let _ = api_tracker_gateway::envlink::scrub_stored_prior_env_once(
-        vault.connection(),
-        Some(&crypto),
-    );
+    // The migration itself lives in the gateway crate so the desktop runs the
+    // SAME code (`ENC-01`): ADR 0028 claimed both front ends ran it, and only
+    // this one did, which left a GUI-only user's plaintext in place forever.
+    match api_tracker_gateway::envlink::upgrade_restore_records(vault) {
+        Ok(_) => {}
+        Err(e) => {
+            // Actionable, and value-free: the user is told the upgrade did not
+            // complete and that it will be retried, not what was in the row.
+            eprintln!(
+                "warning: could not re-seal legacy rollback records ({}); \
+                 they remain readable in the vault database and Tethra will try \
+                 again at the next unlock",
+                e.code()
+            );
+        }
+    }
 }

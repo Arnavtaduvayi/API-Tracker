@@ -100,11 +100,43 @@ redacted rather than carried forward — but the one-time scrub is a deliberate
 no-op when keyless, because redacting would take away an undo that a later,
 unlocked call can still preserve.
 
-The scrub therefore runs at **unlock** (CLI `Ctx::unlocked`, and the desktop's
-unlocked commands), not from `track status`/`track doctor`, which hold no
-vault. That closes the audit's related observation that
-`scrub_stored_prior_env_once` had three call sites, all in the CLI, and that a
-GUI-only user — the persona this PR exists for — never ran it.
+The scrub therefore runs at **unlock**, not from `track status`/`track doctor`,
+which hold no vault. Both front ends reach it through one function,
+`envlink::upgrade_restore_records`:
+
+* CLI — `apps/cli/src/ctx.rs`, from `Ctx::unlocked`.
+* Desktop — `apps/desktop/src-tauri/src/main.rs`, from the `vault_unlock`
+  command.
+
+### Correction (`ENC-01`, 2026-07-28)
+
+This paragraph previously claimed the same thing about "the desktop's unlocked
+commands" **while that call site did not exist**. The only keyed caller was in
+the CLI, so the persona this ADR names as the reason the work was done — a user
+who never opens a terminal — was the one persona whose `RA-006` plaintext was
+never re-sealed. It stayed in `vault.db` indefinitely.
+
+The desktop call site now exists, and both front ends call the same function so
+they cannot diverge again. `crates/gateway/tests/legacy_rollback_migration.rs`
+asserts that both call sites are present and that the desktop's is on the
+`vault_unlock` path; removing either fails the suite.
+
+The migration is transactional (the row rewrite and the completion marker
+commit together), idempotent, marker-guarded so a finished vault is never
+re-scanned, and resumable — an interrupted pass leaves no marker, so the next
+unlock repeats it. It records `envlink_prior_scrub_v1`,
+`envlink_prior_scrub_version` and `envlink_prior_scrub_rows` in `vault_meta`;
+those carry timestamps and counts, never a value. A row this build cannot parse,
+or one a newer build wrote, is left byte-identical rather than rewritten by a
+guess, and does not stop the rest of the pass.
+
+After committing, the WAL is checkpointed and truncated. `secure_delete` (set in
+`db::configure`) overwrites freed pages inside the database file; the WAL is a
+separate file and needs the checkpoint. The residual limits are stated in
+`docs/activity-onboarding/KNOWN_LIMITATIONS.md`: this leaves no copy in
+`vault.db`, `vault.db-wal` or `vault.db-shm`, and it does **not** reach free
+space elsewhere on the volume, a filesystem snapshot, a Time Machine copy, or a
+backup taken before the upgrade.
 
 ## Alternatives considered
 
