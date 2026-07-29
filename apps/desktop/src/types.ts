@@ -1563,3 +1563,243 @@ export interface TrackingUndoReport {
   removed_routes: string[];
   kept_routes: string[];
 }
+
+// --- Projects-first live activity (ADR 0029) ---------------------------
+//
+// These mirror `api_tracker_tracking::project` and the `api_tracker_core`
+// project* modules. Every "absent" field is `null` rather than `0`, because the
+// distinction between "measured zero" and "not reported" is the whole point of
+// the cost and token surfaces (see usage.ts).
+
+export interface ProjectFolderLink {
+  project_id: string;
+  folder_path: string;
+  tracking_enabled: boolean;
+  linked_at: string;
+  last_scan_at: string | null;
+  scan_fingerprint: string | null;
+  applied_generation: number;
+  last_activity_refresh_at: string | null;
+  row_version: number;
+}
+
+export type DetectedStatus = "pending" | "completed" | "ignored" | "external" | "merged";
+export type DetectedSourceKind = "env_file" | "manifest" | "dependency";
+
+/** An integration Tethra can see but whose vault record is unfinished. There is
+ *  no value field, in the DTO or in the table behind it. */
+export interface DetectedCredential {
+  id: string;
+  project_id: string;
+  env_var: string;
+  suggested_provider: string | null;
+  suggested_name: string | null;
+  suggested_environment: string | null;
+  source_kind: DetectedSourceKind;
+  source_file: string;
+  status: DetectedStatus;
+  resolved_credential_id: string | null;
+  first_detected_at: string;
+  last_detected_at: string;
+  row_version: number;
+}
+
+export interface DetectedPreview {
+  env_var: string;
+  suggested_provider: string | null;
+  suggested_name: string;
+  source_file: string;
+  source_kind: DetectedSourceKind;
+  already_have_credential: boolean;
+}
+
+export interface PendingOrigin {
+  provider_id: string;
+  origin: string;
+}
+
+/** What confirming a folder link would change. Derived from the plan on the
+ *  Rust side; the plan itself is deliberately not sent across IPC. */
+export interface PlanSummaryView {
+  attribution_requested: boolean;
+  files_to_edit: string[];
+  routes_to_create: number;
+  service_change: boolean;
+  restart_expected: boolean;
+  port: number;
+  warnings: string[];
+}
+
+export interface FolderLinkPreview {
+  project_id: string;
+  folder: string;
+  detection: TrackingScan;
+  /** null when nothing is auto-configurable yet — every detected destination is
+   *  still awaiting approval. Such a preview cannot be confirmed. */
+  summary: PlanSummaryView | null;
+  digest: string;
+  disclosure: string[];
+  pending_origin_approvals: PendingOrigin[];
+  detected_credentials: DetectedPreview[];
+  already_configured: boolean;
+  scan_fingerprint: string;
+}
+
+export interface LinkOutcome {
+  link: ProjectFolderLink;
+  report: TrackingApplyReport;
+  detected_credentials: DetectedCredential[];
+}
+
+export interface ProjectOverview {
+  project_id: string;
+  link: ProjectFolderLink | null;
+  status: TrackingStatus | null;
+  scan_stale: boolean;
+  configuration_behind: boolean;
+  detected_credentials: DetectedCredential[];
+  credentials_needing_details: number;
+  attribution_paused: boolean;
+}
+
+export type SeriesGranularity = "minute" | "hour" | "day";
+
+export interface ProjectSeriesPoint {
+  bucket_start: string;
+  requests: number;
+  errors: number;
+  avg_latency_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  estimated_micros: number | null;
+  cost_complete: boolean;
+}
+
+export interface ObservedIntegration {
+  host: string;
+  provider: string | null;
+  user_provider: string | null;
+  user_api_name: string | null;
+  requests: number;
+  errors: number;
+  avg_latency_ms: number | null;
+  first_at: string;
+  last_at: string;
+  internal: boolean;
+}
+
+export interface ProjectActivityRow {
+  id: string;
+  at: string;
+  host: string;
+  provider: string | null;
+  method: string;
+  endpoint: string;
+  status_code: number | null;
+  status_class: string;
+  outcome: string;
+  latency_ms: number | null;
+  ttfb_ms: number | null;
+  request_bytes: number | null;
+  response_bytes: number | null;
+  observation_source: string;
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  credential_id: string | null;
+  attribution_confidence: string | null;
+  estimated_micros: number | null;
+  cost_complete: boolean;
+}
+
+export type UnpricedReason =
+  | "no_pricing_record"
+  | "model_not_detected"
+  | "usage_not_extracted"
+  | "non_token_unit"
+  | "unsupported_currency";
+
+export interface PricedUsage {
+  provider: string;
+  model: string;
+  matched_model: string;
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  micros: number;
+  currency: string;
+  pricing_source: string;
+  effective_from: string;
+  last_verified: string;
+  stale: boolean;
+  is_override: boolean;
+  note: string;
+  complete: boolean;
+  unpriced_dimensions: string[];
+}
+
+export interface UnpricedUsage {
+  provider: string;
+  model: string | null;
+  requests: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  reason: UnpricedReason;
+}
+
+export interface ProjectCostCoverage {
+  estimated_micros: number;
+  currency: string;
+  priced_requests: number;
+  priced_input_tokens: number;
+  priced_output_tokens: number;
+  unpriced_requests: number;
+  unpriced_tokens: number;
+  requests_with_unknown_usage: number;
+  /** null when no tokens are known at all — there is no ratio to state. */
+  token_coverage: number | null;
+  complete: boolean;
+  any_stale_pricing: boolean;
+  truncated: boolean;
+  priced: PricedUsage[];
+  unpriced: UnpricedUsage[];
+}
+
+export interface ActivityFacets {
+  hosts: string[];
+  providers: string[];
+  models: string[];
+  status_classes: string[];
+  endpoints: string[];
+  observation_sources: string[];
+}
+
+export interface ProjectActivitySnapshot {
+  project_id: string;
+  since: string;
+  until: string | null;
+  granularity: SeriesGranularity;
+  metrics: ObserveMetrics;
+  no_observations: boolean;
+  series: ProjectSeriesPoint[];
+  integrations: ObservedIntegration[];
+  recent: ProjectActivityRow[];
+  cost: ProjectCostCoverage;
+  facets: ActivityFacets;
+  refreshed_at: string;
+}
+
+export interface ProjectActivityFilter {
+  host?: string | null;
+  provider?: string | null;
+  credential_id?: string | null;
+  status_class?: string | null;
+  endpoint?: string | null;
+  observation_source?: string | null;
+  model?: string | null;
+}
+
+export interface ProjectRestoreEntry {
+  project_id: string;
+  tracking: boolean;
+}

@@ -26,7 +26,12 @@
 // the count that contributed. A real zero remains expressible — hiding a
 // measured zero would be a different lie.
 
-import type { GatewayActivitySummary, UsageSnapshot } from "./types";
+import type {
+  GatewayActivitySummary,
+  ProjectCostCoverage,
+  UnpricedReason,
+  UsageSnapshot,
+} from "./types";
 
 /**
  * Why a token/cost number is, or is not, showable.
@@ -343,4 +348,84 @@ export function snapshotCostAvailability(
 export function ambiguousSumAvailability(sum: number, detail: string): UsageAvailability {
   if (sum > 0) return { kind: "known", covered: 1, total: 1 };
   return { kind: "unknown", total: 0, detail };
+}
+
+// --- projects-first cost coverage (ADR 0029) --------------------------
+
+/** The subject wording for a project's locally estimated cost. */
+export const PROJECT_ESTIMATED_COST: UsageSubject = {
+  name: "Estimated known cost",
+  partialLabel: "Partial cost data",
+  carrier: "a priced token count",
+  unit: "request(s)",
+  absentDetail:
+    "an estimate exists only for requests whose model, tokens and local pricing are all known",
+};
+
+/** The subject wording for a project's observed token usage. */
+export const PROJECT_TOKENS: UsageSubject = {
+  name: "Tokens",
+  partialLabel: "Partial token data",
+  carrier: "a reported token count",
+  unit: "request(s)",
+  absentDetail:
+    "providers report usage only on some responses, and absent usage is never counted as zero",
+};
+
+/**
+ * Cost availability for one project window.
+ *
+ * The denominator is every request the window saw, not just the priced ones:
+ * a total computed over 4 priced requests while 96 went unpriced is a floor,
+ * and comparing against the priced count alone would report it as complete.
+ */
+export function projectCostAvailability(c: ProjectCostCoverage): UsageAvailability {
+  const total = c.priced_requests + c.unpriced_requests + c.requests_with_unknown_usage;
+  const base = fromCoverage(c.priced_requests, total);
+  // A record past its verification horizon still prices, but the number it
+  // produced is as old as the record.
+  return c.any_stale_pricing ? markStale(base, null) : base;
+}
+
+/**
+ * Token availability for one project window.
+ *
+ * Requests whose usage was never reported are the uncovered part. Their tokens
+ * are unknown, so they must widen the denominator rather than contribute zero
+ * to the numerator.
+ */
+export function projectTokenAvailability(c: ProjectCostCoverage): UsageAvailability {
+  const withTokens = c.priced_requests + c.unpriced_requests;
+  return fromCoverage(withTokens, withTokens + c.requests_with_unknown_usage);
+}
+
+/**
+ * The coverage sentence for a partially priced window, e.g.
+ * "76% of token usage priced". Null when there is no ratio to state — which is
+ * not the same as 0%.
+ */
+export function tokenCoverageSentence(c: ProjectCostCoverage): string | null {
+  if (c.token_coverage === null) return null;
+  const pct = Math.round(c.token_coverage * 100);
+  return `${pct}% of token usage priced`;
+}
+
+/** Why a slice of usage carries no estimate, as a sentence. */
+export function unpricedReasonSentence(reason: UnpricedReason): string {
+  switch (reason) {
+    case "no_pricing_record":
+      return "no local pricing record covers this model";
+    case "model_not_detected":
+      return "the response did not report a model";
+    case "usage_not_extracted":
+      return "token usage was not reported for these requests";
+    case "non_token_unit":
+      return "this model's pricing record is not token-based";
+    case "unsupported_currency":
+      return "this model's pricing record is in another currency";
+    default:
+      // An unrecognized reason is reported as unrecognized rather than printed
+      // bare, matching how every other enum reaches this UI.
+      return "the reason was not recognized";
+  }
 }

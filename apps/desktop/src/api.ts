@@ -55,6 +55,14 @@ import type {
   Template,
   TemplateApplyOutcome,
   Project,
+  ProjectActivityFilter,
+  ProjectActivitySnapshot,
+  ProjectOverview,
+  ProjectRestoreEntry,
+  DetectedCredential,
+  DetectedStatus,
+  FolderLinkPreview,
+  LinkOutcome,
   ProviderConnection,
   ProviderKeyListing,
   CredentialActivitySources,
@@ -636,4 +644,55 @@ export const api = {
   trackingForegroundStop: () => call<void>("tracking_foreground_stop"),
   trackingResumeAttribution: (password: string) =>
     call<void>("tracking_resume_attribution", { password }),
+
+  // --- Projects-first live activity (ADR 0029) -------------------------
+
+  /** What selecting this folder would do, plus the digest that binds a
+   *  confirmation to it. Read-only with respect to the user's files. */
+  projectFolderPreview: (project: string, folder: string) =>
+    call<FolderLinkPreview>("project_folder_preview", { project, folder }),
+  /** Apply the previewed configuration. `digest` must be the one the user was
+   *  shown; a mismatch is refused rather than reconciled. */
+  projectFolderLink: (
+    project: string,
+    folder: string,
+    digest: string,
+    password: string | null,
+  ) => call<LinkOutcome>("project_folder_link", { project, folder, digest, password }),
+  /** Configuration and health. Resolves present-tense health, so this is for
+   *  page open, manual refresh and focus — not for the 5s timer. */
+  projectTrackingOverview: (project: string) =>
+    call<ProjectOverview>("project_tracking_overview", { project }),
+  /** The live snapshot. Lock-free-ish by design: the backend reads it without
+   *  touching the inactivity clock, so polling cannot defeat auto-lock. */
+  projectActivity: (
+    project: string,
+    range: string,
+    filter: ProjectActivityFilter = {},
+    limit?: number,
+  ) => call<ProjectActivitySnapshot>("project_activity", { project, range, filter, limit }),
+  /** Re-run detection. Writes no project file and creates no route. */
+  projectRescan: (project: string) => call<DetectedCredential[]>("project_rescan", { project }),
+  projectSetTrackingEnabled: (project: string, enabled: boolean) =>
+    call<void>("project_set_tracking_enabled", { project, enabled }),
+  /** Forget the folder association. Undoing managed file changes is the
+   *  separate `trackingUndo` call. */
+  projectUnlinkFolder: (project: string) => call<boolean>("project_unlink_folder", { project }),
+  projectResolveDetection: (id: string, status: DetectedStatus, credential: string | null) =>
+    call<DetectedCredential>("project_resolve_detection", { id, status, credential }),
+  projectUpdateDetection: (
+    id: string,
+    fields: { name?: string; provider?: string; environment?: string },
+  ) =>
+    call<DetectedCredential>("project_update_detection", {
+      id,
+      name: fields.name ?? null,
+      provider: fields.provider ?? null,
+      environment: fields.environment ?? null,
+    }),
+  /** Name an observed host the catalog does not know. Creates no route and
+   *  approves no destination. */
+  projectNameUnknownApi: (host: string, provider: string | null, apiName: string | null) =>
+    call<void>("project_name_unknown_api", { host, provider, apiName }),
+  projectRestoreTracking: () => call<ProjectRestoreEntry[]>("project_restore_tracking"),
 };

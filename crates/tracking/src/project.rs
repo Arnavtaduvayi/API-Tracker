@@ -122,10 +122,18 @@ pub struct FolderLinkPreview {
     pub project_id: String,
     pub folder: String,
     pub detection: ProjectDetection,
-    /// `None` when nothing is auto-configurable yet — typically because every
-    /// detected destination is still awaiting the user's approval. A preview
-    /// with no plan has an empty `digest` and cannot be confirmed.
+    /// The plan itself is NOT serialized across IPC. It is an orchestrator
+    /// value with its own enums and an embedded per-link CSPRNG slug, and a
+    /// frontend has no use for it: `confirm_link` re-plans from scratch and
+    /// compares the digest, so nothing needs to be sent back. What a surface
+    /// needs is in [`FolderLinkPreview::summary`].
+    #[serde(skip)]
     pub plan: Option<TrackingPlan>,
+    /// What the plan would do, in terms a screen can render. `None` when
+    /// nothing is auto-configurable yet — typically because every detected
+    /// destination is still awaiting the user's approval. A preview with no
+    /// summary has an empty `digest` and cannot be confirmed.
+    pub summary: Option<PlanSummaryView>,
     /// Binds this preview to the apply that follows it. [`confirm_link`]
     /// re-plans and refuses a mismatch, so a stale preview — including one
     /// prepared before a vault lock — cannot be applied.
@@ -146,6 +154,30 @@ pub struct FolderLinkPreview {
     /// up-to-date configuration, in which case confirming changes nothing.
     pub already_configured: bool,
     pub scan_fingerprint: String,
+}
+
+/// What confirming a folder link would change, for display.
+///
+/// Derived from the plan rather than restated, so it cannot describe less than
+/// the plan will do.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlanSummaryView {
+    /// Whether the master password will be asked for, to enable
+    /// per-credential attribution. Tracking works without it.
+    pub attribution_requested: bool,
+    /// Project files that will be edited, folder-relative as the plan names
+    /// them.
+    pub files_to_edit: Vec<String>,
+    /// Routes that will be created (as opposed to reused).
+    pub routes_to_create: usize,
+    /// Whether the local helper will be installed or started.
+    pub service_change: bool,
+    /// Whether the user must restart their own project for tracking to take
+    /// effect.
+    pub restart_expected: bool,
+    pub port: u16,
+    /// Non-fatal cautions, already rendered as sentences by the planner.
+    pub warnings: Vec<String>,
 }
 
 /// A destination inferred from project content, awaiting its own approval.
@@ -343,6 +375,19 @@ pub fn prepare_link(
         None => String::new(),
     };
     let already_configured = is_configured(conn, data_dir, project_id, folder, &fingerprint)?;
+    let summary = planned.as_ref().map(|p| PlanSummaryView {
+        attribution_requested: matches!(p.attribution, plan::AttributionPlan::Requested),
+        files_to_edit: p
+            .link_plans
+            .iter()
+            .flat_map(|lp| lp.files.iter().map(|f| f.path.clone()))
+            .collect(),
+        routes_to_create: p.route_actions.iter().filter(|r| r.creates()).count(),
+        service_change: !p.service_actions.is_empty(),
+        restart_expected: !matches!(p.restart_expectation, plan::RestartExpectation::NotNeeded),
+        port: p.port,
+        warnings: p.warnings.iter().map(|w| w.describe()).collect(),
+    });
     let disclosure = match &planned {
         Some(p) => disclosure_for(p, &detection),
         None => vec![
@@ -358,6 +403,7 @@ pub fn prepare_link(
         disclosure,
         detection,
         plan: planned,
+        summary,
         digest,
         pending_origin_approvals,
         detected_credentials,
