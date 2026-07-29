@@ -53,27 +53,63 @@ fn status_of(resp: &str) -> u16 {
         .unwrap_or(0)
 }
 
-/// Send a raw request, read whatever comes back (possibly nothing).
+/// Send a raw request and read the COMPLETE response — head, and the whole
+/// body its `Content-Length` declares.
+///
+/// This used to stop at the first `\r\n\r\n`, i.e. at the end of the head. So
+/// whether the returned string contained the body depended on whether the
+/// kernel happened to deliver head and body in one segment. Two identical
+/// responses could therefore compare as different, which is precisely what
+/// `audit_prefix_and_encoding_confusion_cannot_reach_or_escape_a_route`
+/// asserts they are not — it compares two 404s byte-for-byte to prove there is
+/// no enumeration oracle, and it failed in CI on a pair whose heads were
+/// identical and whose `Content-Length` was the same 174 both times.
+///
+/// A test whose verdict depends on TCP segmentation can fail when the product
+/// is correct, and — worse for this suite — can pass when it is not. Reading
+/// the declared length makes the comparison deterministic.
 fn probe(gw: &RunningGateway, raw: &str) -> String {
     let mut c = gw.connect();
     c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let _ = c.write_all(raw.as_bytes());
     let _ = c.flush();
-    let mut out = Vec::new();
+
+    let mut out: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
-    loop {
+
+    // 1. Everything up to and including the end of the head.
+    let head_end = loop {
+        if let Some(i) = out.windows(4).position(|w| w == b"\r\n\r\n") {
+            break Some(i + 4);
+        }
+        if out.len() > 65536 {
+            break None;
+        }
         match c.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                out.extend_from_slice(&buf[..n]);
-                if out.len() > 65536 {
-                    break;
-                }
-                if out.windows(4).any(|w| w == b"\r\n\r\n") {
-                    break;
+            Ok(0) => break None,
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(_) => break None,
+        }
+    };
+
+    // 2. The body, exactly as long as the head says it is. A response with no
+    //    Content-Length (or an unparseable one) is returned as-is rather than
+    //    read to EOF, so a kept-alive connection cannot stall the test for the
+    //    full read timeout.
+    if let Some(head_end) = head_end {
+        let head = String::from_utf8_lossy(&out[..head_end]).to_ascii_lowercase();
+        let declared = head.split("\r\n").find_map(|line| {
+            line.strip_prefix("content-length:")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+        });
+        if let Some(want) = declared {
+            while out.len() < head_end + want {
+                match c.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => out.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
                 }
             }
-            Err(_) => break,
         }
     }
     String::from_utf8_lossy(&out).to_string()
