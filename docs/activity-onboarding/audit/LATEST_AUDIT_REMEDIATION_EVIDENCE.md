@@ -573,6 +573,50 @@ killed.
 
 ---
 
+## CI, on the exact head
+
+Six of six, on `1e3c164`, after three rounds in which CI found what the local
+suites could not. The runs before it are not evidence about this head and are
+not quoted as such; what each of them found is recorded above.
+
+```text
+Rust (core + CLI)                  pass   5m21s
+Rust core (Windows)                pass  10m53s
+Desktop frontend                   pass     49s
+Desktop backend (macOS)            pass   2m31s
+Packaged app + validation (macOS)  pass   7m31s
+Packaged macOS service lifecycle   pass   9m09s
+```
+
+**The artifacts, not only the status.** Every scope that emits a results
+document was bound by exact check IDENTITY, in a real run, with nothing
+unrecognised:
+
+```text
+gateway:lifecycle   register: 50 required checks (7 optional), 0 not passed
+                    SET equality: 50/50 declared executed, 0 unrecognised rows
+full:service        register: 64 required checks (0 optional), 0 not passed
+                    SET equality: 64/64 declared executed, 0 unrecognised rows
+offline:none        SET equality: 21/21 declared executed, 0 unrecognised rows
+```
+
+and the gates around them:
+
+```text
+validation_manifest.json is exactly what the harness sources produce
+MANIFEST CHECK RESULT:     38 passed, 0 failed
+MANIFEST MUTATION RESULT:   8 killed, 0 survived
+HARNESS MUTATION RESULT:    8 killed, 0 survived
+ASSERTER FORGERY RESULT:   61 passed, 0 failed
+OWNERSHIP TEST RESULT:     53 passed, 0 failed
+PACKAGED TRACKING VALIDATION (selfcheck): 5/5
+PACKAGED TRACKING VALIDATION (offline):  21/21
+PASS: the bundled helper read 21 embedded manifests under env -i with cwd=/
+```
+
+That last line is `NEW-47`: what used to be a comment claiming a `cp` proved
+self-containment is now a measurement.
+
 ## A process incident, recorded because it affects how the numbers were taken
 
 Parts of this remediation ran concurrently in one working tree. Twice, a tool
