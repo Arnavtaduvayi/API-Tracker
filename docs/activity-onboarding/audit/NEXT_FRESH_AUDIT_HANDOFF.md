@@ -259,6 +259,36 @@ find it, and that it is accurate.
   the owner's own pushes behave, which is not a change a remediation branch
   should make on someone's behalf.
 
+## Two things this remediation's own CI found, and one it made robust
+
+Worth your attention because they are the only defects found *after* the local
+suites were green, and because two of them were found by machinery added in
+this same pass.
+
+1. **The gateway scope's first real run.** All 50 required identities matched
+   (`SET equality: 50/50, 0 unrecognised rows`) and the job still failed:
+   `group 'REPAIR' ran but the manifest does not declare it`. `REPAIR` has no
+   required checks, so it had no entry in the required-count table the
+   validator was using as the set of known groups. The local suite could not
+   have caught it — its synthesised documents built the group breakdown from
+   required rows only, so a wholly-optional group never appeared in a test
+   document. That is this pass's own defect class, one level up, in the test
+   harness. Check the fix: a group the manifest names nowhere must still be
+   refused, and a failure inside an optional group must still be refused.
+2. **`NEW-20` caught a leak introduced by `VAL-05-R`.** The new check register
+   is written beside the ownership ledger and teardown swept only the ledger,
+   so the run left `<ledger>.checks.tsv` in `/private/tmp`. The precondition
+   glob added in this same pass refused the next service run. Both are fixed;
+   verify the sweep covers everything the register era added.
+3. **A flaky fixture, made loud rather than quiet.**
+   `crates/core/tests/gitbound_scanning.rs` builds a 60-commit repository as
+   SETUP and failed once on a hosted runner with `error: bad tree object HEAD`
+   at the 53rd commit — before the scanner ran. Setup `git` calls now retry
+   twice and **print every transient**, so a run that needed one says so.
+   Judge that: a retry is a place to hide a real defect, and the reason it is
+   defensible here is that the failure is in fixture construction, not in the
+   product. If you disagree, that is a finding.
+
 ## The defect class this codebase keeps producing
 
 Four consecutive audits have found the same thing wearing different clothes:

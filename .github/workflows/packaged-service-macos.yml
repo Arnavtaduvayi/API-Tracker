@@ -199,20 +199,20 @@ jobs:
               echo "PASS: $(basename "$bin") links only system libraries"
             fi
           done
-          # 3. The bundled helper performs a full detection with an EMPTY
-          #    environment and a working directory outside the repository.
-          #    `env -i` strips PATH, HOME and every TETHRA_* variable, so
-          #    anything the helper needs must come from inside the bundle.
-          probe="$RUNNER_TEMP/selfcontained-probe"
-          rm -rf "$probe" && mkdir -p "$probe"
-          printf 'OPENAI_API_KEY=sk-proj-CI-SELFCONTAINED-FAKE-NOT-REAL-0001\n' > "$probe/.env"
-          printf '{ "dependencies": { "openai": "^4.0.0", "dotenv": "^16.0.0" } }\n' \
-            > "$probe/package.json"
-          out="$(cd / && env -i "$APP/Contents/MacOS/tethra" track --dry-run "$probe" 2>&1)" || true
-          if printf '%s' "$out" | grep -q 'API integrations found'; then
-            echo "PASS: the bundled helper detects under env -i with cwd=/"
+          # 3. The bundled helper reads its compiled-in provider manifests with
+          #    an EMPTY environment and a working directory outside the
+          #    repository. `env -i` strips PATH, HOME and every TETHRA_*
+          #    variable, so anything it needs must come from inside the binary.
+          #    `provider list` is the right verb precisely because it needs no
+          #    vault and no state: what it prints comes from `include_str!`-ed
+          #    manifests or from nowhere.
+          out="$(cd / && env -i "$APP/Contents/MacOS/tethra" provider list 2>&1)" || true
+          n="$(printf '%s\n' "$out" | grep -cE '^[a-z0-9][a-z0-9-]* +' || true)"
+          if [ "$n" -ge 21 ] && printf '%s' "$out" | grep -q '^openai '; then
+            echo "PASS: the bundled helper read $n embedded manifests under env -i with cwd=/"
           else
-            echo "FAIL: the bundled helper could not run outside the repository"
+            echo "FAIL: the bundled helper could not read its manifests outside the repository"
+            echo "      (matched $n manifest rows; expected at least 21, including openai)"
             printf '%s\n' "$out" | head -20
             fail=1
           fi

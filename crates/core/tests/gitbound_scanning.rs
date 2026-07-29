@@ -159,18 +159,40 @@ fn assert_stub_reaped(pid_file: &Path) {
     );
 }
 
+/// Run a real `git` command as test SETUP, retrying a transient failure.
+///
+/// These calls build the fixture; they are not the thing under test. On a
+/// hosted runner one of them failed once with `error: bad tree object HEAD`
+/// while writing the 53rd of 60 commits — an object-store hiccup in the
+/// fixture, not a finding about the scanner, which had not run yet. A flaky
+/// SETUP turns a required gate into noise, and noise is how a real failure
+/// gets waved through.
+///
+/// The retry is deliberately loud: every transient is printed, so a run that
+/// needed one says so in the log rather than looking clean. If git keeps
+/// failing the test fails exactly as it did before, with git's own stderr.
 fn git(repo: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        out.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let mut last = String::new();
+    for attempt in 0..3 {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        if out.status.success() {
+            if attempt > 0 {
+                eprintln!("note: git {args:?} succeeded on attempt {}", attempt + 1);
+            }
+            return;
+        }
+        last = String::from_utf8_lossy(&out.stderr).to_string();
+        eprintln!(
+            "note: transient git failure (attempt {}): {last}",
+            attempt + 1
+        );
+    }
+    panic!("git {args:?} failed three times: {last}");
 }
 
 fn init_repo(dir: &Path) {
