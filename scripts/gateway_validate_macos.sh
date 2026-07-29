@@ -711,34 +711,74 @@ elif [ "$CANARY_FOUND" -eq 0 ]; then
 fi
 
 step "30. Negative controls: prove the assertions can FAIL"
-# A validation script that cannot fail proves nothing. These exercise the
-# helpers against conditions that MUST be rejected.
+# A validation script that cannot fail proves nothing.
+#
+# VAL-04: these controls used to RE-IMPLEMENT the comparison inline — they
+# called `db`/`python3` directly and never `assert_db`/`assert_status`. So a
+# neutered primitive (`assert_db(){ ok "$2"; }`) flipped every real assertion
+# from FAIL to PASS while the control still reported PASS, and 8 of the checks
+# in this file flow through those two primitives.
+#
+# A control that does not call the thing it certifies is certifying nothing.
+# These now invoke the REAL primitives and capture what they actually did.
+
+# Run a primitive with the tally and the register detached, and report only
+# whether it recorded a pass. This is the whole trick: the primitive executes
+# exactly as it does in production — same function, same body — but its
+# verdict is OBSERVED instead of counted.
+probe_primitive() {   # probe_primitive <fn> <args...>  -> prints "pass"|"fail"
+  local before_pass=$pass before_fail=$fail out
+  out="$("$@" 2>&1)"
+  local gained_pass=$((pass - before_pass)) gained_fail=$((fail - before_fail))
+  pass=$before_pass
+  fail=$before_fail
+  if [ "$gained_pass" -eq 1 ] && [ "$gained_fail" -eq 0 ]; then
+    printf 'pass'
+  elif [ "$gained_fail" -eq 1 ] && [ "$gained_pass" -eq 0 ]; then
+    printf 'fail'
+  else
+    printf 'malformed(+%dp/+%df) %s' "$gained_pass" "$gained_fail" "$out"
+  fi
+}
+
 if db "SELECT 0" >/dev/null 2>&1; then
-  NEG_OK=1
-  # assert_db must reject a query returning 0.
-  got="$(db "SELECT 0")"; [ "$got" = "1" ] && NEG_OK=0
-  # ...and one returning nothing.
-  got="$(db "SELECT 1 WHERE 0")"; [ "$got" = "1" ] && NEG_OK=0
-  # ...and a syntactically invalid one.
-  got="$(db "SELECT FROM nowhere")"; [ "$got" = "1" ] && NEG_OK=0
-  [ "$NEG_OK" -eq 1 ] \
-    && ok "assert_db rejects false, empty, and erroring queries" \
-    || bad "assert_db would pass a query it must reject"
+  NEG_DETAIL=""
+  # assert_db must REJECT a query returning 0, one returning nothing, and one
+  # that errors — and must ACCEPT a true one. All four through assert_db
+  # itself, so neutering it breaks this control.
+  v="$(probe_primitive assert_db "SELECT 0" "control: false query")"
+  [ "$v" = "fail" ] || NEG_DETAIL="$NEG_DETAIL false-query:$v"
+  v="$(probe_primitive assert_db "SELECT 1 WHERE 0" "control: empty query")"
+  [ "$v" = "fail" ] || NEG_DETAIL="$NEG_DETAIL empty-query:$v"
+  v="$(probe_primitive assert_db "SELECT FROM nowhere" "control: erroring query")"
+  [ "$v" = "fail" ] || NEG_DETAIL="$NEG_DETAIL erroring-query:$v"
+  v="$(probe_primitive assert_db "SELECT 1" "control: true query")"
+  [ "$v" = "pass" ] || NEG_DETAIL="$NEG_DETAIL true-query:$v"
+  if [ -z "$NEG_DETAIL" ]; then
+    ok "assert_db itself rejects false, empty and erroring queries, and accepts a true one"
+  else
+    bad "assert_db did not behave as required ($NEG_DETAIL)"
+  fi
 else
   bad "negative control could not run (no readable database)"
 fi
-# assert_status must reject an absent gateway: nothing is running now.
-if "$CLI" --json gateway status 2>/dev/null | python3 -c '
-import sys, json
-raw = sys.stdin.read()
-if not raw.strip():
-    sys.exit(1)
-g = json.loads(raw).get("gateway")
-sys.exit(0 if g else 1)
-'; then
-  bad "a stopped gateway still reported a live status object"
+
+# assert_status must reject an absent gateway. Nothing is running at this
+# point, so the REAL primitive must record a failure — and it is called here,
+# rather than its python re-implemented inline as before.
+v="$(probe_primitive assert_status 'True' "control: any status property, gateway stopped")"
+if [ "$v" = "fail" ]; then
+  ok "assert_status itself rejects a stopped gateway (an empty response is a failure)"
 else
-  ok "assert_status rejects a stopped gateway (an empty response is a failure)"
+  bad "assert_status did not reject a stopped gateway (observed: $v)"
+fi
+# ...and it must reject a FALSE property even when a gateway IS answering,
+# which is the other half of "this primitive consults its argument".
+v="$(probe_primitive assert_status 'False' "control: a property that is never true")"
+if [ "$v" = "fail" ]; then
+  ok "assert_status rejects a property that evaluates false"
+else
+  bad "assert_status accepted a property that is never true (observed: $v)"
 fi
 
 step "31. Isolation invariant: the user's production service was never touched"
@@ -762,17 +802,45 @@ fi
 
 echo
 echo "=== PACKAGED MACOS RESULT: $pass passed, $fail failed ==="
-# A run that asserted almost nothing must not read as success. This floor is
-# the structural guard against the vacuity the final audit found: if steps are
-# skipped or helpers silently stop asserting, the count drops below it and the
-# script fails even with zero recorded failures.
-# 30 → 32 because step 31 adds exactly two UNCONDITIONAL checks; any run that
-# used to reach 30 now reaches 32, so the floor is neither tightened nor
-# loosened relative to the vacuity it was calibrated to catch.
-MIN_CHECKS=32
+# A run that asserted almost nothing must not read as success.
+#
+# VAL-05, AND WHAT IS AND IS NOT FIXED HERE
+# -----------------------------------------
+# This is a FLOOR, not an equality gate, and that distinction was being
+# papered over: the floor was 32 while `SECURITY_AND_PRIVACY.md`,
+# `KNOWN_LIMITATIONS.md` and `FINAL_REAUDIT_HANDOFF.md` all quoted "56 checks"
+# as though it were a fixed property of this script. It is not. The count is
+# machine-dependent by construction:
+#
+#   * step 9 emits one check or none, on `command -v node`;
+#   * step 22b emits five or one, depending on whether an installed helper is
+#     found to damage;
+#   * the port re-check in step 26-27 is guarded by `[ -n "$PORT" ]` with no
+#     else branch.
+#
+# So 24 checks could vanish with zero recorded failures and this script would
+# still exit 0 — the exact weakness its sibling `tracking_validate_macos.sh`
+# documents as fixed, using a declared group table, a fail-closed enumerator
+# that reads the script itself, and a per-group equality gate.
+#
+# That apparatus has NOT been ported here yet. Porting it needs an enumerator
+# proved against a real `--scope full` run, and this script cannot be executed
+# on a developer machine (it installs a LaunchAgent, and `launchctl` addresses
+# `gui/<uid>` regardless of `$HOME`). Landing an unverified equality gate would
+# turn a soft weakness into a broken required job.
+#
+# What HAS changed: the floor is raised to a value that no longer admits a
+# nearly-empty run, and every document that quoted 56 as fixed now states the
+# real structure instead. The remaining work is recorded as VAL-05 in
+# docs/activity-onboarding/audit/POST_FINAL_REAUDIT_REMEDIATION_MATRIX.md and
+# is explicitly handed to the next auditor rather than claimed as done.
+MIN_CHECKS=45
 if [ "$pass" -lt "$MIN_CHECKS" ]; then
   echo "FAIL: only $pass checks ran; at least $MIN_CHECKS are expected."
   echo "      A low count means checks were SKIPPED, not that all is well."
   exit 1
 fi
+echo "NOTE: this is a floor, not an equality gate. The total is machine-dependent"
+echo "      (node present, repair staging, port re-check). Do not quote it as a"
+echo "      fixed property of this script — see VAL-05."
 [ "$fail" -eq 0 ]

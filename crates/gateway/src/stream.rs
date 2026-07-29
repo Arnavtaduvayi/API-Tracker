@@ -14,6 +14,7 @@
 //! unchunked one.
 
 use std::io::{Read, Write};
+use std::time::Instant;
 
 use api_tracker_core::error::{CoreError, Result};
 
@@ -183,6 +184,47 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64> {
     u64::from_str_radix(text, 16).map_err(|_| CoreError::InvalidInput("bad chunk size".into()))
 }
 
+/// A reader that refuses to continue past an ABSOLUTE deadline (`SEC-02`).
+///
+/// The head phase has always had an absolute bound — that is what stops a
+/// Slowloris. The request BODY phase had only a per-read idle timeout, so a
+/// client that completed its head, declared a `Content-Length`, and then
+/// dribbled one byte every few seconds held its connection open indefinitely.
+/// With `MAX_CONNECTIONS` at 128, 128 such clients deny the gateway to the
+/// user's own applications: availability only, loopback-only, fails closed
+/// with 503, and recovers — but a bound the user cannot state is not a bound.
+///
+/// The check is BETWEEN reads, so the true worst case is the deadline plus one
+/// idle timeout. That is bounded and stateable, which is the property that was
+/// missing; making it exact would mean a non-blocking rewrite of the relay for
+/// no additional safety.
+///
+/// This wraps the CLIENT while its REQUEST body is being read. Response
+/// streaming is deliberately untouched: a long model response is a legitimate
+/// long-lived read, and bounding it would break streaming completions.
+pub struct DeadlineReader<'a, R> {
+    inner: &'a mut R,
+    deadline: Instant,
+}
+
+impl<'a, R: Read> DeadlineReader<'a, R> {
+    pub fn new(inner: &'a mut R, deadline: Instant) -> Self {
+        Self { inner, deadline }
+    }
+}
+
+impl<R: Read> Read for DeadlineReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if Instant::now() >= self.deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the request body exceeded the absolute upload deadline",
+            ));
+        }
+        self.inner.read(buf)
+    }
+}
+
 /// Relay a chunked body with strict framing, echoing every byte verbatim to
 /// `dst` while feeding only the DECODED chunk data to `tap`.
 ///
@@ -307,6 +349,35 @@ pub fn relay_plain<R: Read, W: Write>(
 
 #[cfg(test)]
 mod tests {
+    use super::DeadlineReader;
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+
+    /// `SEC-02`: past the deadline, the reader refuses rather than continuing.
+    /// Deterministic — the deadline is already in the past, so no sleep is
+    /// needed and there is no timing race.
+    #[test]
+    fn a_reader_past_its_deadline_refuses_instead_of_reading() {
+        let mut src: &[u8] = b"the body would have kept arriving forever";
+        let mut bounded = DeadlineReader::new(&mut src, Instant::now() - Duration::from_secs(1));
+        let mut buf = [0u8; 8];
+        let err = bounded
+            .read(&mut buf)
+            .expect_err("a body past the absolute deadline must not keep being read");
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    /// Control: inside the deadline it is an ordinary reader, so the guard
+    /// cannot be satisfied by a wrapper that refuses everything.
+    #[test]
+    fn control_a_reader_inside_its_deadline_relays_normally() {
+        let mut src: &[u8] = b"hello";
+        let mut bounded = DeadlineReader::new(&mut src, Instant::now() + Duration::from_secs(60));
+        let mut buf = [0u8; 5];
+        assert_eq!(bounded.read(&mut buf).unwrap(), 5);
+        assert_eq!(&buf, b"hello");
+    }
+
     use super::*;
     use std::io::Cursor;
 

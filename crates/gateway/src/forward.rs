@@ -36,6 +36,17 @@ pub const CLIENT_HEAD_DEADLINE: Duration = Duration::from_secs(15);
 pub const CLIENT_HEAD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Idle budget while streaming a request body from the client.
 pub const CLIENT_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Absolute ceiling on how long ONE request body may take to arrive, however
+/// steadily it trickles (`SEC-02`).
+///
+/// The idle timeout above bounds the gap between two reads; it does not bound
+/// the total, so a client sending one byte every five seconds held a
+/// connection open for as long as it liked. Generous enough for a real upload
+/// over a slow link, far below "forever". Applies to the REQUEST body only —
+/// a streaming response is a legitimate long-lived read and is not bounded by
+/// this.
+pub const CLIENT_BODY_DEADLINE: Duration = Duration::from_secs(300);
 /// Idle budget on a kept-alive connection between requests.
 pub const CLIENT_KEEPALIVE_IDLE: Duration = Duration::from_secs(120);
 /// Budget for one blocking write toward the client. Bounds a client that
@@ -835,27 +846,40 @@ fn forward_exchange(
     //    for the next request on a kept-alive connection.
     let mut client_carry: Vec<u8> = Vec::new();
     if !skip_body {
-        let relayed = match head.framing {
-            Framing::None => Ok((0u64, body_carry.to_vec())),
-            // Strict CRLF chunk framing toward the upstream: a bare-LF chunk
-            // body is REJECTED, never forwarded (SI-15). `observe::relay`
-            // deliberately tolerates bare LF — safe for the observation
-            // proxy, a smuggling primitive for a gateway.
-            Framing::Chunked => crate::stream::relay_chunked_strict(
-                client,
-                &mut upstream,
-                body_carry.to_vec(),
-                None,
-            ),
-            Framing::ContentLength(n) => crate::stream::relay_plain(
-                client,
-                &mut upstream,
-                Some(n),
-                body_carry.to_vec(),
-                None,
-            ),
-            Framing::UntilClose => {
-                crate::stream::relay_plain(client, &mut upstream, None, body_carry.to_vec(), None)
+        // SEC-02: an absolute ceiling on the whole upload, on top of the
+        // per-read idle timeout set by the caller. Without it a slow-body
+        // client occupies one of MAX_CONNECTIONS slots indefinitely. Scoped to
+        // the relay itself so the error paths below still see the raw stream.
+        let body_deadline = Instant::now() + CLIENT_BODY_DEADLINE;
+        let relayed = {
+            let mut client = crate::stream::DeadlineReader::new(client, body_deadline);
+            let client = &mut client;
+            match head.framing {
+                Framing::None => Ok((0u64, body_carry.to_vec())),
+                // Strict CRLF chunk framing toward the upstream: a bare-LF chunk
+                // body is REJECTED, never forwarded (SI-15). `observe::relay`
+                // deliberately tolerates bare LF — safe for the observation
+                // proxy, a smuggling primitive for a gateway.
+                Framing::Chunked => crate::stream::relay_chunked_strict(
+                    client,
+                    &mut upstream,
+                    body_carry.to_vec(),
+                    None,
+                ),
+                Framing::ContentLength(n) => crate::stream::relay_plain(
+                    client,
+                    &mut upstream,
+                    Some(n),
+                    body_carry.to_vec(),
+                    None,
+                ),
+                Framing::UntilClose => crate::stream::relay_plain(
+                    client,
+                    &mut upstream,
+                    None,
+                    body_carry.to_vec(),
+                    None,
+                ),
             }
         };
         match relayed {
