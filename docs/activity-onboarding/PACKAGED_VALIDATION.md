@@ -184,10 +184,11 @@ the **real service**:
    and any cleanup registration;
 2. `tracking_validate_macos.sh --scope selfcheck` — the anti-tautology gate,
    before a bundle exists, so a broken harness fails in seconds;
-3. `bundle_cli.sh`, then `gateway_validate_macos.sh` — 56 checks on the
-   audited CI run (NOT a fixed property: node presence, repair staging and the
-   port re-check each move the total; enforcement is a floor of 45, not an
-   equality gate — `VAL-05`) driving
+3. `bundle_cli.sh`, then `gateway_validate_macos.sh` — **50 required checks,
+   enforced as an equality**, plus up to 7 environment-dependent ones (node
+   presence, the repair staging block, the port re-check), which are tallied
+   separately through `opt_ok`/`opt_bad` and excluded from that equality
+   (`VAL-05`) — driving
    install → stop → restart → uninstall against a **real per-user
    LaunchAgent**, before the ten-minute bundle build so a lifecycle failure
    surfaces early;

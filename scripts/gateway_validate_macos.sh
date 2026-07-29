@@ -58,10 +58,30 @@ export TETHRA_DIR="$DIR"
 export TETHRA_PASSWORD="packaged-validation-password-123"
 export API_TRACKER_INSECURE_FAST_KDF=1   # test vault only; never a real one
 
-pass=0; fail=0
+pass=0; fail=0; optional=0
 ok()   { echo "  PASS  $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL  $1"; fail=$((fail+1)); }
 step() { echo; echo "== $1 =="; }
+
+# --- required vs optional (VAL-05) -----------------------------------------
+# The audit's complaint was that "56 checks" was quoted as a fixed property
+# while enforcement was a floor of 32, so 24 checks could vanish with zero
+# failures and exit 0. The total is genuinely machine-dependent — but only in
+# three places, and they are knowable rather than mysterious:
+#
+#   * step 9 emits one check when `node` is present, none otherwise;
+#   * step 22b emits five checks when there is an installed helper to damage
+#     and one when there is not;
+#   * the port re-check in step 26-27 is guarded by `[ -n "$PORT" ]`.
+#
+# Every check at those sites goes through `opt_ok`/`opt_bad`, which tally
+# exactly as `ok`/`bad` do AND record that the check was environment-
+# dependent. Everything else is REQUIRED, and the gate at the bottom is an
+# equality on the required count — not a floor. A required check that stops
+# running is now a hard failure with a number attached, whatever the optional
+# ones did.
+opt_ok()  { ok  "$1"; optional=$((optional+1)); }
+opt_bad() { bad "$1"; optional=$((optional+1)); }
 
 # Assert a SEMANTIC property of the vault database, not merely that some
 # command exited 0. `$1` is a SQL query that must return exactly `1`; `$2` is
@@ -468,7 +488,7 @@ const u=new URL(process.env.OPENAI_BASE+"/v1/models");
 const req=http.request(u,{headers:{Authorization:"Bearer "+process.env.KEY}},res=>{console.log(res.statusCode);res.resume();});
 req.on("error",e=>console.log("ERR",e.message));req.end();
 ' 2>/dev/null)"
-  [ "$NODE_STATUS" = "401" ] || [ "$NODE_STATUS" = "403" ] && ok "Node reached OpenAI through the gateway ($NODE_STATUS)" || bad "node result: $NODE_STATUS"
+  [ "$NODE_STATUS" = "401" ] || [ "$NODE_STATUS" = "403" ] && opt_ok "Node reached OpenAI through the gateway ($NODE_STATUS)" || opt_bad "node result: $NODE_STATUS"
 else
   echo "  SKIP node not present"
 fi
@@ -634,14 +654,14 @@ step "22b. Repair: damage an OWNED resource and re-align the installation"
 # Nothing outside the run's own namespace is touched.
 INSTALLED_HELPER="$(find "$DIR/bin" -maxdepth 1 -name 'tethra-gateway-*' 2>/dev/null | head -1)"
 if [ -z "$INSTALLED_HELPER" ]; then
-  bad "no installed helper found under $DIR/bin to exercise repair against"
+  opt_bad "no installed helper found under $DIR/bin to exercise repair against"
 else
   rm -f "$INSTALLED_HELPER"
-  [ ! -e "$INSTALLED_HELPER" ] && ok "the installed helper was removed (damage staged: $(basename "$INSTALLED_HELPER"))" \
-    || bad "could not stage the damage"
-  "$CLI" gateway repair --yes >/dev/null 2>&1 && ok "gateway repair completed" || bad "gateway repair failed"
-  [ -x "$INSTALLED_HELPER" ] && ok "repair restored the installed helper binary" \
-    || bad "repair did not restore the installed helper"
+  [ ! -e "$INSTALLED_HELPER" ] && opt_ok "the installed helper was removed (damage staged: $(basename "$INSTALLED_HELPER"))" \
+    || opt_bad "could not stage the damage"
+  "$CLI" gateway repair --yes >/dev/null 2>&1 && opt_ok "gateway repair completed" || opt_bad "gateway repair failed"
+  [ -x "$INSTALLED_HELPER" ] && opt_ok "repair restored the installed helper binary" \
+    || opt_bad "repair did not restore the installed helper"
   # And the service must actually be serving again, not merely present.
   REPAIRED=""
   for i in $(seq 1 40); do
@@ -649,11 +669,11 @@ else
     [ -n "$REPAIRED" ] && break
     sleep 0.25
   done
-  [ -n "$REPAIRED" ] && ok "the gateway is serving again after repair" || bad "no gateway after repair"
+  [ -n "$REPAIRED" ] && opt_ok "the gateway is serving again after repair" || opt_bad "no gateway after repair"
   # Repair must not have escaped this run's namespace.
   launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1 \
-    && bad "repair registered the PRODUCTION label" \
-    || ok "repair did not touch the production label"
+    && opt_bad "repair registered the PRODUCTION label" \
+    || opt_ok "repair did not touch the production label"
 fi
 
 step "23. Unlink the project (restore prior .env)"
@@ -676,7 +696,7 @@ launchctl print "gui/$UID_N/$LABEL" >/dev/null 2>&1 && bad "launchd still knows 
 [ ! -d "$DIR/bin" ] && ok "service binaries removed" || bad "bin/ remains"
 if [ -n "$PORT" ]; then
   sleep 1
-  curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$PORT/openai/v1/models" 2>/dev/null && bad "something still listens on $PORT" || ok "no listener on the old port"
+  curl -s -o /dev/null --max-time 5 "http://127.0.0.1:$PORT/openai/v1/models" 2>/dev/null && opt_bad "something still listens on $PORT" || opt_ok "no listener on the old port"
 fi
 
 step "28. Ordinary networking is unaffected"
@@ -812,45 +832,33 @@ fi
 
 echo
 echo "=== PACKAGED MACOS RESULT: $pass passed, $fail failed ==="
-# A run that asserted almost nothing must not read as success.
+# EQUALITY GATE on the REQUIRED set (`VAL-05`).
 #
-# VAL-05, AND WHAT IS AND IS NOT FIXED HERE
-# -----------------------------------------
-# This is a FLOOR, not an equality gate, and that distinction was being
-# papered over: the floor was 32 while `SECURITY_AND_PRIVACY.md`,
-# `KNOWN_LIMITATIONS.md` and `FINAL_REAUDIT_HANDOFF.md` all quoted "56 checks"
-# as though it were a fixed property of this script. It is not. The count is
-# machine-dependent by construction:
+# The audited head enforced `MIN_CHECKS=32` while three documents quoted "56
+# checks" as a fixed property, so 24 checks could vanish with zero recorded
+# failures and exit 0 — the exact weakness the sibling script
+# `tracking_validate_macos.sh` documents as fixed.
 #
-#   * step 9 emits one check or none, on `command -v node`;
-#   * step 22b emits five or one, depending on whether an installed helper is
-#     found to damage;
-#   * the port re-check in step 26-27 is guarded by `[ -n "$PORT" ]` with no
-#     else branch.
+# The total genuinely is machine-dependent, but only at the three sites that
+# now route through `opt_ok`/`opt_bad`: `node` presence (1), the repair
+# staging block (5), and the port re-check (1). Everything else is REQUIRED,
+# and the required count is a fixed property of this file.
 #
-# So 24 checks could vanish with zero recorded failures and this script would
-# still exit 0 — the exact weakness its sibling `tracking_validate_macos.sh`
-# documents as fixed, using a declared group table, a fail-closed enumerator
-# that reads the script itself, and a per-group equality gate.
+# So this is an equality, not a floor. A required check that silently stops
+# running fails here with both numbers printed, whatever the optional ones did.
 #
-# That apparatus has NOT been ported here yet. Porting it needs an enumerator
-# proved against a real `--scope full` run, and this script cannot be executed
-# on a developer machine (it installs a LaunchAgent, and `launchctl` addresses
-# `gui/<uid>` regardless of `$HOME`). Landing an unverified equality gate would
-# turn a soft weakness into a broken required job.
-#
-# What HAS changed: the floor is raised to a value that no longer admits a
-# nearly-empty run, and every document that quoted 56 as fixed now states the
-# real structure instead. The remaining work is recorded as VAL-05 in
-# docs/activity-onboarding/audit/POST_FINAL_REAUDIT_REMEDIATION_MATRIX.md and
-# is explicitly handed to the next auditor rather than claimed as done.
-MIN_CHECKS=45
-if [ "$pass" -lt "$MIN_CHECKS" ]; then
-  echo "FAIL: only $pass checks ran; at least $MIN_CHECKS are expected."
-  echo "      A low count means checks were SKIPPED, not that all is well."
+# REQUIRED_CHECKS was derived from a measured run rather than guessed: the
+# packaged macOS job on 141152d executed 57 checks with node present, the
+# repair block taken and PORT set — 57 - 1 - 5 - 1 = 50.
+REQUIRED_CHECKS=50
+executed_required=$(( pass + fail - optional ))
+echo "  required $executed_required/$REQUIRED_CHECKS   optional $optional   total $((pass + fail))"
+if [ "$executed_required" -ne "$REQUIRED_CHECKS" ]; then
+  echo "FAIL: $executed_required required checks ran; exactly $REQUIRED_CHECKS are declared."
+  echo "      A DIFFERENT number means required checks were skipped or added,"
+  echo "      not that all is well. Optional (environment-dependent) checks this"
+  echo "      run: $optional — those are node presence, the repair staging block,"
+  echo "      and the port re-check, and they are excluded from this equality."
   exit 1
 fi
-echo "NOTE: this is a floor, not an equality gate. The total is machine-dependent"
-echo "      (node present, repair staging, port re-check). Do not quote it as a"
-echo "      fixed property of this script — see VAL-05."
 [ "$fail" -eq 0 ]

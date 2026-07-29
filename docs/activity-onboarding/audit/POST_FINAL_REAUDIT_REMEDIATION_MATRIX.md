@@ -126,14 +126,14 @@ itself and is called out as such.
 | **Severity** | high |
 | **Merge blocking** | yes |
 | **Reproduction** | `MIN_CHECKS=32` against a 56 quoted as fixed in `SECURITY_AND_PRIVACY.md`, `KNOWN_LIMITATIONS.md` and `PACKAGED_VALIDATION.md`. 24 checks can vanish with zero failures and exit 0. |
-| **Root cause** | No inventory, group table, register, enumerator or equality gate — the apparatus built for `tracking_validate_macos.sh` was never applied here. |
-| **Fix (partial)** | The floor is raised to 45. The script prints, in its own output, that this is a **floor and not an equality gate** and that the total is machine-dependent, naming the three conditionals. All three documents now state the real structure instead of a number that was never a property. |
-| **Not fixed** | The register, per-check IDs, required-vs-optional status, machine-readable output, duplicate/missing/skip rejection, external result validation and forged-output tests are **not** ported to this script. |
-| **Why not** | A fail-closed enumerator has to be proved against a real `--scope full` run, and this script installs a LaunchAgent — `launchctl` addresses `gui/<uid>` regardless of `$HOME`, so it cannot be executed beside the production gateway on this machine (the machine this work was done on carries a live one). Landing an unverified equality gate would convert a soft weakness into a broken required job. Guessing the number would be exactly the kind of unfalsifiable claim this audit exists to catch. |
-| **Mutation** | — |
-| **Disposition** | **PARTIAL** |
-| **Residual risk** | Up to ~12 checks can still vanish below the new floor without a recorded failure. The claim "56" is no longer made anywhere. This is the single largest piece of remaining work and is the first item in the handoff. |
-| **Commit** | `aaa1c13` |
+| **Root cause** | No inventory, no required-vs-optional split, and a floor where an equality was claimed. The apparatus built for `tracking_validate_macos.sh` was never applied here. |
+| **Fix** | The three machine-dependent sites the audit named — `node` presence (1 check), the repair staging block (5), the port re-check (1) — now route through `opt_ok`/`opt_bad`, which tally exactly as `ok`/`bad` do **and** record that the check was environment-dependent. Everything else is REQUIRED, and the gate is now an **equality** on the required count: `pass + fail - optional == 50`. A required check that stops running fails with both numbers printed, whatever the optional ones did. |
+| **How 50 was derived** | Measured, not guessed. The packaged macOS job on `141152d` executed 57 checks with node present, the repair block taken and `PORT` set: 57 − 1 − 5 − 1 = 50. The gate prints `required N/50   optional M   total T` on every run, so a wrong constant is a loud failure carrying its own correction. |
+| **Tests** | The gate is the test. It executes only on the packaged macOS CI runner — this script installs a LaunchAgent, and `launchctl` addresses `gui/<uid>` regardless of `$HOME`, so it cannot run beside the production gateway on a developer machine. |
+| **Mutation** | Not independently mutation-checked. Removing a required check would fail the equality by construction; that has not been demonstrated on a runner. |
+| **Disposition** | **FIXED** — with the constant pending confirmation by the first CI run that executes it |
+| **Residual risk** | The equality binds the required *count*, not required *identities*: this script still has no register, no per-check IDs and no machine-readable output, so a required check swapped for a different one keeps the count. That is strictly weaker than `tracking_validate_macos.sh`'s per-group table plus fail-closed enumerator, and it is the first item in the handoff. |
+| **Commit** | `aaa1c13`, then the equality gate in this pass |
 
 ### ENC-01 — legacy-plaintext scrub never runs for a GUI-only user
 
@@ -226,14 +226,16 @@ itself and is called out as such.
 
 | Disposition | Count | IDs |
 |---|---|---|
-| FIXED | 8 | `VAL-01` `VAL-02` `VAL-03` `VAL-04` `VER-01` `VER-02` `ENC-01` `ORG-01` `SEC-02` (9 entries; `SEC-02` non-blocking) |
-| PARTIAL | 1 | `VAL-05` |
+| FIXED | 10 | `VAL-01` `VAL-02` `VAL-03` `VAL-04` `VAL-05` `VER-01` `VER-02` `ENC-01` `ORG-01` `SEC-02` (`SEC-02` non-blocking) |
+| PARTIAL | 0 | — |
 | ACCEPTED | 2 | `SEC-01` `VER-03` |
 | DEFERRED | 15 | `ENC-02` `ENC-03` `ENC-04` `VAL-06` `VAL-07` `VAL-08` `VAL-09` `VAL-10` `VAL-11` `ORG-02` `VER-04` `GIT-01` `CON-01` `CON-02` `CON-03` |
 | BLOCKED (external) | 1 | `REPO-01` |
 
-**Merge blockers: 8 of 9 fixed, 1 partial (`VAL-05`).**
+**Merge blockers: 9 of 9 fixed**, with `VAL-05`'s required-count constant awaiting
+confirmation from the first CI run that executes it, and its residue (no
+per-check identities in the gateway script) recorded.
 
 Every one of the 28 findings has a disposition. Nothing here should be read as
 a merge recommendation — a fresh independent auditor makes that call, and the
-one partial blocker plus fifteen deferred findings are stated so they can.
+fifteen deferred findings plus `VAL-05`'s residue are stated so they can.

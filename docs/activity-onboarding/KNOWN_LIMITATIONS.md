@@ -186,9 +186,9 @@ On macOS that lifecycle is now executed **with a real login-registered
 service**, on a disposable hosted runner, on every PR:
 `.github/workflows/packaged-service-macos.yml` runs
 `--scope full --require-service` (63 checks) and
-`gateway_validate_macos.sh` (56 checks on the audited CI run; the total is
-machine-dependent and is gated by a floor, not an equality gate — see `VAL-05`),
-and verifies teardown from outside
+`gateway_validate_macos.sh` (50 REQUIRED checks, enforced as an equality, plus
+up to 7 environment-dependent ones — node presence, the repair staging block,
+the port re-check; `VAL-05`), and verifies teardown from outside
 the script. Evidence: `audit/SERVICE_VALIDATION_EVIDENCE.md`.
 
 **One green run is one green run.** That scope first passed on 2026-07-28
