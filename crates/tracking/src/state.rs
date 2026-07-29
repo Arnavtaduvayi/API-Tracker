@@ -135,6 +135,15 @@ pub struct TrackingSetup {
     /// observation to the current verification session, and it is what a
     /// forged or skewed `at` timestamp cannot forge (RA-005).
     pub applied_event_rowid: i64,
+    /// Compare-and-swap token for this row's health columns (`VER-01`).
+    ///
+    /// Every write that decides *from* a value read into this struct requires
+    /// the stored row to still be at this version, and bumps it. A concurrent
+    /// change therefore makes the write affect zero rows — a signal the caller
+    /// re-derives from, rather than a silent overwrite of somebody else's
+    /// newer truth. This is the token, not the state: two writers that both
+    /// read version 4 cannot both commit.
+    pub row_version: i64,
 }
 
 /// Per-provider observation freshness derived by [`refresh`].
@@ -368,7 +377,7 @@ pub struct PlanSummary {
 const COLS: &str = "id, project_id, folder_path, state, detection_json, plan_summary_json, \
                     applied_at, first_traffic_at, last_transition_at, attention_reason, \
                     verification_session, config_generation, first_verified_at, attention_at, \
-                    applied_event_rowid";
+                    applied_event_rowid, row_version";
 
 fn row_to_setup(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackingSetup> {
     let state_raw: String = r.get(3)?;
@@ -390,6 +399,7 @@ fn row_to_setup(r: &rusqlite::Row<'_>) -> rusqlite::Result<TrackingSetup> {
         first_verified_at: r.get(12)?,
         attention_at: r.get(13)?,
         applied_event_rowid: r.get(14)?,
+        row_version: r.get(15)?,
     })
 }
 
@@ -456,7 +466,11 @@ pub fn upsert_setup(
              plan_summary_json = NULL,
              applied_at = NULL,
              first_traffic_at = NULL,
-             applied_event_rowid = excluded.applied_event_rowid",
+             applied_event_rowid = excluded.applied_event_rowid,
+             -- A re-run opens a NEW verification session, which is the single
+             -- biggest reason a refresh already in flight must not commit: its
+             -- conclusion is about the previous attempt (`VER-01`).
+             row_version = tracking_setups.row_version + 1",
         params![
             id,
             project_id,
@@ -529,6 +543,15 @@ pub fn setups_for_folder(conn: &Connection, folder: &Path) -> Result<Vec<Trackin
 
 /// Transition with legality enforcement. Illegal transitions are an error,
 /// never a silent overwrite.
+///
+/// Guarded by the row version like every other health write (`VER-01`): the
+/// legality check above was evaluated against `setup.state` as the CALLER
+/// read it, so committing after someone else moved the row would enforce the
+/// table against a state that is no longer there. A concurrent change is
+/// [`CoreError::StateConflict`], which tells the caller to re-read — it is
+/// deliberately NOT retried here, because an explicit transition encodes an
+/// intent ("this apply failed") whose legality has to be re-judged against
+/// the new state by whoever formed it.
 pub fn transition(
     conn: &Connection,
     setup: &TrackingSetup,
@@ -542,17 +565,12 @@ pub fn transition(
             next.as_str()
         )));
     }
-    let now = clock::now_rfc3339();
     // A failure carries its own timestamp so a LATER read can tell whether
     // an observation post-dates it. Without this, an older observation
     // silently outranked a newer failure (ZFT-006).
-    let attention_at = attention_reason.map(|_| now.clone());
-    conn.execute(
-        "UPDATE tracking_setups
-         SET state = ?2, last_transition_at = ?3, attention_reason = ?4, attention_at = ?5
-         WHERE id = ?1",
-        params![setup.id, next.as_str(), now, attention_reason, attention_at],
-    )?;
+    let attention_at = attention_reason.map(|_| clock::now_rfc3339());
+    let mut working = setup.clone();
+    cas_write_health(conn, &mut working, next, attention_reason, attention_at)?;
     get_setup(conn, &setup.id)?.ok_or(CoreError::NotFound {
         kind: "tracking setup",
         ident: setup.id.clone(),
@@ -567,9 +585,15 @@ pub fn record_applied(conn: &Connection, setup_id: &str, plan_summary: &PlanSumm
     // verify this session, and that fact is now anchored to something the
     // writer's clock cannot influence (RA-005).
     let rowid = newest_event_rowid(conn)?;
+    // Bumping the row version here is what makes a refresh that is mid-flight
+    // across an apply re-read instead of committing (`VER-01`): `applied_at`
+    // and `applied_event_rowid` are the two inputs that decide which
+    // observations are admissible at all, so a conclusion reached before this
+    // statement is a conclusion about a different verification session.
     conn.execute(
         "UPDATE tracking_setups
-         SET plan_summary_json = ?2, applied_at = ?3, applied_event_rowid = ?4
+         SET plan_summary_json = ?2, applied_at = ?3, applied_event_rowid = ?4,
+             row_version = row_version + 1
          WHERE id = ?1",
         params![setup_id, serde_json::to_string(plan_summary)?, now, rowid],
     )?;
@@ -641,6 +665,56 @@ pub fn refresh_with(
     setup: &mut TrackingSetup,
     liveness: GatewayLiveness,
 ) -> Result<TrackingStatusReport> {
+    // Optimistic concurrency (`VER-01`). Every corrective write inside
+    // `refresh_once` is guarded by the row version that `setup` was read at,
+    // so a row somebody else moved in between yields `StateConflict` instead
+    // of a lost update. The answer to a conflict is not to force the write —
+    // it is to look again: re-read the row and re-derive, because the newer
+    // row may well change the conclusion (that is the whole point when the
+    // change was a freshly-recorded failure).
+    for _ in 0..REFRESH_CAS_ATTEMPTS {
+        match refresh_once(conn, setup, liveness, true) {
+            Err(CoreError::StateConflict { .. }) => {
+                let Some(fresh) = get_setup(conn, &setup.id)? else {
+                    // The setup was deleted underneath us. That is a legitimate
+                    // outcome (undo removes the row), not an error to retry.
+                    return Err(CoreError::NotFound {
+                        kind: "tracking setup",
+                        ident: setup.id.clone(),
+                    });
+                };
+                *setup = fresh;
+            }
+            other => return other,
+        }
+    }
+    // Deterministic terminal behaviour: under sustained contention this
+    // REPORTS but does not WRITE. Returning the truth currently stored is
+    // always safe; forcing a write derived from a row that keeps moving is
+    // the defect this guard exists to prevent, and a caller that never
+    // converges is a caller whose cached correction does not matter.
+    if let Some(fresh) = get_setup(conn, &setup.id)? {
+        *setup = fresh;
+    }
+    refresh_once(conn, setup, liveness, false)
+}
+
+/// How many times [`refresh_with`] re-reads and re-derives before it gives up
+/// on writing a correction. Three is enough for any realistic contention on a
+/// single-user machine (the competing writers are the desktop, the CLI and
+/// the gateway) and is bounded so a pathological writer cannot spin a reader.
+const REFRESH_CAS_ATTEMPTS: usize = 3;
+
+/// One attempt at [`refresh_with`].
+///
+/// `may_write` is false on the terminal, post-contention pass: the report is
+/// still derived from real evidence, but no correction is persisted.
+fn refresh_once(
+    conn: &Connection,
+    setup: &mut TrackingSetup,
+    liveness: GatewayLiveness,
+    may_write: bool,
+) -> Result<TrackingStatusReport> {
     let watchable = matches!(
         setup.state,
         TrackingState::AwaitingRestart
@@ -660,7 +734,7 @@ pub fn refresh_with(
             setup.state,
             TrackingState::TrafficObserved | TrackingState::PartiallyObserved
         );
-        if overclaiming {
+        if overclaiming && may_write {
             let reason = if setup.applied_at.is_none() {
                 "the record of when this setup was applied is missing, so its verified state \
                  could not be confirmed"
@@ -668,7 +742,25 @@ pub fn refresh_with(
                 "this setup has no recorded providers, so its verified state could not be \
                  confirmed"
             };
-            write_derived(conn, setup, TrackingState::NeedsAttention, Some(reason))?;
+            // An existing failure reason is the more specific truth and is
+            // kept; this generic one only fills a gap. Replacing a recorded
+            // "apply_failed:EnsureRoutes" with "the record of when this setup
+            // was applied is missing" would lose the actionable half.
+            let recorded = setup
+                .attention_reason
+                .clone()
+                .unwrap_or_else(|| reason.to_string());
+            let attention_at = setup
+                .attention_at
+                .clone()
+                .or_else(|| Some(clock::now_rfc3339()));
+            cas_write_health(
+                conn,
+                setup,
+                TrackingState::NeedsAttention,
+                Some(&recorded),
+                attention_at,
+            )?;
         }
         return Ok(TrackingStatusReport {
             current: health_without_evidence(setup, liveness),
@@ -859,27 +951,40 @@ pub fn refresh_with(
         Some(TrackingState::PartiallyObserved)
     };
     if let Some(next) = derived {
-        if next != setup.state {
-            let keep_reason = if next == TrackingState::NeedsAttention {
-                setup.attention_reason.clone()
-            } else {
-                None
-            };
-            write_derived(conn, setup, next, keep_reason.as_deref())?;
+        if next != setup.state && may_write {
+            // ONE decision, in one place: may this write clear the failure
+            // record? Only if the evidence it is derived from post-dates that
+            // failure. `failure_is_newer` is the same value the `derived`
+            // ladder above used, deliberately — the previous shape asked the
+            // question twice, once as `failure_is_newer` and once as
+            // `next == NeedsAttention`, and the second copy was unreachable
+            // because the first had already forced `next`. An unreachable
+            // guard is indistinguishable from a guard that does not work
+            // (`VER-02`), so there is now only the reachable one.
+            write_derived(conn, setup, next, failure_is_newer)?;
         }
     }
 
     // --- session and historical watermarks -------------------------------
-    if observed_ever > 0 && setup.first_traffic_at.is_none() {
+    // Both are write-once. The `IS NULL` predicate makes that a property of
+    // the STATEMENT rather than of the in-memory row it was decided from: two
+    // processes that both read a null watermark cannot both write, so the
+    // first observation to be recorded wins and the second is a no-op. These
+    // are deliberately outside the row-version CAS — they touch neither the
+    // state nor the failure record, so racing them must not force a caller to
+    // re-derive.
+    if observed_ever > 0 && setup.first_traffic_at.is_none() && may_write {
         conn.execute(
-            "UPDATE tracking_setups SET first_traffic_at = ?2 WHERE id = ?1",
+            "UPDATE tracking_setups SET first_traffic_at = ?2
+             WHERE id = ?1 AND first_traffic_at IS NULL",
             params![setup.id, earliest],
         )?;
         setup.first_traffic_at = earliest.clone();
     }
-    if observed_ever > 0 && setup.first_verified_at.is_none() {
+    if observed_ever > 0 && setup.first_verified_at.is_none() && may_write {
         conn.execute(
-            "UPDATE tracking_setups SET first_verified_at = ?2 WHERE id = ?1",
+            "UPDATE tracking_setups SET first_verified_at = ?2
+             WHERE id = ?1 AND first_verified_at IS NULL",
             params![setup.id, earliest],
         )?;
         setup.first_verified_at = earliest;
@@ -911,35 +1016,102 @@ pub fn refresh(conn: &Connection, setup: &mut TrackingSetup) -> Result<Vec<Provi
     Ok(refresh_with(conn, setup, GatewayLiveness::Unknown)?.freshness)
 }
 
+/// The ONE statement that writes a tracking setup's health columns.
+///
+/// Both writers reach the database through here — [`write_derived`] for
+/// evidence-derived corrections and [`transition`] for explicit,
+/// legality-checked moves — so the two cannot drift apart in what they
+/// preserve or how they guard the write. They diverged once already: the
+/// derived path learned to keep `attention_reason` (ZFT-006) while the
+/// explicit path kept its own copy of the SQL.
+///
+/// # Compare-and-swap, not last-writer-wins (`VER-01`)
+///
+/// The caller decided `next` from a [`TrackingSetup`] it read earlier. If the
+/// stored row changed in between — another process recorded a failure, a
+/// re-apply opened a new session, the user removed a route — then that
+/// decision was made against a row that no longer exists, and committing it
+/// would erase whatever replaced it. The old `WHERE id = ?1` did exactly
+/// that: a failure recorded between a refresh's read and its write was nulled
+/// and the UI reported `VerifiedAndActive`, which is the ZFT-006 outcome
+/// reached with no attacker, no forged timestamp and no clock skew.
+///
+/// `WHERE id = ?1 AND row_version = ?6` makes that a zero-row update instead,
+/// and a zero-row update is [`CoreError::StateConflict`] — a signal the
+/// caller re-derives from. Nothing is ever overwritten on this path;
+/// `rotation::set_state` has guarded rotations this way since they existed.
+fn cas_write_health(
+    conn: &Connection,
+    setup: &mut TrackingSetup,
+    next: TrackingState,
+    attention_reason: Option<&str>,
+    attention_at: Option<String>,
+) -> Result<()> {
+    let now = clock::now_rfc3339();
+    let changed = conn.execute(
+        "UPDATE tracking_setups
+         SET state = ?2, last_transition_at = ?3, attention_reason = ?4, attention_at = ?5,
+             row_version = row_version + 1
+         WHERE id = ?1 AND row_version = ?6",
+        params![
+            setup.id,
+            next.as_str(),
+            now,
+            attention_reason,
+            attention_at,
+            setup.row_version
+        ],
+    )?;
+    if changed == 0 {
+        return Err(CoreError::StateConflict {
+            kind: "tracking setup",
+            ident: setup.id.clone(),
+        });
+    }
+    setup.state = next;
+    setup.attention_reason = attention_reason.map(str::to_string);
+    setup.attention_at = attention_at;
+    setup.last_transition_at = now;
+    setup.row_version += 1;
+    Ok(())
+}
+
 /// Write a derived correction. These deliberately bypass the legality
 /// table: they move the row to what the evidence supports.
 ///
 /// `attention_reason` is passed through rather than nulled. The v15 code
 /// nulled it unconditionally, which deleted the record of why a setup had
 /// failed the moment any older traffic was found (ZFT-006).
+///
+/// Guarded by the row version, so a correction derived from a stale read is
+/// refused rather than applied (`VER-01`).
+///
+/// `preserve_failure` is the ZFT-006 clause and the only thing that decides
+/// whether this write may drop the failure record. The v15 code had no such
+/// clause: it nulled `attention_reason` unconditionally, so the moment ANY
+/// older traffic was found, the record of why a setup had failed was deleted
+/// and the row was promoted back to verified. Passing `false` here reproduces
+/// exactly that.
 fn write_derived(
     conn: &Connection,
     setup: &mut TrackingSetup,
     next: TrackingState,
-    attention_reason: Option<&str>,
+    preserve_failure: bool,
 ) -> Result<()> {
-    let now = clock::now_rfc3339();
-    let attention_at = if attention_reason.is_some() {
-        setup.attention_at.clone().or_else(|| Some(now.clone()))
+    let attention_reason = if preserve_failure {
+        setup.attention_reason.clone()
     } else {
         None
     };
-    conn.execute(
-        "UPDATE tracking_setups
-         SET state = ?2, last_transition_at = ?3, attention_reason = ?4, attention_at = ?5
-         WHERE id = ?1",
-        params![setup.id, next.as_str(), now, attention_reason, attention_at],
-    )?;
-    setup.state = next;
-    setup.attention_reason = attention_reason.map(str::to_string);
-    setup.attention_at = attention_at;
-    setup.last_transition_at = now;
-    Ok(())
+    let attention_at = if attention_reason.is_some() {
+        setup
+            .attention_at
+            .clone()
+            .or_else(|| Some(clock::now_rfc3339()))
+    } else {
+        None
+    };
+    cas_write_health(conn, setup, next, attention_reason.as_deref(), attention_at)
 }
 
 fn history_of(setup: &TrackingSetup) -> VerificationHistory {

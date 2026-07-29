@@ -170,7 +170,7 @@ pub fn undo(
         conn.execute(
             "UPDATE tracking_setups
              SET plan_summary_json = NULL, applied_at = NULL, first_traffic_at = NULL,
-                 verification_session = NULL
+                 verification_session = NULL, row_version = row_version + 1
              WHERE id = ?1",
             [&setup.id],
         )?;

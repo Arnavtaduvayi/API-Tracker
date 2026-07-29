@@ -59,6 +59,26 @@ pub fn test_conn() -> (TempDir, Connection) {
     (dir, conn)
 }
 
+/// A migrated DB **and the path it lives at**, so a test can open a SECOND
+/// connection on the same file.
+///
+/// One `Connection` cannot express the defect `VER-01` is about. A lost
+/// update needs two independent handles that each read, decide, and write —
+/// which on one machine is the desktop app, the CLI and the gateway service,
+/// and in a test is two `rusqlite::Connection`s on one `vault.db`.
+pub fn test_conn_at() -> (TempDir, Connection, PathBuf) {
+    let (dir, conn) = test_conn();
+    let path = dir.path().join("vault.db");
+    (dir, conn, path)
+}
+
+/// Another connection on an already-migrated test database. Configured
+/// exactly like the first (WAL, foreign keys, busy timeout) because it stands
+/// in for a genuinely separate process.
+pub fn second_conn(path: &Path) -> Connection {
+    db::open(path).unwrap()
+}
+
 /// Minimal project row without vault crypto (for FK satisfaction in
 /// state/verify tests that never unlock anything).
 pub fn insert_project(conn: &Connection, id: &str, name: &str) {

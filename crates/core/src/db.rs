@@ -1135,6 +1135,36 @@ CREATE TABLE tracking_approved_origins (
 ALTER TABLE tracking_setups ADD COLUMN applied_event_rowid INTEGER NOT NULL DEFAULT 0;
 "#,
     },
+    Migration {
+        version: 19,
+        name: "tracking setup row version (compare-and-swap, not last-writer-wins)",
+        sql: r#"
+-- Every write to a tracking setup's health columns used to be
+-- `UPDATE tracking_setups SET ... WHERE id = ?1` — a blind write. The state
+-- the write was DECIDED from was read into memory earlier, so any change
+-- another process made in between was overwritten without anyone noticing.
+--
+-- That is a lost update, and it reproduces `ZFT-006` with no attacker and no
+-- clock skew: the desktop lists setups, refreshes each one, and while it is
+-- deciding, the CLI (or the gateway, or a second window) records a failure.
+-- The refresh then writes the conclusion it reached from the PRE-failure row,
+-- nulling `attention_reason`/`attention_at` and reporting `VerifiedAndActive`
+-- for a setup that is, right now, broken (`VER-01`). WAL and `busy_timeout`
+-- do not help — both transactions commit, in order, and the second one is
+-- simply wrong.
+--
+-- This column is the compare-and-swap token. A reader carries the version it
+-- read; the writer requires the row to still be at that version and bumps it.
+-- A concurrent change makes the UPDATE affect zero rows, which is a signal
+-- rather than a silent overwrite: the caller re-reads and re-derives against
+-- what is actually there. `crates/core/src/rotation.rs` has used this shape
+-- since rotations existed; this brings tracking to the same standard.
+--
+-- Existing rows start at 0, which is exactly right: the first CAS write
+-- against an un-upgraded row reads 0, requires 0, and moves it to 1.
+ALTER TABLE tracking_setups ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.
