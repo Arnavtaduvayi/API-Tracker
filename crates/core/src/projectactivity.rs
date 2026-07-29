@@ -197,6 +197,22 @@ impl ActivityFilter<'_> {
         }
         (sql, binds)
     }
+
+    /// Whether this filter constrains anything.
+    ///
+    /// Load-bearing for the series' usage query: with no filter, usage rows are
+    /// read directly so that usage whose event row has already been pruned by
+    /// retention still counts. With a filter, they must be restricted to events
+    /// that match it — see [`project_series`].
+    pub fn is_empty(&self) -> bool {
+        self.host.is_none()
+            && self.provider.is_none()
+            && self.credential_id.is_none()
+            && self.status_class.is_none()
+            && self.endpoint.is_none()
+            && self.observation_source.is_none()
+            && self.model.is_none()
+    }
 }
 
 /// A project's activity series over `[since, until)`.
@@ -256,19 +272,43 @@ pub fn project_series(
     // Tokens and cost come from the usage table, bucketed the same way. Usage
     // rows are joined to the event they describe so the filter applies to both.
     let ubucket = granularity.bucket_expr("u.at");
+    // The filter MUST reach this query too. Restricting only the request query
+    // and then merging unfiltered usage into whichever buckets survived reports
+    // one host's request count beside every host's tokens and cost — a wrong
+    // number, not merely an imprecise one.
+    //
+    // With no filter the usage rows are read directly, so usage whose event row
+    // has already been pruned by retention still counts. With a filter they are
+    // restricted to matching events, which necessarily drops usage that has no
+    // event left to match: an unattributable row cannot be said to satisfy a
+    // filter, and counting it would put the wrong tokens back.
+    let (extra_usage, usage_binds) = filter.clauses();
+    let usage_filter = if filter.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND EXISTS (SELECT 1 FROM runtime_request_events e \
+              WHERE e.id = u.event_id AND e.project_id = ?1{extra_usage})"
+        )
+    };
     let usql = format!(
         "SELECT {ubucket} AS b, u.provider_id, u.model, substr(u.at, 1, 10),
                 SUM(u.input_tokens), SUM(u.output_tokens), SUM(u.cached_input_tokens)
          FROM gateway_usage_events u
-         WHERE u.project_id = ?1 AND u.at >= ?2 AND (?3 IS NULL OR u.at < ?3)
+         WHERE u.project_id = ?1 AND u.at >= ?2 AND (?3 IS NULL OR u.at < ?3){usage_filter}
          GROUP BY b, u.provider_id, u.model
          ORDER BY b LIMIT {}",
         MAX_BUCKETS * 8
     );
+    // Same (project_id, since, until) prefix as the request query, so
+    // `clauses()`'s placeholder numbering applies unchanged.
+    let mut usage_params: Vec<&dyn ToSql> = vec![&project_id, &since, &until];
+    usage_params.extend(usage_binds);
+
     let mut candidate_cache: HashMap<String, Vec<PricingRecord>> = HashMap::new();
     let mut stmt = conn.prepare(&usql)?;
     let groups = stmt
-        .query_map(params![project_id, since, until], |r| {
+        .query_map(usage_params.as_slice(), |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
@@ -1141,6 +1181,76 @@ mod tests {
         )
         .unwrap();
         assert!(none.is_empty());
+    }
+
+    /// A filter must reach the TOKEN and COST figures too. Restricting only the
+    /// request query and merging unfiltered usage into the surviving buckets
+    /// reports one host's request count beside every host's tokens — a wrong
+    /// number, not an imprecise one.
+    #[test]
+    fn a_filter_applies_to_tokens_and_cost_not_only_to_requests() {
+        let conn = mem();
+        let sid = session(&conn);
+        let at = "2026-07-24T10:00:00Z";
+
+        let a = event(&conn, &sid, at, "api.openai.com", Some("openai"), 200, 10);
+        usage_for(
+            &conn,
+            &a,
+            at,
+            "openai",
+            Some("gpt-4o"),
+            Some(1_000_000),
+            Some(0),
+        );
+        let b = event(
+            &conn,
+            &sid,
+            at,
+            "api.anthropic.com",
+            Some("anthropic"),
+            200,
+            10,
+        );
+        usage_for(
+            &conn,
+            &b,
+            at,
+            "anthropic",
+            Some("claude-sonnet-4-5"),
+            Some(4_000_000),
+            Some(0),
+        );
+
+        // Unfiltered: both requests and both token counts.
+        let all = series(&conn, Granularity::Hour);
+        assert_eq!(all[0].requests, 2);
+        assert_eq!(all[0].input_tokens, Some(5_000_000));
+
+        // Filtered to one host: one request AND only that host's tokens/cost.
+        let one = project_series(
+            &conn,
+            "p1",
+            "2000-01-01T00:00:00Z",
+            None,
+            Granularity::Hour,
+            &ActivityFilter {
+                host: Some("api.openai.com"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(one[0].requests, 1);
+        assert_eq!(
+            one[0].input_tokens,
+            Some(1_000_000),
+            "the other host's tokens leaked into a filtered bucket"
+        );
+        assert_eq!(
+            one[0].estimated_micros,
+            Some(2_500_000),
+            "cost must follow the same filter as the tokens it is derived from"
+        );
     }
 
     #[test]
