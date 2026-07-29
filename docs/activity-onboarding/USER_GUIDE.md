@@ -7,12 +7,24 @@ cookies, query values, prompts, request bodies, or response bodies.
 
 ## The desktop flow (no terminal required)
 
+> **This guide describes the advanced flow.** Since ADR 0029 the normal path is
+> shorter and lives on the project page: open **Projects**, open or create a
+> project, click **Select project folder**, and confirm the one disclosure.
+> Detection, route setup and tracking all happen from that one action, and the
+> live activity appears on the same page. See
+> `../projects-first/PRODUCT_BEHAVIOR.md`.
+>
+> Keep reading only if you need what the project page deliberately does not
+> offer: approving a destination that came from your own project files,
+> per-step apply diagnostics, or undoing managed file changes. Those live under
+> **Advanced → Tracking setup (advanced)**, which is the flow below.
+
 1. **Open Tethra.** The app opens on **Activity**, its home screen.
-2. **Add a credential** for the API you use (Vault → Projects →
+2. **Add a credential** for the API you use (Projects → a project →
    Credentials). This is optional for tracking itself, but it is what
    lets Tethra label observed requests with the credential that made
    them.
-3. **Click "Track API activity."**
+3. **Open Advanced → Tracking setup (advanced).**
 4. **Select your project folder** in the native picker. Tethra reads only
    that folder — bounded depth, bounded file sizes, nothing executed,
    nothing uploaded.

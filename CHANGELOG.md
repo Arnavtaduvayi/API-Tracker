@@ -6,6 +6,43 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Projects are the surface; selecting a folder is the tracking action
+The normal path is now one place. Open a project, click **Select project folder**,
+confirm one disclosure, and Tethra scans the folder, configures the APIs it
+recognises, starts tracking, and shows live request, token, latency and cost
+activity on that same page — refreshing about every five seconds without any
+further clicks. The folder is linked once and the link survives relaunches;
+startup restores tracking state and resolves health without rescanning the folder
+or rewriting any project file.
+
+The disclosure is generated from the plan Tethra is about to apply, so it cannot
+describe less than the plan does, and the confirmation carries a digest of what
+was reviewed. If the folder or configuration changed in between, the confirmation
+is refused and a fresh summary replaces the stale one — which also means a plan
+previewed before the vault locked can no longer be applied after unlocking.
+
+Credential variables Tethra finds by name become unfinished records that never
+block tracking. The table behind them has no column capable of holding a value,
+so a discovered plaintext cannot be persisted merely because it was found in a
+project file.
+
+Cost is estimated where the provider, model, tokens, date and a local pricing
+record are all known, and reported next to what it does not cover: unpriced
+requests and tokens, requests that reported no usage at all (unknown, not zero),
+the priced-token percentage, and a drill-down naming each model that could not be
+priced. An unpriced total is never rendered as a dollar amount, and
+provider-reported cost is never summed with a local estimate.
+
+An API Tethra does not recognise keeps its requests, status, endpoint and latency,
+and says plainly that credential attribution and cost estimation are unavailable
+for it. Naming such a host changes its label and nothing else.
+
+**Track API activity** moves from the primary navigation to **Advanced → Tracking
+setup (advanced)**. Nothing was removed: destination approvals, per-step
+diagnostics and undo are still only available there.
+
+See ADR 0029 and `docs/projects-first/`.
+
 ### Fixed — `tethra track` could report success while your requests were failing
 `tethra track` printed `✓ Tracking verified` and exited 0 whenever traffic had
 *ever* been observed for the setup. That answer survived stopping the local
