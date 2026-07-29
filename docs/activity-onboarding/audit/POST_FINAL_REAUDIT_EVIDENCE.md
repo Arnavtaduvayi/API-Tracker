@@ -366,8 +366,33 @@ was reverted immediately and the suite re-run green.
 | `ORG-01` | refusal replaced with an approval | 6 of 11 tests |
 | `SEC-02` | (control) a reader that refuses everything | `control_a_reader_inside_its_deadline_relays_normally` |
 
-**No mutation check for `VAL-03` or `VAL-04`.** Both are in
-`--mode service` / `gateway_validate_macos.sh`, which cannot be executed on
-this machine. Their fixes are argued from source and are first executed by CI.
-This is a gap, and it is stated as one rather than left for the next auditor to
-discover.
+### `VAL-04`, mutation-checked after CI proved it necessary
+
+`probe_primitive` was verified against a stand-in harness: a false assertion
+yields `fail`, a true one `pass`, the outer tally is untouched, and — the point
+— a **neutered** primitive (`assert_db(){ ok "$2"; }`) makes the false case read
+`pass`, which is what the control tests for.
+
+That verification was written *because CI failed*. The first version ran each
+primitive inside `v="$(probe_primitive …)"`, and command substitution is a
+subshell whose `pass`/`fail` increments never reach the parent — so every probe
+read `+0p/+0f` and all three controls failed:
+
+```text
+FAIL  assert_db did not behave as required (false-query:malformed(+0p/+0f) …)
+FAIL  assert_status did not reject a stopped gateway (observed: malformed …)
+=== PACKAGED MACOS RESULT: 54 passed, 3 failed ===
+```
+
+Worth recording plainly: the fix for *a control that never called its
+primitive* was itself, briefly, *a control that never observed one*. It was
+caught on first execution because the controls are now load-bearing — at the
+audited head this same defect would have reported PASS.
+
+That run also measured the real total: **57** (the audited 56, plus the control
+this adds). The new floor of 45 sits comfortably below it; the previous 32 did
+not.
+
+**No mutation check for `VAL-03`.** It is in `--mode service`, which cannot be
+executed on this machine. Its fix is argued from source and is first executed
+by CI. This is a gap, stated rather than left for the next auditor to find.

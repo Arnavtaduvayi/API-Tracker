@@ -114,9 +114,9 @@ itself and is called out as such.
 | **Root cause** | A control that does not call the thing it certifies is certifying nothing. |
 | **Fix** | `probe_primitive` runs the real primitive exactly as production does and observes its verdict by detaching the tally. `assert_db` is exercised against false, empty, erroring **and true** queries; `assert_status` against a stopped gateway **and** a property that is never true, so "consults its argument" is checked as well as "rejects an absent gateway". |
 | **Tests** | The controls are themselves the test, and they now execute the production functions. |
-| **Mutation** | Not independently mutation-checked in this pass — the script cannot be executed on a developer machine. **This is a gap and is named as one.** |
-| **Disposition** | **FIXED** (structurally; unexecuted here) |
-| **Residual risk** | Verified by source review and the first CI run. `gateway_validate_macos.sh` still has no mutation suite of its own — the sibling script's `validation_harness_mutants.sh` has no counterpart here. |
+| **Mutation** | `probe_primitive`'s semantics were mutation-checked against a stand-in harness: with the primitive neutered to `ok "$2"`, the false-query probe reads `pass`, which is exactly what the control tests for. The first CI run to execute the real script also proved the controls are load-bearing — they failed, because the first version ran each primitive inside a command substitution and a subshell's tally increments never reach the parent. |
+| **Disposition** | **FIXED** |
+| **Residual risk** | `gateway_validate_macos.sh` still has no mutation suite of its own — the sibling script's `validation_harness_mutants.sh` has no counterpart here, so these controls guard the two primitives and nothing guards the controls. |
 | **Commit** | `aaa1c13` |
 
 ### VAL-05 — the documented "56 checks" is machine-dependent and gated only by a floor of 32
