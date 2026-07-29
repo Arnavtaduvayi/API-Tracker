@@ -5,6 +5,12 @@
 #                                      [--foreground|--require-service]
 #                                      [path/to/Tethra.app]
 #
+#   scripts/tracking_validate_macos.sh --scope <s> [mode] --emit-check-sites
+#       Prints this file's own check-site inventory for that scope+mode and
+#       exits. Pure enumeration: it reads this source, starts nothing, writes
+#       nothing and needs no app bundle. scripts/gen_validation_manifest.py
+#       drives it to derive the TRUSTED check set (`VAL-05-R`).
+#
 # ---------------------------------------------------------------------------
 # WHAT THIS SCRIPT PROVES, AND WHAT IT DOES NOT (read before quoting a total)
 # ---------------------------------------------------------------------------
@@ -53,8 +59,8 @@
 #     legacy agent would trigger the takeover migration, and a run that
 #     succeeds only because the machine happened to be clean is not evidence.
 #     Use `--scope offline` there.
-#   * the totals for the modes DIFFER BY CONSTRUCTION (foreground 57,
-#     service 63, offline 20, selfcheck 5). A foreground run therefore can
+#   * the totals for the modes DIFFER BY CONSTRUCTION (foreground 58,
+#     service 64, offline 21, selfcheck 5). A foreground run therefore can
 #     never be mistaken for, or quoted as, a service run. Those four numbers
 #     are SUMMED from the group table below, never typed in: `full:service`
 #     was once typed as 60 while its groups sum to 59, which made the mode
@@ -112,6 +118,29 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# THIS FILE, by path, whether it was executed or sourced.
+#
+# `enumerate_checks` re-reads the script to count its own call sites, and it
+# used to read `"$0"`. Under `. tracking_validate_macos.sh` (library mode,
+# which `validation_manifest_check.sh` and `validation_ownership_tests.sh`
+# both use) `$0` is the SOURCING shell, not this file — so the enumerator
+# would silently count the wrong file's call sites and report a plausible
+# number about something else entirely. `${BASH_SOURCE[0]}` is this file in
+# both cases (`VAL-05-R`).
+SELF="${BASH_SOURCE[0]:-$0}"
+
+# EVERY launchd interaction in this file goes through this one name.
+#
+# `NEW-03`: `launchctl bootout` addresses `gui/<uid>` — the operator's live
+# Aqua session — and no `HOME` redirection isolates it. The ownership tests
+# must therefore be able to prove what this script WOULD invoke without ever
+# invoking it, on a machine that has a live production gateway registered.
+# A single indirection makes that possible; `scripts/validation_ownership_tests.sh`
+# asserts structurally that no bare `launchctl` token survives outside this
+# assignment, so a future call site cannot silently escape the seam and make
+# those tests vacuous.
+LAUNCHCTL="${LAUNCHCTL:-launchctl}"
+
 # Resolved before PATH is stripped, because rustc lives in ~/.cargo/bin.
 TRIPLE="$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')"
 if [ -z "$TRIPLE" ]; then
@@ -129,6 +158,7 @@ SCOPE="full"
 # and the weak configuration (ZFT-VAL-4).
 MODE="foreground"
 APP=""
+EMIT_SITES=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --scope)           SCOPE="${2:-}"; shift 2 ;;
@@ -136,6 +166,10 @@ while [ $# -gt 0 ]; do
     --foreground)      MODE="foreground"; shift ;;
     --require-service) MODE="service"; shift ;;
     --self-check|--selfcheck) SCOPE="selfcheck"; shift ;;
+    # Print the check-site inventory for the chosen scope+mode and exit. Pure
+    # enumeration: it reads this file, starts nothing, writes nothing, needs
+    # no app bundle. `scripts/gen_validation_manifest.py` drives it.
+    --emit-check-sites) EMIT_SITES=1; shift ;;
     # The whole header — the mode/scope table and the proves/does-not-prove
     # list ARE the help — up to (not including) the first line of code. The
     # cut point is COMPUTED rather than written down: `sed -n '1,89p'` kept
@@ -173,11 +207,15 @@ esac
 #
 # Two former BUNDLE "checks" are uncounted PRECONDITIONS (a `check` followed
 # by `die` on the failing branch can never be reported as a failure), which is
-# why BUNDLE is 5 and offline is 20 rather than 22.
+# why BUNDLE is 6 and offline is 21 rather than 23. The sixth BUNDLE check is
+# the PATH-isolation assertion added for `NEW-36`: the strip itself is still a
+# precondition that `die`s, but the fact that it took effect is now stated
+# positively in the register instead of being inferred from the run
+# continuing.
 group_size() {   # group_size <GROUP> -> the number of checks that group runs
   case "$1" in
     HARNESS)     echo 5 ;;
-    BUNDLE)      echo 5 ;;
+    BUNDLE)      echo 6 ;;
     FIXTURE)     echo 3 ;;
     DRYRUN)      echo 6 ;;
     OFFLINE)     echo 1 ;;
@@ -232,8 +270,16 @@ in_list() {   # in_list <word> <space-separated list>
 # than guessed at, because each of those would make the enforced total depend
 # on machine state — the property this whole file exists to deny. A call site
 # that must not be counted carries `#@uncounted` and says why.
-enumerate_checks() {   # enumerate_checks <scope> <mode> -> "GROUP=N" lines
-  awk -v want_scope="$1" -v want_mode="$2" '
+#
+# WITH `emit=1` it prints, instead of the counts, one TSV row per counted
+# check site — `seq \t GROUP \t rawline` — which is what makes
+# `scripts/gen_validation_manifest.py` able to derive the EXACT SET of checks
+# a scope+mode runs from this file's source (`VAL-05-R`). Sibling branches of
+# one runtime conditional (the `if`/`else` pairs and `case` arms that emit one
+# check whichever branch runs) share a `seq`, so their alternative labels are
+# collected against the same logical check.
+enumerate_checks() {   # enumerate_checks <scope> <mode> [emit] -> "GROUP=N" lines
+  awk -v want_scope="$1" -v want_mode="$2" -v emit="${3:-0}" '
     function fail(msg) { printf "ERROR (line %d): %s\n", NR, msg; errs++ }
 
     # Quote-aware, so a multi-line SQL string or a multi-line die() message is
@@ -253,6 +299,16 @@ enumerate_checks() {   # enumerate_checks <scope> <mode> -> "GROUP=N" lines
 
     function all_active(   i) {
       for (i = 1; i <= depth; i++) if (!act[i]) return 0
+      return 1
+    }
+    # Reachability by the DECIDABLE guards only — the `[ "$SCOPE" = … ]` and
+    # `[ "$MODE" = … ]` tests this enumerator resolves statically. A site in a
+    # non-taken RUNTIME branch is still reachable at run time (that is exactly
+    # what makes the branches interchangeable), so the emitter must record its
+    # label too; a site behind a false scope/mode guard is not reachable at
+    # all in this tuple and must not be.
+    function guard_active(   i) {
+      for (i = 1; i <= depth; i++) if (ftype[i] == "guard" && !act[i]) return 0
       return 1
     }
     function push(type, a) {
@@ -276,6 +332,13 @@ enumerate_checks() {   # enumerate_checks <scope> <mode> -> "GROUP=N" lines
         if (nbr[d] == 0) first[d] = cnt[d]
         else if (cnt[d] != first[d])
           fail("the branches of a runtime conditional emit different numbers of checks (" first[d] " vs " cnt[d] "), so the total would depend on machine state")
+        # The identity emitter pairs sibling branches POSITIONALLY against the
+        # single sequence number the taken branch consumed. With two or more
+        # checks per branch that pairing is ambiguous, and an ambiguous
+        # identity is exactly what `VAL-05-R` is about. Fail closed: give the
+        # branches one check each, or lift the shared part out.
+        if (cnt[d] > 1)
+          fail("a branch of a runtime conditional emits " cnt[d] " checks; the identity emitter can only pair branches that emit one each")
         act[d] = 0
       }
       nbr[d]++; cnt[d] = 0; closed[d] = 1
@@ -319,7 +382,15 @@ enumerate_checks() {   # enumerate_checks <scope> <mode> -> "GROUP=N" lines
         if (loops > 0) fail("a counted check inside a loop makes the total depend on runtime state")
         if (cur == "") fail("a counted check appears before any group statement")
         for (i = 1; i <= depth; i++) cnt[i]++
-        if (all_active()) count[cur]++
+        if (all_active()) { count[cur]++; seq++ }
+        # The identity emitter. A counted site prints under a fresh sequence
+        # number; a sibling branch of the same runtime conditional prints
+        # under the SAME one, because only one of them runs and the manifest
+        # must accept whichever label reaches the register.
+        if (emit && guard_active()) {
+          if (seq == 0) fail("a check site is reachable before any counted site; the emitter cannot pair it")
+          printf "%d\t%s\t%s\n", seq, cur, s
+        }
         return
       }
       if (q ~ ("(;|then|else|do|\\()[ \t]+" PRIM "[ \t]"))
@@ -417,9 +488,21 @@ enumerate_checks() {   # enumerate_checks <scope> <mode> -> "GROUP=N" lines
       if (cont)       fail("a logical line is still open at end of file")
       if (depth != 0) fail("unbalanced if/case/loop nesting at end of file (depth " depth ")")
       if (errs) exit 1
+      if (emit) exit 0
       for (g in count) if (count[g] > 0) printf "%s=%d\n", g, count[g]
     }
-  ' "$0"
+  ' "$SELF"
+}
+
+# The identity emitter, as a named entry point. TSV, one row per reachable
+# check-site line: `seq \t GROUP \t raw source line`.
+#
+# `scripts/gen_validation_manifest.py` is the only consumer. It exists so the
+# trusted manifest's expected CHECK SET is derived from THIS FILE'S SOURCE —
+# never from a results document, which is the whole of `VAL-01`, and never
+# from a count, which is the whole of `VAL-05-R`.
+enumerate_check_sites() {   # enumerate_check_sites <scope> <mode>
+  enumerate_checks "$1" "$2" 1
 }
 
 # Compares the table above with what this file can actually execute, for
@@ -451,6 +534,15 @@ verify_check_inventory() {
   done
   return "$rc"
 }
+
+# The enumeration-only entry point, placed here because everything above is a
+# definition and everything below it touches the machine. It must run before
+# the library-mode gate and before preflight so the generator can be driven by
+# EXECUTING this file (`$SELF` above is what makes that read the right source).
+if [ "$EMIT_SITES" = "1" ]; then
+  enumerate_check_sites "$SCOPE" "$MODE" || exit 1
+  exit 0
+fi
 
 EXPECTED="$(expected_total "$SCOPE:$MODE")" || exit 2
 
@@ -489,7 +581,7 @@ PLIST="$LA_DIR/$LEGACY_LABEL.plist"
 #
 # So the interlock asks launchd as well as the filesystem.
 registered_gateway_jobs() {
-  launchctl list 2>/dev/null \
+  "$LAUNCHCTL" list 2>/dev/null \
     | awk -v l="$LEGACY_LABEL" '$3 == l || index($3, l ".") == 1 { print "  " $3 }'
 }
 FAKE_KEY="sk-proj-PACKAGED-VALIDATION-FAKE-NOT-A-REAL-KEY-0001"
@@ -691,6 +783,94 @@ proc_is_ours() {
   case "$cmd" in "$prefix"*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- ownership of a LAUNCHD JOB (`NEW-03`) ---------------------------------
+#
+# The defect this replaces: the bootout guard was
+#
+#     if [ -e "$LA_DIR/$value.plist" ] && ! plist_is_ours ...; then continue; fi
+#
+# `$LA_DIR` is `$HOME`-keyed; `bootout` addresses `gui/<uid>`, which no HOME
+# redirection isolates. So the PREDICATE and the ACTION lived in two different
+# namespaces, and when the file was absent the `&&` short-circuited the entire
+# proof — including `plist_is_ours` — while the bootout still landed on the
+# operator's real session. Worse, cleanup step 2 runs `gateway uninstall`,
+# which DELETES the plist, so in every successful service-mode run the file is
+# already gone by the time step 3 reads it. The proof had therefore never once
+# evaluated on a real run, and six orphaned namespaced jobs were observed live
+# in `gui/501` on the audited machine with no plist anywhere on disk — exactly
+# the state in which this harness would have booted out a stranger's job and
+# printed "the job this run registered".
+#
+# The rule now: the existence of a file is NEVER a precondition on whether a
+# proof is required. The proof is unconditional; only its sources may vary,
+# and every source must be co-located with the namespace the action addresses.
+
+# The data directory LAUNCHD ITSELF believes this job serves. Read out of the
+# live gui/<uid> domain — the same namespace `bootout` addresses — so it is
+# unaffected by $HOME and survives the plist being deleted. Fails CLOSED: an
+# unparsable or absent `arguments = { … }` block yields the empty string,
+# which every caller treats as "not proven".
+job_data_dir() {   # job_data_dir <label>
+  "$LAUNCHCTL" print "gui/$UID_N/$1" 2>/dev/null | awk '
+    /arguments = \{/       { in_args = 1; next }
+    in_args && /^[ \t]*\}/ { exit }
+    in_args && seen        { gsub(/^[ \t]+|[ \t]+$/, ""); print; exit }
+    in_args && /--data-dir/ { seen = 1 }
+  '
+}
+
+# May this run unload <label> from the live session? Proven from FOUR
+# independent terms, none of which is the plist and none of which is
+# $HOME-keyed. Any one of them failing refuses.
+#
+#   1. never the production label (also enforced by the caller, first);
+#   2. the label is in the namespaced family — `<production>.<12 hex>` — so a
+#      hand-edited or truncated ledger row cannot name the bare product label
+#      through a different spelling;
+#   3. the ledger row's own `extra` field records the data directory this run
+#      created, so a caller-supplied row in library mode cannot name a foreign
+#      label without also lying about $DIR — and (4) then catches the lie;
+#   4. launchd's own record of the job names $DIR as its --data-dir.
+#
+# (3) is a record; (4) is a live observation of the domain being acted on.
+# Requiring both means no single forged input suffices.
+job_is_ours() {   # job_is_ours <label> <ledger-recorded-data-dir>
+  local lbl="$1" recorded_dir="$2" suffix jdd
+  JOB_REFUSAL=""
+  [ -n "$lbl" ] || { JOB_REFUSAL="the ledger row names no label"; return 1; }
+  if [ "$lbl" = "$LEGACY_LABEL" ]; then
+    JOB_REFUSAL="it is the PRODUCTION label"
+    return 1
+  fi
+  suffix="${lbl#"$LEGACY_LABEL".}"
+  if [ "$suffix" = "$lbl" ] || ! printf '%s' "$suffix" | grep -qE '^[0-9a-f]{12}$'; then
+    JOB_REFUSAL="the label is not a per-installation gateway label (<production>.<12 hex>)"
+    return 1
+  fi
+  if [ "$recorded_dir" != "$DIR" ]; then
+    JOB_REFUSAL="the ledger row records data directory '${recorded_dir:-<empty>}', not this run's $DIR"
+    return 1
+  fi
+  jdd="$(job_data_dir "$lbl")"
+  if [ -z "$jdd" ]; then
+    JOB_REFUSAL="launchd's own record of the job names no --data-dir"
+    return 1
+  fi
+  if [ "$jdd" != "$DIR" ]; then
+    JOB_REFUSAL="launchd says the job serves '$jdd', not this run's $DIR"
+    return 1
+  fi
+  return 0
+}
+
+# Counts service-control actions this run REFUSED to take because ownership
+# could not be proven. A refusal leaves a job registered, and
+# `ci_service_cleanup_check.sh` structurally cannot see that as an error — its
+# precondition goes GREEN when a job disappears. So the only place a refusal
+# can be surfaced is this run's own exit status.
+CLEANUP_REFUSALS=0
+JOB_REFUSAL=""
+
 # Read-only signature of the PRODUCTION definition. Snapshotted before the
 # trap is armed and asserted after teardown: if this run ever creates, moves
 # or replaces the user's live plist, the two differ. That is the invariant
@@ -726,16 +906,31 @@ cleanup() {
 
   # 3. Unload only labels this run bootstrapped. `bootout` addresses the LIVE
   #    gui/<uid> domain regardless of $HOME (REM-001), so it gets the strictest
-  #    guard: never the production label, and — while the definition is still
-  #    on disk — only while that definition proves ours.
+  #    guard — and, since `NEW-03`, one that does NOT depend on the plist
+  #    existing. Three outcomes, all distinguishable in the output:
+  #
+  #      * launchd does not know the label      -> nothing to do, not an error
+  #      * ownership proven (job_is_ours)       -> bootout
+  #      * ownership NOT proven                 -> LEAVE IT REGISTERED and fail
+  #
+  #    The third is deliberate. A visible stray job is a far smaller harm than
+  #    stopping another installation's live gateway, and `ci_service_preconditions.sh`
+  #    doctrine is detect-and-refuse, never remediate.
   while IFS="$(printf '\t')" read -r value extra; do
     [ -n "$value" ] || continue
     [ "$value" = "$LEGACY_LABEL" ] && continue
-    if [ -e "$LA_DIR/$value.plist" ] && ! plist_is_ours "$LA_DIR/$value.plist" "$value"; then
-      echo "  cleanup: leaving $LA_DIR/$value.plist alone (it no longer proves it is ours)"
+    if ! "$LAUNCHCTL" print "gui/$UID_N/$value" >/dev/null 2>&1; then
+      echo "  cleanup: gui/$UID_N/$value is not registered; nothing to boot out"
       continue
     fi
-    launchctl bootout "gui/$UID_N/$value" >/dev/null 2>&1
+    if ! job_is_ours "$value" "$extra"; then
+      echo "  cleanup: REFUSING to boot out gui/$UID_N/$value — $JOB_REFUSAL."
+      echo "           The job is LEFT REGISTERED. Investigate and remove it by hand;"
+      echo "           this run will not unload a job it cannot prove it started."
+      CLEANUP_REFUSALS=$((CLEANUP_REFUSALS + 1))
+      continue
+    fi
+    "$LAUNCHCTL" bootout "gui/$UID_N/$value" >/dev/null 2>&1
     echo "  booted out the job this run registered: gui/$UID_N/$value"
   done <<EOF
 $(ledger_values label)
@@ -778,6 +973,17 @@ EOF
   else
     echo "  production definition unchanged ($PROD_SIG_BEFORE)"
   fi
+
+  # 7. Any refusal above left a launchd job registered. Say so loudly: the
+  #    external verifier (`ci_service_cleanup_check.sh`) cannot detect this
+  #    class at all, because its precondition is "no gateway job registered"
+  #    and a WRONGLY-removed job makes that greener, not redder (`NEW-03`).
+  if [ "$CLEANUP_REFUSALS" -ne 0 ]; then
+    echo "  *** CLEANUP REFUSED ($CLEANUP_REFUSALS) ***"
+    echo "      $CLEANUP_REFUSALS launchd job(s) recorded in this run's ledger could not be"
+    echo "      proved to belong to it, so none of them was booted out. This run's"
+    echo "      teardown is INCOMPLETE by choice. Nothing was removed."
+  fi
   rm -f "$LEDGER" 2>/dev/null
 }
 
@@ -801,7 +1007,23 @@ EOF
 # ever existed.
 # ---------------------------------------------------------------------------
 if [ "${TETHRA_VALIDATE_LIB_ONLY:-0}" = "1" ]; then
-  return 0 2>/dev/null || exit 0
+  # `NEW-04`. The audited head was `return 0 2>/dev/null || exit 0`: when the
+  # script was EXECUTED rather than sourced, `return` failed and it exited 0
+  # SILENTLY, having run nothing and written no results.json. Two CI gates run
+  # this harness without asserting an artifact (`ci.yml`'s selfcheck step and
+  # `packaged-service-macos.yml`'s), so with that variable anywhere in the
+  # environment both would have passed vacuously — a green tick for a run that
+  # did not happen. Library mode is a SOURCING contract; an execution under it
+  # is a misconfiguration, and the only safe answer to a misconfigured gate is
+  # a loud non-zero.
+  if [ "${BASH_SOURCE[0]:-$0}" = "$0" ]; then
+    echo "REFUSING: TETHRA_VALIDATE_LIB_ONLY=1 is set, but this script was EXECUTED" >&2
+    echo "          rather than sourced. Library mode only defines functions; exiting 0" >&2
+    echo "          here would report a green run that executed no check at all." >&2
+    echo "          Source it (. $SELF) for library mode, or unset the variable." >&2
+    exit 2
+  fi
+  return 0
 fi
 
 # ===========================================================================
@@ -896,7 +1118,12 @@ mkdir -p "$DIR" "$COPIES" || { rm -f "$LEDGER"; die "could not create the isolat
 chmod 700 "$DIR"
 ledger_add dir "$DIR"
 ledger_add dir "$COPIES"
-trap cleanup EXIT
+# The trap — not a bare `cleanup` — turns a teardown that REFUSED to act into a
+# non-zero exit (`NEW-03`). A refusal leaves a launchd job registered, and
+# `ci_service_cleanup_check.sh` structurally cannot see that (its precondition
+# goes GREEN when a job disappears), so this run's own status is the only place
+# a refusal can be surfaced.
+trap 'cleanup; [ "$CLEANUP_REFUSALS" -eq 0 ] || exit 1' EXIT
 
 echo "=== packaged tracking validation — scope=$SCOPE mode=$MODE ==="
 echo "    app:      $APP"
@@ -1127,6 +1354,14 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 # PRECONDITION, not a check — same reason as the helper check above.
 command -v tethra >/dev/null 2>&1 && \
   die "a tethra CLI is still on PATH ($(command -v tethra)); this run would not prove bundling."
+# …and the POSITIVE half (`NEW-36`). The `die` above is a silent precondition:
+# it emits nothing on success, so the artifact carried only NEGATIVE evidence
+# for PATH isolation — "the run continued" — and a reader auditing the results
+# file could not tell an isolated run from one that never stripped anything.
+# The two statements are separable and both are asserted: the PATH is exactly
+# the system default, AND no tethra is reachable through it.
+{ [ "$PATH" = "/usr/bin:/bin:/usr/sbin:/sbin" ] && ! command -v tethra >/dev/null 2>&1; }
+check $? "PATH is stripped to the system default and no developer tethra CLI is reachable on it"
 
 "$HELPER" gateway service-probe 2>/dev/null | grep -q "tethra-gateway-service-probe"
 check $? "the bundled helper answers the exec probe"
@@ -1326,7 +1561,14 @@ elif [ "$MODE" = "service" ]; then
     # `plist_is_ours` re-proves against the product's own identity rather than
     # against a basename this script derived.
     ledger_add plist "$SERVICE_INSTALLED" "$PRODUCT_LABEL"
-    ledger_add label "$PRODUCT_LABEL"
+    # The third field is the PROOF TERM, not decoration (`NEW-03`). A `label`
+    # row used to record only THAT a label was seen — never which data
+    # directory it belongs to — so cleanup had nothing to check the row
+    # against once the plist was gone. Recording $DIR here makes a
+    # caller-supplied row in library mode unable to name a foreign label
+    # without also lying about the data directory, and launchd's own record of
+    # the job then catches the lie.
+    ledger_add label "$PRODUCT_LABEL" "$DIR"
   fi
   [ -n "${SERVICE_INSTALLED:-}" ]
   check $? "the apply installed a real LaunchAgent the product can name (resolved: ${SERVICE_INSTALLED:-none})"
@@ -1379,7 +1621,7 @@ elif [ "$MODE" = "service" ]; then
     [ -S "$DIR/gateway.sock" ] && break
     sleep 0.5
   done
-  launchctl print "gui/$UID_N/$INSTALLED_LABEL" >/dev/null 2>&1
+  "$LAUNCHCTL" print "gui/$UID_N/$INSTALLED_LABEL" >/dev/null 2>&1
   check $? "launchd loaded the namespaced service gui/$UID_N/$INSTALLED_LABEL"
 
   # The RUNNING PROCESS must execute the program the OWNED plist declares —
@@ -1389,7 +1631,7 @@ elif [ "$MODE" = "service" ]; then
   # process just as happily.
   PLIST_PROGRAM="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' \
     "${SERVICE_INSTALLED:-/dev/null}" 2>/dev/null)"
-  SVC_PID="$(launchctl print "gui/$UID_N/$INSTALLED_LABEL" 2>/dev/null \
+  SVC_PID="$("$LAUNCHCTL" print "gui/$UID_N/$INSTALLED_LABEL" 2>/dev/null \
     | awk '/^[[:space:]]*pid = /{print $3; exit}')"
   SVC_EXE="$(ps -p "${SVC_PID:-0}" -o comm= 2>/dev/null)"
   [ -n "$SVC_PID" ] && [ -n "$PLIST_PROGRAM" ] && [ "$SVC_EXE" = "$PLIST_PROGRAM" ]
@@ -1486,10 +1728,15 @@ db_write "DELETE FROM runtime_request_events WHERE id='$FORGE_EVENT';
 # floor still catches the failure mode that matters here — a cleanup DELETE
 # wide enough to take the product's own history with it (widen it to
 # `WHERE at<applied_at` and this clause fails).
-assert_db "SELECT (SELECT COUNT(*) FROM runtime_request_events
-                     WHERE id='$FORGE_EVENT' OR session_id='$FORGE_SESSION')=0
-              AND (SELECT COUNT(*) FROM observation_sessions WHERE id='$FORGE_SESSION')=0
-              AND (SELECT COUNT(*) FROM observed_api_services WHERE id='$FORGE_SERVICE')=0
+# Every SQL line carries an explicit `\` continuation so the whole invocation
+# is ONE logical line. Without it the enumerator's quote-aware joiner stops at
+# the first line containing a single quote, and the label — the thing the
+# trusted manifest binds this check's identity to — lands on a physical line
+# that is not a call site, so the identity emitter cannot see it (`VAL-05-R`).
+assert_db "SELECT (SELECT COUNT(*) FROM runtime_request_events \
+                     WHERE id='$FORGE_EVENT' OR session_id='$FORGE_SESSION')=0 \
+              AND (SELECT COUNT(*) FROM observation_sessions WHERE id='$FORGE_SESSION')=0 \
+              AND (SELECT COUNT(*) FROM observed_api_services WHERE id='$FORGE_SERVICE')=0 \
               AND (SELECT COUNT(*) FROM runtime_request_events WHERE at<'$APPLIED')>=$PRE_APPLY_ROWS" \
   "the control removed exactly what it planted: no forged row survives, and the $PRE_APPLY_ROWS pre-apply observation(s) the product recorded itself are intact"
 
@@ -1710,7 +1957,7 @@ if [ -n "${TETHRA_VALIDATION_RESULTS_JSON:-}" ]; then
   [ -z "$DUPLICATES" ] || RESULTS_VERDICT="INCONCLUSIVE"
   {
     echo "{"
-    echo "  \"schema\": \"tethra.validation.results/1\","
+    echo "  \"schema\": \"tethra.validation.results/2\","
     echo "  \"scope\": \"$SCOPE\","
     echo "  \"mode\": \"$MODE\","
     echo "  \"verdict\": \"$RESULTS_VERDICT\","

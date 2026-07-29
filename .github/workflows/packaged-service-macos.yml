@@ -119,11 +119,29 @@ jobs:
       # ~2 minutes instead of after a ten-minute Tauri build. It installs and
       # removes only its own per-installation label and proves its teardown.
       - name: Gateway service lifecycle (install → stop → restart → uninstall)
+        id: gateway
         run: |
           set -o pipefail
           mkdir -p "$RUNNER_TEMP/service-evidence"
+          export TETHRA_GATEWAY_VALIDATION_RESULTS_JSON="$RUNNER_TEMP/service-evidence/gateway-results.json"
           bash scripts/gateway_validate_macos.sh \
             2>&1 | tee "$RUNNER_TEMP/service-evidence/gateway-lifecycle.log"
+
+      # `VAL-05-R`: this harness used to gate on its own exit code and an
+      # in-script `REQUIRED_CHECKS=50` equality — a number derived from ONE
+      # measured run — with no register and no machine-readable result at all.
+      # Identity binding was 0 of 57: renaming a check moved nothing. It now
+      # emits the same schema the tracking harness does and is asserted by the
+      # SAME validator against the SAME trusted manifest, which names all 50
+      # required checks and all 15 optional ones individually. Scope, mode and
+      # commit are passed IN from this workflow and are never read from the
+      # artifact.
+      - name: Assert the gateway lifecycle scope completed (not merely exited)
+        if: always() && steps.gateway.outcome != 'skipped'
+        run: |
+          bash scripts/ci_assert_service_results.sh \
+            "$RUNNER_TEMP/service-evidence/gateway-results.json" \
+            --scope gateway --mode lifecycle --commit "${{ github.sha }}"
 
       # Between the two real-service runs the machine must be a clean room
       # again. If the lifecycle script left anything, the tracking scope's own
@@ -137,8 +155,8 @@ jobs:
         run: npm run tauri build -- --bundles app
 
       # The app a user gets is not "the app inside the build tree". Copying it
-      # out proves the bundle is self-contained: nothing it needs may be
-      # resolved relative to the repository.
+      # out is the SETUP for proving the bundle is self-contained; the step
+      # after it is the proof.
       - name: Copy the .app outside the repository
         run: |
           set -euo pipefail
@@ -148,6 +166,57 @@ jobs:
           echo "PACKAGED_APP=$DEST/Tethra.app" >> "$GITHUB_ENV"
           echo "copied to $DEST/Tethra.app"
           ls -la "$DEST/Tethra.app/Contents/MacOS/"
+
+      # NEW-47: the step above used to CLAIM that copying the bundle out
+      # "proves it is self-contained". Copying proves nothing on its own — the
+      # copy was never exercised in a way that could fail if a path resolved
+      # back into the repository. The audit confirmed the property holds by
+      # measurement; this makes that measurement a gate instead of a comment.
+      - name: Assert the bundle resolves nothing relative to the repository
+        run: |
+          set -euo pipefail
+          APP="$PACKAGED_APP"
+          REPO="$GITHUB_WORKSPACE"
+          fail=0
+          for bin in "$APP/Contents/MacOS/"*; do
+            [ -f "$bin" ] || continue
+            # 1. No compiled-in path into the source tree.
+            if strings -a "$bin" | grep -qF "$REPO"; then
+              echo "FAIL: $bin embeds the repository root $REPO"
+              strings -a "$bin" | grep -F "$REPO" | head -5
+              fail=1
+            else
+              echo "PASS: $(basename "$bin") embeds no path into $REPO"
+            fi
+            # 2. No non-system dynamic library.
+            if otool -L "$bin" | tail -n +2 \
+                 | grep -vE '^\s+(/usr/lib/|/System/Library/)' | grep -q .; then
+              echo "FAIL: $bin links a non-system dylib"
+              otool -L "$bin" | tail -n +2 \
+                | grep -vE '^\s+(/usr/lib/|/System/Library/)'
+              fail=1
+            else
+              echo "PASS: $(basename "$bin") links only system libraries"
+            fi
+          done
+          # 3. The bundled helper performs a full detection with an EMPTY
+          #    environment and a working directory outside the repository.
+          #    `env -i` strips PATH, HOME and every TETHRA_* variable, so
+          #    anything the helper needs must come from inside the bundle.
+          probe="$RUNNER_TEMP/selfcontained-probe"
+          rm -rf "$probe" && mkdir -p "$probe"
+          printf 'OPENAI_API_KEY=sk-proj-CI-SELFCONTAINED-FAKE-NOT-REAL-0001\n' > "$probe/.env"
+          printf '{ "dependencies": { "openai": "^4.0.0", "dotenv": "^16.0.0" } }\n' \
+            > "$probe/package.json"
+          out="$(cd / && env -i "$APP/Contents/MacOS/tethra" track --dry-run "$probe" 2>&1)" || true
+          if printf '%s' "$out" | grep -q 'API integrations found'; then
+            echo "PASS: the bundled helper detects under env -i with cwd=/"
+          else
+            echo "FAIL: the bundled helper could not run outside the repository"
+            printf '%s\n' "$out" | head -20
+            fail=1
+          fi
+          exit "$fail"
 
       # ---------------------------------------------------------------------
       # THE POINT OF THE JOB.

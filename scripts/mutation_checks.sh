@@ -293,8 +293,8 @@ mutate "route-and-link-existence-gate-health" \
 mutate "undo-refuses-when-the-plan-is-unknown" \
   "crates/tracking/src/undo.rs" \
   's = s.replace(
-      "    if summary_missing && !live_links.is_empty() {\n        complete = false;",
-      "    if false && summary_missing && !live_links.is_empty() {\n        complete = false;")' \
+      "    if plan_incomplete && !live_links.is_empty() {\n        complete = false;",
+      "    if false && plan_incomplete && !live_links.is_empty() {\n        complete = false;")' \
   -p api-tracker-tracking --test undo_ground_truth
 
 # ---------------------------------------------------------------------------
@@ -381,6 +381,58 @@ mutate "unknown-credentials-stay-visible" \
   's = s.replace(
       "    let unrecognized: Vec<UnrecognizedCredential> = unattributed.into_values().collect();",
       "    let unrecognized: Vec<UnrecognizedCredential> = Vec::new(); let _ = unattributed;")' \
+  -p api-tracker-tracking --test detect_coverage
+
+# ---------------------------------------------------------------------------
+# The latest fresh audit (2026-07-29). Every one of these protections had a
+# test that could not fail: the constant nothing contended for, the one health
+# write with no predicate, the provenance a failed apply never recorded, the
+# swallowed transition error, the CAS that ran after the destruction it was
+# meant to guard, and the row label that used a different precedence from the
+# headline that counted it.
+# ---------------------------------------------------------------------------
+
+# NEW-05: three attempts and one attempt were indistinguishable, because no
+# test created enough contention to need a second.
+mutate "refresh-retries-a-lost-compare-and-swap" \
+  "crates/tracking/src/state.rs" \
+  's = s.replace(
+      "const REFRESH_CAS_ATTEMPTS: usize = 3;",
+      "const REFRESH_CAS_ATTEMPTS: usize = 1;")' \
+  -p api-tracker-tracking --test verification_cas_retry
+
+# NEW-31: `record_applied` advanced the row version without predicating on it,
+# so two concurrent applies were last-writer-wins and undo then acted on the
+# wrong created_routes.
+mutate "record-applied-predicates-on-the-row-it-read" \
+  "crates/tracking/src/state.rs" \
+  's = s.replace("AND row_version = ?5", "")' \
+  -p api-tracker-tracking --test transaction_recovery
+
+# NEW-32: a failed apply wrote no plan summary, so the retry's undo reported
+# "existed before this setup (only reused)" for routes it had created itself.
+mutate "a-failed-apply-still-records-what-it-created" \
+  "crates/tracking/src/apply.rs" \
+  's = s.replace(
+      "state::record_routes_created(",
+      "(|_: &_, _: &mut _, _: &_, _: &_| -> api_tracker_core::Result<()> { Ok(()) })(")' \
+  -p api-tracker-tracking --test transaction_recovery
+
+# NEW-34: undo destroyed the setup before its compare-and-swap, so a stale
+# undo tore down a live one.
+mutate "undo-checks-the-row-version-before-it-destroys" \
+  "crates/tracking/src/undo.rs" \
+  's = s.replace("    if live.row_version != setup.row_version {",
+                 "    if false && live.row_version != setup.row_version {")' \
+  -p api-tracker-tracking --test transaction_recovery
+
+# NEW-43: the headline ranked confidence first while the row labels did not,
+# so six rows could render under a headline that said three.
+mutate "row-labels-use-the-headline-precedence" \
+  "crates/tracking/src/detect.rs" \
+  's = s.replace(
+      "        if self.confidence < DetectionConfidence::Likely {",
+      "        if false && self.confidence < DetectionConfidence::Likely {")' \
   -p api-tracker-tracking --test detect_coverage
 
 echo

@@ -136,7 +136,7 @@ jobs:
     # It runs the packaged validation at `--scope offline`, which is the
     # largest scope a hosted runner can execute HONESTLY:
     #
-    #   REQUIRED here (20 checks, every one of them fails the build):
+    #   REQUIRED here (21 checks, every one of them fails the build):
     #     - the bundle carries a runnable native helper at Contents/MacOS
     #     - the helper's MEASURED --version equals the bundle's Info.plist
     #       version, and its bytes equal the sidecar staged from this source
@@ -185,7 +185,7 @@ jobs:
       # than after a bundle build.
       - name: Validation harness self-check (anti-tautology gate)
         run: bash scripts/tracking_validate_macos.sh --scope selfcheck
-      # ...and prove that gate is not itself decorative: seven mutants that
+      # ...and prove that gate is not itself decorative: eight mutants that
       # weaken the harness into "always ok" (including the literal ZFT-VAL-7
       # and ZFT-VAL-10 defects) must each be killed by the self-check. Runs on
       # copies under mktemp; starts no service and touches no repository file.
@@ -205,10 +205,26 @@ jobs:
       # forgery declaring zero checks printed "SERVICE SCOPE COMPLETED: 0/0"
       # and exited 0 (VAL-01). These two steps guard the replacement: the
       # manifest must describe the harness that actually exists, and the
-      # validator must accept exactly one genuine result out of thirty-three
-      # documents — including the audit's own forgery, replayed verbatim.
-      - name: Trusted manifest matches the harness's group table
+      # validator must accept a genuine result for each of the five scopes the
+      # manifest declares and refuse every one of the forgeries — including the
+      # audit's own, replayed verbatim, and its case 2b (a single required check
+      # renamed with every count intact), which the audited head accepted.
+      - name: Trusted manifest matches the harnesses it describes
         run: bash scripts/validation_manifest_check.sh
+      # …and the manifest must be EXACTLY what the harness sources produce, not
+      # merely consistent with their counts. `VAL-05-R`: only 9 of the 63
+      # checks in full:service were bound by IDENTITY, so renaming one required
+      # APPLY check — every count intact — was accepted. The generator derives
+      # the expected check SET from the two harness scripts and nothing else;
+      # this step fails on any drift and names the exact check that moved.
+      - name: Trusted manifest is regenerable from the harness sources
+        run: python3 scripts/gen_validation_manifest.py --check
+      # …and prove that generator can NOTICE. Eight mutants, each changing one
+      # thing about a check's identity in a copy of a harness, must each be
+      # killed. A --check that cannot fail is the same defect class as a
+      # harness that cannot fail, and this repository has shipped both.
+      - name: Check-identity mutation test (the manifest must notice a rename)
+        run: bash scripts/validation_manifest_mutants.sh
       - name: Service-results forgery tests (the gate must refuse forgeries)
         run: bash scripts/validation_asserter_tests.sh
       - name: Install frontend deps
@@ -223,7 +239,19 @@ jobs:
       - name: Build the real macOS app bundle
         working-directory: apps/desktop
         run: npm run tauri build -- --bundles app
+      # The offline scope now emits its register and is asserted by the SAME
+      # validator the service scope uses, against the same trusted manifest.
+      # Until `VAL-05-R` this step gated on the exit code alone, so all 20 of
+      # its checks were bound by count and none by identity — a renamed or
+      # substituted check here was invisible.
       - name: Packaged validation (offline scope — REQUIRED)
         run: bash scripts/tracking_validate_macos.sh --scope offline
+        env:
+          TETHRA_VALIDATION_RESULTS_JSON: ${{ runner.temp }}/offline-results.json
+      - name: Assert the offline scope completed (not merely exited)
+        run: |
+          bash scripts/ci_assert_service_results.sh \
+            "$RUNNER_TEMP/offline-results.json" \
+            --scope offline --mode none --commit "${{ github.sha }}"
       - name: Smoke suite (release binary, throwaway vault, no network)
         run: bash scripts/smoke.sh

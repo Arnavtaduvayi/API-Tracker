@@ -117,13 +117,24 @@ else
   bad "a vault database ALREADY exists at $DATA_DIR/vault.db"
 fi
 
-# 8. No stale temporary test namespace. The harness works under
-# /tmp/tethra-track-val-<pid>; a survivor means a previous run died without
-# cleaning up, and reusing the namespace would make this run's ownership
-# claims false.
-STALE="$(ls -d /tmp/tethra-track-val-* 2>/dev/null | sed 's/^/      /')"
+# 8. No stale temporary test namespace, from EITHER harness. The tracking
+# harness works under /tmp/tethra-track-val-<pid>; a survivor means a previous
+# run died without cleaning up, and reusing the namespace would make this run's
+# ownership claims false.
+#
+# `NEW-20`: this used to glob only the tracking prefix. The gateway harness
+# uses `$TMPBASE/tethra-gw-val-<run id>`, where `$TMPBASE` is `/tmp` resolved
+# with `pwd -P` — i.e. /private/tmp on macOS — which that glob never matched.
+# So neither the between-runs re-assert nor the final cleanup verification
+# could see a gateway-harness leak, and `NEW-21` meant the log could not
+# either. Both prefixes and both spellings are globbed now, exactly as
+# service_cleanup_safety.sh already did.
+STALE="$(ls -d /tmp/tethra-track-val-* /tmp/tethra-track-val-copies-* \
+              /tmp/tethra-gw-val-* /private/tmp/tethra-gw-val-* \
+              /tmp/tethra-track-val-ledger-*.tsv 2>/dev/null \
+         | sort -u | sed 's/^/      /')"
 if [ -z "$STALE" ]; then
-  ok "no stale /tmp/tethra-track-val-* namespace"
+  ok "no stale /tmp/tethra-track-val-* or /private/tmp/tethra-gw-val-* namespace"
 else
   bad "a stale test namespace ALREADY exists:"
   printf '%s\n' "$STALE"

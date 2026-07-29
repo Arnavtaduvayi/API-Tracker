@@ -58,9 +58,54 @@ export TETHRA_DIR="$DIR"
 export TETHRA_PASSWORD="packaged-validation-password-123"
 export API_TRACKER_INSECURE_FAST_KDF=1   # test vault only; never a real one
 
+# EVERY launchd interaction goes through this one name — see `NEW-03` in the
+# teardown below and the identical seam in tracking_validate_macos.sh. It lets
+# the ownership tests prove what this script WOULD invoke without invoking it.
+LAUNCHCTL="${LAUNCHCTL:-launchctl}"
+
 pass=0; fail=0; optional=0
-ok()   { echo "  PASS  $1"; pass=$((pass+1)); }
-bad()  { echo "  FAIL  $1"; fail=$((fail+1)); }
+
+# --- the check register (`VAL-05-R`) ---------------------------------------
+#
+# Until this was added, this script had NO machine-readable result at all: it
+# printed a tally and gated on `executed_required -ne REQUIRED_CHECKS`, a
+# constant derived from ONE measured run. A count is not evidence that the
+# right checks ran — rename a check and every number is unchanged — and CI
+# gated on this script's exit code alone, so identity binding here was 0 of
+# 57. The register now records every check under the group in effect, and
+# `scripts/ci_assert_service_results.py` asserts the executed REQUIRED set
+# against the exact set `scripts/validation_manifest.json` declares.
+#
+# The register is opened after preflight (nothing is written by a refusal) and
+# lives beside the ledger, never inside $DIR — the privacy canary sweep at
+# step 29 greps $DIR, and a check LABEL is prose that can legitimately contain
+# a needle shape.
+GROUP="PREFLIGHT"
+GROUPS_SEEN=""
+group() {
+  GROUP="$1"
+  case " $GROUPS_SEEN " in
+    *" $1 "*) ;;
+    *) GROUPS_SEEN="$GROUPS_SEEN $1" ;;
+  esac
+}
+
+RESULTS_TSV=""
+RECORD=1
+# Set only for the duration of an `opt_ok`/`opt_bad` call, so the register
+# records WHICH checks were environment-dependent. It must be a flag rather
+# than a separate recording path: `opt_ok` delegates to `ok`, and a
+# `record_check` duplicated into both would either record the row twice or
+# record it with the wrong requiredness.
+OPTIONAL_FLAG=0
+record_check() {   # record_check <pass|fail> <label>
+  [ -n "$RESULTS_TSV" ] || return 0
+  [ "${RECORD:-1}" -eq 1 ] || return 0
+  printf '%s\t%s\t%s\t%s\n' "$GROUP" "$1" "$OPTIONAL_FLAG" "$2" >> "$RESULTS_TSV"
+}
+
+ok()   { echo "  PASS  $1"; pass=$((pass+1)); record_check pass "$1"; }
+bad()  { echo "  FAIL  $1"; fail=$((fail+1)); record_check fail "$1"; }
 step() { echo; echo "== $1 =="; }
 
 # --- required vs optional (VAL-05) -----------------------------------------
@@ -80,8 +125,15 @@ step() { echo; echo "== $1 =="; }
 # equality on the required count — not a floor. A required check that stops
 # running is now a hard failure with a number attached, whatever the optional
 # ones did.
-opt_ok()  { ok  "$1"; optional=$((optional+1)); }
-opt_bad() { bad "$1"; optional=$((optional+1)); }
+#
+# The optional set is no longer defined ONLY by which primitive was called:
+# every optional site is named in `scripts/validation_manifest.json`, the
+# validator refuses a run that presents an optional check as required (or the
+# reverse), and the generator refuses a manifest whose optional and required
+# id sets are not disjoint. "Environment-dependent" is now a declared property
+# of a named check rather than an unnamed licence to run fewer of them.
+opt_ok()  { OPTIONAL_FLAG=1; ok  "$1"; OPTIONAL_FLAG=0; optional=$((optional+1)); }
+opt_bad() { OPTIONAL_FLAG=1; bad "$1"; OPTIONAL_FLAG=0; optional=$((optional+1)); }
 
 # Assert a SEMANTIC property of the vault database, not merely that some
 # command exited 0. `$1` is a SQL query that must return exactly `1`; `$2` is
@@ -166,6 +218,60 @@ proc_is_ours() {
   case "$cmd" in "$prefix"*) return 0 ;; *) return 1 ;; esac
 }
 
+# --- ownership of a LAUNCHD JOB (`NEW-03`) ---------------------------------
+#
+# The guard this replaces read `[ -e "$LA_DIR/$value.plist" ] && ! plist_is_ours …`.
+# `$LA_DIR` follows `$HOME`; `bootout` addresses `gui/<uid>`, which nothing
+# about `$HOME` reaches. When the file was absent — which is the NORMAL state,
+# because cleanup step 1 runs `gateway uninstall` and that deletes the plist —
+# the `&&` short-circuited the whole proof and the bootout fired unproven. The
+# in-code comment even stated the argument ("the record itself is then the
+# proof, because the label is derived from a data directory that did not exist
+# until this run created it") without anything checking that derivation.
+#
+# Now the proof is unconditional and every term is read from a namespace the
+# action itself addresses, or from a record this run wrote about itself.
+job_data_dir() {   # job_data_dir <label>
+  "$LAUNCHCTL" print "gui/$UID_N/$1" 2>/dev/null | awk '
+    /arguments = \{/       { in_args = 1; next }
+    in_args && /^[ \t]*\}/ { exit }
+    in_args && seen        { gsub(/^[ \t]+|[ \t]+$/, ""); print; exit }
+    in_args && /--data-dir/ { seen = 1 }
+  '
+}
+
+job_is_ours() {   # job_is_ours <label> <ledger-recorded-data-dir>
+  local lbl="$1" recorded_dir="$2" suffix jdd
+  JOB_REFUSAL=""
+  [ -n "$lbl" ] || { JOB_REFUSAL="the ledger row names no label"; return 1; }
+  if [ "$lbl" = "$LEGACY_LABEL" ]; then
+    JOB_REFUSAL="it is the PRODUCTION label"
+    return 1
+  fi
+  suffix="${lbl#"$LEGACY_LABEL".}"
+  if [ "$suffix" = "$lbl" ] || ! printf '%s' "$suffix" | grep -qE '^[0-9a-f]{12}$'; then
+    JOB_REFUSAL="the label is not a per-installation gateway label (<production>.<12 hex>)"
+    return 1
+  fi
+  if [ "$recorded_dir" != "$DIR" ]; then
+    JOB_REFUSAL="the ledger row records data directory '${recorded_dir:-<empty>}', not this run's $DIR"
+    return 1
+  fi
+  jdd="$(job_data_dir "$lbl")"
+  if [ -z "$jdd" ]; then
+    JOB_REFUSAL="launchd's own record of the job names no --data-dir"
+    return 1
+  fi
+  if [ "$jdd" != "$DIR" ]; then
+    JOB_REFUSAL="launchd says the job serves '$jdd', not this run's $DIR"
+    return 1
+  fi
+  return 0
+}
+
+CLEANUP_REFUSALS=0
+JOB_REFUSAL=""
+
 # Teardown. Ledger-driven, ownership-checked, and idempotent: every action is
 # guarded by "does this still exist and is it still ours", so a second run
 # finds nothing left to prove and does nothing. It is armed only after every
@@ -173,36 +279,57 @@ proc_is_ours() {
 cleanup() {
   local value extra
 
+  # `NEW-21`: teardown used to print ONLY on its refusal branches, so a run
+  # that cleaned up correctly left no cleanup section in the log at all — the
+  # artifact could not distinguish "cleaned up" from "never reached teardown",
+  # and `ci_service_preconditions.sh` did not glob this script's scratch
+  # prefix either, so a leak was invisible on both sides. Every branch now
+  # states what it did.
+  echo
+  echo "== cleanup =="
+
   # 1. Let the PRODUCT tear down its own installation first — the same path a
   #    user runs, and one that applies ensure_ours against $TETHRA_DIR, so it
   #    can only act on this run's service. Skipped entirely when we never got
   #    as far as registering one.
   if [ -n "$(ledger_values label)" ]; then
     "$CLI" gateway uninstall --keep-env --yes >/dev/null 2>&1 || true
+    echo "  asked the product to uninstall the service this run installed"
+  else
+    echo "  no service was registered by this run; nothing for the product to uninstall"
   fi
 
   # 2. Stop only processes this run started, proven by pid AND binary.
   while IFS=$'\t' read -r value extra; do
     if proc_is_ours "$value" "$extra"; then
       kill -TERM "$value" 2>/dev/null || true
+      echo "  stopped the process this run started (pid $value)"
+    elif [ -n "$value" ]; then
+      echo "  cleanup: pid $value no longer runs the binary this run started; not signalled"
     fi
   done < <(ledger_values pid)
 
   # 3. Unload only labels this run bootstrapped. `bootout` addresses the LIVE
   #    gui/<uid> domain no matter which $HOME the plist came from (ZFT-014),
-  #    so it gets the strictest guard: never the production label, and — while
-  #    the definition is still on disk — only when that definition proves ours.
-  #    Once step 1 has removed the plist there is nothing left to re-read; the
-  #    record itself is then the proof, because the label is derived from a
-  #    data directory that did not exist until this run created it.
+  #    so it gets the strictest guard — and, since `NEW-03`, one that does not
+  #    depend on the plist existing. Three outcomes, all reported:
+  #    not registered (a no-op), proven ours (bootout), or unproven (LEFT
+  #    REGISTERED and counted as a refusal, which fails the run).
   while IFS=$'\t' read -r value extra; do
     [ -n "$value" ] || continue
     [ "$value" = "$LEGACY_LABEL" ] && continue
-    if [ -e "$LA_DIR/$value.plist" ] && ! plist_is_ours "$LA_DIR/$value.plist" "$value"; then
-      echo "  cleanup: leaving $LA_DIR/$value.plist alone (it no longer proves it is ours)" >&2
+    if ! "$LAUNCHCTL" print "gui/$UID_N/$value" >/dev/null 2>&1; then
+      echo "  cleanup: gui/$UID_N/$value is not registered; nothing to boot out"
       continue
     fi
-    launchctl bootout "gui/$UID_N/$value" >/dev/null 2>&1 || true
+    if ! job_is_ours "$value" "$extra"; then
+      echo "  cleanup: REFUSING to boot out gui/$UID_N/$value — $JOB_REFUSAL." >&2
+      echo "           The job is LEFT REGISTERED. Investigate and remove it by hand." >&2
+      CLEANUP_REFUSALS=$((CLEANUP_REFUSALS + 1))
+      continue
+    fi
+    "$LAUNCHCTL" bootout "gui/$UID_N/$value" >/dev/null 2>&1 || true
+    echo "  booted out the job this run registered: gui/$UID_N/$value"
   done < <(ledger_values label)
 
   # 4. Remove only definitions this run created, and only while they still
@@ -217,19 +344,36 @@ cleanup() {
       echo "  cleanup: NOT removing $value (it no longer proves it is ours)" >&2
       continue
     fi
-    rm -f "$value" 2>/dev/null || true
+    if [ -e "$value" ]; then
+      rm -f "$value" 2>/dev/null || true
+      echo "  removed the LaunchAgent definition this run installed: $value"
+    else
+      echo "  the definition this run installed is already gone: $value"
+    fi
   done < <(ledger_values plist)
 
   # 5. Our scratch directory. The prefix test is belt-and-braces: a truncated
   #    or corrupted ledger must not be able to widen an `rm -rf`.
   while IFS=$'\t' read -r value extra; do
     case "$value" in
-      "$TMPBASE"/tethra-gw-val-*) rm -rf "$value" 2>/dev/null || true ;;
+      "$TMPBASE"/tethra-gw-val-*) rm -rf "$value" 2>/dev/null || true; echo "  cleaned $value" ;;
       *) [ -n "$value" ] && echo "  cleanup: refusing to remove unexpected directory $value" >&2 ;;
     esac
   done < <(ledger_values dir)
 
   rm -f "$LEDGER" 2>/dev/null || true
+
+  # 6. A refusal above left a launchd job registered. The external verifier
+  #    cannot see that — `ci_service_preconditions.sh`'s launchd precondition
+  #    goes GREEN when a job disappears, so it detects the opposite error —
+  #    which is why the refusal has to be surfaced here and in the exit status.
+  if [ "$CLEANUP_REFUSALS" -ne 0 ]; then
+    echo "  *** CLEANUP REFUSED ($CLEANUP_REFUSALS) ***" >&2
+    echo "      $CLEANUP_REFUSALS launchd job(s) in this run's ledger could not be proved to" >&2
+    echo "      belong to it; none was booted out and nothing was removed." >&2
+  else
+    echo "  cleanup complete: nothing this run could not prove it owned was touched"
+  fi
 }
 
 # =====================================================================
@@ -280,7 +424,7 @@ for existing in "$LA_DIR/$LEGACY_LABEL".*.plist; do
   [ -e "$existing" ] || continue
   refuse "a Tethra gateway LaunchAgent already exists at $existing. This run will not proceed beside it, and will never delete it."
 done
-if launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1; then
+if "$LAUNCHCTL" print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1; then
   refuse "launchd already runs the production job gui/$UID_N/$LEGACY_LABEL"
 fi
 
@@ -328,7 +472,7 @@ fi
 if [ -e "$PLIST" ]; then
   refuse "$PLIST already exists — this run neither adopts nor deletes a file it did not create"
 fi
-if launchctl print "gui/$UID_N/$LABEL" >/dev/null 2>&1; then
+if "$LAUNCHCTL" print "gui/$UID_N/$LABEL" >/dev/null 2>&1; then
   refuse "launchd already knows gui/$UID_N/$LABEL; refusing to take over a job this run did not create"
 fi
 
@@ -357,7 +501,17 @@ if ! mkdir "$DIR"; then          # plain mkdir: a second guard against adoption
 fi
 chmod 700 "$DIR"
 ledger_add dir "$DIR"
-trap cleanup EXIT
+# The register opens here, before the first counted check and after every
+# refusal, so a refusal still writes nothing at all. It lives BESIDE $DIR
+# rather than inside it: step 29 greps everything under $DIR for credential
+# canaries and a check label is prose that can contain a needle shape.
+RESULTS_TSV="$LEDGER.checks.tsv"
+: > "$RESULTS_TSV"
+# The trap turns a cleanup that REFUSED to act into a non-zero exit (`NEW-03`).
+# A refusal leaves a launchd job registered, and the external verifier cannot
+# see that — its precondition goes GREEN when a job disappears — so the run's
+# own status is the only place it can surface.
+trap 'cleanup; [ "$CLEANUP_REFUSALS" -eq 0 ] || exit 1' EXIT
 
 # `installation_id` canonicalizes, so creating the directory could in
 # principle move the label the preflight checks just vetted (it does for a
@@ -376,12 +530,13 @@ echo "LaunchAgent: $LABEL"
 echo "  plist:     $PLIST"
 
 # --- vault + fake data ---
-"$CLI" init >/dev/null 2>&1 && ok "init a fresh isolated vault" || bad "init"
+group INSTALL
+"$CLI" init >/dev/null 2>&1 && ok "init a fresh isolated vault" || bad "init did not create a fresh isolated vault"
 "$CLI" project create app >/dev/null 2>&1 && ok "create project 'app'" || bad "project create"
 # Two FAKE OpenAI-shaped keys: one we will link into the vault, one unknown.
 KNOWN_KEY="sk-proj-FAKEvalidation0000000000000000000000000000known"
 printf '%s' "$KNOWN_KEY" | "$CLI" key add --project app --provider openai --name prod --environment production --value-stdin >/dev/null 2>&1 \
-  && ok "add a KNOWN fake credential to the vault" || bad "key add"
+  && ok "add a KNOWN fake credential to the vault" || bad "key add did not store the KNOWN fake credential"
 
 PROJDIR="$DIR/project"; mkdir -p "$PROJDIR"
 printf 'OPENAI_API_KEY=%s\n' "$KNOWN_KEY" > "$PROJDIR/.env"
@@ -402,11 +557,11 @@ if [ -e "$PLIST" ]; then
   ledger_add label "$LABEL"
   ok "LaunchAgent plist written at $PLIST"
 else
-  bad "no plist"
+  bad "no LaunchAgent plist was written by gateway install"
 fi
 grep -q "KeepAlive" "$PLIST" && grep -q "Crashed" "$PLIST" && ok "plist has KeepAlive={Crashed:true}" || bad "plist KeepAlive"
 grep -q -- "--data-dir" "$PLIST" && grep -q "$DIR" "$PLIST" && ok "plist bakes --data-dir into argv" || bad "plist data-dir"
-launchctl print "gui/$UID_N/$LABEL" >/dev/null 2>&1 && ok "launchctl knows the service (bootstrapped)" || bad "not bootstrapped"
+"$LAUNCHCTL" print "gui/$UID_N/$LABEL" >/dev/null 2>&1 && ok "launchctl knows the service (bootstrapped)" || bad "not bootstrapped"
 
 # Give the service a moment to bind and answer its identity probe.
 PORT=""
@@ -417,12 +572,13 @@ for i in $(seq 1 40); do
 done
 [ -n "$PORT" ] && ok "gateway is listening (port $PORT), identity-verified via status" || bad "gateway never came up"
 
+group LIFECYCLE
 step "4. Service survives the enabling process exiting"
 # The CLI that ran `install` has already exited; the service is a
 # separate launchd-owned process. Prove it is still up.
 sleep 1
 "$CLI" gateway status >/dev/null 2>&1 && ok "service still running after installer exited" || bad "service died with installer"
-SVC_PID="$(launchctl print "gui/$UID_N/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')"
+SVC_PID="$("$LAUNCHCTL" print "gui/$UID_N/$LABEL" 2>/dev/null | awk '/pid =/{print $3; exit}')"
 if [ -n "$SVC_PID" ]; then
   # Recorded with the binary it must still be running: teardown signals this
   # pid only after re-proving both facts, so a pid that has since been reused
@@ -433,8 +589,9 @@ else
   bad "no service pid"
 fi
 
+group ROUTE
 step "5. Add a route (real provider origin; fake keys → 401)"
-"$CLI" gateway route add openai >/dev/null 2>&1 && ok "route 'openai' added" || bad "route add"
+"$CLI" gateway route add openai >/dev/null 2>&1 && ok "route 'openai' added" || bad "route add did not create the openai route"
 "$CLI" gateway route list 2>/dev/null | grep -q "api.openai.com" && ok "route resolves to api.openai.com" || bad "route origin"
 
 step "6. Link the project (real .env rewrite, preview+confirm)"
@@ -475,6 +632,7 @@ fi
 BASE="http://127.0.0.1:$PORT/p/$(grep -oE '/p/[0-9a-f]+/openai' "$PROJDIR/.env" | head -1 | sed 's#/p/##;s#/openai##')/openai"
 echo "  (link base: http://127.0.0.1:$PORT/p/<slug>/openai)"
 
+group TRAFFIC
 step "7. curl through the gateway (fake key → provider 401 proves the path)"
 CURL_STATUS="$(curl -s -o "$DIR/curl.out" -w '%{http_code}' --max-time 20 \
   -H "Authorization: Bearer $KNOWN_KEY" "$BASE/v1/models")"
@@ -503,7 +661,14 @@ PY
 )"
   [ "$PY_STATUS" = "401" ] || [ "$PY_STATUS" = "403" ] && ok "Python reached OpenAI through the gateway ($PY_STATUS)" || bad "python result: $PY_STATUS"
 else
-  echo "  SKIP python3 not present"
+  # `NEW-27`. This branch used to emit NOTHING, so a REQUIRED check sat behind
+  # a runtime conditional whose other arm printed a bare SKIP: relax the
+  # python3 preflight above and one required check vanishes silently while the
+  # equality gate reports "49 ran, 50 declared" and points at nothing. python3
+  # IS a hard preflight today, so this arm is unreachable — which is exactly
+  # why it must still emit, because an unreachable arm that emits nothing is
+  # indistinguishable from a reachable one until the day it becomes reachable.
+  bad "python3 is a preflight requirement of this script but is not on PATH, so the Python-through-the-gateway check could not run"
 fi
 
 step "9. Node through the gateway"
@@ -529,11 +694,12 @@ assert_db "SELECT CASE WHEN COUNT(*) >= 1 THEN 1 ELSE 0 END
   "the recorded events are actually persisted"
 # Negative control: the forbidden columns must not exist at all, so a future
 # schema that adds one is caught here rather than by a reviewer.
-assert_db "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END
-           FROM pragma_table_info('runtime_request_events')
+assert_db "SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END \
+           FROM pragma_table_info('runtime_request_events') \
            WHERE name IN ('body','request_body','response_body','headers','url','query')" \
   "no body/header/url/query column exists on the event table"
 
+group ATTRIBUTION
 step "11-12. Attribution: KNOWN vs UNKNOWN fake credential"
 # Attribution is fingerprint-based, so it works on a 401. Push the key.
 # push-key is DELIBERATELY interactive: it is a reauthentication, so it uses
@@ -613,10 +779,10 @@ assert_db "SELECT CASE WHEN COUNT(*) >= ${BEFORE_EVENTS:-0} + 2 THEN 1 ELSE 0 EN
 # resolves to a credential and the unknown one does not. If push-key ever
 # breaks, the check above fails AND these fail, which is both correct and
 # more informative than a skip.
-assert_db "SELECT CASE WHEN COUNT(DISTINCT COALESCE(credential_id,'<none>')) >= 2
-                       THEN 1 ELSE 0 END
-           FROM (SELECT credential_id FROM runtime_request_events
-                 WHERE observation_source='gateway'
+assert_db "SELECT CASE WHEN COUNT(DISTINCT COALESCE(credential_id,'<none>')) >= 2 \
+                       THEN 1 ELSE 0 END \
+           FROM (SELECT credential_id FROM runtime_request_events \
+                 WHERE observation_source='gateway' \
                  ORDER BY at DESC LIMIT 2)" \
   "the known and unknown credentials attribute DISTINCTLY"
 assert_db "SELECT CASE WHEN COUNT(*) >= 1 THEN 1 ELSE 0 END
@@ -632,6 +798,7 @@ echo "  (PERFORMANCE_RESULTS.md: +5.6ms first-byte, 200/200 events)."
 echo "  Deliberately NOT counted as a check: pointing at other evidence is not"
 echo "  evidence, and counting it inflated this run's total by one."
 
+group RESILIENCE
 step "14-16. Lock the vault during traffic; forwarding continues"
 # The service holds no vault key material; forwarding is vault-independent.
 # There is no live vault session in the service to 'lock' — prove instead
@@ -649,7 +816,7 @@ assert_status 'g["written_events"] >= 1' \
   "the run recorded at least one event (an empty status is a failure, not a pass)"
 
 step "19-20. Stop the gateway; verify diagnostics"
-"$CLI" gateway stop >/dev/null 2>&1 && ok "gateway stop requested (graceful)" || bad "stop failed"
+"$CLI" gateway stop >/dev/null 2>&1 && ok "gateway stop requested (graceful)" || bad "gateway stop did not exit 0 (graceful stop failed)"
 sleep 1
 "$CLI" --json gateway doctor 2>/dev/null | python3 -c '
 import sys,json; d=json.load(sys.stdin)
@@ -667,8 +834,9 @@ for i in $(seq 1 40); do
   [ -n "$RECOVERED" ] && break
   sleep 0.25
 done
-[ -n "$RECOVERED" ] && ok "gateway recovered after restart" || bad "no recovery"
+[ -n "$RECOVERED" ] && ok "gateway recovered after restart" || bad "no gateway is serving after the restart"
 
+group REPAIR
 step "22b. Repair: damage an OWNED resource and re-align the installation"
 # `gateway repair` is `install(force=false)` underneath: re-copy this binary,
 # rewrite the definition for this data directory, re-register, restart. It was
@@ -697,11 +865,12 @@ else
   done
   [ -n "$REPAIRED" ] && opt_ok "the gateway is serving again after repair" || opt_bad "no gateway after repair"
   # Repair must not have escaped this run's namespace.
-  launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1 \
+  "$LAUNCHCTL" print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1 \
     && opt_bad "repair registered the PRODUCTION label" \
     || opt_ok "repair did not touch the production label"
 fi
 
+group UNINSTALL
 step "23. Unlink the project (restore prior .env)"
 "$CLI" gateway unlink --project app --route openai --yes >/dev/null 2>&1 && ok "unlink succeeded" || bad "unlink failed"
 if grep -q "OPENAI_API_KEY=$KNOWN_KEY" "$PROJDIR/.env" && ! grep -q "127.0.0.1" "$PROJDIR/.env"; then
@@ -716,7 +885,7 @@ step "24-25. Disable then uninstall"
 step "26-27. Verify LaunchAgent + listener + tokens + files all gone"
 sleep 1
 [ ! -f "$PLIST" ] && ok "LaunchAgent plist removed" || bad "plist remains"
-launchctl print "gui/$UID_N/$LABEL" >/dev/null 2>&1 && bad "launchd still knows the service" || ok "service unregistered from launchd"
+"$LAUNCHCTL" print "gui/$UID_N/$LABEL" >/dev/null 2>&1 && bad "launchd still knows the service" || ok "service unregistered from launchd"
 [ ! -e "$DIR/gateway.sock" ] && ok "control socket removed" || bad "socket remains"
 [ ! -e "$DIR/gateway.nonce" ] && ok "control nonce removed" || bad "nonce remains"
 [ ! -d "$DIR/bin" ] && ok "service binaries removed" || bad "bin/ remains"
@@ -729,17 +898,25 @@ step "28. Ordinary networking is unaffected"
 curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://api.openai.com/v1/models -H "Authorization: Bearer $KNOWN_KEY" | grep -qE '401|403' \
   && ok "direct provider networking still works (401 on the fake key)" || bad "direct networking broken"
 
+group PRIVACY
 step "29. Privacy canaries: forbidden values must appear NOWHERE on disk"
 # The known fake key and the distinctive path/query canaries must not be in
 # the database, its WAL/SHM sidecars, the service log, or any runtime file.
 # Scanned AFTER uninstall so the check covers what is left behind.
+# `NEW-26`. This loop used to call `bad` once per (file × needle) HIT, so on a
+# run with N hits the required total was N — data-dependent, a fourth
+# machine-dependent site the required/optional split never named, and exactly
+# the shape the sibling harness's enumerator declares fail-closed against. The
+# hits are accumulated here and reported by exactly ONE check below, whatever
+# the data does; the detail is preserved in the label.
 CANARY_FOUND=0
+CANARY_HITS=""
 for f in "$DIR/vault.db" "$DIR/vault.db-wal" "$DIR/vault.db-shm" \
          "$DIR/logs/gateway.log" "$DIR/gateway.nonce" "$DIR/gateway.pid"; do
   [ -e "$f" ] || continue
   for needle in "$KNOWN_KEY" "$UNKNOWN_KEY" "CANARYQUERY"; do
     if LC_ALL=C grep -qa -- "$needle" "$f" 2>/dev/null; then
-      bad "canary '${needle:0:12}...' found in $f"
+      CANARY_HITS="$CANARY_HITS ${needle:0:12}...@$f"
       CANARY_FOUND=1
     fi
   done
@@ -751,11 +928,14 @@ for f in "$DIR/vault.db" "$DIR/vault.db-wal" "$DIR/vault.db-shm" "$DIR/logs/gate
   [ -e "$f" ] && SCANNED=$((SCANNED+1))
 done
 if [ "$SCANNED" -lt 1 ]; then
-  bad "privacy canary scanned NO files (vacuous); expected at least vault.db"
-elif [ "$CANARY_FOUND" -eq 0 ]; then
+  bad "privacy canary scan read NO files (vacuous); expected at least vault.db"
+elif [ "$CANARY_FOUND" -ne 0 ]; then
+  bad "privacy canary scan found a forbidden value on disk:$CANARY_HITS"
+else
   ok "no credential or query canary in any on-disk artifact ($SCANNED file(s) scanned)"
 fi
 
+group CONTROLS
 step "30. Negative controls: prove the assertions can FAIL"
 # A validation script that cannot fail proves nothing.
 #
@@ -784,7 +964,15 @@ PROBE_VERDICT=""
 PROBE_LOG="${TMPDIR:-/tmp}/tethra-gw-probe-$$.log"
 probe_primitive() {   # probe_primitive <fn> <args...>  -> sets PROBE_VERDICT
   local before_pass=$pass before_fail=$fail
+  # …and the REGISTER is detached too, for the same reason the tally is: these
+  # are deliberately-false assertions about nothing. Four of them appearing as
+  # real rows would break the executed-required set equality outright
+  # (`VAL-05-R`), which is a stronger failure than the tally drift the
+  # detached counters already prevent.
+  local before_record="${RECORD:-1}"
+  RECORD=0
   "$@" >>"$PROBE_LOG" 2>&1
+  RECORD="$before_record"
   local gained_pass=$((pass - before_pass)) gained_fail=$((fail - before_fail))
   pass=$before_pass
   fail=$before_fail
@@ -837,6 +1025,7 @@ else
   bad "assert_status accepted a property that is never true (observed: $PROBE_VERDICT)"
 fi
 
+group ISOLATION
 step "31. Isolation invariant: the user's production service was never touched"
 # RA-004 was a teardown that deleted the PRODUCTION LaunchAgent
 # ($HOME/Library/LaunchAgents/dev.api-tracker.gateway.plist) — a live service
@@ -850,8 +1039,8 @@ if [ "$PROD_SIG_AFTER" = "$PROD_SIG_BEFORE" ]; then
 else
   bad "the production plist CHANGED during this run ($PROD_SIG_BEFORE -> $PROD_SIG_AFTER)"
 fi
-if launchctl print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1; then
-  bad "gui/$UID_N/$LEGACY_LABEL is loaded; preflight refused to run beside one, so this run registered the production label"
+if "$LAUNCHCTL" print "gui/$UID_N/$LEGACY_LABEL" >/dev/null 2>&1; then
+  bad "the PRODUCTION label is loaded in gui/$UID_N; preflight refused to run beside one, so this run registered it"
 else
   ok "the production label was never registered in gui/$UID_N by this run"
 fi
@@ -873,12 +1062,94 @@ echo "=== PACKAGED MACOS RESULT: $pass passed, $fail failed ==="
 # So this is an equality, not a floor. A required check that silently stops
 # running fails here with both numbers printed, whatever the optional ones did.
 #
-# REQUIRED_CHECKS was derived from a measured run rather than guessed: the
-# packaged macOS job on 141152d executed 57 checks with node present, the
-# repair block taken and PORT set — 57 - 1 - 5 - 1 = 50.
+# REQUIRED_CHECKS used to be derived from one MEASURED run — the packaged macOS
+# job on 141152d executed 57 checks with node present, the repair block taken
+# and PORT set, so 57 - 1 - 5 - 1 = 50. That is an observation, not a property
+# of this file, and it could not detect a check that moved between the required
+# and optional sets.
+#
+# It is no longer a number from a measured run. It is
+# re-derived from THIS FILE'S SOURCE by `scripts/gen_validation_manifest.py`,
+# which counts the required call sites, pairs the branches of each conditional,
+# refuses a required check inside a loop (`NEW-26`) and refuses a conditional
+# arm that emits nothing (`NEW-27`) — and `scripts/validation_manifest_check.sh`
+# fails if this constant and that derivation disagree. Three independent
+# statements of the same number, as in the sibling harness.
 REQUIRED_CHECKS=50
 executed_required=$(( pass + fail - optional ))
 echo "  required $executed_required/$REQUIRED_CHECKS   optional $optional   total $((pass + fail))"
+
+# --- the machine-readable result (`VAL-05-R`) -------------------------------
+# The same schema the tracking harness emits, so ONE validator asserts both.
+# Written before the count gate below so a run that fails the gate still leaves
+# evidence naming exactly which checks ran; the validator refuses it anyway
+# (verdict != PASS), which is the point — a failed run must not be able to
+# withhold its register.
+GW_DUPLICATES=""
+if [ -n "$RESULTS_TSV" ] && [ -f "$RESULTS_TSV" ]; then
+  GW_DUPLICATES="$(awk -F'\t' '{ key = $1 "\t" $4; n[key]++ }
+    END { for (k in n) if (n[k] > 1) printf "      %d x %s\n", n[k], k }' "$RESULTS_TSV")"
+fi
+if [ -n "${TETHRA_GATEWAY_VALIDATION_RESULTS_JSON:-}" ]; then
+  GW_VERDICT="PASS"
+  [ "$fail" -eq 0 ] || GW_VERDICT="FAIL"
+  [ "$executed_required" -eq "$REQUIRED_CHECKS" ] || GW_VERDICT="INCONCLUSIVE"
+  [ -z "$GW_DUPLICATES" ] || GW_VERDICT="INCONCLUSIVE"
+  {
+    echo "{"
+    echo "  \"schema\": \"tethra.validation.results/2\","
+    echo "  \"scope\": \"gateway\","
+    echo "  \"mode\": \"lifecycle\","
+    echo "  \"verdict\": \"$GW_VERDICT\","
+    echo "  \"expected_total\": $REQUIRED_CHECKS,"
+    echo "  \"executed_total\": $executed_required,"
+    echo "  \"passed\": $pass,"
+    echo "  \"failed\": $fail,"
+    echo "  \"skipped\": 0,"
+    echo "  \"optional_executed\": $optional,"
+    echo "  \"duplicate_names\": $(printf '%s' "$GW_DUPLICATES" | grep -c . || true),"
+    echo "  \"data_dir\": \"$(printf '%s' "$DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"service_plist\": \"$(printf '%s' "$PLIST" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"service_label\": \"$(printf '%s' "$LABEL" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    echo "  \"commit\": \"$(printf '%s' "${GITHUB_SHA:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}" | sed 's/[^0-9a-zA-Z_-]//g')\","
+    if [ -n "$(ledger_values plist)" ]; then
+      echo "  \"service_created_by_this_run\": true,"
+    else
+      echo "  \"service_created_by_this_run\": false,"
+    fi
+    echo "  \"groups\": ["
+    GW_SEP=""
+    for g in $GROUPS_SEEN; do
+      gp="$(awk -F'\t' -v g="$g" '$1 == g && $2 == "pass" && $3 == "0"' "$RESULTS_TSV" | grep -c . || true)"
+      gf="$(awk -F'\t' -v g="$g" '$1 == g && $2 == "fail" && $3 == "0"' "$RESULTS_TSV" | grep -c . || true)"
+      printf '%s    {"name": "%s", "executed": %s, "passed": %s, "failed": %s}' \
+        "$GW_SEP" "$g" "$((gp + gf))" "$gp" "$gf"
+      GW_SEP=",
+"
+    done
+    echo
+    echo "  ],"
+    echo "  \"checks\": ["
+    if [ -f "$RESULTS_TSV" ]; then
+      awk -F'\t' '{
+        name = $4
+        gsub(/\\/, "\\\\", name); gsub(/"/, "\\\"", name)
+        printf "%s    {\"group\": \"%s\", \"result\": \"%s\", \"optional\": %s, \"name\": \"%s\"}", \
+          sep, $1, $2, ($3 == "1" ? "true" : "false"), name
+        sep = ",\n"
+      } END { if (NR) printf "\n" }' "$RESULTS_TSV"
+    fi
+    echo "  ]"
+    echo "}"
+  } > "$TETHRA_GATEWAY_VALIDATION_RESULTS_JSON"
+  echo "  machine-readable results written to $TETHRA_GATEWAY_VALIDATION_RESULTS_JSON"
+fi
+
+if [ -n "$GW_DUPLICATES" ]; then
+  echo "FAIL: two or more checks share a name, so a missing one cannot be identified:"
+  printf '%s\n' "$GW_DUPLICATES"
+  exit 1
+fi
 if [ "$executed_required" -ne "$REQUIRED_CHECKS" ]; then
   echo "FAIL: $executed_required required checks ran; exactly $REQUIRED_CHECKS are declared."
   echo "      A DIFFERENT number means required checks were skipped or added,"
@@ -887,4 +1158,7 @@ if [ "$executed_required" -ne "$REQUIRED_CHECKS" ]; then
   echo "      and the port re-check, and they are excluded from this equality."
   exit 1
 fi
+# NOTE: a cleanup that could not prove ownership (`NEW-03`) cannot be gated
+# here — teardown runs from the EXIT trap, after this line. The trap itself
+# turns a refusal into a non-zero status; see where it is armed.
 [ "$fail" -eq 0 ]

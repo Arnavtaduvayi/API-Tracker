@@ -235,9 +235,15 @@ def main(argv):
     if not isinstance(checks, list):
         fails.append("the results file carries no check register")
         checks = []
-    if len(checks) != expected:
+    # `expected_total` counts REQUIRED checks only. The gateway harness's
+    # register also carries environment-dependent rows flagged `optional: true`;
+    # those are validated separately, as a subset, and must never be able to
+    # pad the required total.
+    required_rows = [c for c in checks if not (isinstance(c, dict) and c.get("optional") is True)]
+    if len(required_rows) != expected:
         fails.append(
-            "the register holds %d checks but the manifest requires %d" % (len(checks), expected)
+            "the register holds %d required checks but the manifest requires %d"
+            % (len(required_rows), expected)
         )
     names = [c.get("name") for c in checks if isinstance(c, dict)]
     if len(names) != len(checks):
@@ -252,13 +258,15 @@ def main(argv):
     # result == "pass" for every register row is what stops one being
     # substituted for a required check.
     line(
-        not notpass and len(checks) == expected,
-        "register: %d named checks, %d not passed" % (len(checks), len(notpass)),
+        not notpass and len(required_rows) == expected,
+        "register: %d required checks (%d optional), %d not passed"
+        % (len(required_rows), len(checks) - len(required_rows), len(notpass)),
     )
 
     # Per-group register counts, so a group cannot borrow another's rows.
+    # Required rows only, for the same reason the total is.
     per_group = {}
-    for c in checks:
+    for c in required_rows:
         if isinstance(c, dict):
             per_group.setdefault(c.get("group"), []).append(c.get("name"))
     for name in sorted(required_groups):
@@ -269,32 +277,166 @@ def main(argv):
                 % (got, name, required_groups[name])
             )
 
-    # --- required checks, BY NAME ------------------------------------------
-    # Counting alone cannot tell a renamed check from a replaced one. Labels
-    # interpolate runtime values, so the manifest holds each label's static
-    # prefix and this requires a one-to-one match.
-    for group, prefixes in (spec.get("required_checks") or {}).items():
-        if group.startswith("_"):
-            continue
-        present = list(per_group.get(group, []))
-        for prefix in prefixes:
-            hit = None
-            for candidate in present:
-                if isinstance(candidate, str) and candidate.startswith(prefix):
-                    hit = candidate
-                    break
-            if hit is None:
-                fails.append(
-                    "required %s check is missing: no register row begins %r" % (group, prefix)
-                )
-                line(False, "required %-8s %r" % (group, prefix))
-            else:
-                present.remove(hit)
-                line(True, "required %-8s %r" % (group, prefix))
-        for leftover in present:
-            fails.append(
-                "unrecognised %s check %r — the manifest does not declare it" % (group, leftover)
+    # --- THE EXACT REQUIRED CHECK SET (VAL-05-R) ---------------------------
+    #
+    # This is the block the whole manifest exists for, and the block whose
+    # absence let the auditor's case 2b through. That forgery renamed ONE
+    # required APPLY check to a string naming no assertion the product ever
+    # made — every count intact, 63 rows, 63 distinct names, all passing — and
+    # the audited validator printed
+    #
+    #     OK    group APPLY        9/9 executed, 0 failed
+    #     === SERVICE SCOPE COMPLETED: 63/63 required checks passed ===
+    #
+    # because identity binding covered only the nine SERVICE checks. Nothing
+    # bound the other 54, nothing bound any of `full:foreground`, `offline:none`
+    # or `selfcheck:none`, and the gateway harness had no register at all.
+    #
+    # A correct count is not evidence that the correct checks ran. What follows
+    # is SET EQUALITY in both directions, per scope+mode:
+    #
+    #     exact expected required set  ==  exact executed required set
+    #
+    # The expected side comes only from the manifest, which is generated from
+    # the harness SOURCE by scripts/gen_validation_manifest.py and re-derived in
+    # CI. It is never, in whole or in part, taken from the document under test.
+    #
+    # A check's identity is the STATIC PREFIX of its label — the part fixed at
+    # authoring time, before any interpolation. Several prefixes on one entry
+    # mean the check has sibling branches (an if/else pair, `A && ok … || bad …`,
+    # case arms) that emit one check under one of several labels; any ONE of
+    # them identifies it.
+    declared = spec.get("required_checks")
+    optional_declared = spec.get("optional_checks") or []
+    if not isinstance(declared, list) or not declared:
+        # A scope with no named checks is exactly the hole VAL-05-R was: the
+        # old manifest declared `"required_checks": {}` for three of its four
+        # scopes and the loop that would have bound them never executed. It is
+        # a HARD FAILURE now, so the defect cannot recur by omission.
+        print("=== SERVICE SCOPE ASSERTION FAILED ===")
+        print(
+            "  - the manifest declares no required-check set for %s. A scope whose checks "
+            "are not named is bound only by counts, and a count cannot tell a renamed "
+            "check from a replaced one (VAL-05-R). Regenerate the manifest." % key
+        )
+        return 2
+    for i, entry in enumerate(declared + optional_declared):
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("group"), str)
+            or not isinstance(entry.get("label_prefixes"), list)
+            or not entry["label_prefixes"]
+            or not all(isinstance(p, str) and p for p in entry["label_prefixes"])
+        ):
+            print("=== SERVICE SCOPE ASSERTION FAILED ===")
+            print("  - the manifest's own entry %d for %s is malformed" % (i, key))
+            return 2
+
+    # A group the manifest declares but names no checks for is the same hole at
+    # group granularity, and it is how the defect would most plausibly return:
+    # someone adds a group to `groups` and forgets its checks.
+    named_groups = {}
+    for entry in declared:
+        named_groups[entry["group"]] = named_groups.get(entry["group"], 0) + 1
+    for gname in sorted(required_groups):
+        if required_groups[gname] and gname not in named_groups:
+            print("=== SERVICE SCOPE ASSERTION FAILED ===")
+            print(
+                "  - the manifest declares group %s for scope %s but names none of its "
+                "checks. A declared group with no required-check list is bound by count "
+                "alone, which is the VAL-05-R defect itself." % (gname, key)
             )
+            return 2
+
+    # ---- assignment: deterministic, one-to-one, longest-prefix-first ------
+    #
+    # The old mechanism took the FIRST register row that started with a prefix,
+    # in manifest order, so if one required prefix were a prefix of another the
+    # earlier entry would consume the later one's row — an order-dependent
+    # false pass. The generator now refuses to emit a manifest in which any two
+    # prefixes shadow each other, and this side is made unambiguous
+    # independently: candidates are matched longest-prefix-first, and a row that
+    # two entries could claim is reported rather than silently given to one.
+    rows = []
+    for c in checks:
+        if isinstance(c, dict):
+            rows.append({"group": c.get("group"), "name": c.get("name"), "row": c, "claimed": None})
+
+    def candidates_for(entry, index):
+        out = []
+        for j, row in enumerate(rows):
+            if row["group"] != entry["group"]:
+                continue
+            name = row["name"]
+            if not isinstance(name, str):
+                continue
+            best = None
+            for prefix in entry["label_prefixes"]:
+                if name.startswith(prefix) and (best is None or len(prefix) > len(best)):
+                    best = prefix
+            if best is not None:
+                out.append((len(best), j))
+        out.sort(reverse=True)
+        return out
+
+    all_entries = [(idx, e, True) for idx, e in enumerate(declared)]
+    all_entries += [(len(declared) + idx, e, False) for idx, e in enumerate(optional_declared)]
+
+    missing_required = []
+    for idx, entry, is_required in all_entries:
+        hit = None
+        for _, j in candidates_for(entry, idx):
+            if rows[j]["claimed"] is None:
+                hit = j
+                break
+        if hit is None:
+            if is_required:
+                missing_required.append(entry)
+                fails.append(
+                    "required %s check did not execute: no register row begins with any of %r"
+                    % (entry["group"], entry["label_prefixes"])
+                )
+                line(False, "required %-11s %r" % (entry["group"], entry["label_prefixes"][0]))
+            # An OPTIONAL check that did not run is legitimate — that is what
+            # "environment-dependent" means. Optional checks are a SUBSET
+            # requirement, never an equality.
+            continue
+        rows[hit]["claimed"] = (idx, is_required)
+        row = rows[hit]["row"]
+        if is_required and row.get("optional") is True:
+            fails.append(
+                "check %r is REQUIRED in the manifest but the run reported it as optional"
+                % rows[hit]["name"]
+            )
+        if not is_required and row.get("optional") is not True:
+            fails.append(
+                "check %r is declared OPTIONAL in the manifest but the run reported it as "
+                "required" % rows[hit]["name"]
+            )
+        if is_required:
+            line(True, "required %-11s %r" % (entry["group"], entry["label_prefixes"][0]))
+
+    # ---- the other direction: every executed row must be a declared check --
+    unclaimed = [row for row in rows if row["claimed"] is None]
+    for row in unclaimed:
+        fails.append(
+            "unrecognised %s check %r — the manifest declares no check with that label. "
+            "A renamed or substituted check lands here even when every count still adds up."
+            % (row["group"], row["name"])
+        )
+
+    executed_required = len(declared) - len(missing_required)
+    if executed_required != len(declared) or unclaimed:
+        fails.append(
+            "the executed required-check id set is NOT EQUAL to the manifest's for %s: "
+            "%d of %d required checks matched, %d register row(s) matched nothing"
+            % (key, executed_required, len(declared), len(unclaimed))
+        )
+    line(
+        executed_required == len(declared) and not unclaimed,
+        "required check SET equality: %d/%d declared checks executed, %d unrecognised rows"
+        % (executed_required, len(declared), len(unclaimed)),
+    )
 
     # --- required facts -----------------------------------------------------
     # "A service existed and was observed" and "this run installed, exercised

@@ -47,10 +47,24 @@ fi
 shift
 if [ ! -f "$JSON" ]; then
   echo "FATAL: no machine-readable results at $JSON" >&2
-  echo "The validation script writes this when TETHRA_VALIDATION_RESULTS_JSON is set." >&2
+  echo "The validation script writes this when TETHRA_VALIDATION_RESULTS_JSON (tracking) or" >&2
+  echo "TETHRA_GATEWAY_VALIDATION_RESULTS_JSON (gateway) is set." >&2
   echo "Its absence means the run died before the result stage — read the log." >&2
   exit 1
 fi
 
-echo "=== asserting the service scope completed (source: $JSON) ==="
+# WHAT "THE RIGHT CHECKS" MEANS (`VAL-05-R`)
+# ------------------------------------------
+# The manifest used to supply only COUNTS, plus the nine SERVICE check names.
+# The other 54 checks of full:service, all 57 of full:foreground, all 20 of
+# offline:none and all 57 of the gateway harness were bound by count alone —
+# so renaming one required check, with every number intact, was ACCEPTED. The
+# manifest now carries the EXACT SET of checks each scope runs, generated from
+# the harness SOURCES by scripts/gen_validation_manifest.py, and the validator
+# requires set equality in both directions.
+#
+# This wrapper serves every scope the manifest declares, including the gateway
+# lifecycle (--scope gateway --mode lifecycle). The banner says "service scope"
+# because that is the strongest caller; the assertion is the same for all.
+echo "=== asserting the declared scope completed (source: $JSON) ==="
 python3 "$(dirname "$0")/ci_assert_service_results.py" "$JSON" "$@"
