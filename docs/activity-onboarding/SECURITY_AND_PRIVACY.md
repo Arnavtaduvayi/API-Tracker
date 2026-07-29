@@ -294,3 +294,63 @@ about a real credential.
 
 Full record, including the three harness defects the first real runs exposed:
 `audit/SERVICE_VALIDATION_EVIDENCE.md`.
+
+
+## Correction (2026-07-28, post-final-re-audit): the local-database attacker
+
+The fresh independent re-audit raised two non-blocking security findings. Both
+are now stated here rather than only in an audit report, because a threat model
+that lives in a findings file is not a threat model.
+
+### An attacker with local write access to `vault.db` is EXPLICITLY out of scope
+
+`SEC-01`: a route's `provider_id` is not bound into authenticated state, so
+editing it in the database redirects a credential to a **different shipped
+manifest provider**. The audit confirmed by upstream fingerprint that an OpenAI
+credential reached `api.anthropic.com` after
+`UPDATE gateway_routes SET provider_id='anthropic' WHERE route_prefix='openai'`.
+
+This is accepted, and the exclusion is deliberate. `THREAT_MODEL.md` already
+records that metadata edits are not cryptographically detected; this states the
+consequence in the specific case, and why the obvious fix was not treated as a
+boundary:
+
+* The capability required is **local write access to the vault database**. An
+  attacker who has it can equally replace the Tethra binary, rewrite the
+  LaunchAgent definition to run their own program, or read the running
+  process's memory. The credential is reachable by simpler routes than a
+  provider-id swap.
+* Extending the route MAC to cover `(route_prefix, provider_id)` is a small
+  change and would raise the cost of that one path. It would **not** make the
+  product resistant to a local-write attacker, and shipping it as though it did
+  would be the more dangerous outcome.
+
+**Why custom-origin protection does not extend to this.** The custom-origin MAC
+exists for a different adversary: a *repository* that names a destination
+(`ZFT-004`, `ZFT-012`). Its job is to bind "the user approved this exact host"
+so that repository content cannot become authorization. A built-in provider's
+origin is not user-approved data at all — it comes from a compiled-in manifest —
+so there was no approval to bind. The two protections answer different
+questions, and the pinning test's name reads broader than its scope.
+
+**What is therefore NOT claimed anywhere in this product:** that Tethra detects
+or resists tampering with its own database by software already running as your
+user. It does not.
+
+### Request-body slot exhaustion is bounded, not eliminated
+
+`SEC-02`: the head phase always had an absolute deadline; the request **body**
+phase had only a per-read idle timeout, so a client that completed its head and
+then dribbled bytes held one of `MAX_CONNECTIONS` (128) slots indefinitely.
+
+Fixed: `stream::DeadlineReader` bounds a request body at `CLIENT_BODY_DEADLINE`
+(300s). Response streaming is deliberately **not** bounded — a long model
+response is a legitimate long-lived read, and a limit there would break
+streaming completions. Request-upload limits and response-stream limits are
+different questions and are answered differently.
+
+Residual, stated honestly: the deadline is checked *between* reads, so the true
+bound is the deadline plus one idle timeout (≈360s). 128 clients can still
+occupy every slot for up to that long. The gateway is loopback-only, fails
+closed with 503, and recovers on its own. Availability only — no credential and
+no observation is affected.

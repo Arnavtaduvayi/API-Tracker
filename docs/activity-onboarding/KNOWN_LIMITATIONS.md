@@ -252,9 +252,20 @@ The vault's credential values are encrypted. These are not, by design:
     change can be undone by hand, and `unlink` says so rather than claiming
     a restore it did not perform.
   * Restore records written by builds before this change hold plaintext.
-    They are re-sealed the next time the vault is unlocked. Until then they
-    remain as they were — deleting them without a key would take away an
-    undo that a later unlocked run can still preserve.
+    They are re-sealed the next time the vault is unlocked — from the
+    **desktop app** as well as the CLI. Until `ENC-01` that migration had no
+    desktop call site at all, so a user who never opened a terminal kept the
+    plaintext indefinitely; ADR 0028 claimed otherwise. Until an unlock
+    happens the records remain as they were, because deleting them without a
+    key would take away an undo that a later unlocked run can still preserve.
+
+    **What the re-seal does and does not reach.** After the migration commits,
+    the WAL is checkpointed and truncated, and `secure_delete` overwrites freed
+    pages inside the database file. Measured: no copy of the value remains in
+    `vault.db`, `vault.db-wal` or `vault.db-shm`. It does **not** reach free
+    space elsewhere on the volume, a filesystem snapshot, a Time Machine copy,
+    or any backup taken before the upgrade. Encrypted-at-rest storage protects
+    those; this migration does not.
 
 * **The consent diff shows a declared base URL's current value verbatim.**
   When Tethra is about to replace `OPENAI_BASE_URL`, the removed line is
@@ -262,3 +273,21 @@ The vault's credential values are encrypted. These are not, by design:
   point of the approval screen (ADR 0019 D9). Every other removed value is
   masked. This is an on-screen disclosure of your own file to you; it is
   never persisted.
+
+
+## Gateway availability under slow request bodies
+
+A request **body** is bounded by an absolute deadline of 300 seconds
+(`CLIENT_BODY_DEADLINE`), checked between reads — so the true worst case is
+that deadline plus one 60-second idle timeout. With `MAX_CONNECTIONS` at 128, a
+client opening many slow-body connections can still make the gateway
+unavailable to your own applications for up to that long (`SEC-02`).
+
+The gateway listens on loopback only, fails closed with `503` rather than
+queueing without limit, and recovers by itself once the connections expire. No
+credential, no observation and no stored data is affected — this is an
+availability limit, stated because it is real rather than because it is
+serious.
+
+A streaming **response** is deliberately not bounded this way. A long model
+completion is a legitimate long-lived read; capping it would break streaming.

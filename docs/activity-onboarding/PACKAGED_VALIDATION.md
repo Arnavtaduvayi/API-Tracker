@@ -288,3 +288,72 @@ The count-equality gate catches a check that stops executing; it cannot catch
 a check that has never executed anywhere, because the count is consistent
 either way. Only running the scope catches that — which is the argument for
 this CI job, stated as the thing it actually found.
+
+
+## The trusted manifest (2026-07-28, `VAL-01`)
+
+The gate that certifies the packaged service scope used to read its own
+expectations out of the artifact it was validating. `expected_total`, every
+`groups[].expected` and every check name came from the results file, so it
+proved internal self-consistency and nothing else — and a twelve-line forgery
+declaring zero checks printed
+`SERVICE SCOPE COMPLETED: 0/0 checks passed in full:service` and exited 0.
+
+The rule now:
+
+> A result may **report** what it observed. It may not **define** what is
+> acceptable.
+
+### Where acceptance comes from
+
+| Source | Carries | Trusted because |
+|---|---|---|
+| `scripts/validation_manifest.json` | required total, per-group counts, the nine SERVICE checks by name, required provenance facts | committed and reviewed; not produced by the run |
+| Workflow arguments | `--scope`, `--mode`, `--commit` | set by `.github/workflows/packaged-service-macos.yml`, not read from the artifact |
+
+The results file additionally carries `commit` and
+`service_created_by_this_run`. The second is true only when the run recorded
+creating the LaunchAgent in its own ownership ledger — so "a service existed
+and was observed" and "this run installed, exercised and removed one" stop
+being the same document.
+
+### The number lives in three places, and none can move alone
+
+1. `group_size()` / `scope_groups()` in `tracking_validate_macos.sh` — the
+   harness's own declaration.
+2. `enumerate_checks()` in the same file — a fail-closed awk enumerator that
+   re-reads the script and counts the call sites a scope+mode can actually
+   execute. The harness proves (1) against (2) before any check runs.
+3. `validation_manifest.json` — what CI enforces.
+
+`scripts/validation_manifest_check.sh` proves (3) against (1), and proves every
+check the manifest names by string exists as a real call site.
+
+### The scripts, and what each is for
+
+| Script | Proves | Runs in |
+|---|---|---|
+| `tracking_validate_macos.sh --scope selfcheck` | the harness reports a deliberately-broken control as a failure | `ci.yml` |
+| `validation_harness_mutants.sh` | 8 mutants that weaken the harness into "always ok" are each killed | `ci.yml` |
+| `validation_ownership_tests.sh` | cleanup authority comes from the ledger, never a filename pattern (`VAL-02`) | `ci.yml` |
+| `validation_manifest_check.sh` | the manifest describes the harness that exists | `ci.yml` |
+| `validation_asserter_tests.sh` | the gate accepts exactly one genuine result out of 33 documents | `ci.yml` |
+| `ci_assert_service_results.sh` | the service scope completed, against the manifest | `packaged-service-macos.yml` |
+
+### Library mode
+
+`tracking_validate_macos.sh` sourced with `TETHRA_VALIDATE_LIB_ONLY=1` defines
+its primitives and returns without acting. That seam exists because the
+ownership path — the one bounding a `launchctl bootout` and an `rm -f` — could
+otherwise only be reached from `--scope full --mode service`, which cannot run
+on a machine carrying a live gateway. A dead field extractor survived there for
+months precisely because nothing could reach it locally.
+
+### What is NOT covered
+
+`gateway_validate_macos.sh` has **none** of this apparatus: no inventory, no
+register, no per-check IDs, no machine-readable output, no equality gate. Its
+enforcement is a floor (45), not a count, and its total is machine-dependent.
+See `VAL-05` in
+`audit/POST_FINAL_REAUDIT_REMEDIATION_MATRIX.md` — it is recorded as partially
+remediated, not as done.
