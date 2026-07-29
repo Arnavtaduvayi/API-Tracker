@@ -396,3 +396,118 @@ not.
 **No mutation check for `VAL-03`.** It is in `--mode service`, which cannot be
 executed on this machine. Its fix is argued from source and is first executed
 by CI. This is a gap, stated rather than left for the next auditor to find.
+
+
+---
+
+## 8. What the packaged macOS runner actually proved
+
+`VAL-01` … `VAL-05` are the findings whose fixes cannot be executed on a
+developer machine. Here is what CI executed, per head.
+
+```text
+cac469e  (audited head)            packaged: success
+4140168  first remediation head    packaged: FAILURE  — probe_primitive subshell
+141152d  commit-identity fix       packaged: FAILURE  — same
+9117e83  evidence counts           packaged: FAILURE  — same
+54455ee  flaky-probe fix           packaged: FAILURE  — same
+1af8edf  probe_primitive fixed     packaged: success
+e4c5264  docs                      packaged: success
+4ee7494  VAL-05 equality gate      packaged: success
+9844c49  docs only, on 4ee7494     packaged: FAILURE  — partial gateway link
+db2707a  apply-failure retry       packaged: (pending)
+```
+
+### `VAL-01`, `VAL-02`, `VAL-03` — executed and passing (`e4c5264`, `4ee7494`)
+
+```text
+=== PACKAGED TRACKING VALIDATION (scope=full, mode=service): 63 passed, 0 failed (63/63 checks) ===
+  OK    executed_total = 63 (manifest requires 63)
+  OK    required SERVICE  'the dry run left ~/Library/LaunchAgents byte-identical'
+  OK    required SERVICE  'the apply installed a real LaunchAgent the product can name'
+  OK    required SERVICE  'the installed LaunchAgent declares the label the product reports'
+  OK    required SERVICE  'the label is namespaced per data directory, not the global one'
+  OK    required SERVICE  "the LaunchAgent runs the helper the product installed in this run's data directory"
+  OK    required SERVICE  'the installed helper is byte-identical to the in-bundle helper'
+  OK    required SERVICE  'launchd loaded the namespaced service gui/'
+  OK    required SERVICE  'the running service (pid '
+  OK    required SERVICE  'the service exposes its control endpoint at $TETHRA_DIR/gateway.sock, mode 0600'
+  OK    fact service_created_by_this_run = True
+=== SERVICE SCOPE COMPLETED: 63/63 required checks passed in full:service ===
+```
+
+The count came from the manifest (`manifest requires 63`), the nine SERVICE
+checks matched **by name**, and the provenance fact held. `VAL-02`'s
+product-derived ownership and `VAL-03`'s two rewritten checks are inside that
+63 and passed.
+
+### `VAL-04` — executed and passing
+
+```text
+  PASS  assert_db itself rejects false, empty and erroring queries, and accepts a true one
+  PASS  assert_status itself rejects a stopped gateway (an empty response is a failure)
+  PASS  assert_status rejects a property that evaluates false
+```
+
+Its own first execution **failed** (four consecutive heads), because the first
+version ran each primitive inside a command substitution. That failure is the
+evidence the controls are load-bearing: at the audited head the same defect
+reported PASS.
+
+### `VAL-05` — the constant was right
+
+```text
+=== PACKAGED MACOS RESULT: 55 passed, 2 failed ===
+  required 50/50   optional 7   total 57
+```
+
+`50` was derived from a measured run (57 total − node 1 − repair 5 − port 1) and
+the gate confirms it exactly. `4ee7494`, the first head carrying the gate,
+passed the whole job.
+
+---
+
+## 9. New finding: the packaged link check is nondeterministic
+
+`9844c49` differs from `4ee7494` by **documentation only** — verified with
+`git diff --name-only`, which lists five `.md` files and nothing else. `4ee7494`
+passed; `9844c49` failed:
+
+```text
+== 6. Link the project (real .env rewrite, preview+confirm) ==
+  FAIL  base url not written
+  FAIL  alias not written
+  PASS  NO_PROXY written
+  PASS  marker comment written
+  PASS  existing OPENAI_API_KEY preserved
+```
+
+So the link **partially** applied: the marker, `NO_PROXY` and the preserved key
+landed; the two base-URL variables did not. The run then continued and curl,
+Python and Node all reached the provider through the gateway.
+
+Ruled out:
+
+* **A port mismatch between the two assertions.** Both runs report the same
+  value in `gateway is listening (port N)` and in `link base: …:N/p/…`.
+* **A code regression.** No product file differs between the passing and
+  failing heads.
+* **Nondeterminism in the product's link path.** Driven locally five times
+  against a persisted port with no service installed, `gateway link` wrote both
+  variables every time.
+
+Not ruled out: a divergence between the port persisted in `gateway_config` and
+the port the service is actually listening on, which would make the harness's
+`grep "…:$PORT/p/"` fail while the link itself succeeded against the stored
+value. That is a real hypothesis and it is **unconfirmed** — it needs the `.env`
+from a failing run.
+
+Which is why the step now prints, on failure, the link log (fake key redacted)
+and the `.env` reduced to variable names plus whether each points at this run's
+gateway. No values. **A check that fails leaving nothing to diagnose with is the
+defect class this entire audit chain is about, applied to the harness's own
+failure path.**
+
+Severity: this is a HARNESS reliability defect, not a product defect, on the
+evidence available. It is recorded rather than dismissed because "it passed the
+second time" is exactly the reasoning that should not be accepted here.
