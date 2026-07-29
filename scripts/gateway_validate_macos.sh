@@ -445,6 +445,32 @@ grep -q "NO_PROXY=127.0.0.1,localhost,::1" "$PROJDIR/.env" && ok "NO_PROXY writt
 grep -q "tethra-gateway route: openai" "$PROJDIR/.env" && ok "marker comment written" || bad "marker missing"
 grep -q "OPENAI_API_KEY=$KNOWN_KEY" "$PROJDIR/.env" && ok "existing OPENAI_API_KEY preserved" || bad "user key clobbered"
 
+# A failing check here used to leave nothing to diagnose with: the link's own
+# output goes to $DIR/link.log and was never shown, so a partial link (marker
+# and NO_PROXY written, base URL not) read as two bare FAIL lines with no
+# evidence. That is the same complaint this whole audit chain is about, applied
+# to the harness's own failure path.
+#
+# Values are NOT printed. The fake key is redacted and each line is reduced to
+# its variable name plus whether the value points at this run's gateway, which
+# is the only thing these assertions are about.
+if [ "$fail" -ne 0 ]; then
+  echo "  --- link diagnostics (values redacted) ---"
+  echo "  link exit log:"
+  sed "s/$KNOWN_KEY/<redacted-fake-key>/g" "$DIR/link.log" 2>/dev/null | head -20 | sed 's/^/      /'
+  echo "  .env shape:"
+  while IFS= read -r line; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    name="${line%%=*}"
+    case "$line" in
+      *"127.0.0.1:$PORT/p/"*) echo "      $name -> points at this run's gateway (port $PORT)" ;;
+      *) echo "      $name -> other value" ;;
+    esac
+  done < "$PROJDIR/.env"
+fi
+
 # The base URL the SDKs will use.
 BASE="http://127.0.0.1:$PORT/p/$(grep -oE '/p/[0-9a-f]+/openai' "$PROJDIR/.env" | head -1 | sed 's#/p/##;s#/openai##')/openai"
 echo "  (link base: http://127.0.0.1:$PORT/p/<slug>/openai)"
