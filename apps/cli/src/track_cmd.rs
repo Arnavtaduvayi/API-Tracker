@@ -190,9 +190,16 @@ fn resolve_project(
     }
 }
 
-/// Whether the user pre-approved this exact destination on the command
-/// line. Comparison is on the canonical origin, so `https://h`,
-/// `https://h:443` and `https://H/` all match — and nothing else does.
+/// Whether the user pre-approved this exact destination on the command line.
+///
+/// Comparison is on the canonical origin, so `https://h`, `https://H` and
+/// `https://h:443` all match — and nothing else does. In particular a
+/// trailing slash does **not**: `origin::canonicalize` requires a bare
+/// authority and rejects any path, query or fragment, because loosening that
+/// is how a destination the user never approved starts matching an approval
+/// they did give. This comment used to claim `https://H/` matched; it never
+/// has, and [`validate_allow_origins`] now reports such a value instead of
+/// letting it silently fail to match.
 fn args_allows(allow_origins: &[String], origin: &str) -> bool {
     let Ok(wanted) = origin::canonicalize(origin) else {
         return false;
@@ -203,6 +210,28 @@ fn args_allows(allow_origins: &[String], origin: &str) -> bool {
         .any(|o| o == wanted)
 }
 
+/// Reject an unusable `--allow-origin` up front.
+///
+/// Without this, a value the canonicalizer cannot parse simply never matches
+/// anything, and the user sees "NOT approved" for a destination they believe
+/// they just approved — with nothing anywhere saying why. That is an
+/// unactionable result on the one path whose entire job is to be an explicit,
+/// deliberate approval, so a malformed value is an error before any scanning
+/// happens rather than a silent no-op afterwards.
+fn validate_allow_origins(allow_origins: &[String]) -> Result<()> {
+    for raw in allow_origins {
+        if let Err(e) = origin::canonicalize(raw) {
+            bail!(
+                "--allow-origin {}: {e}\n       \
+                 Pass the destination exactly as Tethra displays it — scheme, host and \
+                 optional :443, with no trailing slash and no path.",
+                render::sanitize(raw)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn track(
     ctx: &Ctx,
     path: Option<PathBuf>,
@@ -211,6 +240,7 @@ fn track(
     yes: bool,
     allow_origins: &[String],
 ) -> Result<()> {
+    validate_allow_origins(allow_origins)?;
     let folder = resolve_folder(path)?;
     let vault = unlocked(ctx)?;
     let mut vault = vault;
