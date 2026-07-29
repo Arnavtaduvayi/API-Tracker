@@ -96,10 +96,26 @@ lives in the production suite under `crates/gateway/tests/`.
   IP literals, the gap the spike's IP-only test left) and assert the two-phase
   check (`check_authority` + `resolve_validated`, dial validated `SocketAddr`,
   no re-resolution) refuses them.
-- **Origins are not obeyed from the DB:** a direct `UPDATE gateway_routes`
-  cannot change where a manifest route forwards (origin comes from the on-disk
-  manifest); a custom-origin route with an invalid/absent MAC returns 503 and
-  forwards nowhere.
+- **No free-form origin is obeyed from the DB, but `provider_id` is not
+  authenticated** (SEC-01 / NEW-49). Assert what is actually true, in four
+  separate cases, and do not let a test name claim more than its body proves:
+  - a direct `UPDATE gateway_routes SET custom_origin = ...` fails MAC
+    verification, so the route returns 503 and forwards nowhere — the edit
+    stops the route, it does not redirect it;
+  - a custom-origin route with an invalid/absent MAC likewise returns 503;
+  - rewriting `provider_id` to an **unknown** id fails closed and the route is
+    skipped with `unknown provider`;
+  - rewriting `provider_id` to a **known shipped** provider DOES redirect the
+    built-in route to that provider's compiled-in origin, and nulling all four
+    custom columns downgrades a custom route onto that same unauthenticated
+    path. Both are required coverage: they pin the accepted exclusion so that
+    if anyone ever adds a binding, the documents get corrected in the same
+    commit.
+- **The claims about the above stay honest:** `documentation_claims.rs` scans
+  the repository tree and fails if the retired absolute-guarantee wording
+  (the section heading and closing sentence that NEW-49 removed) returns, or
+  if the correcting section in `docs/gateway/SECURITY.md` is deleted instead
+  of maintained.
 - Unregistered prefix → 404, nothing forwarded, no DNS performed.
 - Route updates picked up via data-version polling; deleted route stops
   matching within the poll interval; last-known-good table survives DB

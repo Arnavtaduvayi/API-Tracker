@@ -32,9 +32,12 @@ cookies, query values, prompts, request bodies, or response bodies.
 7. **Restart your project** if Tethra says to (a running process keeps
    its old configuration).
 8. **Make one API request** from your app.
-9. **See it verified.** Tethra says "Tracking verified" only after a real
-   request from your project has been recorded. Until then it tells you
-   exactly what it is waiting for.
+9. **See it verified.** Tethra says "Tracking verified" only when a real
+   request from your project has been recorded **and** everything that
+   request depended on is still working right now: the local service is
+   answering and proves it is yours, the route and the project link still
+   exist, and no later failure supersedes the observation. Until then it
+   tells you exactly what it is waiting for.
 
 That is the whole flow: no route forms, no linking step, no separate
 attribution setup, and no terminal commands.
@@ -81,6 +84,14 @@ Configuration is not the same as coverage, so Tethra separates them:
 Only the second one is reported as "Tracking verified." A state that
 claims traffic is re-derived from the recorded observations every time it
 is read, so a stale record cannot claim coverage it doesn't have.
+
+**"Verified previously" is a different answer, and it is not a success.**
+If traffic was observed and then the service stopped, or the route or link
+was removed, the desktop and `tethra track status` both say so under a
+present-tense heading, with the historical fact shown beside it rather than
+instead of it. `tethra track` and `tethra track status` **exit non-zero** in
+that case, so a script that gates on tracking working is never told yes while
+your requests are failing (`ZFT-005`, `NEW-01`).
 
 ## Credential attribution
 

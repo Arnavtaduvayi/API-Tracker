@@ -107,18 +107,28 @@ key withheld: it cannot read restore values but can destroy them.
 `gateway_routes` and `tracking_approved_origins` are MAC'd against this same
 adversary; `prior_env_json` is not. **Not addressed in this pass.**
 
-### 6. Fourteen further deferred findings
+### 6. Fourteen further deferred findings (with `ENC-02` in §5 above, fifteen)
 
 `ENC-03` `ENC-04` `VAL-06` `VAL-07` `VAL-08` `VAL-09` `VAL-10` `VAL-11`
 `ORG-02` `VER-04` `GIT-01` `CON-01` `CON-02` `CON-03`. Each has a disposition
 and reasoning in `POST_FINAL_REAUDIT_REMEDIATION_MATRIX.md`. None was fixed.
 
-### 7. `REPO-01` is blocked on repository administration
+### 7. `REPO-01` is a decision not taken, not a blocked one
 
-`main` has no branch protection and no rulesets. This is a GitHub setting, not
-a code change, and cannot be done from a branch. Until it is, "required check"
-is a convention — which compounds `VAL-01`: a correct gate that nothing
-enforces is still not a gate.
+`main` has no branch protection and no rulesets. This is a GitHub setting
+rather than a code change, so it cannot land from a branch — but it was
+described here as *blocked on admin access*, and that was wrong: the
+credential in use reports `"admin": true`. Nobody has decided to turn it on.
+Until someone does, "required check" is a convention — which compounds
+`VAL-01`: a correct gate that nothing enforces is still not a gate.
+
+The same correction applies to the four free GitHub security features that
+are off on this public credential-manager repository (secret scanning, push
+protection, Dependabot alerts and Dependabot security updates). They are
+also decisions not taken. They are deliberately left for the repository owner
+because push protection and branch protection both change how the owner's own
+pushes behave, which is not a change a remediation branch should make on
+someone's behalf.
 
 ## Where to attack the fixes that ARE claimed
 
@@ -204,7 +214,8 @@ Stated so you can judge what was and was not observed:
 4. Per-check IDs for the trusted manifest, replacing label prefixes
    (`VAL-01` residue).
 5. Pin `ZFT-006` at the CLI and UI boundaries (`VER-02` residue).
-6. Branch protection on `main` (`REPO-01`) — needs a repository admin.
+6. Branch protection on `main` (`REPO-01`) and the four disabled GitHub
+   security features (`NEW-25`) — repository-owner decisions, not blocks.
 
 ## Do not
 

@@ -61,10 +61,13 @@ npx tauri dev
 `TETHRA_INSECURE_FAST_KDF=1` weakens Argon2id **in debug builds only**
 so tests are fast; release builds ignore it.
 
-### Release builds need the CLI bundled first
+### Builds AND tests need the CLI bundled first
 
-`cargo build --release --workspace` **fails on a clean checkout** with
-`resource path binaries/tethra-<target> doesn't exist`. That is correct and
+`cargo build --release --workspace`, `cargo test --workspace` and
+`cargo clippy --workspace` all **fail on a clean checkout** with
+`resource path binaries/tethra-<target> doesn't exist` — the sidecar is
+declared in `tauri.conf.json`, so `tauri-build` refuses before anything
+compiles, whichever cargo command you ran (`NEW-22`). That is correct and
 deliberate: the desktop app declares the CLI as a Tauri `externalBin`
 sidecar, and a build that silently produced an `.app` with no helper inside
 would ship a product that cannot perform its primary function. Run the

@@ -23,9 +23,9 @@ foreground run therefore cannot be mistaken for, or quoted as, a service run
 | Scope | Checks | Groups | Runs in CI? |
 |---|---|---|---|
 | `--scope selfcheck` | **5** | HARNESS 5 | **yes** |
-| `--scope offline` | **20** | HARNESS 5 · BUNDLE 5 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
-| `--scope full --foreground` | **57** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
-| `--scope full --require-service` | **63** | as above, minus FOREGROUND 3, plus SERVICE 9 | **yes** |
+| `--scope offline` | **21** | HARNESS 5 · BUNDLE 6 · FIXTURE 3 · DRYRUN 6 · OFFLINE 1 | **yes** |
+| `--scope full --foreground` | **58** | + APPLY 9 · NEGATIVE 8 · TRAFFIC 5 · PRIVACY 5 · IDEMPOTENCE 4 · UNDO 4 · FOREGROUND 3 | no |
+| `--scope full --require-service` | **64** | as above, minus FOREGROUND 3, plus SERVICE 9 | **yes** |
 
 > **`--scope full --require-service` now passes, on a clean hosted macOS
 > runner, and runs on every PR.**
@@ -37,6 +37,13 @@ foreground run therefore cannot be mistaken for, or quoted as, a service run
 > Label     dev.api-tracker.gateway.39d11f8db375  (namespaced, per data dir)
 > Cleanup   verified from outside the script: no residue
 > ```
+>
+> That run is quoted verbatim and reports **63**. The declared total is now
+> **64**: `NEW-36` turned the PATH-stripping assertion — which previously
+> emitted only negative evidence — into a counted `BUNDLE` check, so `BUNDLE`
+> went 5 → 6 and every scope containing it moved by one. The table above is
+> the current arithmetic; this block is the historical record of a run that
+> happened before it.
 >
 > Full record: `audit/SERVICE_VALIDATION_EVIDENCE.md`.
 >
@@ -89,18 +96,18 @@ produced one is the change that proved it does not.
 $ bash scripts/tracking_validate_macos.sh --scope selfcheck
   check inventory (summed from the group table, proved against this file):
     selfcheck:none    5 checks
-    offline:none     20 checks
-    full:foreground  57 checks
-    full:service     63 checks
+    offline:none     21 checks
+    full:foreground  58 checks
+    full:service     64 checks
 === PACKAGED TRACKING VALIDATION (scope=selfcheck, mode=none): 5 passed, 0 failed (5/5 checks) ===
 
 $ bash scripts/tracking_validate_macos.sh --scope offline
     HARNESS        5 checks  (5 passed, 0 failed)
-    BUNDLE         5 checks  (5 passed, 0 failed)
+    BUNDLE         6 checks  (6 passed, 0 failed)
     FIXTURE        3 checks  (3 passed, 0 failed)
     DRYRUN         6 checks  (6 passed, 0 failed)
     OFFLINE        1 checks  (1 passed, 0 failed)
-    TOTAL         20 checks  (20 passed, 0 failed)
+    TOTAL         21 checks  (21 passed, 0 failed)
 
 $ bash scripts/validation_harness_mutants.sh
 === HARNESS MUTATION RESULT: 8 killed, 0 survived ===
@@ -114,7 +121,7 @@ $ echo $?
 The `--scope selfcheck` and mutation lines were re-measured after the
 `RA-002` / `RA-003` / `RA-015` repairs below. The `--scope offline` breakdown
 is the run recorded earlier on this machine: those five group counts are
-unchanged by the repairs, and the enumerator now derives the same 20 from the
+unchanged by the repairs, and the enumerator now derives the same 21 from the
 script's source on every `--scope selfcheck`, but the offline scope needs a
 built `.app` and has not been re-run since.
 
@@ -170,7 +177,7 @@ every PR:
    killed;
 3. `npm ci`, `scripts/bundle_cli.sh`, `tauri build --bundles app` — a **real
    `.app`**, which is what the validation then inspects;
-4. `tracking_validate_macos.sh --scope offline` — 20 required checks;
+4. `tracking_validate_macos.sh --scope offline` — 21 required checks;
 5. `scripts/smoke.sh`.
 
 Every one of those fails the build.
@@ -196,7 +203,7 @@ the **real service**:
    again between the two real-service runs;
 5. `tauri build --bundles app`, then the `.app` is **copied outside the
    repository**, so nothing it needs may resolve relative to the source tree;
-6. `tracking_validate_macos.sh --scope full --require-service` — **63
+6. `tracking_validate_macos.sh --scope full --require-service` — **64
    required checks**;
 7. `ci_assert_service_results.sh` — assert the machine-readable result names
    the exact scope and mode, per-group counts, zero failed, zero skipped,
@@ -309,7 +316,7 @@ The rule now:
 
 | Source | Carries | Trusted because |
 |---|---|---|
-| `scripts/validation_manifest.json` | required total, per-group counts, the nine SERVICE checks by name, required provenance facts | committed and reviewed; not produced by the run |
+| `scripts/validation_manifest.json` | required total, per-group counts, **the exact identity of every required check in every scope**, the gateway harness's optional checks declared separately, required provenance facts | committed and reviewed; generated from the harness sources, never from a run |
 | Workflow arguments | `--scope`, `--mode`, `--commit` | set by `.github/workflows/packaged-service-macos.yml`, not read from the artifact |
 
 The results file additionally carries `commit` and
@@ -317,6 +324,62 @@ The results file additionally carries `commit` and
 creating the LaunchAgent in its own ownership ledger — so "a service existed
 and was observed" and "this run installed, exercised and removed one" stop
 being the same document.
+
+### Identities, not counts (2026-07-29, `VAL-05-R`)
+
+The version above bound how MANY required checks ran. It did not bind WHICH,
+except for the nine `SERVICE` checks. The fresh audit's own forgery suite
+proved the consequence: take a genuine 63-check document, rename one required
+`APPLY` check to a string naming no assertion the product ever made, change
+nothing else — every count still correct, 63 distinct names, all `pass` — and
+the gate **accepted** it. `full:foreground` bound 0 of its 57; `offline:none`
+0 of its 20; the gateway harness had no register at all.
+
+A correct count is not evidence that the correct checks ran.
+
+Now:
+
+* the manifest names **every required check in every scope**, and the
+  validator requires exact **set equality** between the expected required
+  identity set and the executed one, in both directions;
+* a declared group that names no checks, and a scope whose manifest entry
+  names none, are hard failures — the defect cannot recur by omission;
+* optional checks (the gateway harness has up to 15) are declared separately
+  and validated separately, and can never pad a required total;
+* `gateway_validate_macos.sh` now has a register and emits a results document
+  in the same schema, asserted by the same validator.
+
+**What a check's identity is.** It is the **static prefix of its label** — the
+literal text before the first runtime interpolation. That choice is
+deliberate: the label is what a reader of the artifact actually sees, so
+binding to it makes a rename a manifest diff by construction. A separate
+`#@id` annotation would be a second name that nothing keeps honest — a
+reviewer would see a matching id above a renamed label.
+
+Two rules follow, and both are enforced at generation time rather than left as
+hazards:
+
+* every check's label must begin with at least **12 static characters**;
+* no two prefixes within a scope may shadow one another (one being a prefix of
+  the other), because that would make assignment order-dependent.
+
+**The manifest is generated, not hand-written.** `scripts/gen_validation_manifest.py`
+derives it from the two harness scripts and nothing else:
+
+```bash
+python3 scripts/gen_validation_manifest.py --check   # CI: fail on drift
+python3 scripts/gen_validation_manifest.py --write   # after adding a check
+```
+
+`--check` runs inside `validation_manifest_check.sh`, which also proves the
+generator is *capable* of detecting drift rather than assuming it.
+
+**The honest ceiling.** An editor who changes a check's body while keeping its
+label is invisible to the manifest, by design — that is a source diff, visible
+in review, and no manifest can close it. An editor who changes the harness and
+regenerates the manifest is not stopped either. What the mechanism does is
+convert a silent swap into a named, two-sided, reviewable diff. It does not
+and cannot stop a reviewer who approves that diff.
 
 ### The number lives in three places, and none can move alone
 
@@ -338,7 +401,9 @@ check the manifest names by string exists as a real call site.
 | `validation_harness_mutants.sh` | 8 mutants that weaken the harness into "always ok" are each killed | `ci.yml` |
 | `validation_ownership_tests.sh` | cleanup authority comes from the ledger, never a filename pattern (`VAL-02`) | `ci.yml` |
 | `validation_manifest_check.sh` | the manifest describes the harness that exists | `ci.yml` |
-| `validation_asserter_tests.sh` | the gate accepts exactly one genuine result out of 33 documents | `ci.yml` |
+| `validation_asserter_tests.sh` | the gate accepts a genuine result for each declared scope and refuses every forgery — 59 assertions, including the audit's case `2b` (one required check renamed, every count intact) which the audited head accepted | `ci.yml` |
+| `gen_validation_manifest.py --check` | the manifest is exactly what the harness sources produce | `ci.yml` |
+| `validation_manifest_mutants.sh` | 8 mutants of a check's identity are each noticed by the generator | `ci.yml` |
 | `ci_assert_service_results.sh` | the service scope completed, against the manifest | `packaged-service-macos.yml` |
 
 ### Library mode
@@ -352,9 +417,26 @@ months precisely because nothing could reach it locally.
 
 ### What is NOT covered
 
-`gateway_validate_macos.sh` has **none** of this apparatus: no inventory, no
-register, no per-check IDs, no machine-readable output, no equality gate. Its
-enforcement is a floor (45), not a count, and its total is machine-dependent.
-See `VAL-05` in
-`audit/POST_FINAL_REAUDIT_REMEDIATION_MATRIX.md` — it is recorded as partially
-remediated, not as done.
+This paragraph used to say `gateway_validate_macos.sh` had **none** of this
+apparatus — no inventory, no register, no machine-readable output, no equality
+gate. That is no longer true: it has all four, its required set is
+identity-bound like the tracking harness's, and its 15 optional checks are
+declared and validated separately (`VAL-05-R`).
+
+What remains uncovered:
+
+* The gateway results document has not yet been produced by a **real** run
+  anywhere. Its schema, register and gate were exercised against synthetic
+  documents built from the manifest; the tracking side was additionally
+  validated end to end on a real `--scope selfcheck` run. The first CI
+  execution of `packaged-service-macos.yml` is the real proof, and it fails
+  loudly rather than passing quietly if the group tallies or optional flags
+  are wrong.
+* `--scope full` in either mode still cannot run on a developer machine
+  carrying a live gateway, so `full:service`, `full:foreground` and
+  `gateway:lifecycle` identity binding rests on source-derived prefixes plus
+  synthetic documents rather than on an observed local run.
+* The results schema was bumped to `tethra.validation.results/2`. That is a
+  hard cut: every pre-remediation artifact is now refused, which closes the
+  stale-artifact class outright but means an older document cannot be
+  replayed.

@@ -8,8 +8,8 @@ Every claim below is executed evidence; anything not executed is labeled.
 | Capability | Status | Evidence |
 |---|---|---|
 | Packaged app ships its helper | **done** | `Tethra.app/Contents/MacOS/{api-tracker-desktop,tethra}`; `PACKAGED_VALIDATION.md` |
-| Setup with no external CLI | **done** | packaged run with `PATH` stripped, 42/42 checks |
-| One-screen desktop flow | **done** | `TrackFlow.tsx`, 14 vitest cases |
+| Setup with no external CLI | **done** | packaged run with `PATH` stripped; the scope totals are in `PACKAGED_VALIDATION.md` |
+| One-screen desktop flow | **done** | `TrackFlow.tsx`, 45 vitest cases |
 | `tethra track .` fallback | **done** | clean-vault run below: 2 commands total |
 | Automatic provider detection | **done** | `crates/tracking/src/detect.rs`, 12 + 10 tests |
 | Bulk multi-provider setup | **done** | one plan, one apply; 30-provider-scale test |
@@ -20,24 +20,48 @@ Every claim below is executed evidence; anything not executed is labeled.
 | Undo | **done** | byte-for-byte restore, executed twice |
 | Idempotent re-run | **done** | no duplicate rows, no second file write |
 | Migration of manual setups | **done** | route reuse / link slug reuse; `MIGRATION.md` |
-| Dashboard-first navigation | **done** | `DashboardView.tsx`, 10 vitest cases |
+| Dashboard-first navigation | **done** | `DashboardView.tsx`, 26 vitest cases |
 | Foreground fallback | **done** | offered on blocked install; exercised in validation |
 
 ## Test counts (executed on this machine)
 
+Re-measured on 2026-07-29, after the fresh-final-audit remediation. The
+previous version of this block carried five stale numbers, one of which was the
+defective pre-`ZFT-VAL-4` count the harness header itself calls out — while
+line 4 above claims every figure is executed evidence (`NEW-40`). Every number
+below was produced by the command beside it, on this machine, on a quiet tree.
+
 ```text
-Rust workspace (5 crates)               1005 passed, 0 failed
-  api-tracker-core                         533
-  api-tracker-gateway                      269   (+6 new: helper discovery)
-  api-tracker-cli                           86   (+9 new: track suite)
-  api-tracker-observe                       63
-  api-tracker-tracking (new crate)          54
-Frontend vitest                           65 passed, 0 failed, 0 errors
-  of which TrackFlow (new)                 14
-  of which DashboardView (new)             10
-scripts/smoke.sh                         138 passed, 0 failed
-scripts/tracking_validate_macos.sh        42 passed, 0 failed (foreground mode)
+$ API_TRACKER_INSECURE_FAST_KDF=1 cargo test --workspace --all-targets
+Rust workspace (5 crates)              1370 passed, 0 failed, 9 ignored
+                                        (95 test binaries)
+  api-tracker-core                        400
+  api-tracker-gateway                     304
+  api-tracker-tracking                    181
+  api-tracker-cli                         130
+  api-tracker-observe                      67
+  (the remainder are the desktop backend's targets and doc-tests)
+
+$ cd apps/desktop && npx vitest run
+Frontend vitest                         171 passed, 0 failed   (17 files)
+
+$ bash scripts/smoke.sh                 140 passed, 0 failed
+$ bash scripts/mutation_checks.sh        29 killed, 0 survived
+$ bash scripts/validation_manifest_check.sh    38 passed, 0 failed
+$ bash scripts/validation_asserter_tests.sh    59 passed, 0 failed
+$ bash scripts/validation_harness_mutants.sh    8 killed, 0 survived
+$ bash scripts/validation_manifest_mutants.sh   8 killed, 0 survived
+$ bash scripts/validation_ownership_tests.sh   53 passed, 0 failed
 ```
+
+**Validation-scope counts are not restated here.** They live in
+`PACKAGED_VALIDATION.md`, which is the authority, and are re-derived from the
+harness sources on every run by `scripts/gen_validation_manifest.py --check`.
+Two documents carrying the same number independently is how the stale ones got
+here.
+
+Not executed on this machine, and labelled as such: `--scope full` in either
+mode, which needs a runner with no Tethra gateway installed.
 
 Gates run clean: `cargo fmt --all --check`, `cargo clippy` (pinned
 1.97.0) across all five library crates and the desktop backend with
@@ -144,6 +168,10 @@ records what is true after the remediation. Per-finding detail is in
 * A destination read from project content is never configured without an
   explicit per-destination decision that defaults to off.
 * "Tracking verified" describes the present; history is shown separately.
+  One resolver (`crates/tracking/src/health.rs`) answers that question for
+  the core, the CLI, the Tauri boundary and the frontend, so the four cannot
+  answer it differently — which is exactly what `NEW-01` found, with the CLI
+  claiming success from a cached column while the desktop did not.
 * Two Tethra installations coexist without either being able to stop,
   replace or reconfigure the other.
 * Unknown credentials are listed and counted, never dropped.
@@ -159,11 +187,11 @@ records what is true after the remediation. Per-finding detail is in
 * **ZFT-029** gained a per-project dimension; the per-provider dimension the
   finding's title also names was not built, and the per-project query lives
   in the desktop crate rather than `gateway::store`.
-* **The `--scope full` packaged validation (57 / 60 checks) has never been
-  executed on any machine.** Its `$LABEL`-unbound crash and legacy-path
-  defects are fixed, but the fixes are reviewed rather than run: this
-  machine has a Tethra gateway and the interlock correctly refuses. CI runs
-  `--scope offline` (20 checks) against a real `.app`.
+* **`--scope full` cannot be executed on a machine that already has a Tethra
+  gateway**, and this one does, so the interlock correctly refuses. It runs on
+  a clean hosted macOS runner on every PR — see `PACKAGED_VALIDATION.md` for
+  the per-scope totals, which are derived from the harness sources rather than
+  restated here. CI also runs `--scope offline` against a real `.app`.
 * **The new Tauri command layer has no automated test.** The structural
   guarantee it carries — the IPC boundary cannot choose a destination — is
   verified by reading.
@@ -177,13 +205,17 @@ records what is true after the remediation. Per-finding detail is in
 ## Numbers at the final commit
 
 ```text
-Rust workspace           1133 passed, 0 failed
-Desktop vitest             91 passed, 0 failed
+Rust workspace           1370 passed, 0 failed, 9 ignored
+Desktop vitest            171 passed, 0 failed
 Smoke suite               140 passed, 0 failed
-Packaged validation        20 passed, 0 failed  (--scope offline)
+Packaged validation        21 declared              (--scope offline)
 Harness self-check          5 passed, 0 failed
-Product mutants            21 killed, 0 survived
+Product mutants            29 killed, 0 survived
 Harness mutants             8 killed, 0 survived
+Manifest mutants            8 killed, 0 survived
+Asserter forgeries         59 passed, 0 failed
+Manifest consistency       38 passed, 0 failed
+Ownership tests            53 passed, 0 failed
 Provider manifests         21 total, 13 trackable, 8 unsupported
 ```
 

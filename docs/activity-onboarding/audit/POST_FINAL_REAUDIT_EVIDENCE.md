@@ -255,7 +255,13 @@ between read and write" case) or two threads released by a `std::sync::Barrier`.
 Mutation: removing the CAS predicate fails 5 of the 12.
 
 **Not covered:** apply-vs-apply, apply-vs-undo and legacy-scrub-vs-undo are not
-separately tested. `record_applied`, the undo artifact clear and the re-apply
+separately tested. **That gap was real and `NEW-31` found what was hiding in
+it: `record_applied` advanced the row version without predicating on it, so
+apply-vs-apply was last-writer-wins.** Fixed and covered in the latest-audit
+remediation (`crates/tracking/tests/transaction_recovery.rs`). The original
+argument below is preserved as written:
+
+`record_applied`, the undo artifact clear and the re-apply
 upsert all advance the row version, so a refresh in flight across any of them
 re-reads; the *pairwise* races between those writers themselves are argued from
 that, not measured. Named in the handoff.
@@ -364,7 +370,7 @@ was reverted immediately and the suite re-run green.
 | `VER-02` b | preserved reason dropped (`write_derived(..., false)`) | `an_upgraded_v15_row_does_not_lose_its_failure_on_the_first_refresh` |
 | `ENC-01` | desktop call site deleted | `both_front_ends_call_the_shared_migration` |
 | `ORG-01` | refusal replaced with an approval | 6 of 11 tests |
-| `SEC-02` | (control) a reader that refuses everything | `control_a_reader_inside_its_deadline_relays_normally` |
+| `SEC-02` | (control) a reader that refuses everything | `control_a_reader_inside_its_deadline_relays_normally` — **insufficient, see `NEW-48`/`NEW-51`**: this exercises the reader, not the connection loop around it, so deleting the whole wiring left it green. The real controls are in `crates/gateway/tests/connection_limits.rs`. |
 
 ### `VAL-04`, mutation-checked after CI proved it necessary
 

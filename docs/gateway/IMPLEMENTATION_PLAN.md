@@ -29,9 +29,12 @@ feasibility spike (`experiments/gateway-spike`, 11 tests; deleted after its cove
   populated-upgrade test goes IN `migration_safety.rs` (it iterates
   `MIGRATIONS` dynamically — no fixed count); gateway-behavior tests get
   their own file.
-- `gateway_routes` stores provider_id + link only; upstream origins are NOT
-  stored here (they are looked up from the on-disk manifest, or MAC-verified
-  for custom origins) — see ADR 0019 D3.
+- `gateway_routes` stores provider_id + link only; free-form upstream origins
+  are not stored here (they are looked up from the on-disk manifest, or
+  MAC-verified for custom origins) — see ADR 0019 D3. *(Scoped, SEC-01:
+  `provider_id` IS stored here and is unauthenticated, so it selects which
+  compiled-in manifest origin a built-in route resolves to; see
+  `SECURITY.md` and `THREAT_MODEL.md` GW-3.)*
 - A `db::open_at_current_version` helper (open + assert
   `user_version == current_schema_version`, else persistence-degraded) —
   `db::open` alone does NOT check the schema. Migration v13 is applied only

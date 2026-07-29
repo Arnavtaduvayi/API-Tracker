@@ -77,7 +77,7 @@ confident documentation is where defects hide.
    This is why the path that matters spawns nothing at all.
 3. **`--scope full` packaged validation has not been run for this branch.**
    It refuses to run on a machine with a Tethra gateway installed, and this
-   one has one. CI runs `--scope offline` (20 checks) against a real `.app`
+   one has one. CI runs `--scope offline` (21 checks) against a real `.app`
    and says exactly that.
 4. **Windows service support is compile-validated only** — as it was before.
 5. **Three ZFT-009 desktop actions were deliberately not built** rather than

@@ -38,7 +38,7 @@ as a present-tense mitigation):
 | Piece | State |
 |---|---|
 | Forwarding engine (`forward.rs`, `head.rs`, `stream.rs`) | Implemented: canonical head regeneration, strict chunked relay (smuggling rejected, not normalized), streamed bodies both directions, per-(connection,route) upstreams, three timeout budgets |
-| Secure route table (`routes.rs`) | Implemented: manifest origins as the trust root, MAC'd custom origins, last-known-good snapshots, SSRF two-phase validation |
+| Secure route table (`routes.rs`) | Implemented: manifest origins as the trust root, MAC'd custom origins, last-known-good snapshots, SSRF two-phase validation. Scope limit (SEC-01): the built-in route's `provider_id` selector is unauthenticated — see `SECURITY.md` and `THREAT_MODEL.md` GW-3 |
 | Attribution (`attribution.rs`) | Implemented: keyed-fingerprint matching, six honest states, scoped matcher table, `attribution_method` provenance |
 | Usage extraction (`usage.rs`) | Implemented: bounded OpenAI/Anthropic shapes, absent-is-a-state, cache-token semantics per provider |
 | Observation writer (`writer.rs`) | Implemented: dedicated thread, bounded queue with drop-and-count, transactional persist, retention/rollup |

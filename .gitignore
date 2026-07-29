@@ -2,6 +2,15 @@
 .env
 .env.*
 !.env.example
+# Atomic-write temp files (crates/core/src/envgov.rs). These hold the COMPLETE
+# new file — real credential values included — if a crash lands between the
+# write and the rename. For `.env` the name is `..env.api-tracker-tmp-<uuid>`,
+# which neither `.env` nor `.env.*` matches (NEW-29).
+.*.api-tracker-tmp-*
+
+# Python bytecode from the validation-manifest generator
+__pycache__/
+*.pyc
 *.pem
 *.key
 *.p12

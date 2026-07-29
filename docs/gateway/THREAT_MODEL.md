@@ -61,22 +61,46 @@ stripped, so responses stay opaque; (e) exact Host match. *Residual:* a page
 can still cause credential-less requests to a provider (rejected as
 unauthenticated); low impact, noted.
 
-### GW-3 Route-table tampering (A3, A4) — DEFENDED (origins not obeyed from DB)
-`gateway_routes` stores provider_id + link slug ONLY; the upstream origin is
-NOT stored there. Manifest routes resolve the origin from the on-disk manifest
-(install tree, not the same-uid DB); custom origins carry a MAC over
-`(vault_id, provider_id, origin, port, consent_ts)` under a vault-derived key,
-verified before forwarding, and are not forwarded while the vault has been
-locked since boot. So a same-uid `UPDATE gateway_routes SET ...` cannot
-redirect a live pass-through credential to an attacker origin — the earlier
-free-form-origin design (the review's `route-row-tamper-credential-theft`
-blocker) is removed. The two-phase SSRF check runs at load AND connect
-(`resolve_validated`, dialing the validated `SocketAddr`), closing split-
-horizon/rebinding origins that `check_authority` alone would pass. *Accepted
-residual:* A4 (malware as the user, out of scope repo-wide) can still tamper
-with the on-disk manifest or unlocked-session state, but A4 can already
-intercept the user's clients directly; the gateway adds no capability A4 lacks.
-Route writes through Tethra require an unlocked vault + re-auth and are audited.
+### GW-3 Route-table tampering (A3, A4) — PARTIAL (custom origins only; `provider_id` is unauthenticated)
+`gateway_routes` stores no free-form upstream origin. Manifest routes resolve
+the origin from the on-disk manifest (install tree, not the same-uid DB);
+custom origins carry a MAC over
+`(vault_id, route_prefix, provider_id, origin, port, consent_ts)` under a
+vault-derived key, verified before forwarding, and are not forwarded while the
+vault has been locked since boot. So a same-uid
+`UPDATE gateway_routes SET custom_origin = ...` cannot send a live pass-through
+credential to an **attacker-chosen** origin: the edited row fails verification
+and the route stops forwarding rather than going somewhere new, and an
+unrecognized `provider_id` fails closed. The earlier free-form-origin
+design (the review's `route-row-tamper-credential-theft` blocker) is removed.
+The two-phase SSRF check runs at load AND connect (`resolve_validated`, dialing
+the validated `SocketAddr`), closing split-horizon/rebinding origins that
+`check_authority` alone would pass.
+
+**What this does NOT defend, stated plainly (SEC-01 / NEW-49).** The label on
+this entry used to read `DEFENDED (origins not obeyed from DB)`, which
+overstated it. A built-in route's destination is *selected* by `provider_id`,
+which is read straight from the untrusted row and bound into nothing. An
+attacker with local write access to `vault.db` can therefore
+(a) `UPDATE gateway_routes SET provider_id='anthropic' WHERE route_prefix='openai'`
+and send the user's OpenAI credential to `api.anthropic.com` (one of the
+eleven forwardable origins compiled into the shipped manifests — a trusted
+destination, but the wrong one), and (b) null `custom_origin`,
+`custom_origin_port`, `custom_origin_mac` and `custom_origin_consent_at`
+together, which the CHECK constraints permit, to downgrade a MAC'd custom
+route onto that same unauthenticated path — the MAC is selected by row shape,
+not by a recorded route kind, so it is deleted rather than forged.
+
+*Accepted residual:* both paths require A4 (malware as the user, out of scope
+repo-wide), who can equally tamper with the on-disk manifest, replace the
+binary, rewrite the service definition, or read process memory — the gateway
+adds no capability A4 lacks. Metadata edits are not cryptographically detected
+(root `THREAT_MODEL.md`), and `provider_id` is metadata. Route writes *through
+Tethra* require an unlocked vault + re-auth and are audited; direct SQL writes
+are not, and are not claimed to be. Full disclosure:
+`docs/activity-onboarding/SECURITY_AND_PRIVACY.md` *"the local-database
+attacker"* and `SECURITY.md` *"What database tampering can and cannot do to
+your routes"*.
 
 ### GW-4 Port squatting when the service is down (A3, A4) — MITIGATED, residual
 The listener port can be bound by another same-uid process while the service is

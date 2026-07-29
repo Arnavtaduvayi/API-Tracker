@@ -77,8 +77,12 @@ Honest enumeration — the redesign is not risk-free:
    route to it. Mitigations: full `validate_origin` + SSRF policy; the
    origin is displayed verbatim with "traffic will be forwarded only to
    this exact address"; it requires an explicit checkbox (never part of
-   Confirmed auto-config); and the existing MAC binding means later DB
-   tampering still cannot redirect it. Residual: a user can confirm a bad
+   Confirmed auto-config); and the MAC binding means a later edit to the
+   stored origin STOPS the route (`MacMismatch`) rather than redirecting
+   it. That binding is not unconditional: nulling the four custom columns
+   together downgrades the row onto the unauthenticated built-in path,
+   where the destination is chosen by `provider_id` — see "the
+   local-database attacker" below. Residual: a user can confirm a bad
    origin they didn't read — equivalent to today's manual origin form, so
    no regression, but now reachable from a scan. Accepted, documented.
 3. **Bundled helper.** The app bundle now carries a second executable.
@@ -283,8 +287,9 @@ asserted against a real per-user LaunchAgent rather than a foreground child:
 The lifecycle verbs (install → stop → restart → uninstall, with vault
 lock/unlock and credential attribution) are covered by
 `gateway_validate_macos.sh` in the same clean room: 50 required checks enforced
-as an equality, plus up to 7 environment-dependent ones counted separately
-(`VAL-05`), 0 failed,
+as an equality of exact check IDENTITIES rather than only of counts
+(`VAL-05-R`), plus up to 15 environment-dependent ones declared and validated
+separately, 0 failed,
 including the isolation invariant that the production plist is exactly as the
 run found it and the production label was never registered by it.
 
@@ -338,20 +343,47 @@ questions, and the pinning test's name reads broader than its scope.
 or resists tampering with its own database by software already running as your
 user. It does not.
 
-### Request-body slot exhaustion is bounded, not eliminated
+### Connection slot exhaustion is bounded, not eliminated
 
-`SEC-02`: the head phase always had an absolute deadline; the request **body**
-phase had only a per-read idle timeout, so a client that completed its head and
-then dribbled bytes held one of `MAX_CONNECTIONS` (128) slots indefinitely.
+`SEC-02` began as: the head phase always had an absolute deadline; the request
+**body** phase had only a per-read idle timeout, so a client that completed its
+head and then dribbled bytes held one of `MAX_CONNECTIONS` (128) slots
+indefinitely.
 
-Fixed: `stream::DeadlineReader` bounds a request body at `CLIENT_BODY_DEADLINE`
-(300s). Response streaming is deliberately **not** bounded — a long model
-response is a legitimate long-lived read, and a limit there would break
-streaming completions. Request-upload limits and response-stream limits are
-different questions and are answered differently.
+**The first fix was incomplete, and this section claimed more than it
+delivered (`NEW-48`).** `CLIENT_BODY_DEADLINE` (300s) does bound one request
+body — but it was computed inside the per-request handler, which runs once per
+keep-alive iteration, so every budget was re-armed on each request. A client
+that kept *completing* slow work was never idle and never out of time. The
+audit measured one connection holding one slot for **422 seconds** across
+twenty slow bodies, and it could have gone on indefinitely. The "≈360s" figure
+this section used to state was not a loose bound; there was no bound.
 
-Residual, stated honestly: the deadline is checked *between* reads, so the true
-bound is the deadline plus one idle timeout (≈360s). 128 clients can still
-occupy every slot for up to that long. The gateway is loopback-only, fails
-closed with 503, and recovers on its own. Availability only — no credential and
-no observation is affected.
+Fixed properly: a **per-connection** budget, charged cumulatively across every
+request the connection serves and never renewed.
+
+* `CLIENT_CONNECTION_TIME_BUDGET` (600s) — cumulative **client-paced** time:
+  idling between requests, reading a head, reading a body.
+* `CLIENT_CONNECTION_MAX_AGE` (3600s) — the age past which the connection
+  serves no NEW request. Enforced between exchanges, never mid-exchange.
+* `MAX_REQUESTS_PER_CONNECTION` (10 000) — belt and braces; forces periodic
+  reconnection so the connection cap can rebalance across clients.
+* The existing per-request deadlines and idle timeouts are unchanged.
+
+Upstream-paced time — connecting to the provider, waiting for its response
+head, streaming its response body — is deliberately **not** charged, because
+the destination comes from the route table and never from the request, so a
+client cannot lengthen it. That is what lets a long model completion stream to
+the end. Request-upload limits and response-stream limits are different
+questions and are still answered differently.
+
+Residual, stated honestly and this time measured: the budget is observed
+*between* phases, so residency overshoots it by at most one in-flight idle
+budget — 120s if the wait for the next head was running, 60s if the body relay
+was. **The true bound is 720s, not 600s and not 360s.** 128 clients can occupy
+every slot for up to that long, and can renew by reconnecting roughly every
+twelve minutes, each new connection subject to the 15s first-head deadline. The
+gateway is loopback-only, fails closed with 503 rather than queueing, and
+recovers on its own. Availability only — no credential and no observation is
+affected, and an attacker able to open loopback connections is already running
+on your machine.

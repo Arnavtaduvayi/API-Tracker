@@ -71,10 +71,15 @@ Tables: `gateway_config`, `gateway_routes`, `gateway_project_links`,
 `gateway_usage_events`, `gateway_usage_daily`, `gateway_route_counters`, plus
 one additive column `runtime_request_events.attribution_method`.
 
-`gateway_routes` deliberately stores **no obeyable origin**: manifest routes
-resolve theirs from the compiled-in provider manifest, and custom origins are
-stored only next to a MAC over `(vault_id, provider_id, origin, port,
-consent_ts)` under a new vault-derived key.
+`gateway_routes` deliberately stores **no obeyable free-form origin**: manifest
+routes resolve theirs from the compiled-in provider manifest, and custom
+origins are stored only next to a MAC over
+`(vault_id, route_prefix, provider_id, origin, port, consent_ts)` under a new
+vault-derived key. *(Scoped, SEC-01: the built-in route's origin **selector**,
+`provider_id`, is stored here and is not authenticated, so a local-DB attacker
+can reassign a built-in route among the shipped manifest origins, or null all
+four custom columns to downgrade a custom row onto that path. See
+`SECURITY.md` and `THREAT_MODEL.md` GW-3.)*
 
 ## Dependencies added
 

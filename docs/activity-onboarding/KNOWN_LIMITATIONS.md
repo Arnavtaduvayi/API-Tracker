@@ -164,7 +164,22 @@ behaviour change on a file you own (`ZFT-038`).
 
 **A crash mid-write can leave a temporary file.** It is created 0600 and
 unlinked on every error path, and a sweeper removes stragglers older than an
-hour, but the window is bounded rather than eliminated.
+hour, but the window is bounded rather than eliminated. The temporary name is
+`..env.api-tracker-tmp-<uuid>`, which matches neither `.env` nor `.env.*`; it
+is git-ignored explicitly, and the sweeper now runs from the link and unlink
+paths rather than only from export cleanup, which is where `NEW-29` found it
+unreachable.
+
+**Two projects linking one `.env` can destroy your original value (`NEW-28`).**
+If you deliberately point two differently-named Tethra projects at one folder
+with `--project`, the second link records the FIRST project's gateway URL as
+its "prior" value. Undoing the first then leaves the second holding a dead
+value, and every outcome is reported as *Restored* while your original line is
+gone. The implicit form is refused — `tethra track <dir>` on a folder with two
+projects fails with "more than one project" — so this needs deliberate
+`--project` overrides. No credential reaches a wrong origin: an unknown link
+slug 404s. **Not fixed.** The correct fix changes link-plan semantics, which is
+not a change to make in a remediation pass.
 
 **A tracked `.env` will carry Tethra's loopback URL into git.** If your
 `.env` is committed, the rewritten base URL and its 128-bit link slug are
@@ -185,11 +200,12 @@ install-and-track lifecycle has not been executed on either. See
 On macOS that lifecycle is now executed **with a real login-registered
 service**, on a disposable hosted runner, on every PR:
 `.github/workflows/packaged-service-macos.yml` runs
-`--scope full --require-service` (63 checks) and
+`--scope full --require-service` (64 checks) and
 `gateway_validate_macos.sh` (50 REQUIRED checks, enforced as an equality, plus
-up to 7 environment-dependent ones — node presence, the repair staging block,
-the port re-check; `VAL-05`), and verifies teardown from outside
-the script. Evidence: `audit/SERVICE_VALIDATION_EVIDENCE.md`.
+up to 15 environment-dependent ones declared and validated separately), and
+verifies teardown from outside the script. Both harnesses now bind the exact
+IDENTITY of every required check, not only how many ran (`VAL-05-R`); see
+`PACKAGED_VALIDATION.md`. Evidence: `audit/SERVICE_VALIDATION_EVIDENCE.md`.
 
 **One green run is one green run.** That scope first passed on 2026-07-28
 (run `30325704492`). It is repeatable and gated, but it does not yet have a
@@ -229,6 +245,69 @@ The reservation is checked rather than asserted: `origin_trust.rs` pins that
 twelve spellings of a restricted destination are refused, with a public
 origin as the anti-vacuity control.
 
+## Usage and cost completeness
+
+Absent usage is a state, never a silent zero: `0 tokens` and `$0.00` are shown
+only when the source genuinely reports or derives a known zero, and a total
+folded over a mix of known and unknown records reports itself as a floor rather
+than as a total (`NEW-37`). Three residuals remain, and they are stated here
+because the remediation that closed `NEW-37` is what found them.
+
+**A partially-priced estimate is stored as if it were complete.** A local
+pricing record that prices input tokens but not output tokens now yields a cost
+estimate that KNOWS it is partial — but `usage_snapshots` has no column for
+that fact, so the writers drop it at the storage boundary. A later read counts
+the row as fully costed, and a budget evaluated over it is treated as complete.
+The number is always a floor, never an overstatement, but it is a floor
+presented as a total. Closing this needs an additive migration and is the top
+follow-up from this pass.
+
+**A genuinely free model reads as unpriced in the gateway rollup.**
+`gateway_usage_daily` stores a cost of zero both for a request that was priced
+at zero and for one that could not be priced at all, so the desktop infers the
+difference from "tokens were measured but cost is zero". A model your local
+price table genuinely prices at zero therefore reads as *"Estimated cost not
+reported"*. The error direction is always toward understating certainty and
+never toward asserting spend, but it is an inference rather than a fact, and it
+needs a stored count of events that actually got a price.
+
+**A budget cannot always be evaluated.** Because uncosted records contribute
+nothing, `used` is a floor. A floor ABOVE the budget still proves an overrun —
+more data can only raise it — but a floor BELOW it proves nothing unless it is
+also the total. That case is now reported as *"cannot be evaluated — usage is
+incomplete"* with its own alert rather than being collapsed into "under
+budget", which is what previously suppressed real overrun alerts.
+
+## Destination approvals
+
+**An approval is remembered for the whole vault, not for one project
+(`NEW-09`).** When you approve a destination read from a repository's own
+files, the approval is bound to the vault and the provider — not to the
+project or the folder. A SECOND repository on the same vault that infers the
+same destination inherits that approval, and under `--yes` it is configured
+without asking. That is the intended behaviour for re-running in the same
+project and an unintended one across projects.
+
+**Approvals cannot be listed or revoked (`NEW-10`).** The store has both
+operations; no command and no screen calls either. Once given, an approval is
+permanent and invisible until the vault is replaced. `--allow-origin` now says
+the approval is remembered (`NEW-12`), which is the disclosure half; the
+management half is not built.
+
+**The CLI and the desktop disagree about re-asking (`NEW-11`).** Given a
+previously-approved destination, the CLI proceeds silently and the desktop
+still shows the request with "You approved this exact destination on …". Both
+are defensible; having both is not.
+
+**An approval for a provider that already has a built-in route is silently
+inert (`NEW-16`).** The plan keeps the existing route and the warning that
+would say so is only emitted for custom-origin rows.
+
+**A malformed hostname or port is refused with the wrong reason
+(`NEW-14`).** Every refusal from the destination policy reports the
+loopback/private/link-local/cloud-metadata wording, including the cases where
+the problem is that the hostname or port could not be parsed at all.
+
 ## Data that is stored in plaintext
 
 The vault's credential values are encrypted. These are not, by design:
@@ -267,6 +346,30 @@ The vault's credential values are encrypted. These are not, by design:
     or any backup taken before the upgrade. Encrypted-at-rest storage protects
     those; this migration does not.
 
+* **A WAL checkpoint that fails after the re-seal is never retried
+  (`NEW-08`).** The legacy re-seal commits, then checkpoints and truncates
+  the WAL so no copy of the old plaintext remains in `vault.db-wal`. If a
+  concurrent reader holds the database at that moment the checkpoint cannot
+  complete — and because the completion marker is already durable, the
+  migration does not run again. The WAL may therefore retain legacy plaintext
+  until some later write happens to checkpoint it. **Not fixed.**
+
+* **A tampered restore record can make `undo` delete your line (`ENC-02`).**
+  `prior_env_json` in `gateway_project_links` records what a variable held
+  before Tethra re-pointed it. Unlike `gateway_routes` and
+  `tracking_approved_origins`, which are both MAC'd, that record carries no
+  integrity tag. A process with local write access to `vault.db` can strip
+  the `sealed` field; the record then deserialises as a legacy v1 record with
+  no prior value, and `tethra track undo` DELETES the configuration line
+  while reporting the outcome as "Restored".
+
+  This needs an attacker already running as your user — the same exclusion
+  `THREAT_MODEL.md` records — and it is destructive rather than
+  exfiltrating: nothing is sent anywhere and no credential is exposed. It is
+  **not fixed**. It is recorded here because the previous remediation
+  deferred it without a user-facing disclosure, which is the part that was
+  wrong.
+
 * **The consent diff shows a declared base URL's current value verbatim.**
   When Tethra is about to replace `OPENAI_BASE_URL`, the removed line is
   shown unmasked, because seeing exactly what is being replaced is the
@@ -277,17 +380,60 @@ The vault's credential values are encrypted. These are not, by design:
 
 ## Gateway availability under slow request bodies
 
-A request **body** is bounded by an absolute deadline of 300 seconds
-(`CLIENT_BODY_DEADLINE`), checked between reads — so the true worst case is
-that deadline plus one 60-second idle timeout. With `MAX_CONNECTIONS` at 128, a
-client opening many slow-body connections can still make the gateway
-unavailable to your own applications for up to that long (`SEC-02`).
+**Corrected 2026-07-29 (`NEW-48`).** This section previously said the worst
+case was one 300-second request-body deadline plus one 60-second idle timeout,
+about 360 seconds. That was wrong, and it was wrong in the direction that
+matters: every client-facing budget was re-armed from `Instant::now()` on each
+keep-alive iteration, so a client that kept *completing* slow work was never
+idle and never out of time. The audit held one of the 128 slots for **422
+seconds** across twenty slow bodies on a single connection, and could have held
+it indefinitely — the bound was not merely larger than stated, it was not
+expressible.
 
-The gateway listens on loopback only, fails closed with `503` rather than
-queueing without limit, and recovers by itself once the connections expire. No
-credential, no observation and no stored data is affected — this is an
+What bounds a slot now:
+
+| Limit | Value | What it bounds |
+| --- | --- | --- |
+| `CLIENT_HEAD_DEADLINE` | 15 s | reading one request head |
+| `CLIENT_BODY_DEADLINE` | 300 s | reading one request body |
+| `CLIENT_BODY_IDLE_TIMEOUT` | 60 s | the gap between two body reads |
+| `CLIENT_KEEPALIVE_IDLE` | 120 s | the gap between two requests |
+| `CLIENT_CONNECTION_TIME_BUDGET` | 600 s | **cumulative client-paced time for the whole connection — never renewed** |
+| `CLIENT_CONNECTION_MAX_AGE` | 3600 s | the age past which the connection serves no NEW request |
+| `MAX_REQUESTS_PER_CONNECTION` | 10 000 | requests on one keep-alive connection |
+| `MAX_CONNECTIONS` | 128 | concurrent connections; further ones get `503` immediately |
+
+Only **client-paced** time is charged to the connection budget: idling between
+requests, reading a head, reading a body. Upstream-paced time — connecting to
+the provider, waiting for its response head, streaming its response body — is
+deliberately not charged, because the destination comes from the route table
+and never from the request, so a client cannot lengthen it. That asymmetry is
+the reason a long model completion still streams to the end.
+
+**The honest worst case is 720 seconds, not 600.** The budget is observed
+between phases, so residency overshoots it by at most one in-flight idle
+budget — 120 s if the wait for the next head was running, 60 s if the body
+relay was. The head deadline is deliberately not clamped to the remaining
+budget, because clamping could expire mid-head and turn a legitimately
+arriving request into a spurious `400`.
+
+So the residual availability risk is: a local attacker can hold all 128 slots
+by re-opening 128 connections roughly every twelve minutes, each subject to the
+15-second first-head deadline. The gateway listens on loopback only, fails
+closed with `503` rather than queueing without limit, and recovers by itself.
+No credential, no observation and no stored data is affected — this is an
 availability limit, stated because it is real rather than because it is
-serious.
+serious, and an attacker able to open loopback connections is already running
+on your machine.
 
-A streaming **response** is deliberately not bounded this way. A long model
-completion is a legitimate long-lived read; capping it would break streaming.
+**One behaviour change on the legitimate path.** Charging idle time means a
+long-lived pooled connection now closes after 600 seconds of *cumulative* idle
+rather than 120 seconds of *continuous* idle. Every HTTP client handles a
+connection closed between requests, and where the bound is already visible the
+preceding response carries `Connection: close` — but when the budget runs out
+during the idle wait the close is silent, exactly as today's 120-second idle
+close is.
+
+A body cut short by the connection budget is now recorded distinguishably from
+a client that went away (`NEW-52`), so "we cut them off" and "they left" are
+different rows rather than the same one.

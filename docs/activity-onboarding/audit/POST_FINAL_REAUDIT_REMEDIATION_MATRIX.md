@@ -52,7 +52,7 @@ itself and is called out as such.
 | **Merge blocking** | yes |
 | **Reproduction** | Two connections on one `vault.db`: read a setup, record a failure from the other connection, then refresh from the first. At the audited head the failure is nulled and the report is `VerifiedAndActive`. |
 | **Root cause** | `failure_is_newer` was computed from the caller's in-memory `attention_at`, and `write_derived` committed with `UPDATE … WHERE id = ?1` — a blind write with no predicate on what the row looked like when the decision was made. A lost update across transactions; WAL and `busy_timeout` do not help. |
-| **Fix** | Migration v19 adds `tracking_setups.row_version`. All health writes funnel through one guarded statement (`cas_write_health`) requiring the row to still be at the version its caller read. `refresh_with` answers a conflict by re-reading and re-deriving (three attempts, then it reports without writing — deterministic). `transition` deliberately does not retry: its legality check encodes an intent that must be re-judged. `record_applied`, the undo artifact clear and the re-apply upsert all advance the version. The two write-once watermarks gain `IS NULL` predicates. |
+| **Fix** | Migration v19 adds `tracking_setups.row_version`. All health writes funnel through one guarded statement (`cas_write_health`) requiring the row to still be at the version its caller read. `refresh_with` answers a conflict by re-reading and re-deriving (three attempts, then it reports without writing — deterministic). `transition` deliberately does not retry: its legality check encodes an intent that must be re-judged. `record_applied`, the undo artifact clear and the re-apply upsert all advance the version. **Correction (`NEW-31`, latest-audit remediation):** advancing the version is not the same as *predicating* on it, and `record_applied` did the first without the second — it was the one health write with no `AND row_version = ?N`, so two concurrent applies were last-writer-wins and a later undo acted on the wrong `created_routes`. The predicate is now present and pinned by a named test. The two write-once watermarks gain `IS NULL` predicates. |
 | **Tests** | `crates/tracking/tests/verification_concurrency.rs` — 12 tests, two connections on one database: stale-handle erasure, failure racing a refresh, two refreshes racing, gateway death, route removal, link removal, setup-generation change, old verification session, desktop+CLI together, refused stale transition, version advance. Barriers or hand-sequenced interleavings; no sleeps. |
 | **Mutation** | Removing the CAS predicate (`WHERE id = ?1`, parameter dropped so it still compiles) fails 5 tests including the headline reproduction. |
 | **Disposition** | **FIXED** |
@@ -179,7 +179,7 @@ itself and is called out as such.
 | **Root cause** | The route MAC covers custom origins; a shipped-manifest route's `provider_id` is not bound into authenticated state. |
 | **Disposition** | **ACCEPTED**, threat model made explicit |
 | **Reasoning** | The attacker required is one with **local database write access**. `THREAT_MODEL.md` already documents that metadata edits are not cryptographically detected, and an attacker who can write `vault.db` can also replace the binary, edit the plist, or read the process's memory — the credential is reachable by simpler means than a route swap. Extending the MAC to `(route_prefix, provider_id)` is a genuinely small change, but it is not a *boundary*: it raises the cost of one path out of many available to the same attacker, and presenting it as a defence would overstate what local-DB tamper resistance this product has. |
-| **Action taken** | `SECURITY_AND_PRIVACY.md` now states the exclusion explicitly, explains why custom-origin MAC protection does not extend to built-in provider-id tampering, and no user-facing claim implies DB tamper resistance beyond what exists. |
+| **Action taken** | `SECURITY_AND_PRIVACY.md` states the exclusion explicitly and explains why custom-origin MAC protection does not extend to built-in provider-id tampering. **The second half of this row was false when written** (`NEW-49`): `docs/gateway/SECURITY.md`, `docs/gateway/ARCHITECTURE.md` and a shipped `GatewayView` string all still claimed database tampering could not redirect a credential. They were corrected in the latest-audit remediation — see `LATEST_AUDIT_REMEDIATION_MATRIX.md`. |
 | **Residual risk** | An attacker with local write access to `vault.db` can redirect a credential to another **shipped-manifest** provider. Custom origins remain MAC-protected. |
 | **Commit** | this pass (documentation) |
 
@@ -193,9 +193,11 @@ itself and is called out as such.
 | **Fix** | `stream::DeadlineReader` wraps the client for the **request body only** and refuses past `CLIENT_BODY_DEADLINE` (300s). Response streaming is deliberately untouched — a long model response is a legitimate long-lived read, and bounding it would break streaming completions. |
 | **Tests** | Two deterministic unit tests in `crates/gateway/src/stream.rs`, including a control proving the wrapper is not simply refusing everything. |
 | **Mutation** | The control test is the mutation guard: a wrapper that refuses everything fails it. |
-| **Disposition** | **FIXED** |
-| **Residual risk** | The check happens **between** reads, so the true bound is the deadline plus one idle timeout (≈360s worst case), not 300s exactly. Stated in the code and in `KNOWN_LIMITATIONS.md`. Making it exact needs a non-blocking rewrite of the relay for no additional safety. 128 clients can still occupy all slots for up to that bound; the gateway fails closed with 503 and recovers. |
-| **Commit** | `aaa1c13` |
+| **Disposition** | ~~**FIXED**~~ → **INCOMPLETE. Superseded by `NEW-48`.** |
+| **Residual risk** | ~~the deadline plus one idle timeout (≈360s worst case)~~ — **this row was wrong.** The deadline was computed inside the per-request handler, which runs once per keep-alive iteration, so a client that kept *completing* slow work re-armed every budget and was never idle. The fresh audit measured one connection holding one slot for **422 seconds** across twenty slow bodies. There was no bound to state. |
+| **Mutation, in hindsight** | The mutation row above is the diagnostic: the guard was a unit test on the reader, and the reader was correct. Nothing exercised the connection, so nothing could have caught a defect that lived in the loop around it. `NEW-51` records the same thing from the other side — deleting the wiring left both shipped tests green. |
+| **Superseded by** | `NEW-48`, remediated with a per-connection budget. See `LATEST_AUDIT_REMEDIATION_MATRIX.md` and `LATEST_AUDIT_REMEDIATION_EVIDENCE.md`. The honest bound is **720s**. |
+| **Commit** | `aaa1c13` (this fix); superseded in the latest-audit remediation |
 
 ---
 
@@ -219,7 +221,7 @@ itself and is called out as such.
 | `VAL-09` | low | no | The REM-005 remediation note misstates why the old gate failed | **DEFERRED** | It failed for one reason (pretty-printing), not the two claimed. Note untouched. |
 | `VAL-10` | low | no | The duplicate-name detector keys on group+name | **DEFERRED** | A name reused across two groups is invisible to the harness. The CI asserter now rejects global duplicates for `full:service`; the offline job still has no asserter. |
 | `VAL-11` | low | no | Weak or overclaiming assertions in both validation scripts | **DEFERRED** | Non-emptiness-only checks, `COUNT(*)>=1` for "recorded history was KEPT", labels claiming a locked vault when nothing locks one. |
-| `REPO-01` | info | no | `main` has no branch protection and no rulesets | **BLOCKED — external** | A repository setting, not a code change. Requires admin access to the GitHub repository; cannot be done from this branch. Compounds `VAL-01`: a required check is a convention until it is enforced. |
+| `REPO-01` | info | no | `main` has no branch protection and no rulesets | **NOT DONE — owner decision** | A repository setting, not a code change, so it cannot land from this branch. This row previously said *blocked on admin access*; that was wrong — the credential in use reports `"admin": true` (`NEW-24`). It is a decision nobody has taken, left to the repository owner because branch protection changes how their own pushes behave. Compounds `VAL-01`: a required check is a convention until it is enforced. |
 
 ---
 
@@ -227,11 +229,11 @@ itself and is called out as such.
 
 | Disposition | Count | IDs |
 |---|---|---|
-| FIXED | 10 | `VAL-01` `VAL-02` `VAL-03` `VAL-04` `VAL-05` `VER-01` `VER-02` `ENC-01` `ORG-01` `SEC-02` (`SEC-02` non-blocking) |
+| FIXED | 9 | `VAL-01` `VAL-02` `VAL-03` `VAL-04` `VAL-05` `VER-01` `VER-02` `ENC-01` `ORG-01` — `SEC-02` was counted here and should not have been (see its row: incomplete, superseded by `NEW-48`) |
 | PARTIAL | 0 | — |
 | ACCEPTED | 2 | `SEC-01` `VER-03` |
 | DEFERRED | 15 | `ENC-02` `ENC-03` `ENC-04` `VAL-06` `VAL-07` `VAL-08` `VAL-09` `VAL-10` `VAL-11` `ORG-02` `VER-04` `GIT-01` `CON-01` `CON-02` `CON-03` |
-| BLOCKED (external) | 1 | `REPO-01` |
+| NOT DONE (owner decision) | 1 | `REPO-01` |
 
 **Merge blockers: 9 of 9 fixed**, with `VAL-05`'s required-count constant awaiting
 confirmation from the first CI run that executes it, and its residue (no
