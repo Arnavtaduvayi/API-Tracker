@@ -331,6 +331,25 @@ Verified by reproduction rather than by reasoning: the pre-fix validator,
 given the genuine document, prints the exact CI error; the fixed one accepts it
 and prints `50/50 required checks passed in gateway:lifecycle`.
 
+**And its second real run found a second one, in the same place.** With the
+group fix in, the gateway scope's assertion passed — and the job failed one
+step later, at the clean-room precondition between the two service runs:
+
+```text
+FAIL   a stale test namespace ALREADY exists:
+       /private/tmp/tethra-gw-val-11458-976f0948.ledger.checks.tsv
+=== PRECONDITIONS FAILED (1) — refusing to run the service scope ===
+```
+
+The check register is written beside the ownership ledger, and teardown swept
+the ledger but not the register. The register is new in this pass, so the leak
+is new in this pass — and it was caught by `NEW-20`, the precondition glob for
+`/private/tmp/tethra-gw-val-*` added in this same pass. A new check found a new
+leak on its first opportunity, which is the whole argument for adding it.
+
+Fixed by sweeping both. The tracking harness has no equivalent leak: it writes
+its register inside a directory teardown already removes.
+
 **End to end, not only synthetic.** A real `--scope selfcheck` run with
 `TETHRA_VALIDATION_RESULTS_JSON` set validates as `5/5 required checks passed
 in selfcheck:none`. That is the proof the generated label prefixes match the

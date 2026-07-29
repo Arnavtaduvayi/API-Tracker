@@ -361,7 +361,12 @@ cleanup() {
     esac
   done < <(ledger_values dir)
 
-  rm -f "$LEDGER" 2>/dev/null || true
+  # The ledger AND the check register beside it. The register was added with
+  # the results document (`VAL-05-R`) and was not swept, so a run left
+  # `<ledger>.checks.tsv` behind — which `ci_service_preconditions.sh` now
+  # globs for (`NEW-20`) and correctly refuses on. Its own new check caught
+  # its own new leak, which is the point of that precondition existing.
+  rm -f "$LEDGER" "$RESULTS_TSV" 2>/dev/null || true
 
   # 6. A refusal above left a launchd job registered. The external verifier
   #    cannot see that — `ci_service_preconditions.sh`'s launchd precondition
