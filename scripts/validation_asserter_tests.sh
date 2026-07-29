@@ -73,10 +73,16 @@ required_n = len(checks)
 for e in (spec.get("optional_checks") or [])[: int(n_opt)]:
     checks.append({"group": e["group"], "result": "pass", "optional": True,
                    "name": e["label_prefixes"][0] + " (measured)"})
+# Mirror what the harnesses actually emit: ONE entry per group that ran, with
+# `executed` counting REQUIRED rows only. A group made entirely of optional
+# checks therefore appears with 0 — which is precisely the shape that was
+# missing here, and precisely why this suite passed while the gateway scope's
+# first real CI run was rejected for running its wholly-optional REPAIR block.
 groups = {}
 for c in checks:
+    groups.setdefault(c["group"], 0)
     if not c.get("optional"):
-        groups[c["group"]] = groups.get(c["group"], 0) + 1
+        groups[c["group"]] += 1
 assert required_n == spec["expected_total"], (required_n, spec["expected_total"])
 json.dump({
     "schema": m["results_schema"], "scope": scope, "mode": mode, "verdict": "PASS",
@@ -422,6 +428,27 @@ refuses "$(mutate_from "$WORK/gateway7.json" gw_required_as_opt 'for c in d["che
   "a gateway REQUIRED check presented as OPTIONAL is REFUSED" \
   --scope gateway --mode lifecycle
 
+# 10l. A WHOLLY-OPTIONAL GROUP. The gateway harness's REPAIR block runs only
+# when the run reaches a state needing a repair, so it has no required checks
+# and therefore no entry in the manifest's required-count table. The first real
+# CI execution of this scope was REJECTED for that — "group 'REPAIR' ran but
+# the manifest does not declare it" — while every one of its 50 required
+# identities matched. `$WORK/gateway7.json` carries REPAIR rows and is accepted
+# above; these two pin both sides of the distinction, because "recognise a
+# group the manifest names only in its optional set" must not become "recognise
+# any group at all".
+refuses "$(mutate_from "$WORK/gateway7.json" gw_unknown_group 'd["groups"].append(
+    {"name": "SMUGGLED", "expected": 0, "executed": 0, "passed": 0, "failed": 0})')" \
+  "a gateway group the manifest names NOWHERE is still REFUSED" \
+  --scope gateway --mode lifecycle
+
+refuses "$(mutate_from "$WORK/gateway7.json" gw_opt_group_failed 'for g in d["groups"]:
+    if g["name"] == "REPAIR":
+        g["failed"] = 1
+        break')" \
+  "a FAILURE inside a wholly-optional gateway group is REFUSED" \
+  --scope gateway --mode lifecycle
+
 refuses "$(mutate_from "$WORK/gateway0.json" gw_unknown 'd["checks"].append(
     {"group": "UNINSTALL", "result": "pass", "name": "an assertion nobody declared"})')" \
   "a gateway result carrying an id the manifest never declared is REFUSED" \
@@ -511,7 +538,7 @@ echo "=== ASSERTER FORGERY RESULT: $pass passed, $fail failed ==="
 # The floor is an EQUALITY, not a minimum: a floor with no headroom cannot tell
 # "an assertion was added" from "an assertion was skipped", and both are things
 # a reader of this number needs to know.
-EXPECTED_ASSERTIONS=59
+EXPECTED_ASSERTIONS=61
 if [ "$pass" -ne "$EXPECTED_ASSERTIONS" ] && [ "$fail" -eq 0 ]; then
   echo "FAIL: $pass assertions ran; exactly $EXPECTED_ASSERTIONS are declared."
   echo "      A DIFFERENT count means assertions were added or SKIPPED, not that all"

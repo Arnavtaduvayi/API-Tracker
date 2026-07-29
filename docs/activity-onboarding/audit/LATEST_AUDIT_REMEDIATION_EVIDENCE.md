@@ -300,6 +300,37 @@ test is not vacuous. Two guards keep that control honest: a mutation that
 fails to apply is a FAIL, and a mutant that refuses even a genuine document is
 a FAIL.
 
+**The gateway scope's first real CI run found a defect in this work, and it is
+worth recording because of WHERE it was.** On `37d4582` the packaged
+service-lifecycle job ran the gateway harness against the new validator. Every
+one of the 50 required identities matched — `required check SET equality: 50/50
+declared checks executed, 0 unrecognised rows` — and the job still failed:
+
+```text
+=== SERVICE SCOPE ASSERTION FAILED ===
+  - group 'REPAIR' ran but the manifest does not declare it for gateway:lifecycle
+```
+
+`REPAIR` stages a repair only when the run reaches a state that needs one, so
+it has **no required checks** and therefore no entry in the manifest's
+required-count table — which the validator was using as the set of KNOWN
+groups. A group can legitimately consist entirely of optional checks; that is
+what optional means.
+
+The local suite had not caught it because its synthesised documents built the
+group breakdown from required rows only, so a wholly-optional group never
+appeared in a test document at all. That is the same defect class this whole
+finding is about — a check that cannot fail — one level up, in the test
+harness. Both are fixed: the synthesiser now mirrors what the harnesses emit
+(one entry per group that ran, `executed` counting required rows only), and
+two committed cases pin both sides of the distinction — a group the manifest
+names nowhere is still refused, and a failure inside a wholly-optional group is
+still refused. The asserter suite is 61 assertions, up from 59.
+
+Verified by reproduction rather than by reasoning: the pre-fix validator,
+given the genuine document, prints the exact CI error; the fixed one accepts it
+and prints `50/50 required checks passed in gateway:lifecycle`.
+
 **End to end, not only synthetic.** A real `--scope selfcheck` run with
 `TETHRA_VALIDATION_RESULTS_JSON` set validates as `5/5 required checks passed
 in selfcheck:none`. That is the proof the generated label prefixes match the

@@ -190,7 +190,22 @@ def main(argv):
     )
 
     # --- per-group, from the MANIFEST --------------------------------------
+    #
+    # `spec["groups"]` holds how many REQUIRED checks each group runs. It is
+    # the right instrument for "did every required group run its required
+    # number"; it is the wrong instrument for "is this group known", because a
+    # group can legitimately consist entirely of OPTIONAL checks. The gateway
+    # harness's REPAIR block is exactly that: it stages a repair only when the
+    # run reaches a state that needs one, so it has no fixed count by
+    # construction — which is what `optional` means. Treating absence from the
+    # required-count table as "undeclared" rejected a genuine run on the first
+    # real execution of the gateway scope.
     required_groups = spec["groups"]
+    optional_groups = set()
+    for entry in spec.get("optional_checks") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("group"), str):
+            optional_groups.add(entry["group"])
+    declared_groups = set(required_groups) | optional_groups
     groups = r.get("groups")
     if not isinstance(groups, list) or not groups:
         fails.append("no group breakdown in the results")
@@ -204,11 +219,28 @@ def main(argv):
         if name in seen_groups:
             fails.append("group %r appears twice in the breakdown" % name)
         seen_groups[name] = g
-        if name not in required_groups:
+        if name not in declared_groups:
             fails.append(
-                "group %r ran but the manifest does not declare it for %s" % (name, key)
+                "group %r ran but the manifest declares no check for it in %s" % (name, key)
             )
             line(False, "group %-12s UNDECLARED" % (name,))
+            continue
+        if name not in required_groups:
+            # Wholly optional. Its rows are still bound BY IDENTITY in the
+            # optional set below — an unrecognised REPAIR row is refused
+            # exactly like an unrecognised INSTALL row — so nothing here is
+            # unchecked; only the count is, and only because there is no count
+            # to check.
+            good = g.get("failed") == 0
+            if not good:
+                fails.append(
+                    "group %s is optional but reported %r failed" % (name, g.get("failed"))
+                )
+            line(
+                good,
+                "group %-12s %r executed (optional; identities still bound), %r failed"
+                % (name, g.get("executed"), g.get("failed")),
+            )
             continue
         need = required_groups[name]
         good = g.get("executed") == need and g.get("failed") == 0
