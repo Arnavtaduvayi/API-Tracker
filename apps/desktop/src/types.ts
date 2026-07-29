@@ -1344,11 +1344,33 @@ export interface GatewayActivitySummary {
 
 // --- Track API activity (ADR 0022) ------------------------------------
 
+/**
+ * detect::CoverageBucket — the ONE precedence that decides both the headline
+ * count an integration is included in and the label its own row carries
+ * (NEW-43). Confidence is asked first and unconditionally, so a `possible`
+ * provider is `low_confidence` whatever its `configurability` would otherwise
+ * have allowed.
+ */
+export type TrackingCoverageBucket =
+  | "tracked_automatically"
+  | "needs_origin_confirmation"
+  | "detected_unsupported"
+  | "low_confidence";
+
 export interface TrackingProvider {
   provider_id: string;
   display_name: string;
   confidence: "confirmed" | "likely" | "possible";
   configurability: "automatic" | "needs_origin_confirm" | "needs_origin_input" | "unsupported";
+  /**
+   * Which headline bucket this provider was counted under. The review screen
+   * groups and labels on THIS, never on `configurability` alone: that rule has
+   * no confidence guard, so it put a `possible`-confidence provider under
+   * "Tethra knows where these go" while the headline counted it as low
+   * confidence, and six rows could appear under a headline saying three
+   * (NEW-43).
+   */
+  bucket: TrackingCoverageBucket;
   inferred_origin: string | null;
   evidence: string[];
   limitations: string[];
@@ -1465,6 +1487,13 @@ export interface TrackingHealth {
     | "verified_previously_gateway_down"
     | "verified_previously_idle"
     | "waiting_for_first_request"
+    /**
+     * An apply that started and never reported an outcome. Its own kind
+     * because such a row is not waiting for anything the user can do by
+     * making a request — the apply is either running now or was interrupted
+     * (NEW-35).
+     */
+    | "apply_incomplete"
     | "needs_restart"
     | "configuration_changed"
     | "gateway_unavailable"

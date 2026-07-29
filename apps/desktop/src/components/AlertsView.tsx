@@ -42,10 +42,25 @@ export function AlertsView() {
   const [status, setStatus] = useState<MonitorStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
+  // `loaded` is what separates "the vault holds no alerts" from "the list
+  // never arrived". Without it a failed read left `alerts` at its empty
+  // initial value and the screen printed "No alerts." beside the error —
+  // the most reassuring possible sentence for a monitoring surface whose
+  // whole job is to not be reassuring when it does not know (NEW-41).
   const reload = useCallback(async () => {
     try {
       setAlerts(await api.alertsList(includeResolved));
+      setError(null);
+      setLoaded(true);
+    } catch (e) {
+      setLoaded(false);
+      setError(isApiError(e) ? e.message : String(e));
+    }
+    // Independent of the list: a missing run history must not blank the
+    // alerts that did load, and vice versa.
+    try {
       setStatus(await api.monitorStatus());
     } catch (e) {
       setError(isApiError(e) ? e.message : String(e));
@@ -112,9 +127,25 @@ export function AlertsView() {
           {status.last_detail && ` — ${status.last_detail}`}
         </p>
       )}
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error" role="alert">
+          {error}{" "}
+          <button className="link" onClick={() => void reload()}>
+            Retry
+          </button>
+        </p>
+      )}
       {notice && <p className="notice">{notice}</p>}
-      {alerts.length === 0 ? (
+      {!loaded ? (
+        error === null ? (
+          <p className="muted">Loading alerts…</p>
+        ) : (
+          <p className="warnbox" role="status">
+            The alert list could not be read, so this screen cannot say whether you have any. An
+            unread list is not an empty one.
+          </p>
+        )
+      ) : alerts.length === 0 ? (
         <p>No alerts. Run the checks to evaluate your credentials.</p>
       ) : (
         alerts.map((a) => (

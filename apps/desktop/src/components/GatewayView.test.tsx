@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { GatewayDoctor } from "../types";
+import type { GatewayActivitySummary, GatewayDoctor, ProviderManifest } from "../types";
 
 vi.mock("../api", async () => {
   const actual = await vi.importActual<typeof import("../api")>("../api");
@@ -18,6 +18,7 @@ vi.mock("../api", async () => {
       gatewayMatchWhileLockedGet: vi.fn().mockResolvedValue(false),
       gatewayMatchWhileLockedSet: vi.fn().mockResolvedValue(undefined),
       gatewayUnlink: vi.fn(),
+      gatewayActivity: vi.fn(),
       providersList: vi.fn().mockResolvedValue([]),
       projectList: vi.fn().mockResolvedValue([]),
     },
@@ -34,7 +35,63 @@ const mockApi = api as unknown as {
   gatewayLocateCli: ReturnType<typeof vi.fn>;
   gatewayInstall: ReturnType<typeof vi.fn>;
   gatewayUnlink: ReturnType<typeof vi.fn>;
+  gatewayActivity: ReturnType<typeof vi.fn>;
+  providersList: ReturnType<typeof vi.fn>;
 };
+
+function activity(over: Partial<GatewayActivitySummary> = {}): GatewayActivitySummary {
+  return {
+    since: null,
+    total_requests: 0,
+    success_count: 0,
+    error_count: 0,
+    transport_error_count: 0,
+    p50_latency_ms: null,
+    p95_latency_ms: null,
+    p99_latency_ms: null,
+    request_bytes: 0,
+    response_bytes: 0,
+    top_endpoints: [],
+    attribution: [],
+    input_tokens: 0,
+    output_tokens: 0,
+    usage_event_count: 0,
+    top_models: [],
+    estimated_cost_micros: 0,
+    first_event_at: null,
+    last_event_at: null,
+    ...over,
+  };
+}
+
+/** A manifest with only the fields the route form reads. */
+function manifest(
+  id: string,
+  name: string,
+  gateway: ProviderManifest["gateway"],
+): ProviderManifest {
+  return {
+    id,
+    name,
+    description: "",
+    website: "",
+    api_docs_url: "",
+    auth_docs_url: "",
+    manage_url: "",
+    env_vars: [],
+    credential_types: [],
+    expiration: "none",
+    changelog_url: "",
+    pricing_url: "",
+    permissions_docs_url: "",
+    login_url: "",
+    billing_url: "",
+    watch_docs: [],
+    detection: [],
+    gateway,
+    capabilities: {} as ProviderManifest["capabilities"],
+  };
+}
 
 function absent(): GatewayDoctor {
   return {
@@ -124,6 +181,9 @@ beforeEach(() => {
   mockApi.gatewayLocateCli.mockReset();
   mockApi.gatewayInstall.mockReset();
   mockApi.gatewayUnlink.mockReset();
+  mockApi.gatewayActivity.mockReset();
+  mockApi.gatewayActivity.mockResolvedValue(activity());
+  mockApi.providersList.mockResolvedValue([]);
 });
 
 describe("GatewayView consent and honesty", () => {
@@ -332,5 +392,129 @@ describe("GatewayView unlink reporting (RA-013)", () => {
     expect(
       await screen.findByText(/Nothing was recorded for this link, so nothing was restored/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("GatewayView activity never fabricates a zero (NEW-37)", () => {
+  /** Open the Activity tab of a running gateway. */
+  async function openActivity(summary: GatewayActivitySummary) {
+    mockApi.gatewayDoctor.mockResolvedValue(running());
+    mockApi.gatewayActivity.mockResolvedValue(summary);
+    render(<GatewayView />);
+    await userEvent.click(await screen.findByRole("button", { name: "Activity" }));
+  }
+
+  it("reports absent usage as a state, not as 0 tokens and $0.0000", async () => {
+    await openActivity(
+      activity({ total_requests: 42, success_count: 42, usage_event_count: 0 }),
+    );
+    expect(await screen.findByText(/Tokens not reported/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/\$0\.0000/);
+    expect(document.body.textContent).not.toMatch(/LOWER-bound estimate/);
+    // Anti-vacuity: the panel still rendered the numbers it does know.
+    expect(screen.getByText("42")).toBeInTheDocument();
+  });
+
+  it("shows the figures when every response carried usage", async () => {
+    await openActivity(
+      activity({
+        total_requests: 2,
+        success_count: 2,
+        usage_event_count: 2,
+        input_tokens: 100,
+        output_tokens: 50,
+        estimated_cost_micros: 12_345,
+      }),
+    );
+    expect(await screen.findByText(/100 in \/ 50 out/)).toBeInTheDocument();
+    expect(screen.getByText(/\$0\.0123/)).toBeInTheDocument();
+    expect(screen.getByText(/LOWER-bound estimate/)).toBeInTheDocument();
+  });
+
+  it("does not print an estimate for tokens the local price table does not cover", async () => {
+    await openActivity(
+      activity({
+        total_requests: 2,
+        success_count: 2,
+        usage_event_count: 2,
+        input_tokens: 100,
+        output_tokens: 50,
+        estimated_cost_micros: 0,
+      }),
+    );
+    expect(await screen.findByText(/100 in \/ 50 out/)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/\$0\.0000/);
+    expect(screen.getByText(/no local price covers the model/)).toBeInTheDocument();
+  });
+
+  it("labels a window where only some responses carried usage", async () => {
+    await openActivity(
+      activity({
+        total_requests: 500,
+        success_count: 500,
+        usage_event_count: 3,
+        input_tokens: 900,
+        output_tokens: 100,
+        estimated_cost_micros: 4_000,
+      }),
+    );
+    expect(
+      await screen.findByText(/Partial token data: 3 of 500 response\(s\)/),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("GatewayView route form (NEW-39, NEW-49)", () => {
+  /** Open Routes and choose one provider in the add-route form. */
+  async function chooseProvider(m: ProviderManifest) {
+    mockApi.gatewayDoctor.mockResolvedValue(running());
+    mockApi.providersList.mockResolvedValue([m]);
+    render(<GatewayView />);
+    await userEvent.click(await screen.findByRole("button", { name: "Routes" }));
+    await userEvent.selectOptions(await screen.findByRole("combobox"), m.id);
+  }
+
+  it("gives a per-account-host provider the reason that is true of it", async () => {
+    await chooseProvider(
+      manifest("supabase", "Supabase", {
+        origins: [],
+        base_path: "",
+        env_vars: ["SUPABASE_URL"],
+        usage_shape: "",
+      }),
+    );
+    expect(await screen.findByText(/every account gets its own host/)).toBeInTheDocument();
+  });
+
+  it("does not tell a provider with a fixed origin that it has none", async () => {
+    // Stripe, GitHub, Mistral, DeepSeek, xAI, OpenRouter, HuggingFace and
+    // AWS Bedrock all have one fixed public origin; what they lack is a
+    // base-URL environment variable for an SDK to read (NEW-39).
+    await chooseProvider(manifest("stripe", "Stripe", null));
+    expect(
+      await screen.findByText(/its SDKs read no base-URL environment variable/),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Stripe has no fixed API origin/);
+    expect(document.body.textContent).not.toMatch(/every account gets its own host/);
+  });
+
+  it("does not claim database tampering cannot redirect a credential (NEW-49)", async () => {
+    await chooseProvider(manifest("stripe", "Stripe", null));
+    const note = await screen.findByText(/A custom origin is bound into the route/);
+
+    // What the MAC does: refuse a destination the user never approved.
+    expect(note.textContent).toMatch(/cannot be injected or substituted/);
+    // What it does not do, stated rather than left to be inferred: built-in
+    // routes are not bound, so a local-write attacker can repoint one at
+    // another shipped provider's origin (SEC-01).
+    expect(note.textContent).toMatch(/Built-in provider routes are not bound the same way/);
+    expect(note.textContent).toMatch(/DIFFERENT shipped provider/);
+    expect(note.textContent).toMatch(/with your credential still attached/);
+
+    // The negative control: the audited sentence, and any blanket claim.
+    expect(document.body.textContent).not.toMatch(/integrity-protected against database/);
+    expect(document.body.textContent).not.toMatch(
+      /cannot make .* go anywhere else|database tampering cannot redirect/,
+    );
   });
 });

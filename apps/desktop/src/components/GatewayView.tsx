@@ -20,6 +20,15 @@ import type {
   Project,
   ProviderManifest,
 } from "../types";
+import {
+  GATEWAY_ESTIMATED_COST,
+  GATEWAY_TOKENS,
+  formatCostMicros,
+  formatTokenPair,
+  gatewayCostAvailability,
+  gatewayTokenAvailability,
+  hasValue,
+} from "../usage";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ReauthDialog } from "./ReauthDialog";
 
@@ -652,6 +661,38 @@ function FindingCard({ finding }: { finding: GatewayFinding }) {
 // Routes
 // ---------------------------------------------------------------------------
 
+/**
+ * What the custom-origin MAC does and does not protect (NEW-49).
+ *
+ * The audited string said a custom origin "is integrity-protected against
+ * database tampering", which a reader generalises to the whole routing table.
+ * It is not true of the table. The MAC binds a destination the USER approved,
+ * so repository content cannot become authorization (ZFT-004, ZFT-012) — that
+ * is the adversary it was built for. Built-in manifest routes carry no such
+ * binding: `provider_id` is read straight from the row, so an attacker who can
+ * already write vault.db can point /openai/… at another SHIPPED provider's
+ * origin with the OpenAI credential still attached (SEC-01, confirmed by
+ * upstream fingerprint in the re-audit).
+ *
+ * That attacker is explicitly out of scope — anyone with local write access
+ * can replace the binary or read process memory — but the acceptance depends
+ * on the disclosure being honest here, not only in
+ * docs/activity-onboarding/SECURITY_AND_PRIVACY.md.
+ */
+function CustomOriginIntegrityNote() {
+  return (
+    <p className="muted">
+      A custom origin is bound into the route&apos;s authentication code, so a destination you
+      never approved cannot be injected or substituted for it. That binding covers custom
+      origins only. Built-in provider routes are not bound the same way, so software that can
+      already write this vault&apos;s database can repoint one built-in prefix at a DIFFERENT
+      shipped provider&apos;s origin, with your credential still attached. Tethra does not claim
+      to detect or resist tampering with its own database by something running as you — such a
+      process can equally replace Tethra itself.
+    </p>
+  );
+}
+
 function RoutesTab(props: {
   gatewayRunning: boolean;
   onError: (msg: string) => void;
@@ -713,8 +754,18 @@ function RoutesTab(props: {
   };
 
   const manifest = providers.find((p) => p.id === provider);
-  const needsCustomOrigin =
-    manifest != null && (!manifest.gateway || manifest.gateway.origins.length === 0);
+  // Two different reasons land in the same "type an origin" branch, and
+  // collapsing them told eight providers something false about themselves
+  // (NEW-39). A manifest WITH a `[gateway]` section and an empty `origins`
+  // list is genuinely origin-less: every account gets its own host
+  // (Supabase). A manifest with NO `[gateway]` section at all — Stripe,
+  // GitHub, Mistral, DeepSeek, xAI, OpenRouter, HuggingFace, AWS Bedrock —
+  // has a perfectly fixed public origin; what it lacks is a base-URL
+  // environment variable for their SDKs to read, which is what a built-in
+  // route would need in order to be applied to a project automatically.
+  const perAccountOrigin = manifest?.gateway != null && manifest.gateway.origins.length === 0;
+  const noBaseUrlEnvVar = manifest != null && manifest.gateway == null;
+  const needsCustomOrigin = perAccountOrigin || noBaseUrlEnvVar;
 
   return (
     <div>
@@ -825,13 +876,21 @@ function RoutesTab(props: {
             placeholder="https://xyzcompany.supabase.co"
           />
         </label>
-        {needsCustomOrigin && (
+        {perAccountOrigin && (
           <p className="muted">
-            {manifest?.name} has no fixed API origin — every project gets its own host — so the
-            exact origin must be given here and is integrity-protected against database
-            tampering.
+            {manifest?.name} has no fixed API origin — every account gets its own host — so the
+            exact origin must be given here.
           </p>
         )}
+        {noBaseUrlEnvVar && (
+          <p className="muted">
+            {manifest?.name} does have a fixed API origin, but Tethra ships no built-in route
+            for it: its SDKs read no base-URL environment variable, so a link cannot point a
+            project at the gateway on its own. Give the exact origin here and change the base
+            URL in your code.
+          </p>
+        )}
+        {needsCustomOrigin && <CustomOriginIntegrityNote />}
         {formError && <p className="error">{formError}</p>}
         <button disabled={busy}>Add route</button>
       </form>
@@ -1277,16 +1336,29 @@ function ActivityTab({ onError }: { onError: (msg: string) => void }) {
           {summary.request_bytes} sent / {summary.response_bytes} received
         </dd>
         <dt>Tokens</dt>
+        {/* This panel's `usage_event_count > 0` guard was the only correct one
+            in the app, and the dashboard's absence of it was NEW-37. Both now
+            call the shared rule so the two surfaces cannot drift again, and so
+            the case this guard missed — tokens extracted, model unpriced — is
+            covered here too. */}
         <dd>
-          {summary.usage_event_count > 0
-            ? `${summary.input_tokens} in / ${summary.output_tokens} out (from ${summary.usage_event_count} response(s) that carried usage — absent usage is never counted as zero)`
-            : "none extracted (providers report usage only on some responses)"}
+          {formatTokenPair(
+            summary.input_tokens,
+            summary.output_tokens,
+            gatewayTokenAvailability(summary),
+            GATEWAY_TOKENS,
+          )}
         </dd>
         <dt>Estimated cost</dt>
         <dd>
-          {summary.usage_event_count > 0
-            ? `$${(summary.estimated_cost_micros / 1_000_000).toFixed(4)} (LOWER-bound estimate from local pricing; cache-read tokens excluded; never provider-billed truth)`
-            : "—"}
+          {formatCostMicros(
+            summary.estimated_cost_micros,
+            gatewayCostAvailability(summary),
+            GATEWAY_ESTIMATED_COST,
+            4,
+          )}
+          {hasValue(gatewayCostAvailability(summary)) &&
+            " (LOWER-bound estimate from local pricing; cache-read tokens excluded; never provider-billed truth)"}
         </dd>
         <dt>Freshness</dt>
         <dd>

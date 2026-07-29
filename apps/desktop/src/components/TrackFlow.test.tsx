@@ -20,6 +20,7 @@ import type {
   TrackingApplyReport,
   TrackingOriginRequest,
   TrackingPlan,
+  TrackingProvider,
   TrackingScan,
 } from "../types";
 
@@ -42,6 +43,7 @@ vi.mock("../api", async () => {
       trackingStatus: vi.fn(),
       trackingDiagnose: vi.fn(),
       trackingForegroundStart: vi.fn(),
+      trackingUndo: vi.fn(),
     },
   };
 });
@@ -56,7 +58,32 @@ const mockApi = api as unknown as {
   trackingStatus: ReturnType<typeof vi.fn>;
   trackingDiagnose: ReturnType<typeof vi.fn>;
   trackingForegroundStart: ReturnType<typeof vi.fn>;
+  trackingUndo: ReturnType<typeof vi.fn>;
 };
+
+/**
+ * One detected provider. `bucket` is the field the review screen groups and
+ * labels on (NEW-43) and is set explicitly by every caller, because the whole
+ * class of bug is a fixture whose bucket and whose `configurability` imply
+ * different sections.
+ */
+function providerFixture(over: Partial<TrackingProvider> = {}): TrackingProvider {
+  return {
+    provider_id: "openai",
+    display_name: "OpenAI",
+    confidence: "confirmed",
+    configurability: "automatic",
+    bucket: "tracked_automatically",
+    inferred_origin: null,
+    evidence: ["Found OPENAI_API_KEY in .env (value not read)"],
+    limitations: [],
+    credential_candidates: [],
+    selected_by_default: true,
+    needs_origin_approval: false,
+    unsupported_reason: null,
+    ...over,
+  };
+}
 
 function scanFixture(overrides: Partial<TrackingScan> = {}): TrackingScan {
   return {
@@ -64,35 +91,20 @@ function scanFixture(overrides: Partial<TrackingScan> = {}): TrackingScan {
     project_name: "my-app",
     project_exists: true,
     providers: [
-      {
-        provider_id: "openai",
-        display_name: "OpenAI",
-        confidence: "confirmed",
-        configurability: "automatic",
-        inferred_origin: null,
-        evidence: ["Found OPENAI_API_KEY in .env (value not read)"],
-        limitations: [],
-        credential_candidates: [],
-        selected_by_default: true,
-        needs_origin_approval: false,
-        unsupported_reason: null,
-      },
-      {
+      providerFixture(),
+      providerFixture({
         provider_id: "stripe",
         display_name: "Stripe",
-        confidence: "confirmed",
         configurability: "unsupported",
-        inferred_origin: null,
+        bucket: "detected_unsupported",
         evidence: ["Found STRIPE_SECRET_KEY in .env (value not read)"],
         limitations: [
           "The Stripe SDK does not read a base-URL environment variable, so Tethra cannot observe it this way yet. Everything else still works.",
         ],
-        credential_candidates: [],
         selected_by_default: false,
-        needs_origin_approval: false,
         unsupported_reason:
           "This provider's SDK reads no base-URL setting, so Tethra has no way to route its traffic through the local service. Nothing about your setup is wrong.",
-      },
+      }),
     ],
     scanned_files: 3,
     skipped_oversized: 0,
@@ -157,19 +169,16 @@ function originRequestFixture(
 function needsInputScan(): TrackingScan {
   return scanFixture({
     providers: [
-      {
+      providerFixture({
         provider_id: "self-hosted",
         display_name: "Self-hosted LLM",
         confidence: "likely",
         configurability: "needs_origin_input",
-        inferred_origin: null,
+        bucket: "needs_origin_confirmation",
         evidence: ["Found LLM_API_KEY in .env (value not read)"],
-        limitations: [],
-        credential_candidates: [],
         selected_by_default: false,
         needs_origin_approval: true,
-        unsupported_reason: null,
-      },
+      }),
     ],
     coverage_lines: ["1 API integration found", "1 needs you to say where its traffic goes"],
     coverage: {
@@ -423,6 +432,207 @@ describe("TrackFlow review screen", () => {
     expect(
       screen.getByText(/packed-refs file was larger than the read limit/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("TrackFlow rows and headline cannot disagree (NEW-43)", () => {
+  /** The `<li>`s of the section whose heading labels it. */
+  function rowsUnder(heading: string | RegExp): HTMLElement[] {
+    return within(screen.getByRole("list", { name: heading })).getAllByRole("listitem");
+  }
+
+  async function reachReviewFor(scan: TrackingScan) {
+    mockApi.trackingScan.mockResolvedValue(scan);
+    openDialog.mockResolvedValue("/Users/dev/my-app");
+    render(<TrackFlow onDone={() => {}} onOpenAdvanced={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Select project folder" }));
+    await screen.findByText(scan.coverage_lines[0]);
+  }
+
+  /**
+   * The case that matters: `possible` confidence with `automatic`
+   * configurability. The headline counts it as low confidence — the planner
+   * will not configure it at any confidence below `likely` — while the
+   * audited screen grouped on `configurability` alone and listed it under
+   * "Tethra knows where these go", ticked and ready to "start tracking".
+   */
+  const lowConfidenceScan = scanFixture({
+    providers: [
+      providerFixture({
+        confidence: "possible",
+        configurability: "automatic",
+        bucket: "low_confidence",
+        selected_by_default: false,
+      }),
+    ],
+    coverage_lines: [
+      "1 API integration found",
+      "1 were detected but not confidently enough to configure",
+    ],
+    coverage: {
+      total: 1,
+      tracked_automatically: 0,
+      needs_origin_confirmation: 0,
+      detected_unsupported: 0,
+      unrecognized: 0,
+      low_confidence: 1,
+    },
+  });
+
+  it("does not present a low-confidence provider as one Tethra knows where to send", async () => {
+    await reachReviewFor(lowConfidenceScan);
+    expect(
+      screen.getByText("1 were detected but not confidently enough to configure"),
+    ).toBeInTheDocument();
+    expect(rowsUnder(/Detected, but not confidently enough to configure/)).toHaveLength(1);
+    expect(screen.getByText("OpenAI")).toBeInTheDocument();
+    expect(
+      screen.getByText("Found OPENAI_API_KEY in .env (value not read)"),
+    ).toBeInTheDocument();
+
+    // The negative controls: the section the audited screen put it in, and
+    // the checkbox that let the user ask for something the planner refuses.
+    expect(
+      screen.queryByRole("heading", { name: "Tethra knows where these go" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /OpenAI/ })).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing is selected, so there is nothing to configure/),
+    ).toBeInTheDocument();
+  });
+
+  /** The same provider, detected well enough for the planner to act on. */
+  const confidentScan = scanFixture({
+    providers: [providerFixture({ confidence: "confirmed" })],
+    coverage_lines: ["1 API integration found", "1 can be tracked automatically"],
+    coverage: {
+      total: 1,
+      tracked_automatically: 1,
+      needs_origin_confirmation: 0,
+      detected_unsupported: 0,
+      unrecognized: 0,
+      low_confidence: 0,
+    },
+  });
+
+  it("keeps the same provider in the tracked section once it is confident enough", async () => {
+    // Anti-vacuity for the test above: the only difference is the confidence,
+    // and therefore the bucket the backend computed from it. A screen that
+    // simply never rendered the tracked section would fail here.
+    await reachReviewFor(confidentScan);
+    expect(rowsUnder("Tethra knows where these go")).toHaveLength(1);
+    expect(screen.getByRole("checkbox", { name: /OpenAI/ })).toBeChecked();
+    expect(
+      screen.queryByRole("heading", {
+        name: /Detected, but not confidently enough to configure/,
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders exactly as many rows per section as the headline counts", async () => {
+    const scan = scanFixture({
+      providers: [
+        providerFixture({ confidence: "likely" }),
+        providerFixture({
+          provider_id: "supabase",
+          display_name: "Supabase",
+          configurability: "needs_origin_confirm",
+          bucket: "needs_origin_confirmation",
+          inferred_origin: "https://attacker.example",
+          evidence: ["Found SUPABASE_URL in .env (value not read)"],
+          selected_by_default: false,
+          needs_origin_approval: true,
+        }),
+        providerFixture({
+          provider_id: "self-hosted",
+          display_name: "Self-hosted LLM",
+          confidence: "likely",
+          configurability: "needs_origin_input",
+          bucket: "needs_origin_confirmation",
+          evidence: ["Found LLM_API_KEY in .env (value not read)"],
+          selected_by_default: false,
+          needs_origin_approval: true,
+        }),
+        providerFixture({
+          provider_id: "stripe",
+          display_name: "Stripe",
+          configurability: "unsupported",
+          bucket: "detected_unsupported",
+          evidence: ["Found STRIPE_SECRET_KEY in .env (value not read)"],
+          selected_by_default: false,
+          unsupported_reason: "This provider's SDK reads no base-URL setting.",
+        }),
+        providerFixture({
+          provider_id: "cohere",
+          display_name: "Cohere",
+          confidence: "possible",
+          configurability: "automatic",
+          bucket: "low_confidence",
+          evidence: ["cohere mentioned in package-lock.json"],
+          selected_by_default: false,
+        }),
+      ],
+      coverage_lines: [
+        "5 API integrations found",
+        "1 can be tracked automatically",
+        "2 need you to confirm where their traffic goes",
+        "1 use an SDK configuration Tethra cannot observe yet",
+        "1 were detected but not confidently enough to configure",
+      ],
+      coverage: {
+        total: 5,
+        tracked_automatically: 1,
+        needs_origin_confirmation: 2,
+        detected_unsupported: 1,
+        unrecognized: 0,
+        low_confidence: 1,
+      },
+    });
+    // The inferred half of the needs-approval bucket reaches the screen as an
+    // approval request, not as a provider row, so it is counted from there.
+    mockApi.trackingOriginRequests.mockResolvedValue([originRequestFixture()]);
+    await reachReviewFor(scan);
+
+    expect(rowsUnder("Tethra knows where these go")).toHaveLength(
+      scan.coverage.tracked_automatically,
+    );
+    expect(rowsUnder("Destinations read from this project")).toHaveLength(
+      scan.coverage.needs_origin_confirmation,
+    );
+    expect(rowsUnder("Detected, but Tethra cannot observe them")).toHaveLength(
+      scan.coverage.detected_unsupported,
+    );
+    expect(rowsUnder(/Detected, but not confidently enough to configure/)).toHaveLength(
+      scan.coverage.low_confidence,
+    );
+    // Every provider the scan returned is accounted for on screen: a bucket
+    // with no section would leave one counted in the headline and visible
+    // nowhere, which is the ZFT-010 failure in a different disguise.
+    expect(
+      rowsUnder("Tethra knows where these go").length +
+        rowsUnder("Destinations read from this project").length +
+        rowsUnder("Detected, but Tethra cannot observe them").length +
+        rowsUnder(/Detected, but not confidently enough to configure/).length,
+    ).toBe(scan.providers.length);
+  });
+
+  it("labels each row with the bucket it was counted in, not its raw confidence", async () => {
+    await reachReviewFor(lowConfidenceScan);
+    const [row] = rowsUnder(/Detected, but not confidently enough to configure/);
+    expect(within(row).getByText("low confidence")).toBeInTheDocument();
+    // The negative control: the tracked list printed the detection enum
+    // verbatim beside the name, so this token appearing anywhere means some
+    // row is still describing itself by something other than its bucket.
+    // `toContain`, not a `\b` regex: `textContent` runs the label straight
+    // into the next node's text, so there is no word boundary after it.
+    expect(document.body.textContent).not.toContain("possible");
+  });
+
+  it("labels a tracked row by its bucket too, not by 'confirmed'", async () => {
+    await reachReviewFor(confidentScan);
+    const [row] = rowsUnder("Tethra knows where these go");
+    expect(within(row).getByText("tracked")).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("confirmed");
   });
 });
 
@@ -1071,5 +1281,81 @@ describe("TrackFlow watch re-arm (ZFT-015)", () => {
       expect(mockApi.trackingStatus.mock.calls.length).toBeGreaterThan(callsBefore),
     );
     expect(await screen.findByText("Tracking verified")).toBeInTheDocument();
+  });
+});
+
+describe("TrackFlow partial apply offers undo (NEW-30)", () => {
+  /** Reach the partial-apply screen with a failed environment-file step. */
+  async function reachPartialApply(overrides: Partial<TrackingApplyReport> = {}) {
+    mockApi.trackingApply.mockResolvedValue(
+      applyFixture({
+        failed: true,
+        state: "needs_attention",
+        steps: [
+          { title: "Local service installed and running", outcome: "done", detail: "" },
+          {
+            title: "Environment files updated",
+            outcome: "failed",
+            detail: "openai: the environment files changed since the preview",
+          },
+        ],
+        ...overrides,
+      }),
+    );
+    await reachReview();
+    await userEvent.click(screen.getByRole("button", { name: "Start tracking" }));
+    await screen.findByText("Tracking is partially configured");
+  }
+
+  it("undoes the completed steps from the screen that reports them", async () => {
+    mockApi.trackingUndo.mockResolvedValue({
+      complete: true,
+      restored: ["/Users/dev/my-app/.env"],
+      removed_routes: ["openai"],
+      kept_routes: [],
+    });
+    await reachPartialApply();
+    await userEvent.click(screen.getByRole("button", { name: "Undo the completed steps" }));
+    expect(mockApi.trackingUndo).toHaveBeenCalledWith("setup-1");
+    expect(
+      await screen.findByText(/everything this apply changed was put back/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Restored: \/Users\/dev\/my-app\/\.env/)).toBeInTheDocument();
+  });
+
+  it("reports an incomplete undo as incomplete, naming what is still applied", async () => {
+    mockApi.trackingUndo.mockResolvedValue({
+      complete: false,
+      restored: [],
+      removed_routes: [],
+      kept_routes: ["openai"],
+    });
+    await reachPartialApply();
+    await userEvent.click(screen.getByRole("button", { name: "Undo the completed steps" }));
+    expect(await screen.findByText(/Undo was incomplete/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Routes kept \(still in use by another project\): openai/),
+    ).toBeInTheDocument();
+    // The negative control: a click is not a result.
+    expect(
+      screen.queryByText(/everything this apply changed was put back/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("says a failed undo left the completed steps in place", async () => {
+    mockApi.trackingUndo.mockRejectedValue({ code: "locked", message: "the vault is locked" });
+    await reachPartialApply();
+    await userEvent.click(screen.getByRole("button", { name: "Undo the completed steps" }));
+    expect(
+      await screen.findByText(/Undo failed, so the completed steps are still in place/),
+    ).toBeInTheDocument();
+  });
+
+  it("offers no undo button when no setup row was ever created", async () => {
+    await reachPartialApply({ setup_id: null });
+    expect(
+      screen.queryByRole("button", { name: "Undo the completed steps" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/There is no undo for this attempt/)).toBeInTheDocument();
   });
 });

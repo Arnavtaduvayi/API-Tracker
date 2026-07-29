@@ -23,12 +23,14 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
 import type {
   TrackingApplyReport,
+  TrackingCoverageBucket,
   TrackingDiagnosis,
   TrackingOriginRequest,
   TrackingPlan,
   TrackingProvider,
   TrackingScan,
   TrackingStatus,
+  TrackingUndoReport,
 } from "../types";
 
 type Phase =
@@ -65,6 +67,20 @@ const UNRECOGNIZED_DISPLAY_LIMIT = 12;
 const LIST_SCROLL: React.CSSProperties = {
   maxHeight: "20rem",
   overflowY: "auto",
+};
+
+/**
+ * The short label a provider row carries, keyed by the bucket the HEADLINE
+ * counted it under (NEW-43). A `Record` rather than a `switch` on purpose:
+ * adding a variant to `TrackingCoverageBucket` then fails to type-check here
+ * instead of silently falling through to a default that could disagree with
+ * the count above it.
+ */
+const BUCKET_LABEL: Record<TrackingCoverageBucket, string> = {
+  tracked_automatically: "tracked",
+  needs_origin_confirmation: "needs approval",
+  detected_unsupported: "unsupported",
+  low_confidence: "low confidence",
 };
 
 /**
@@ -168,6 +184,10 @@ export function TrackFlow({
   // nothing, permanently (ZFT-015).
   const [watchAttempt, setWatchAttempt] = useState(0);
   const [watchStopped, setWatchStopped] = useState<string | null>(null);
+  // Undo of a partial apply, from the screen that reports the partial apply
+  // (NEW-30). It was previously reachable only from the dashboard, which the
+  // user has not seen yet at this point in the flow.
+  const [undoReport, setUndoReport] = useState<TrackingUndoReport | null>(null);
   const pollRef = useRef<number | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -442,6 +462,29 @@ export function TrackFlow({
     }
   }
 
+  /**
+   * Roll back the steps that DID complete before the apply stopped.
+   *
+   * The screen says "completed steps are left in place", which is the truth
+   * about the state but was previously the whole story: the only way to undo
+   * them was to find the setup again on the dashboard (NEW-30). This calls
+   * the same `tracking_undo` command that screen calls, and reports its
+   * report rather than the click — an undo that could not restore everything
+   * says so, naming what it kept.
+   */
+  async function undoPartialApply(setupId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      setUndoReport(await api.trackingUndo(setupId));
+    } catch (e) {
+      setUndoReport(null);
+      setError(`Undo failed, so the completed steps are still in place: ${errText(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startForegroundFallback() {
     setBusy(true);
     try {
@@ -520,9 +563,23 @@ export function TrackFlow({
 
   if (phase.name === "review") {
     const scan = phase.scan;
-    const automatic = scan.providers.filter((p) => p.configurability === "automatic");
-    const needsInput = scan.providers.filter((p) => p.configurability === "needs_origin_input");
-    const unsupported = scan.providers.filter((p) => p.configurability === "unsupported");
+    // Grouped by `bucket`, which is the precedence the HEADLINE counts by.
+    // Grouping by `configurability` instead had no confidence guard, so a
+    // `possible`-confidence provider was listed under "Tethra knows where
+    // these go" — offered with a ticked-by-default box the planner would
+    // never act on — while the headline counted it as low confidence, and
+    // the two disagreed without either total looking wrong (NEW-43).
+    const automatic = scan.providers.filter((p) => p.bucket === "tracked_automatically");
+    // Within the needs-approval bucket the screen still has to know WHICH
+    // question to ask: an inferred destination arrives as an approval request
+    // from the backend, while `needs_origin_input` has no destination to show
+    // and needs the user to type one.
+    const needsInput = scan.providers.filter(
+      (p) =>
+        p.bucket === "needs_origin_confirmation" && p.configurability === "needs_origin_input",
+    );
+    const unsupported = scan.providers.filter((p) => p.bucket === "detected_unsupported");
+    const lowConfidence = scan.providers.filter((p) => p.bucket === "low_confidence");
     const requests = originRequests ?? [];
     const [headline, ...restLines] = scan.coverage_lines;
     const nothingFound = scan.coverage.total === 0 && scan.providers.length === 0;
@@ -585,12 +642,12 @@ export function TrackFlow({
         {/* --- configured from a Tethra manifest ------------------------ */}
         {automatic.length > 0 && (
           <>
-            <h2>Tethra knows where these go</h2>
+            <h2 id="bucket-automatic">Tethra knows where these go</h2>
             <p className="muted">
               Their destination comes from a Tethra provider definition built into this app, so
               nothing in your project can change it.
             </p>
-            <ul className="stack" style={LIST_SCROLL}>
+            <ul className="stack" style={LIST_SCROLL} aria-labelledby="bucket-automatic">
               {automatic.map((p) => (
                 <li key={p.provider_id}>
                   <label>
@@ -605,7 +662,7 @@ export function TrackFlow({
                       }}
                     />{" "}
                     <strong>{p.display_name}</strong>{" "}
-                    <span className="muted">{p.confidence}</span>
+                    <span className="muted">{BUCKET_LABEL[p.bucket]}</span>
                   </label>
                   <div className="muted">
                     {p.evidence.map((line, i) => (
@@ -624,7 +681,7 @@ export function TrackFlow({
         {/* --- destinations read from the project (ADR 0024) ------------ */}
         {(requests.length > 0 || needsInput.length > 0 || originError) && (
           <>
-            <h2>Destinations read from this project</h2>
+            <h2 id="bucket-origins">Destinations read from this project</h2>
             <p>
               These addresses came out of your project&apos;s own files, not from Tethra.
               Allowing one means this machine will forward requests — and the credential they
@@ -636,7 +693,7 @@ export function TrackFlow({
                 The destinations could not be reviewed: {originError}
               </p>
             )}
-            <ul className="stack" style={LIST_SCROLL}>
+            <ul className="stack" style={LIST_SCROLL} aria-labelledby="bucket-origins">
               {requests.map((r) => (
                 <li key={r.provider_id}>
                   {r.refusal ? (
@@ -765,8 +822,8 @@ export function TrackFlow({
         {/* --- detected, not supported ---------------------------------- */}
         {unsupported.length > 0 && (
           <>
-            <h2>Detected, but Tethra cannot observe them</h2>
-            <ul className="stack" style={LIST_SCROLL}>
+            <h2 id="bucket-unsupported">Detected, but Tethra cannot observe them</h2>
+            <ul className="stack" style={LIST_SCROLL} aria-labelledby="bucket-unsupported">
               {unsupported.map((p) => (
                 <li key={p.provider_id}>
                   <div>
@@ -820,6 +877,43 @@ export function TrackFlow({
                 </li>
               ))}
             </ul>
+          </>
+        )}
+
+        {/* --- detected, not confidently enough (NEW-43) ---------------- */}
+        {lowConfidence.length > 0 && (
+          <>
+            <h2 id="bucket-low-confidence">
+              Detected, but not confidently enough to configure ({lowConfidence.length})
+            </h2>
+            <p>
+              Tethra saw real evidence for these but not enough of it to act on, so it will
+              neither configure them nor ask you where their traffic goes. They have a section
+              because the headline counts them: leaving them off the screen would make this read
+              as coverage Tethra does not have.
+            </p>
+            <ul className="stack" style={LIST_SCROLL} aria-labelledby="bucket-low-confidence">
+              {lowConfidence.map((p) => (
+                <li key={p.provider_id}>
+                  <div>
+                    <strong>{p.display_name}</strong>{" "}
+                    <span className="muted">{BUCKET_LABEL[p.bucket]}</span>
+                  </div>
+                  <div className="muted">
+                    {p.evidence.map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {onOpenAdvanced && (
+              <p>
+                <button className="link" onClick={onOpenAdvanced}>
+                  Add a destination by hand (Advanced)
+                </button>
+              </p>
+            )}
           </>
         )}
 
@@ -1124,6 +1218,10 @@ export function TrackFlow({
   // attention
   const report = phase.report;
   const failed = report?.steps.find((s) => s.outcome === "failed");
+  // Undo needs the setup row the apply created. A failure before that row
+  // exists leaves nothing to undo, which the screen states rather than
+  // offering a button that cannot act.
+  const undoableSetupId = report?.setup_id ?? null;
   return (
     <section className="stack">
       <h1>Tracking is partially configured</h1>
@@ -1139,8 +1237,27 @@ export function TrackFlow({
       )}
       {failed && (
         <p className="error" role="alert">
-          Setup stopped at “{failed.title}”: {failed.detail}. Completed steps are left in place.
+          Setup stopped at “{failed.title}”: {failed.detail}. Completed steps are left in place
+          {undoableSetupId !== null ? " — undo below removes them." : "."}
         </p>
+      )}
+      {undoReport && (
+        <div className="warnbox" role="status">
+          <p>
+            {undoReport.complete
+              ? "Undone: everything this apply changed was put back."
+              : "Undo was incomplete. What could not be put back is listed below and is STILL applied."}
+          </p>
+          <p className="muted">
+            {undoReport.restored.length > 0
+              ? `Restored: ${undoReport.restored.join(", ")}.`
+              : "No file was restored — nothing recorded a prior value to put back."}{" "}
+            {undoReport.removed_routes.length > 0 &&
+              `Routes removed: ${undoReport.removed_routes.join(", ")}. `}
+            {undoReport.kept_routes.length > 0 &&
+              `Routes kept (still in use by another project): ${undoReport.kept_routes.join(", ")}.`}
+          </p>
+        </div>
       )}
       {error && (
         <p className="error" role="alert">
@@ -1161,10 +1278,23 @@ export function TrackFlow({
       )}
       <div>
         <button onClick={() => void pickFolder()}>Try again</button>{" "}
+        {undoableSetupId !== null && undoReport === null && (
+          <>
+            <button disabled={busy} onClick={() => void undoPartialApply(undoableSetupId)}>
+              {busy ? "Undoing…" : "Undo the completed steps"}
+            </button>{" "}
+          </>
+        )}
         <button className="link" onClick={onDone}>
           Back to dashboard
         </button>
       </div>
+      {report !== null && undoableSetupId === null && (
+        <p className="muted">
+          There is no undo for this attempt: it stopped before a setup record existed, so
+          nothing was recorded to put back.
+        </p>
+      )}
     </section>
   );
 }

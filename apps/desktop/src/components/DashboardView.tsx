@@ -23,6 +23,16 @@ import type {
   ProjectActivity,
   TrackingStatus,
 } from "../types";
+import {
+  GATEWAY_ESTIMATED_COST,
+  GATEWAY_TOKENS,
+  type UsageAvailability,
+  formatCostMicros,
+  formatTokenPair,
+  gatewayCostAvailability,
+  gatewayTokenAvailability,
+  hasValue,
+} from "../usage";
 import { ReauthDialog } from "./ReauthDialog";
 
 function errText(e: unknown): string {
@@ -71,9 +81,10 @@ function attributionSentence(state: string): string {
 }
 
 /**
- * The persisted `TrackingState` as a sentence. Kept as a fallback only:
- * present-tense truth comes from `status.health.sentence`, which is derived
- * from live evidence rather than from a cached row.
+ * The persisted `TrackingState` as a sentence. Kept as a fallback only, and
+ * only for the PAST-tense section: present-tense truth comes from
+ * `status.health.sentence`, which is derived from live evidence rather than
+ * from a cached row.
  */
 function stateLabel(state: string): string {
   switch (state) {
@@ -88,7 +99,7 @@ function stateLabel(state: string): string {
     case "needs_attention":
       return "Needs attention";
     case "applying":
-      return "Setting up";
+      return "Setting up — this setup never finished applying";
     case "unsupported":
       return "Nothing trackable detected";
     default:
@@ -165,7 +176,16 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
 
   const attributionPaused = (setups ?? []).some((s) => s.attribution_paused);
   const notWorking = (setups ?? []).filter((s) => !s.health.currently_working);
-  const cost = summary ? (summary.estimated_cost_micros / 1_000_000).toFixed(4) : null;
+  // Whether these numbers are knowable at all is a separate question from
+  // whether the fetch succeeded. A successful fetch of a window in which no
+  // response carried usage yields 0/0/$0 — the arithmetic identity of a
+  // measured zero — so the guard is coverage, not `summary != null` (NEW-37).
+  const unread: UsageAvailability = {
+    kind: "unavailable",
+    reason: "the activity summary could not be read",
+  };
+  const tokenAvailability = summary ? gatewayTokenAvailability(summary) : unread;
+  const costAvailability = summary ? gatewayCostAvailability(summary) : unread;
   const successRate =
     summary && summary.total_requests > 0
       ? Math.round((summary.success_count / summary.total_requests) * 100)
@@ -289,11 +309,27 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
           </dd>
           <dt>Tokens in / out</dt>
           <dd>
-            {summary.input_tokens} / {summary.output_tokens}
+            {formatTokenPair(
+              summary.input_tokens,
+              summary.output_tokens,
+              tokenAvailability,
+              GATEWAY_TOKENS,
+            )}
           </dd>
           <dt>Estimated cost</dt>
           <dd>
-            ${cost} <span className="muted">(lower bound; cache reads excluded)</span>
+            {formatCostMicros(
+              summary.estimated_cost_micros,
+              costAvailability,
+              GATEWAY_ESTIMATED_COST,
+              4,
+            )}{" "}
+            {/* The lower-bound caveat describes a figure. Printing it beside
+                "not reported" would attach an estimate's disclaimer to an
+                estimate that does not exist. */}
+            {hasValue(costAvailability) && (
+              <span className="muted">(lower bound; cache reads excluded)</span>
+            )}
           </dd>
           <dt>First / last observed</dt>
           <dd>
@@ -390,6 +426,13 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
           </div>
           <div>
             <h3>Right now</h3>
+            {/* Verbatim from `CurrentHealth::describe`, for every state.
+                This screen used to special-case `state === "applying"` with a
+                sentence of its own, because a half-applied setup came back as
+                "waiting for the first request" — advice that only makes sense
+                for a setup that finished. `CurrentHealth::ApplyIncomplete`
+                now answers that case at the source, so the rule lives in one
+                place and the CLI states it identically (NEW-35). */}
             <p
               className={s.health.currently_working ? undefined : "warnbox"}
               role={s.health.currently_working ? undefined : "status"}

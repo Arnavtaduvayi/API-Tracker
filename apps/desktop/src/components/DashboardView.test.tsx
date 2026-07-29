@@ -71,6 +71,17 @@ function emptySummary(over: Partial<GatewayActivitySummary> = {}): GatewayActivi
   };
 }
 
+/**
+ * `CurrentHealth::ApplyIncomplete::describe()` verbatim (NEW-35). Copied
+ * rather than paraphrased on purpose: the point of the variant is that one
+ * sentence serves the desktop and the CLI, so a test that invents its own
+ * wording would pass while the two surfaces disagreed.
+ */
+const APPLY_INCOMPLETE_SENTENCE =
+  "setup has not finished applying — nothing is verified yet and no request will be " +
+  "observed; if no setup is running right now it was interrupted, so start tracking for " +
+  "this folder again to finish it";
+
 const activeHealth: TrackingHealth = {
   kind: "verified_and_active",
   sentence: "tracking verified and active",
@@ -156,8 +167,18 @@ describe("DashboardView", () => {
   });
 
   it("labels the estimated cost as a lower bound", async () => {
+    // usage_event_count matches the request count on purpose: a cost with no
+    // usage event behind it is a state the backend cannot produce, and the
+    // fixture used to encode exactly that (NEW-37).
     mockApi.gatewayActivity.mockResolvedValue(
-      emptySummary({ total_requests: 3, success_count: 3, estimated_cost_micros: 12_345 }),
+      emptySummary({
+        total_requests: 3,
+        success_count: 3,
+        usage_event_count: 3,
+        input_tokens: 90,
+        output_tokens: 30,
+        estimated_cost_micros: 12_345,
+      }),
     );
     render(<DashboardView onTrack={() => {}} />);
     expect(await screen.findByText(/lower bound; cache reads excluded/)).toBeInTheDocument();
@@ -205,6 +226,81 @@ describe("DashboardView", () => {
   });
 });
 
+describe("DashboardView never fabricates a zero (NEW-37)", () => {
+  it("does not render 0 tokens or $0.0000 when no response carried usage", async () => {
+    // The audited state: real traffic through a provider whose manifest has
+    // usage_shape = "" (cohere, google-gemini, langsmith, replicate,
+    // supabase). Nothing is extractable, so the rollup has no row and every
+    // usage field arrives as 0.
+    mockApi.gatewayActivity.mockResolvedValue(
+      emptySummary({ total_requests: 42, success_count: 42, usage_event_count: 0 }),
+    );
+    render(<DashboardView onTrack={() => {}} />);
+    expect(await screen.findByText(/Tokens not reported/)).toBeInTheDocument();
+
+    // The negative controls: the two strings the audited screen printed.
+    expect(screen.queryByText("0 / 0")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/\$0\.0000/);
+    // And the disclaimer that only makes sense beside a figure.
+    expect(document.body.textContent).not.toMatch(/lower bound; cache reads excluded/);
+    // Anti-vacuity: the panel rendered, it was not blanked. The real numbers
+    // are still there.
+    expect(screen.getByText("42")).toBeInTheDocument();
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("still shows a measured zero, because hiding a measurement is a different lie", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(
+      emptySummary({
+        total_requests: 5,
+        success_count: 5,
+        usage_event_count: 5,
+        input_tokens: 0,
+        output_tokens: 0,
+        estimated_cost_micros: 0,
+      }),
+    );
+    render(<DashboardView onTrack={() => {}} />);
+    expect(await screen.findByText("0 in / 0 out")).toBeInTheDocument();
+    expect(document.body.textContent).toMatch(/\$0\.0000/);
+    expect(screen.getByText(/lower bound; cache reads excluded/)).toBeInTheDocument();
+  });
+
+  it("labels a total folded over some unknown records as partial", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(
+      emptySummary({
+        total_requests: 500,
+        success_count: 500,
+        usage_event_count: 3,
+        input_tokens: 900,
+        output_tokens: 100,
+        estimated_cost_micros: 4_000,
+      }),
+    );
+    render(<DashboardView onTrack={() => {}} />);
+    const tokens = await screen.findByText(/900 in \/ 100 out/);
+    expect(tokens.textContent).toMatch(/Partial token data: 3 of 500 response\(s\)/);
+    expect(tokens.textContent).toMatch(/not counted as zero/);
+  });
+
+  it("does not invent an estimate for tokens it could not price", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(
+      emptySummary({
+        total_requests: 3,
+        success_count: 3,
+        usage_event_count: 3,
+        input_tokens: 900,
+        output_tokens: 120,
+        estimated_cost_micros: 0,
+      }),
+    );
+    render(<DashboardView onTrack={() => {}} />);
+    expect(await screen.findByText("900 in / 120 out")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/\$0\.0000/);
+    expect(screen.getByText(/no local price covers the model/)).toBeInTheDocument();
+  });
+});
+
 describe("DashboardView current vs historical status (ZFT-005)", () => {
   it("separates what is true now from what was true before", async () => {
     mockApi.trackingList.mockResolvedValue([setup()]);
@@ -240,6 +336,62 @@ describe("DashboardView current vs historical status (ZFT-005)", () => {
     expect(screen.getByText(/1 project\(s\) are not tracking right now/)).toBeInTheDocument();
     // History survives — it is shown, just not as present-tense success.
     expect(screen.getByText(/First verified 2026-07-20T08:00:00Z\./)).toBeInTheDocument();
+  });
+
+  it("does not tell a half-applied setup to go and make a request (NEW-35)", async () => {
+    // `applying` is not in the backend's watchable set, so it falls through to
+    // `health_without_evidence`, where it used to be answered by the catch-all
+    // "waiting for the first request" — advice for a setup that finished. This
+    // one did not. The backend now answers it with `ApplyIncomplete`, and this
+    // screen renders that sentence rather than a paraphrase of its own, so the
+    // desktop and the CLI say the same thing about the same row.
+    mockApi.trackingList.mockResolvedValue([
+      setup({
+        state: "applying",
+        health: {
+          kind: "apply_incomplete",
+          sentence: APPLY_INCOMPLETE_SENTENCE,
+          currently_working: false,
+        },
+      }),
+    ]);
+    render(<DashboardView onTrack={() => {}} />);
+    const now = (await screen.findByRole("heading", { name: "Right now" }))
+      .parentElement as HTMLElement;
+    const sentence = within(now).getByText(APPLY_INCOMPLETE_SENTENCE);
+    // Not verified, and flagged as such: `is_currently_working()` is false for
+    // this variant, so the row must read as a problem, not as body text.
+    expect(sentence).toHaveClass("warnbox");
+    expect(screen.getByText(/1 project\(s\) are not tracking right now/)).toBeInTheDocument();
+    // The negative control that fails if the catch-all ever answers this row
+    // again, in the backend or in a reinstated local special case.
+    expect(document.body.textContent).not.toMatch(/waiting for the first request/);
+  });
+
+  it("renders the backend's apply-incomplete sentence, not a local paraphrase (NEW-35)", async () => {
+    // The audited fix lived HERE, as `presentTenseSentence`'s `state ===
+    // "applying"` branch, so the desktop and the CLI stated the same condition
+    // in two different sentences and only one of them could be corrected. The
+    // rule is now `CurrentHealth::ApplyIncomplete`; this pins that nothing on
+    // this screen rewrites it.
+    mockApi.trackingList.mockResolvedValue([
+      setup({
+        state: "applying",
+        health: {
+          kind: "apply_incomplete",
+          sentence: APPLY_INCOMPLETE_SENTENCE,
+          currently_working: false,
+        },
+      }),
+    ]);
+    render(<DashboardView onTrack={() => {}} />);
+    await screen.findByRole("heading", { name: "Right now" });
+    // The distinctive clause of the removed local sentence. It shares its
+    // opening words with the backend's, so only a phrase unique to the
+    // workaround can tell the two apart.
+    expect(document.body.textContent).not.toMatch(
+      /so nothing here is verified and no request will be observed yet/,
+    );
   });
 
   it("says a never-verified setup has never been verified", async () => {
