@@ -171,12 +171,19 @@ jobs:
       # results file from defining its own acceptance criteria: the previous
       # revision took every expectation from the file it was validating, and a
       # twelve-line forgery declaring zero checks passed it (VAL-01).
+      #
+      # `github.sha` and NOT `github.event.pull_request.head.sha`: on a
+      # pull_request event GitHub checks out a MERGE commit, `GITHUB_SHA` is
+      # that merge commit, and the harness stamps `GITHUB_SHA` into the
+      # results. Passing the PR head here instead would compare two different
+      # commits and fail every PR run — which is how a commit check turns from
+      # a guard into an outage.
       - name: Assert the service scope completed (not merely exited)
         if: always() && steps.service.outcome != 'skipped'
         run: |
           bash scripts/ci_assert_service_results.sh \
             "$RUNNER_TEMP/service-evidence/results.json" \
-            --scope full --mode service --commit "${{ github.event.pull_request.head.sha || github.sha }}"
+            --scope full --mode service --commit "${{ github.sha }}"
 
       # Cleanup is a claim the run makes about itself. Verify it independently,
       # from outside the script, after the script's own trap has run.
