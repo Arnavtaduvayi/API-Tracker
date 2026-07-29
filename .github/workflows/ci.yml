@@ -200,6 +200,17 @@ jobs:
       # $HOME: no gateway, no service, no launchctl.
       - name: Validation ownership tests (cleanup authority, never a glob)
         run: bash scripts/validation_ownership_tests.sh
+      # The gate that certifies the whole service scope used to read its own
+      # expectations out of the artifact it was validating, so a twelve-line
+      # forgery declaring zero checks printed "SERVICE SCOPE COMPLETED: 0/0"
+      # and exited 0 (VAL-01). These two steps guard the replacement: the
+      # manifest must describe the harness that actually exists, and the
+      # validator must accept exactly one genuine result out of thirty-three
+      # documents — including the audit's own forgery, replayed verbatim.
+      - name: Trusted manifest matches the harness's group table
+        run: bash scripts/validation_manifest_check.sh
+      - name: Service-results forgery tests (the gate must refuse forgeries)
+        run: bash scripts/validation_asserter_tests.sh
       - name: Install frontend deps
         working-directory: apps/desktop
         run: npm ci

@@ -163,12 +163,20 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/service-evidence/service-lifecycle.log"
 
       # A green script exit is not the same statement as "the service scope
-      # completed". This asserts the machine-readable result says so: the exact
-      # scope and mode, zero failures, zero skipped, and the full declared
-      # check count actually executed.
+      # completed". This asserts the machine-readable result says so.
+      #
+      # The scope, mode and commit are passed IN, from this workflow — they are
+      # never read from the artifact. Together with the committed manifest that
+      # supplies the required counts and check names, that is what stops a
+      # results file from defining its own acceptance criteria: the previous
+      # revision took every expectation from the file it was validating, and a
+      # twelve-line forgery declaring zero checks passed it (VAL-01).
       - name: Assert the service scope completed (not merely exited)
         if: always() && steps.service.outcome != 'skipped'
-        run: bash scripts/ci_assert_service_results.sh "$RUNNER_TEMP/service-evidence/results.json"
+        run: |
+          bash scripts/ci_assert_service_results.sh \
+            "$RUNNER_TEMP/service-evidence/results.json" \
+            --scope full --mode service --commit "${{ github.event.pull_request.head.sha || github.sha }}"
 
       # Cleanup is a claim the run makes about itself. Verify it independently,
       # from outside the script, after the script's own trap has run.

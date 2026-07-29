@@ -1,0 +1,112 @@
+{
+  "_comment": [
+    "TRUSTED CHECK MANIFEST — the acceptance criteria for a packaged-validation run.",
+    "",
+    "This file exists because ci_assert_service_results.py used to read expected_total,",
+    "groups[].expected and every check name FROM THE FILE IT WAS VALIDATING. It therefore",
+    "proved only that a results document was internally self-consistent, and a twelve-line",
+    "forgery declaring zero checks produced",
+    "'SERVICE SCOPE COMPLETED: 0/0 checks passed in full:service' with exit 0 (VAL-01).",
+    "",
+    "A result may REPORT what it observed. It may not DEFINE what is acceptable. That is",
+    "what lives here: committed, reviewed, and outside the artifact under test.",
+    "",
+    "Counts are the arithmetic of scripts/tracking_validate_macos.sh's own group table",
+    "(group_size + scope_groups). scripts/validation_manifest_check.sh re-derives them from",
+    "that script and fails if the two disagree, so this file cannot drift away from the",
+    "harness it describes — and the harness's enumerate_checks() independently proves the",
+    "group table against the actual call sites before any check runs. Three independent",
+    "statements of the same number; a single edit cannot move all three quietly."
+  ],
+  "schema": "tethra.validation.manifest/1",
+  "results_schema": "tethra.validation.results/1",
+  "production_label": "dev.api-tracker.gateway",
+  "scopes": {
+    "full:service": {
+      "description": "The packaged macOS service lifecycle: installs, exercises and removes a namespaced LaunchAgent.",
+      "expected_total": 63,
+      "requires_service": true,
+      "groups": {
+        "HARNESS": 5,
+        "BUNDLE": 5,
+        "FIXTURE": 3,
+        "DRYRUN": 6,
+        "SERVICE": 9,
+        "APPLY": 9,
+        "NEGATIVE": 8,
+        "TRAFFIC": 5,
+        "PRIVACY": 5,
+        "IDEMPOTENCE": 4,
+        "UNDO": 4
+      },
+      "required_checks": {
+        "_comment": [
+          "The SERVICE group is the reason the packaged job exists, so its nine checks are",
+          "named here individually rather than only counted. Labels interpolate runtime",
+          "values (a resolved path, a pid, a uid), so each entry is the STATIC prefix of the",
+          "label; the validator requires a one-to-one match between these and the SERVICE",
+          "rows in the register. A check that is renamed, dropped, duplicated, or replaced",
+          "by an unrelated one fails here even when the count still adds up."
+        ],
+        "SERVICE": [
+          "the dry run left ~/Library/LaunchAgents byte-identical",
+          "the apply installed a real LaunchAgent the product can name",
+          "the installed LaunchAgent declares the label the product reports",
+          "the label is namespaced per data directory, not the global one",
+          "the LaunchAgent runs the helper the product installed in this run's data directory",
+          "the installed helper is byte-identical to the in-bundle helper",
+          "launchd loaded the namespaced service gui/",
+          "the running service (pid ",
+          "the service exposes its control endpoint at $TETHRA_DIR/gateway.sock, mode 0600"
+        ]
+      },
+      "required_facts": {
+        "service_created_by_this_run": true
+      }
+    },
+    "full:foreground": {
+      "description": "The unsigned-build fallback: a foreground gateway, no LaunchAgent. NOT a substitute for full:service.",
+      "expected_total": 57,
+      "requires_service": false,
+      "groups": {
+        "HARNESS": 5,
+        "BUNDLE": 5,
+        "FIXTURE": 3,
+        "DRYRUN": 6,
+        "FOREGROUND": 3,
+        "APPLY": 9,
+        "NEGATIVE": 8,
+        "TRAFFIC": 5,
+        "PRIVACY": 5,
+        "IDEMPOTENCE": 4,
+        "UNDO": 4
+      },
+      "required_checks": {},
+      "required_facts": {}
+    },
+    "offline:none": {
+      "description": "No gateway is started and no network request is made.",
+      "expected_total": 20,
+      "requires_service": false,
+      "groups": {
+        "HARNESS": 5,
+        "BUNDLE": 5,
+        "FIXTURE": 3,
+        "DRYRUN": 6,
+        "OFFLINE": 1
+      },
+      "required_checks": {},
+      "required_facts": {}
+    },
+    "selfcheck:none": {
+      "description": "Proves only that the harness reports a deliberately-broken control as a failure.",
+      "expected_total": 5,
+      "requires_service": false,
+      "groups": {
+        "HARNESS": 5
+      },
+      "required_checks": {},
+      "required_facts": {}
+    }
+  }
+}

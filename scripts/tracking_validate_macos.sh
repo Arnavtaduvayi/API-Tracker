@@ -1727,6 +1727,23 @@ if [ -n "${TETHRA_VALIDATION_RESULTS_JSON:-}" ]; then
     echo "  \"data_dir\": \"$(printf '%s' "$DIR" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
     echo "  \"service_plist\": \"$(printf '%s' "${SERVICE_INSTALLED:-}" | sed 's/\\/\\\\/g; s/"/\\"/g')\","
     echo "  \"service_label\": \"$(basename "${SERVICE_INSTALLED:-}" .plist 2>/dev/null | sed 's/\\/\\\\/g; s/"/\\"/g')\","
+    # WHICH COMMIT THIS EVIDENCE IS ABOUT. Without it, a results file proves
+    # something ran — not that THIS revision did — so a green gate could be
+    # satisfied by an artifact kept from an earlier build (`VAL-01`). The
+    # validator compares this against a commit passed to it by the workflow,
+    # never against a value read from this file.
+    echo "  \"commit\": \"$(printf '%s' "${GITHUB_SHA:-$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)}" | sed 's/[^0-9a-zA-Z_-]//g')\","
+    # PROVENANCE OF THE SERVICE. `true` only when this run recorded creating
+    # the LaunchAgent in its own ownership ledger. A run that found a service
+    # already installed cannot set this — preflight refuses to start beside
+    # one at all — so it is the fact that distinguishes "this run installed,
+    # exercised and removed a service" from "a service existed and was
+    # observed".
+    if [ -n "$(ledger_values plist)" ]; then
+      echo "  \"service_created_by_this_run\": true,"
+    else
+      echo "  \"service_created_by_this_run\": false,"
+    fi
     echo "  \"groups\": ["
     RESULTS_SEP=""
     for g in $(scope_groups "$SCOPE:$MODE"); do

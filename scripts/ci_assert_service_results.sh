@@ -19,17 +19,32 @@
 #     built to produce DIFFERENT totals.
 #
 # So this asserts the machine-readable result names the exact scope and mode
-# that were meant to run, that every declared group executed its declared
+# that were meant to run, that every required group executed its required
 # number of checks, that nothing was skipped or duplicated, and that the
 # service label the run installed was namespaced rather than the production
 # one. Any of those failing fails the job.
+#
+# WHERE "REQUIRED" COMES FROM (`VAL-01`)
+# --------------------------------------
+# Not from the results file. The previous revision read `expected_total`,
+# every `groups[].expected` and every check name out of the artifact it was
+# validating, so a twelve-line forgery declaring zero checks printed
+# "SERVICE SCOPE COMPLETED: 0/0" and exited 0. Expectations now come from
+# `scripts/validation_manifest.json` — committed, reviewed, and proved against
+# the harness's own group table by `scripts/validation_manifest_check.sh` —
+# and the scope, mode and commit come from THIS script's arguments, which in
+# CI are set by the workflow. A result may report what it observed; it may not
+# define what is acceptable.
+#
+#   scripts/ci_assert_service_results.sh <results.json> [--scope S] [--mode M] [--commit SHA]
 set -uo pipefail
 
 JSON="${1:-}"
 if [ -z "$JSON" ]; then
-  echo "usage: $0 <results.json>" >&2
+  echo "usage: $0 <results.json> [--scope S] [--mode M] [--commit SHA]" >&2
   exit 2
 fi
+shift
 if [ ! -f "$JSON" ]; then
   echo "FATAL: no machine-readable results at $JSON" >&2
   echo "The validation script writes this when TETHRA_VALIDATION_RESULTS_JSON is set." >&2
@@ -38,4 +53,4 @@ if [ ! -f "$JSON" ]; then
 fi
 
 echo "=== asserting the service scope completed (source: $JSON) ==="
-python3 "$(dirname "$0")/ci_assert_service_results.py" "$JSON"
+python3 "$(dirname "$0")/ci_assert_service_results.py" "$JSON" "$@"
