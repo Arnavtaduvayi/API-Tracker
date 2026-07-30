@@ -4674,6 +4674,20 @@ fn project_name_unknown_api(
     provider: Option<String>,
     api_name: Option<String>,
 ) -> CmdResult<()> {
+    // `set_service_correction` sets `confirmed = 1` unconditionally, which
+    // permanently suppresses the "unknown API first observed" alert for that
+    // host. A call carrying neither a name nor a provider corrects nothing, so
+    // accepting it would silence an alert in exchange for no information.
+    if provider.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && api_name.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Err(ErrDto {
+            code: "nothing_to_record".into(),
+            message: "give this API a name or a provider — an empty correction would only \
+                      stop Tethra telling you about it."
+                .into(),
+        });
+    }
     with_vault(&state, |vault| {
         let conn = vault.connection();
         let Some(service) = api_tracker_core::runtime::store::get_service_by_host(conn, &host)?

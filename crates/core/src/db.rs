@@ -1283,11 +1283,23 @@ CREATE INDEX idx_detcred_resolved ON detected_credentials(resolved_credential_id
 -- implementation of an existing feature, and the two would disagree the first
 -- time one was written without the other.
 
--- The project activity surface windows usage by (project, time). v13 gave
--- gateway_usage_events only the single-column idx_gue_at and idx_gue_project,
--- so a per-project time window scanned every row that project ever produced.
+-- The project activity surface windows BOTH tables by (project, time).
+--
+-- v13 gave gateway_usage_events only the single-column idx_gue_at and
+-- idx_gue_project, so a per-project time window scanned every row that project
+-- ever produced.
+--
+-- runtime_request_events has idx_rre_project (project_id) and v16's
+-- idx_rre_project_source_at (project_id, observation_source, at). Neither
+-- serves "this project, this window": the composite has observation_source
+-- BETWEEN the two columns the range needs, so a query that does not also
+-- constrain the source cannot use its `at` component and degrades to scanning
+-- every row for the project. Every query the live surface issues is exactly
+-- that shape.
 CREATE INDEX IF NOT EXISTS idx_gue_project_at
     ON gateway_usage_events(project_id, at);
+CREATE INDEX IF NOT EXISTS idx_rre_project_at
+    ON runtime_request_events(project_id, at);
 "#,
     },
 ];

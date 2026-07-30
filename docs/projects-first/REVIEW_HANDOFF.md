@@ -24,7 +24,7 @@ Base: `main` @ `b6f6692` (PR #16 merge commit, verified from git)
 ```text
 cargo fmt --all --check                                    PASS (exit 0)
 cargo +1.97.0 clippy --workspace --all-targets -D warnings PASS (exit 0)
-cargo test --workspace --all-targets                       PASS 1449 passed / 0 failed
+cargo test --workspace --all-targets                       PASS 1453 passed / 0 failed
                                                                 (97 test binaries)
 cargo build --workspace --release                           PASS (exit 0)
 bash scripts/smoke.sh                                       PASS 140 passed / 0 failed
@@ -33,7 +33,7 @@ npm ci                    (locked install)                  PASS
 npm run format:check                                        PASS
 npm run lint                                                PASS
 npm run typecheck                                           PASS
-npm test                                                    PASS 235 passed / 21 files
+npm test                                                    PASS 239 passed / 21 files
 npm run build             (tsc --noEmit && vite build)      PASS
 cargo build -p api-tracker-desktop  (Tauri backend)         PASS
 ```
@@ -61,6 +61,54 @@ the manifest and satisfying four separate shape constraints.
 
 **Live provider traffic end to end.** Same reason. Every activity path is covered
 by tests that seed observations directly.
+
+## Focused review: what it found, and what changed
+
+A review across the eight named dimensions was run, with each finding
+independently refuted before being accepted. 13 findings survived refutation.
+Every one was real; all 13 are fixed on this branch, each with a test that fails
+against the previous code.
+
+The two most serious were both false-reporting bugs in the area this iteration
+exists to get right, and both had passed the original tests:
+
+1. **Priced-request overstatement (high).** The gateway writes a usage row for
+   every request, whether or not usage could be extracted — so a normal streamed
+   workload produces `(provider, model, day)` groups where one row has tokens and
+   ninety-nine do not. `COUNT(*)` credited all hundred as priced, leaving
+   `requests_with_unknown_usage` at 0 and `complete` at true. The query now counts
+   usage-bearing rows separately and splits the group.
+2. **A partially-failed apply reported "Tracking is on" (high).** The UI tested
+   `step.outcome === "failed"` against `apply::ApplyReport`, whose `StepOutcome`
+   is a nested Rust enum — so the comparison could never match. Worse, the test
+   written to prove partial applies are reported honestly used a hand-authored
+   fixture in a shape the backend cannot emit, so it passed against a UI that
+   could not detect failure at all: a false validation PASS. `LinkOutcome` now
+   carries an `ApplyReportView` whose `failed_step` is computed by the
+   orchestrator's own `failed_step()`, and the fixture is the real shape.
+
+The rest:
+
+| Finding | Fix |
+|---|---|
+| The series' token/cost query ignored the activity filter, so a filtered bucket showed one host's requests beside every host's tokens | the filter now reaches both queries, via one shared clause builder |
+| The token cards showed *priced* tokens — excluding unpriced models and cache reads | added `known_input_tokens` / `known_output_tokens` |
+| Partial pricing counted the same tokens as both priced and unpriced | a dimension is counted in exactly one total |
+| `projectCostAvailability` ignored `complete`, rendering a floor as an unqualified figure | it now degrades to `partial` |
+| A fetcher change mid-flight locked the poll loop onto the OLD fetcher (the shared `inFlight` guard also dropped the new one) | a generation counter; stale closures no-op |
+| "Change folder" was a dead button — an effect discarded any preview whose path differed from the linked one, which is exactly that case | the effect is gone; the preview is cleared where it is finished with |
+| A clean setup immediately reported "your files changed", because the stored fingerprint predated the apply that rewrote `.env` | recomputed after apply |
+| A failed overview read rendered the "Select project folder" call to action for a project that may be linked | the last known overview is kept and the failure is stated |
+| A disabled surface stayed on "Loading…" forever | `loading` cleared on the disabled path |
+| The canary sweep serialized only the credential sub-list, not the whole preview | sweeps the preview, the detection as written to `detection_json`, and the disclosure |
+| Stale *pricing* used the wording for a stale provider *sync* | no longer marked stale; the pricing sentence carries it |
+| No `(project_id, at)` index on `runtime_request_events` — v16's composite has `observation_source` between the two columns a range needs | added |
+| `project_name_unknown_api` set `confirmed = 1` for an empty correction, permanently suppressing that host's alert | an empty correction is refused |
+
+Findings raised and **refuted** (recorded so they are not re-raised): that the
+sequence/`applied` guard is unreachable because the overlap guard prevents
+concurrency — true of the same generation, which is why the generation check was
+added rather than the sequence check removed.
 
 ## Please look hardest at
 

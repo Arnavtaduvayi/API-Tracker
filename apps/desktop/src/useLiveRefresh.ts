@@ -86,7 +86,23 @@ export function useLiveRefresh<T>(
   const mounted = useRef(true);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const failuresRef = useRef(0);
-  const hidden = useRef(false);
+  const hidden = useRef(
+    typeof document !== "undefined" && document.visibilityState === "hidden",
+  );
+  /**
+   * Which incarnation of the loop is live.
+   *
+   * Bumped whenever the fetcher identity or `enabled` changes. Every closure
+   * captures the generation it was created in and no-ops if it is no longer
+   * current. Without this, changing the time range while a fetch was in flight
+   * left the OLD fetch's `.finally(() => schedule())` to arm a timer over the
+   * OLD fetcher — and because `inFlight` is shared, the new incarnation's first
+   * fetch was ALSO dropped by the overlap guard. The result was a loop
+   * permanently polling the range the user had just navigated away from.
+   */
+  const generation = useRef(0);
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   const clearTimer = useCallback(() => {
     if (timer.current !== null) {
@@ -99,14 +115,16 @@ export function useLiveRefresh<T>(
     // Overlap guard. Dropping the tick is correct: the in-flight fetch is
     // already going to deliver fresher data than this tick could.
     if (inFlight.current || !mounted.current) return false;
+    const gen = generation.current;
     inFlight.current = true;
     const seq = ++sequence.current;
     setRefreshing(true);
     try {
       const next = await fetcher();
       // Stale-response guard. `applied` only ever moves forward, so a slow
-      // response that lost the race cannot roll the display backwards.
-      if (mounted.current && seq > applied.current) {
+      // response that lost the race cannot roll the display backwards, and a
+      // result from a superseded generation is discarded outright.
+      if (mounted.current && gen === generation.current && seq > applied.current) {
         applied.current = seq;
         setData(next);
         setError(null);
@@ -116,7 +134,7 @@ export function useLiveRefresh<T>(
       }
       return true;
     } catch (e) {
-      if (mounted.current && seq > applied.current) {
+      if (mounted.current && gen === generation.current && seq > applied.current) {
         // The error is recorded but `data` is left alone: a failed refresh
         // must not blank a display that still holds the last good answer.
         setError(errorText(e));
@@ -146,12 +164,21 @@ export function useLiveRefresh<T>(
   // health and visibility, and setInterval cannot express that without being
   // torn down and rebuilt on every change.
   const schedule = useCallback(() => {
+    // A stale incarnation must not arm anything, or it re-establishes itself
+    // after the current one has already scheduled its own tick.
+    const gen = generation.current;
     clearTimer();
-    if (!mounted.current || !enabled) return;
+    // `enabledRef`, not the captured `enabled`: a closure created while enabled
+    // and invoked from a pending `.finally()` after it was disabled would
+    // otherwise happily arm the next tick.
+    if (!mounted.current || !enabledRef.current) return;
     timer.current = setTimeout(() => {
-      void runFetch().finally(() => schedule());
+      if (gen !== generation.current) return;
+      void runFetch().finally(() => {
+        if (gen === generation.current) schedule();
+      });
     }, nextDelay());
-  }, [clearTimer, enabled, nextDelay, runFetch]);
+  }, [clearTimer, nextDelay, runFetch]);
 
   const refresh = useCallback(async () => {
     const ok = await runFetch();
@@ -163,14 +190,31 @@ export function useLiveRefresh<T>(
 
   useEffect(() => {
     mounted.current = true;
+    // A new incarnation. Anything the previous one has pending is now stale,
+    // including its in-flight fetch — so release the overlap guard too, or this
+    // incarnation's first fetch is dropped and the loop never starts.
+    generation.current += 1;
+    inFlight.current = false;
     if (!enabled) {
       clearTimer();
+      // `loading` starts true and is otherwise only cleared in `runFetch`'s
+      // finally — which never runs while disabled. Leaving it set stranded the
+      // surface on "Loading…" indefinitely for, say, an archived project.
+      setLoading(false);
+      // The disabled branch STILL has to clear `mounted` on unmount. Returning a
+      // cleanup that only stops the timer left the mounted guard armed, so a
+      // late result from a previously-leaked fetch could set state after the
+      // component was gone.
       return () => {
+        mounted.current = false;
         clearTimer();
       };
     }
+    const gen = generation.current;
     // Refresh immediately when the surface opens, then settle into the loop.
-    void runFetch().finally(() => schedule());
+    void runFetch().finally(() => {
+      if (gen === generation.current) schedule();
+    });
     return () => {
       // Unmount cleanup: stop the timer AND stop any in-flight result from
       // being applied, so nothing sets state on an unmounted component.
@@ -192,6 +236,9 @@ export function useLiveRefresh<T>(
       }
     };
     const onFocus = () => {
+      // A focused window is a visible one; without this the cadence could stay
+      // on the hidden interval after the user came back.
+      hidden.current = false;
       void runFetch().finally(() => schedule());
     };
     document.addEventListener("visibilitychange", onVisibility);

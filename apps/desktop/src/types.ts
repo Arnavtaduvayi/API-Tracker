@@ -1645,9 +1645,30 @@ export interface FolderLinkPreview {
   scan_fingerprint: string;
 }
 
+export interface ApplyStepView {
+  title: string;
+  outcome: "done" | "skipped" | "failed";
+  detail: string;
+}
+
+/** The apply result, flattened on the Rust side.
+ *
+ *  Deliberately not `TrackingApplyReport`: the orchestrator's `StepOutcome` is a
+ *  nested enum, so `step.outcome === "failed"` against the raw report silently
+ *  never matches and a partial failure reads as success. `failed_step` is
+ *  computed by the orchestrator's own `failed_step()`. */
+export interface ApplyReportView {
+  failed_step: string | null;
+  failed_detail: string | null;
+  install_blocked: boolean;
+  attribution_enabled: boolean;
+  setup_id: string | null;
+  steps: ApplyStepView[];
+}
+
 export interface LinkOutcome {
   link: ProjectFolderLink;
-  report: TrackingApplyReport;
+  report: ApplyReportView;
   detected_credentials: DetectedCredential[];
 }
 

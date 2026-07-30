@@ -227,7 +227,16 @@ struct UsageGroup {
     provider: String,
     model: Option<String>,
     day: String,
+    /// Every row in the group.
     requests: i64,
+    /// The rows that actually reported a token count.
+    ///
+    /// `COUNT(*)` and `SUM(input_tokens)` answer different questions: a group of
+    /// 100 rows where one reported usage sums that one row's tokens but counts
+    /// 100. Crediting all 100 as priced overstates coverage enormously — which
+    /// is the normal case for streamed responses, since the gateway writes a
+    /// usage row for every request whether or not usage was extractable.
+    with_usage: i64,
     /// `None` when no request in the group reported usage.
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
@@ -287,19 +296,40 @@ pub fn project_cost_coverage(
         // Tokens unknown is the blocker that outranks everything else: without
         // them there is nothing to price and nothing to put in a token total,
         // so these requests are counted and appear in neither token figure.
-        let (Some(input), Some(output)) = (g.input_tokens, g.output_tokens) else {
-            out.requests_with_unknown_usage += g.requests;
+        // Rows in this group that reported nothing are unknown regardless of what
+        // happens to the rest of the group, so account for them first and
+        // exclude them from every priced/unpriced token figure below.
+        let without_usage = (g.requests - g.with_usage).max(0);
+        if without_usage > 0 {
+            out.requests_with_unknown_usage += without_usage;
             out.complete = false;
             add_unpriced(
                 &mut unpriced_acc,
                 &g.provider,
                 g.model.clone(),
-                g.requests,
+                without_usage,
                 None,
                 None,
                 UnpricedReason::UsageNotExtracted,
             );
+        }
+        // Nothing in the group reported usage at all: there is nothing to price.
+        if g.with_usage == 0 {
             continue;
+        }
+        // `with_usage > 0` means at least one row carried a count, so the SUMs
+        // are non-NULL; treat a NULL half as a reported zero for that dimension.
+        let (input, output) = (g.input_tokens.unwrap_or(0), g.output_tokens.unwrap_or(0));
+        // From here on, only the rows that reported usage are in scope.
+        let g = &UsageGroup {
+            provider: g.provider.clone(),
+            model: g.model.clone(),
+            day: g.day.clone(),
+            requests: g.with_usage,
+            with_usage: g.with_usage,
+            input_tokens: Some(input),
+            output_tokens: g.output_tokens,
+            cached_input_tokens: g.cached_input_tokens,
         };
         // Reported tokens are counted here, once, whatever happens to pricing
         // below. A token total must not depend on whether a price was found.
@@ -389,19 +419,26 @@ pub fn project_cost_coverage(
 
         out.estimated_micros = out.estimated_micros.saturating_add(est.micros);
         out.priced_requests += g.requests;
-        out.priced_input_tokens += billable_input;
-        out.priced_output_tokens += output;
+
+        // A dimension the record could not price contributed nothing to
+        // `est.micros`, so its tokens are UNPRICED — and must therefore not also
+        // be counted as priced. Adding them to both totals inflated the coverage
+        // denominator and double-counted the same tokens, which made a partially
+        // priced window look better covered than a wholly unpriced one.
+        let input_unpriced = est.unpriced_dimensions.iter().any(|d| d == "input tokens");
+        let output_unpriced = est.unpriced_dimensions.iter().any(|d| d == "output tokens");
+        if input_unpriced {
+            out.unpriced_tokens += billable_input;
+        } else {
+            out.priced_input_tokens += billable_input;
+        }
+        if output_unpriced {
+            out.unpriced_tokens += output;
+        } else {
+            out.priced_output_tokens += output;
+        }
         if !est.complete {
             out.complete = false;
-            // The dimensions this record could not price are known tokens that
-            // contributed nothing, so they belong in the unpriced token total.
-            for dim in &est.unpriced_dimensions {
-                match dim.as_str() {
-                    "input tokens" => out.unpriced_tokens += billable_input,
-                    "output tokens" => out.unpriced_tokens += output,
-                    _ => {}
-                }
-            }
         }
         if est.stale {
             out.any_stale_pricing = true;
@@ -509,6 +546,8 @@ fn load_groups(
     // this", not "the total was zero". COALESCE(...,0) here would erase it.
     let mut stmt = conn.prepare(
         "SELECT provider_id, model, substr(at, 1, 10) AS day, COUNT(*),
+                SUM(CASE WHEN input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+                         THEN 1 ELSE 0 END),
                 SUM(input_tokens), SUM(output_tokens), SUM(cached_input_tokens)
          FROM gateway_usage_events
          WHERE project_id = ?1 AND at >= ?2 AND (?3 IS NULL OR at < ?3)
@@ -524,9 +563,10 @@ fn load_groups(
                 model: r.get(1)?,
                 day: r.get(2)?,
                 requests: r.get(3)?,
-                input_tokens: r.get(4)?,
-                output_tokens: r.get(5)?,
-                cached_input_tokens: r.get(6)?,
+                with_usage: r.get(4)?,
+                input_tokens: r.get(5)?,
+                output_tokens: r.get(6)?,
+                cached_input_tokens: r.get(7)?,
             })
         },
     )?;
@@ -866,6 +906,55 @@ mod tests {
         assert_eq!(c.unpriced[0].input_tokens, None);
     }
 
+    /// The gateway writes a usage row for EVERY request, whether or not usage
+    /// could be extracted — so a normal streamed workload produces groups where
+    /// one row has tokens and ninety-nine do not. Counting all hundred as priced
+    /// overstates coverage enormously, which is the whole point of this figure.
+    #[test]
+    fn a_group_mixing_reported_and_unreported_usage_splits_correctly() {
+        let conn = mem();
+        // One request reported usage.
+        usage(
+            &conn,
+            "2026-07-18T12:00:00Z",
+            "openai",
+            Some("gpt-4o"),
+            Some(1_000_000),
+            Some(0),
+            None,
+        );
+        // Nine in the same (provider, model, day) group reported none.
+        for i in 1..10 {
+            usage(
+                &conn,
+                &format!("2026-07-18T12:0{i}:00Z"),
+                "openai",
+                Some("gpt-4o"),
+                None,
+                None,
+                None,
+            );
+        }
+        let c = coverage(&conn);
+        assert_eq!(
+            c.priced_requests, 1,
+            "only the request that reported usage may be counted as priced"
+        );
+        assert_eq!(
+            c.requests_with_unknown_usage, 9,
+            "the nine that reported nothing are unknown, not priced"
+        );
+        assert_eq!(
+            c.estimated_micros, 2_500_000,
+            "priced from the one real count"
+        );
+        assert_eq!(c.known_input_tokens, 1_000_000);
+        assert!(!c.complete, "nine requests are uncovered");
+        // The unknown nine widen the cost denominator without touching tokens.
+        assert_eq!(c.unpriced_tokens, 0);
+        assert_eq!(c.token_coverage, Some(1.0), "of the tokens that ARE known");
+    }
+
     /// Tokens known but no model reported: the tokens ARE known, so they count
     /// as unpriced tokens rather than vanishing into "unknown usage".
     #[test]
@@ -968,6 +1057,18 @@ mod tests {
         assert!(!c.complete);
         assert_eq!(c.micros_if_complete(), None);
         assert_eq!(c.unpriced_tokens, 1_000_000, "the unpriced input tokens");
+        assert_eq!(
+            c.priced_input_tokens, 0,
+            "input was NOT priced, so it must not also be counted as priced"
+        );
+        assert_eq!(c.priced_output_tokens, 1_000_000, "output was priced");
+        // The same tokens counted in both totals inflated the denominator and
+        // made a half-priced window look better covered than an unpriced one.
+        assert_eq!(
+            c.token_coverage,
+            Some(0.5),
+            "half the known tokens were priced"
+        );
         assert!(!c.priced[0].complete);
         assert!(c.priced[0]
             .unpriced_dimensions

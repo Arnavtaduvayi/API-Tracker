@@ -193,6 +193,39 @@ fn every_new_foreign_key_child_column_is_indexed() {
         indexed("gateway_usage_events", "project_id"),
         "the project activity window needs a (project_id, at) index"
     );
+    // Both tables are windowed by (project, time). v16's composite has
+    // observation_source between the two columns a range needs, so it cannot
+    // serve a query that does not also constrain the source — which is every
+    // query the live surface issues.
+    let composite = |table: &str, a: &str, b: &str| -> bool {
+        let mut stmt = conn
+            .prepare(&format!("SELECT name FROM pragma_index_list('{table}')"))
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        names.iter().any(|idx| {
+            let mut s = conn
+                .prepare(&format!("SELECT name FROM pragma_index_info('{idx}')"))
+                .unwrap();
+            let cols: Vec<String> = s
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            cols.len() >= 2 && cols[0] == a && cols[1] == b
+        })
+    };
+    assert!(
+        composite("runtime_request_events", "project_id", "at"),
+        "the live series needs (project_id, at) with `at` immediately after"
+    );
+    assert!(
+        composite("gateway_usage_events", "project_id", "at"),
+        "the cost window needs (project_id, at) with `at` immediately after"
+    );
 }
 
 #[test]

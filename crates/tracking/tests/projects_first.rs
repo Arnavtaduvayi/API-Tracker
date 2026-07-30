@@ -169,6 +169,41 @@ fn the_disclosure_names_the_files_that_will_be_edited() {
     }
 }
 
+/// A disclosure that counts destinations without naming them does not let the
+/// user recognise what they are agreeing to.
+#[test]
+fn the_disclosure_names_the_apis_that_will_be_routed() {
+    let (tmp, conn) = test_conn();
+    insert_project(&conn, "p1", "web");
+    let folder = fixture();
+    let preview = project::prepare_link(
+        &conn,
+        tmp.path(),
+        "p1",
+        "web",
+        folder.path(),
+        &service_absent(),
+        false,
+    )
+    .unwrap();
+
+    let plan = preview.plan.as_ref().expect("the fixture is configurable");
+    let creating: Vec<&str> = plan
+        .route_actions
+        .iter()
+        .filter(|r| r.creates())
+        .map(|r| r.provider_id())
+        .collect();
+    assert!(!creating.is_empty(), "the fixture registers routes");
+    let text = preview.disclosure.join(" ");
+    for provider in &creating {
+        assert!(
+            text.contains(provider),
+            "the disclosure registers {provider} without naming it: {text}"
+        );
+    }
+}
+
 /// A destination read from project files is never pre-approved: repository
 /// content is evidence, not authorization (ADR 0024 / ZFT-004).
 #[test]
@@ -214,7 +249,19 @@ fn a_repository_discovered_destination_is_not_pre_approved() {
     );
     assert!(
         !preview.pending_origin_approvals.is_empty(),
-        "the user should be told what approval would unblock this"
+        "the user should be told which destinations were found"
+    );
+    // `prepare_link` builds from `Selections::defaults`, which never includes a
+    // repository-discovered destination — so the copy must not send the user
+    // round a loop that cannot terminate.
+    let text = preview.disclosure.join(" ");
+    assert!(
+        text.contains("advanced"),
+        "the disclosure must point at the flow that can actually configure it: {text}"
+    );
+    assert!(
+        !text.contains("select the folder again"),
+        "re-selecting the folder changes nothing here, so it must not be suggested: {text}"
     );
     let approvals: i64 = conn
         .query_row("SELECT COUNT(*) FROM tracking_approved_origins", [], |r| {
@@ -316,6 +363,16 @@ fn confirming_the_previewed_digest_links_the_folder_and_records_detections() {
         .unwrap()
         .unwrap();
     assert_eq!(reread.folder_path, outcome.link.folder_path);
+
+    // A successful setup must NOT immediately report the folder as changed.
+    // Apply rewrites `.env`, which the fingerprint covers, so recording the
+    // pre-apply fingerprint made every clean setup land on a page telling the
+    // user their files had changed — about a change Tethra had just made.
+    let overview = project::overview(tv.vault.connection(), &tv.data_dir, &project_id).unwrap();
+    assert!(
+        !overview.scan_stale,
+        "a clean setup reported its own file edits as a change the user should rescan"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -385,11 +442,26 @@ fn no_secret_value_reaches_a_detected_credential_row() {
         !dumped.contains(CANARY),
         "a discovered value reached detected_credentials: {dumped}"
     );
-    // And the preview itself never carried it either.
-    let serialized = serde_json::to_string(&preview.detected_credentials).unwrap();
+    // The WHOLE preview, not just the credential list: `detection`,
+    // `disclosure` and `summary` all cross IPC too, and `ProjectDetection` is
+    // additionally serialized verbatim into `tracking_setups.detection_json`,
+    // which is a plaintext column. Sweeping only the sub-list left every field
+    // that actually carries risk unguarded.
+    let serialized = serde_json::to_string(&preview).unwrap();
     assert!(
         !serialized.contains(CANARY),
         "a discovered value reached the preview DTO"
+    );
+    // And the same structure as it lands on disk.
+    let detection_json = serde_json::to_string(&preview.detection).unwrap();
+    assert!(
+        !detection_json.contains(CANARY),
+        "a discovered value would be written to tracking_setups.detection_json"
+    );
+    let disclosure = preview.disclosure.join(" ");
+    assert!(
+        !disclosure.contains(CANARY),
+        "a discovered value reached the disclosure shown to the user"
     );
 
     let rows = projectlink::list_detections(&conn, "p1").unwrap();

@@ -391,8 +391,20 @@ pub fn prepare_link(
     let disclosure = match &planned {
         Some(p) => disclosure_for(p, &detection),
         None => vec![
-            "Tethra found API integrations in this folder but cannot configure any of them \
-             yet. Approve a destination below to continue."
+            "Tethra found API integrations in this folder, but none of them is one it can \
+             configure on its own. Every destination it found was read from this project's \
+             own files, and Tethra will not route traffic to a destination it discovered \
+             rather than one it ships."
+                .to_string(),
+            // Deliberately NOT "approve it and select the folder again":
+            // `prepare_link` builds its plan from `Selections::defaults`, which
+            // includes only `Configurability::Automatic` providers. An approved
+            // repository-discovered origin still needs `approve_origin`, which
+            // only the advanced flow calls — so re-selecting the folder here
+            // would change nothing, and saying otherwise would send the user
+            // round a loop that cannot terminate.
+            "Configuring one of these is an advanced action: open Tracking setup (advanced), \
+             where approving a destination and configuring it happen together."
                 .to_string(),
         ],
     };
@@ -432,11 +444,19 @@ fn disclosure_for(plan: &TrackingPlan, detection: &ProjectDetection) -> Vec<Stri
                 .to_string(),
         );
     }
-    let creating = plan.route_actions.iter().filter(|r| r.creates()).count();
-    if creating > 0 {
+    let creating: Vec<&str> = plan
+        .route_actions
+        .iter()
+        .filter(|r| r.creates())
+        .map(|r| r.provider_id())
+        .collect();
+    if !creating.is_empty() {
+        // Named, not just counted: "2 destinations will be registered" does not
+        // tell the user WHICH, and the point of a disclosure is that they can
+        // recognise what they are agreeing to.
         lines.push(format!(
-            "{creating} API destination(s) Tethra already knows will be registered so \
-             traffic can be measured."
+            "Traffic to these APIs will be routed through Tethra so it can be measured: {}.",
+            creating.join(", ")
         ));
     }
     let files: Vec<String> = plan
@@ -485,9 +505,15 @@ fn link_digest(project_id: &str, folder: &Path, plan: &TrackingPlan) -> String {
         field(&mut hasher, format!("{action:?}").as_bytes());
     }
     for action in &plan.route_actions {
-        field(&mut hasher, action.prefix().as_bytes());
-        field(&mut hasher, action.provider_id().as_bytes());
-        field(&mut hasher, &[u8::from(action.creates())]);
+        // The whole Debug form, not prefix + provider_id + creates. Those three
+        // accessors skip `CreateCustomRoute::origin`, which would make the
+        // consent token origin-blind: two plans differing ONLY in the
+        // destination host would hash identically. No such plan can reach here
+        // today, because `prepare_link` uses `Selections::defaults` and never
+        // approves an origin — but a digest whose correctness depends on a
+        // caller elsewhere not changing is not a guarantee. Hashing the variant
+        // and all its fields also covers any field a future variant gains.
+        field(&mut hasher, format!("{action:?}").as_bytes());
     }
     for lp in &plan.link_plans {
         // NOT `lp.digest`. That digest covers each file's previewed input and
@@ -657,7 +683,14 @@ pub fn confirm_link(
     // linked and tracking" on top of that would contradict it.
     let conn = vault.connection();
     let mut link = projectlink::upsert_link(conn, project_id, &preview.folder)?;
-    projectlink::record_scan(conn, &mut link, Some(&preview.scan_fingerprint))?;
+    // The fingerprint must be recomputed HERE, not carried from the preview.
+    // Apply rewrites the project's `.env`, and `.env` is one of the files the
+    // fingerprint covers — so storing the pre-apply value made every successful
+    // setup immediately report "your files changed since the last scan" about a
+    // change Tethra had just made itself, on every page open until the user
+    // clicked Rescan.
+    let applied_fingerprint = folder_fingerprint(Path::new(&preview.folder));
+    projectlink::record_scan(conn, &mut link, Some(&applied_fingerprint))?;
     if report.failed_step().is_none() {
         if let Some(setup) = state::find_setup(conn, project_id, Path::new(&preview.folder))? {
             projectlink::record_applied_generation(conn, &mut link, setup.config_generation)?;
@@ -667,7 +700,7 @@ pub fn confirm_link(
 
     Ok(LinkOutcome {
         link,
-        report,
+        report: ApplyReportView::of(&report),
         detected_credentials: created,
     })
 }
@@ -676,8 +709,75 @@ pub fn confirm_link(
 #[derive(Debug, Serialize)]
 pub struct LinkOutcome {
     pub link: ProjectFolderLink,
-    pub report: crate::apply::ApplyReport,
+    pub report: ApplyReportView,
     pub detected_credentials: Vec<DetectedCredential>,
+}
+
+/// One apply step, flattened for display.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyStepView {
+    pub title: String,
+    /// `"done" | "skipped" | "failed"` — a flat string, deliberately.
+    pub outcome: String,
+    pub detail: String,
+}
+
+/// The apply result in terms a screen can check.
+///
+/// `apply::ApplyReport` is NOT sent across IPC. Its `StepOutcome` is a nested
+/// Rust enum, so a frontend testing `step.outcome === "failed"` silently never
+/// matches — which is exactly the bug this type exists to make impossible: a
+/// partially failed apply would have reported "Tracking is on". `failed_step` is
+/// computed here by `ApplyReport::failed_step`, which is the orchestrator's own
+/// definition of failure rather than a second one.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApplyReportView {
+    /// The title of the first failed step, or `None` when every step got
+    /// through. A caller checks THIS, not a string comparison on an enum.
+    pub failed_step: Option<String>,
+    pub failed_detail: Option<String>,
+    pub install_blocked: bool,
+    pub attribution_enabled: bool,
+    pub setup_id: Option<String>,
+    pub steps: Vec<ApplyStepView>,
+}
+
+impl ApplyReportView {
+    fn of(report: &crate::apply::ApplyReport) -> Self {
+        use crate::apply::StepOutcome;
+        let failed = report.failed_step();
+        Self {
+            failed_step: failed.map(|s| s.title.to_string()),
+            failed_detail: failed.and_then(|s| match &s.outcome {
+                StepOutcome::Failed { error } => Some(error.clone()),
+                _ => None,
+            }),
+            install_blocked: report.install_blocked,
+            attribution_enabled: report.attribution_enabled,
+            setup_id: report.setup_id.clone(),
+            steps: report
+                .steps
+                .iter()
+                .map(|s| {
+                    let (outcome, detail) = match &s.outcome {
+                        StepOutcome::Done { detail } => ("done", detail.clone()),
+                        StepOutcome::Skipped { reason } => ("skipped", reason.clone()),
+                        StepOutcome::Failed { error } => ("failed", error.clone()),
+                    };
+                    ApplyStepView {
+                        title: s.title.to_string(),
+                        outcome: outcome.to_string(),
+                        detail,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether the apply got all the way through.
+    pub fn succeeded(&self) -> bool {
+        self.failed_step.is_none()
+    }
 }
 
 /// Write the unfinished credential records, skipping the ones the project

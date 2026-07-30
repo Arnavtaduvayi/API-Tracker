@@ -17,6 +17,7 @@ export function ProjectDetail(props: {
   const [credentials, setCredentials] = useState<Credential[]>([]);
   const [overview, setOverview] = useState<ProjectOverview | null>(null);
   const [overviewLoading, setOverviewLoading] = useState(true);
+  const [overviewFailed, setOverviewFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<"set" | "unlock" | "remove" | null>(
@@ -49,8 +50,13 @@ export function ProjectDetail(props: {
     setOverviewLoading(true);
     try {
       setOverview(await api.projectTrackingOverview(props.ident));
+      setOverviewFailed(false);
     } catch (e) {
-      setOverview(null);
+      // `overview` is left as it was rather than nulled. Nulling it renders the
+      // "Select project folder" call to action for a project that may well BE
+      // linked, which is a claim about the project's state derived from a failed
+      // read — the opposite of what this catch is for.
+      setOverviewFailed(true);
       setError(isApiError(e) ? e.message : String(e));
     } finally {
       setOverviewLoading(false);
@@ -242,6 +248,12 @@ export function ProjectDetail(props: {
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
 
+      {overviewFailed && (
+        <p className="error">
+          Tethra could not read this project&apos;s tracking state, so what is shown below may
+          be incomplete. It is not a statement that tracking is off.
+        </p>
+      )}
       <ProjectTracking
         projectIdent={props.ident}
         overview={overview}

@@ -14,7 +14,7 @@
 // requirement of this product (ZFT-009): a user must know what will be read
 // before they choose what to expose to it.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
 import type { DetectedCredential, FolderLinkPreview, ProjectOverview } from "../types";
@@ -73,11 +73,19 @@ export function ProjectTracking(props: {
       );
       setPreview(null);
       setPassword("");
-      const failed = outcome.report.steps.find((s) => s.outcome === "failed");
+      // `failed_step` is the orchestrator's own verdict, computed in Rust.
+      // Comparing `step.outcome` to a string here would never match, because the
+      // raw report's outcome is a nested enum — and a partial failure would then
+      // have reported "Tracking is on".
+      const failed = outcome.report.failed_step;
       setNotice(
         failed
-          ? `Tracking setup stopped at "${failed.title}". The steps that completed are still in place — open advanced tracking diagnostics to review them.`
-          : "Tracking is on. Activity appears below as soon as your project makes a request.",
+          ? `Tracking setup stopped at "${failed}"${
+              outcome.report.failed_detail ? `: ${outcome.report.failed_detail}` : ""
+            }. The steps that completed are still in place — open advanced tracking diagnostics to review them.`
+          : outcome.report.install_blocked
+            ? "Tracking is configured, but this computer blocked the background helper. Open advanced tracking diagnostics for the foreground fallback."
+            : "Tracking is on. Activity appears below as soon as your project makes a request.",
       );
       props.onChanged();
     } catch (e) {
@@ -112,10 +120,12 @@ export function ProjectTracking(props: {
     [props],
   );
 
-  // A preview for a folder that is no longer the linked one is stale context.
-  useEffect(() => {
-    if (preview && link && link.folder_path !== preview.folder) setPreview(null);
-  }, [preview, link]);
+  // NOTE: there is deliberately no effect discarding a preview whose path
+  // differs from the linked one. That condition is exactly the "Change folder"
+  // case, and clearing on it destroyed the disclosure in the same commit it
+  // appeared in — a silent dead button, with the backend fully able to move the
+  // link. The preview is cleared where it is actually finished with: on a
+  // successful confirm, and on Cancel.
 
   return (
     <section aria-labelledby="project-tracking-heading">
@@ -272,8 +282,9 @@ export function ProjectTracking(props: {
                   {preview.pending_origin_approvals.length} destination(s) came from this
                   project&apos;s own files.
                 </strong>{" "}
-                Tethra will not send anything to a destination it read out of your project until
-                you approve that exact destination. These are left out of the setup below.
+                Tethra will not route traffic to a destination it read out of your project.
+                These are left out of the setup below, and stay left out however many times you
+                select this folder.
               </p>
               <ul>
                 {preview.pending_origin_approvals.map((o) => (
@@ -311,8 +322,9 @@ export function ProjectTracking(props: {
 
           {preview.summary === null ? (
             <p data-testid="nothing-to-configure">
-              There is nothing Tethra can configure automatically for this folder yet. Approve a
-              destination above, then select the folder again.
+              There is nothing Tethra can configure automatically for this folder. Selecting it
+              again will not change that — use <strong>Tracking setup (advanced)</strong> for
+              the destinations listed above.
             </p>
           ) : (
             <>

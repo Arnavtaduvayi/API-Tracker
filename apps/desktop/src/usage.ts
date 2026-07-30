@@ -381,10 +381,25 @@ export const PROJECT_TOKENS: UsageSubject = {
  */
 export function projectCostAvailability(c: ProjectCostCoverage): UsageAvailability {
   const total = c.priced_requests + c.unpriced_requests + c.requests_with_unknown_usage;
-  const base = fromCoverage(c.priced_requests, total);
-  // A record past its verification horizon still prices, but the number it
-  // produced is as old as the record.
-  return c.any_stale_pricing ? markStale(base, null) : base;
+  let base = fromCoverage(c.priced_requests, total);
+  // `complete` is the BACKEND's verdict, and it can be false for a reason the
+  // request counts cannot express: a record that priced output but not input
+  // makes every request "priced" while the amount is only a floor. Ignoring it
+  // rendered that floor as an unqualified dollar figure in the headline card.
+  if (!c.complete && base.kind === "known") {
+    base = { kind: "partial", covered: c.priced_requests, total: Math.max(total, 1) };
+  }
+  // Deliberately NOT `markStale`. That state means "the SOURCE has not synced,
+  // so newer usage is missing", which is a different and wrong thing to tell the
+  // user here: the usage is complete and current, and it is the PRICE that is
+  // past its verification date. `tokenCoverageSentence`/`CostCoverage` carry the
+  // stale-pricing sentence instead, so the number keeps its real availability.
+  return base;
+}
+
+/** Whether the price behind an estimate is past its verification horizon. */
+export function pricingIsStale(c: ProjectCostCoverage): boolean {
+  return c.any_stale_pricing;
 }
 
 /**

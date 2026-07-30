@@ -167,7 +167,14 @@ describe("ProjectTracking", () => {
     mocked.projectFolderPreview.mockResolvedValue(preview());
     mocked.projectFolderLink.mockResolvedValue({
       link: linked().link,
-      report: { steps: [], state: "awaiting_first_request", setup_id: "s1", failed: false },
+      report: {
+        failed_step: null,
+        failed_detail: null,
+        install_blocked: false,
+        attribution_enabled: false,
+        setup_id: "s1",
+        steps: [],
+      },
       detected_credentials: [],
     });
     const onChanged = vi.fn();
@@ -248,7 +255,8 @@ describe("ProjectTracking", () => {
         summary: null,
         digest: "",
         disclosure: [
-          "Tethra found API integrations in this folder but cannot configure any of them yet. Approve a destination below to continue.",
+          "Tethra found API integrations in this folder, but none of them is one it can configure on its own.",
+          "Configuring one of these is an advanced action: open Tracking setup (advanced), where approving a destination and configuring it happen together.",
         ],
         pending_origin_approvals: [
           { provider_id: "supabase", origin: "https://x.example.com" },
@@ -265,9 +273,13 @@ describe("ProjectTracking", () => {
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
-    expect((await screen.findByTestId("nothing-to-configure")).textContent).toContain(
-      "Approve a destination",
-    );
+    // The copy must NOT promise that re-selecting the folder will pick up an
+    // approved destination: `prepare_link` builds from `Selections::defaults`,
+    // which never includes a repository-discovered one, so that loop cannot
+    // terminate.
+    const nothing = (await screen.findByTestId("nothing-to-configure")).textContent!;
+    expect(nothing).toContain("Selecting it again will not change that");
+    expect(nothing).toContain("Tracking setup (advanced)");
     expect(screen.getByTestId("pending-origins").textContent).toContain(
       "https://x.example.com",
     );
@@ -296,7 +308,8 @@ describe("ProjectTracking", () => {
     fireEvent.click(screen.getByText("Select project folder"));
     const pending = await screen.findByTestId("pending-origins");
     expect(pending.textContent).toContain("came from this project");
-    expect(pending.textContent).toContain("will not send anything");
+    expect(pending.textContent).toContain("will not route traffic");
+    expect(pending.textContent).toContain("stay left out however many times");
     expect(pending.textContent).toContain("https://attacker.example.com");
   });
 
@@ -511,14 +524,20 @@ describe("ProjectTracking", () => {
     mocked.projectFolderPreview.mockResolvedValue(preview());
     mocked.projectFolderLink.mockResolvedValue({
       link: linked().link,
+      // The shape the BACKEND actually emits: `failed_step` computed in Rust.
+      // The previous fixture invented a flat `outcome: "failed"` that the raw
+      // report never produces, which made this test pass against a UI that
+      // could not detect a failure at all.
       report: {
+        failed_step: "Apply project links",
+        failed_detail: "permission denied",
+        install_blocked: false,
+        attribution_enabled: false,
+        setup_id: "s1",
         steps: [
           { title: "Register routes", outcome: "done", detail: "" },
           { title: "Apply project links", outcome: "failed", detail: "permission denied" },
         ],
-        state: "needs_attention",
-        setup_id: "s1",
-        failed: true,
       },
       detected_credentials: [],
     });

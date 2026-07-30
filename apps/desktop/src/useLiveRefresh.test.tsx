@@ -290,6 +290,88 @@ describe("useLiveRefresh", () => {
     expect(fetcher).toHaveBeenCalledTimes(3);
   });
 
+  /// Changing the fetcher WHILE a fetch is in flight is the ordinary case — the
+  /// user changes the period or a filter mid-tick. The loop must switch, not
+  /// lock onto the fetcher it was already using.
+  it("switches fetchers even when the change lands mid-flight", async () => {
+    let releaseOld: ((v: string) => void) | null = null;
+    const oldFetcher = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseOld = resolve;
+        }),
+    );
+    const newFetcher = vi.fn().mockResolvedValue("new-range");
+
+    const view = render(<Probe fetcher={oldFetcher} />);
+    await flush();
+    expect(oldFetcher).toHaveBeenCalledTimes(1);
+
+    // The user changes the range while the first fetch is still outstanding.
+    view.rerender(<Probe fetcher={newFetcher} />);
+    await flush();
+    expect(newFetcher).toHaveBeenCalledTimes(1);
+    expect(text("data")).toBe("new-range");
+
+    // The superseded fetch now settles. It must not be applied...
+    await act(async () => {
+      releaseOld?.("stale-range");
+    });
+    await flush();
+    expect(text("data")).toBe("new-range");
+
+    // ...and must not have re-armed the loop over the old fetcher.
+    await advance(VISIBLE_INTERVAL_MS);
+    expect(oldFetcher).toHaveBeenCalledTimes(1);
+    expect(newFetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops polling when disabled mid-flight, and cleans up on unmount", async () => {
+    let release: ((v: string) => void) | null = null;
+    const fetcher = vi.fn(
+      () =>
+        new Promise<string>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const view = render(<Probe fetcher={fetcher} />);
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Disabled while the fetch is outstanding.
+    view.rerender(<Probe fetcher={fetcher} enabled={false} />);
+    await flush();
+    await act(async () => {
+      release?.("late");
+    });
+    await flush();
+
+    // The pending .finally() must not have armed a new tick.
+    await advance(VISIBLE_INTERVAL_MS * 4);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // And unmounting from the disabled state must still clear the guard.
+    view.unmount();
+    await advance(VISIBLE_INTERVAL_MS * 4);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the hidden cadence when it mounts into a hidden document", async () => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => "hidden",
+    });
+    const fetcher = vi.fn().mockResolvedValue("v");
+    render(<Probe fetcher={fetcher} />);
+    await flush();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    // The visible interval must NOT fire for a surface nobody is looking at.
+    await advance(VISIBLE_INTERVAL_MS * 2);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await advance(HIDDEN_INTERVAL_MS);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
   it("stops polling on unmount", async () => {
     const fetcher = vi.fn().mockResolvedValue("v");
     const view = render(<Probe fetcher={fetcher} />);

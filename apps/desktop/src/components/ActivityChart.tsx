@@ -262,7 +262,15 @@ export function ActivityChart(props: {
           {series.map((s) => (
             <tr key={`row-${s.bucket}`}>
               <th scope="row">{formatBucket(s.bucket, granularity)}</th>
-              <td>{s.value === null ? "not reported" : formatValue(s.value, metric)}</td>
+              <td>
+                {s.value === null
+                  ? "not reported"
+                  : `${formatValue(s.value, metric)}${
+                      metric === "cost" && !s.costComplete
+                        ? " (partial — a floor, not a total)"
+                        : ""
+                    }`}
+              </td>
             </tr>
           ))}
         </tbody>
