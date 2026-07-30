@@ -505,6 +505,63 @@ describe("ProjectActivity", () => {
     expect(screen.getByRole("status").textContent).toContain("last successful refresh");
   });
 
+  // AUD-01 made `no_observations` describe the FILTERED population, so an empty
+  // result no longer always means "this project has never been observed".
+  it("a filter that matches nothing says so, and can still be cleared", async () => {
+    const facets = {
+      hosts: ["api.openai.com", "api.anthropic.com"],
+      providers: ["openai", "anthropic"],
+      models: ["gpt-4o"],
+      status_classes: ["2xx"],
+      endpoints: ["/v1/chat"],
+      observation_sources: ["gateway"],
+    };
+    mocked.projectActivity.mockResolvedValueOnce(snapshot({ facets })).mockResolvedValue(
+      snapshot({
+        facets,
+        no_observations: true,
+        series: [],
+        recent: [],
+        integrations: [],
+        metrics: { ...snapshot().metrics, total: 0, errors: 0, error_rate: 0 },
+      }),
+    );
+    render(<ProjectActivity projectIdent="p1" enabled />);
+    await screen.findByTestId("activity-filters");
+
+    fireEvent.change(screen.getByLabelText("Filter by host"), {
+      target: { value: "api.anthropic.com" },
+    });
+
+    const notice = await screen.findByTestId("no-filter-matches");
+    // NOT "waiting for the first request" — the project has traffic; this filter
+    // does not match any of it.
+    expect(notice.textContent).toContain("match the current filters");
+    expect(screen.queryByTestId("awaiting-first-request")).toBeNull();
+    // And the controls that caused it are still on screen, offering every value
+    // in the window, so the filter can be undone.
+    expect(screen.getByTestId("activity-filters")).toBeTruthy();
+    expect(screen.getByText("Clear 1 filter(s)")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Clear 1 filter(s)"));
+    await waitFor(() =>
+      expect(mocked.projectActivity).toHaveBeenLastCalledWith("p1", "24h", {}, 50),
+    );
+  });
+
+  it("an unfiltered empty project still says it is waiting for the first request", async () => {
+    mocked.projectActivity.mockResolvedValue(
+      snapshot({
+        no_observations: true,
+        series: [],
+        metrics: { ...snapshot().metrics, total: 0, errors: 0, error_rate: 0 },
+      }),
+    );
+    render(<ProjectActivity projectIdent="p1" enabled />);
+    expect(await screen.findByTestId("awaiting-first-request")).toBeTruthy();
+    expect(screen.queryByTestId("no-filter-matches")).toBeNull();
+  });
+
   it("does not fetch at all while disabled", () => {
     mocked.projectActivity.mockResolvedValue(snapshot());
     render(<ProjectActivity projectIdent="p1" enabled={false} />);

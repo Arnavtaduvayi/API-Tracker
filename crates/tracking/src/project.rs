@@ -270,8 +270,16 @@ pub struct ProjectActivitySnapshot {
     pub until: Option<String>,
     pub granularity: Granularity,
     pub metrics: Metrics,
-    /// True when nothing at all was observed in the window, so a surface can
-    /// say "waiting for the first request" instead of showing zeroes.
+    /// True when nothing matched, so a surface can say so instead of showing
+    /// zeroes.
+    ///
+    /// This counts the FILTERED population, like every other figure here, which
+    /// means it no longer distinguishes "this project has never been observed"
+    /// from "the filter you just set excludes everything". A surface has that
+    /// distinction already — it knows whether a filter is active — and must use
+    /// it: "waiting for the first request" is the wrong sentence for the second
+    /// case, and hiding the filter controls along with the figures would leave
+    /// no way to undo the filter that emptied the view.
     pub no_observations: bool,
     pub series: Vec<projectactivity::ProjectSeriesPoint>,
     pub integrations: Vec<projectactivity::ObservedIntegration>,

@@ -100,7 +100,7 @@ rendered hollow with a floor tooltip; metric change; granularity change;
 value as "not reported" and never `0`; 720 points bounded to ≤10 axis labels; an
 all-zero series not collapsing.
 
-## Frontend — `ProjectActivity.test.tsx` (19) / `ProjectTracking.test.tsx` (16)
+## Frontend — `ProjectActivity.test.tsx` (21) / `ProjectTracking.test.tsx` (16)
 
 Waiting-for-first-request instead of zeroes; summary cards; **an unpriced cost
 never rendering a dollar amount**; the coverage percentage; unknown-usage
@@ -109,7 +109,10 @@ case; an unknown API keeping its metadata with cost unavailable; naming it sendi
 only a display name; an unavailable per-row estimate; a per-row floor labelled;
 range and filter changes refetching; a failed refresh keeping figures; disabled
 not fetching; **manual Refresh re-resolving health** while the five-second timer
-never does, and the panel still working with no health hook (AUD-08).
+never does, and the panel still working with no health hook (AUD-08); and a
+filter that matches nothing saying so **with its controls still on screen**,
+versus an unfiltered empty project still saying it is waiting for the first
+request (AUD-01's consequence for `no_observations`).
 
 `ProjectTracking.test.tsx`'s two overview helpers are no longer hand-written:
 they start from the Rust-generated fixture. Hand-written fixtures with
@@ -224,12 +227,12 @@ frontend        new: 64        (18 + 15 + 15 + 16)
 targeted remediation (AUD-05 / AUD-01 / AUD-03 / AUD-06 / AUD-08)
 crates/tracking new: 33        (10 status_contract + 10 filter consistency
                                 + 13 live_activity_readonly)
-frontend        new: 19        (15 ProjectTrackingStatus + 4 ProjectActivity)
+frontend        new: 21        (15 ProjectTrackingStatus + 6 ProjectActivity)
                      ----
-                     52
+                     54
 
-                total new: 189
+                total new: 191
 ```
 
-Whole-suite totals on the remediated head: **1 486** Rust tests and **257**
+Whole-suite totals on the remediated head: **1 486** Rust tests and **259**
 frontend tests, 0 failures.

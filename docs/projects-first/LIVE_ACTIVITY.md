@@ -205,6 +205,27 @@ known-but-unpriced, never-reported, partial coverage, a floor never presented as
 total (`micros_if_complete` still returns `None`), and a known zero still a
 measured zero rather than "unknown".
 
+### An empty result is two different things
+
+`no_observations` counts the filtered population, like every other figure, so it
+no longer distinguishes "this project has never been observed" from "the filter
+you just set excludes everything". The panel makes that distinction itself, from
+whether a filter is active:
+
+* **no filter, nothing observed** → "Waiting for the first request." Unchanged.
+* **filter active, nothing matches** → "No requests in this period match the
+  current filters", **with the filter controls still mounted** so the filter that
+  emptied the view can be undone. Collapsing the panel around the notice would
+  have taken those controls away with it, leaving no way back except a reload.
+
+This works because facets are scoped by the window rather than by the selection:
+the controls still offer every value that exists even when the current result set
+is empty.
+
+`a filter that matches nothing says so, and can still be cleared` and
+`an unfiltered empty project still says it is waiting for the first request` pin
+both branches.
+
 ### Facets are deliberately broader
 
 `activity_facets` takes no filter. It populates the filter controls, and a

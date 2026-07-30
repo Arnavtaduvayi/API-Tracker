@@ -96,6 +96,16 @@ export function ProjectActivity(props: {
     [filter],
   );
 
+  // `no_observations` is the FILTERED request count (AUD-01: the cards describe
+  // the same rows as the chart). So an empty result now means one of two very
+  // different things, and they need different sentences: "waiting for the first
+  // request" is wrong for a filter the user set a second ago, and collapsing the
+  // panel around it would take the filter controls away with it — leaving no way
+  // to undo the filter short of reloading the page.
+  const nothing = snap?.no_observations === true;
+  const emptyWindow = nothing && activeFilters === 0;
+  const emptyFilter = nothing && activeFilters > 0;
+
   return (
     <section aria-labelledby="project-activity-heading">
       <h2 id="project-activity-heading">Live activity</h2>
@@ -135,14 +145,34 @@ export function ProjectActivity(props: {
 
       {live.loading && !snap && <p>Loading activity…</p>}
 
-      {snap && snap.no_observations && (
+      {snap && emptyWindow && (
         <p className="notice" data-testid="awaiting-first-request">
           Waiting for the first request. Tethra is watching this project; run it and activity
           appears here automatically.
         </p>
       )}
 
-      {snap && !snap.no_observations && (
+      {snap && emptyFilter && (
+        <>
+          <p className="notice" data-testid="no-filter-matches">
+            No requests in this period match the current filters. Tethra is still recording;
+            clear a filter or widen the period to see what it has.
+          </p>
+          {/* Kept mounted deliberately: the values come from `facets`, which is
+              scoped by the time window and NOT by the current selection, so the
+              controls still offer every value that exists and the filter that
+              emptied the view can actually be undone. */}
+          <Filters
+            snap={snap}
+            filter={filter}
+            activeFilters={activeFilters}
+            onChange={onFilterChange}
+            onClear={() => setFilter({})}
+          />
+        </>
+      )}
+
+      {snap && !nothing && (
         <>
           <SummaryCards snap={snap} />
 
