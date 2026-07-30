@@ -850,8 +850,15 @@ fn the_frontend_fixture_is_what_rust_serializes() {
              `UPDATE_STATUS_FIXTURE=1 cargo test -p api-tracker-tracking --test status_contract`"
         )
     });
+    // Line endings are a property of the checkout, not of the contract. The
+    // repository has no `.gitattributes`, so a Windows runner checks this file
+    // out with CRLF (`core.autocrlf` defaults to true there) while
+    // `to_string_pretty` emits LF — which failed this test on Windows alone and
+    // said "out of date with the Rust DTO", which was not true. What is being
+    // asserted is the CONTENT, so both sides are normalized.
     assert_eq!(
-        committed, generated,
+        committed.replace("\r\n", "\n"),
+        generated,
         "{FIXTURE_REL} is out of date with the Rust DTO. Regenerate with \
          `UPDATE_STATUS_FIXTURE=1 cargo test -p api-tracker-tracking --test status_contract` \
          and re-run the frontend suite."
