@@ -8,6 +8,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FolderLinkPreview, ProjectOverview } from "../types";
+import { fixture } from "../test/statusFixtures";
 import { ProjectTracking } from "./ProjectTracking";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -81,35 +82,17 @@ function preview(over: Partial<FolderLinkPreview> = {}): FolderLinkPreview {
   };
 }
 
+// Both overview helpers start from bytes RUST serialized
+// (`crates/tracking/tests/status_contract.rs` generates and verifies the
+// fixture). They used to be hand-written, with `status: null` throughout —
+// which is why a full suite passed while the project page could not report a
+// healthy project (AUD-05). The shape is no longer this file's opinion.
 function overview(over: Partial<ProjectOverview> = {}): ProjectOverview {
-  return {
-    project_id: "p1",
-    link: null,
-    status: null,
-    scan_stale: false,
-    configuration_behind: false,
-    detected_credentials: [],
-    credentials_needing_details: 0,
-    attribution_paused: false,
-    ...over,
-  };
+  return { ...fixture("not_linked"), ...over };
 }
 
 function linked(over: Partial<ProjectOverview> = {}): ProjectOverview {
-  return overview({
-    link: {
-      project_id: "p1",
-      folder_path: "/work/app",
-      tracking_enabled: true,
-      linked_at: "2026-07-29T10:00:00Z",
-      last_scan_at: "2026-07-29T10:00:00Z",
-      scan_fingerprint: "fp-1",
-      applied_generation: 1,
-      last_activity_refresh_at: null,
-      row_version: 2,
-    },
-    ...over,
-  });
+  return { ...fixture("tracking_on"), ...over };
 }
 
 const noop = () => {};

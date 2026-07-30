@@ -1,0 +1,1092 @@
+{
+  "_generated_by": "crates/tracking/tests/status_contract.rs — do not edit by hand",
+  "attribution_paused": {
+    "attribution_paused": true,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "verified_and_active"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": null,
+      "attribution": "paused",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": true,
+      "label": "Tracking is on",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "tracking verified and active",
+      "state": "tracking_on"
+    }
+  },
+  "awaiting_setup": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": null,
+    "tracking": {
+      "action": "Select the folder again to finish setting tracking up.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": null,
+      "folder_available": true,
+      "is_working": false,
+      "label": "Waiting for setup",
+      "last_observed_at": null,
+      "sentence": "This folder is linked, but tracking has not been set up for it yet.",
+      "state": "awaiting_setup"
+    }
+  },
+  "configuration_changed": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "detail": "the route and the project link for openai is gone (1 of 2 configured providers)",
+        "kind": "configuration_changed",
+        "link_missing": true,
+        "route_missing": true
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "needs_attention"
+    },
+    "tracking": {
+      "action": "Select the folder again to re-apply this project's setup.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Configuration changed",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "configuration changed since verification — the route and the project link for openai is gone (1 of 2 configured providers)",
+      "state": "configuration_changed"
+    }
+  },
+  "folder_missing": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": false,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "verified_and_active"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": "Choose the folder again if it moved, or unlink it if the project is gone.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": false,
+      "is_working": true,
+      "label": "Folder missing",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "Tethra can no longer find this project's folder. Nothing already recorded is affected, and no file has been changed.",
+      "state": "folder_missing"
+    }
+  },
+  "gateway_unavailable": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "gateway_unavailable"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "awaiting_first_request"
+    },
+    "tracking": {
+      "action": "Requests are failing right now. Open advanced tracking diagnostics to start the local helper.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Gateway unavailable",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "the local tracking service is not running",
+      "state": "gateway_unavailable"
+    }
+  },
+  "gateway_unavailable_after_verification": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "verified_previously_gateway_down"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": "Requests are failing right now. Open advanced tracking diagnostics to start the local helper.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Gateway unavailable",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "verified previously — the local tracking service is not running, so requests are not reaching your APIs",
+      "state": "gateway_unavailable"
+    }
+  },
+  "health_attribution_paused": {
+    "attribution_paused": true,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "attribution_paused"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": "Unlock the vault for attribution. Requests are being recorded either way.",
+      "attribution": "paused",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Attribution paused",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "tracking active; credential attribution is paused (vault locked)",
+      "state": "attribution_paused"
+    }
+  },
+  "idle": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "verified_previously_idle",
+        "last_observed_at": "2026-07-20T09:00:00Z"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": null,
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "No recent requests",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "verified previously — last observed 2026-07-20T09:00:00Z",
+      "state": "idle"
+    }
+  },
+  "needs_attention": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "needs_attention",
+        "reason": "the local helper could not be installed"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "needs_attention"
+    },
+    "tracking": {
+      "action": "Open advanced tracking diagnostics to see what failed, then select the folder again.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Tracking needs attention",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "needs attention — the local helper could not be installed",
+      "state": "needs_attention"
+    }
+  },
+  "not_linked": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": null,
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": null,
+    "tracking": {
+      "action": "Select this project's folder.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": null,
+      "folder_available": true,
+      "is_working": false,
+      "label": "No folder selected",
+      "last_observed_at": null,
+      "sentence": "No folder is linked to this project yet, so there is nothing to track.",
+      "state": "not_linked"
+    }
+  },
+  "partially_tracked": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "partially_tracked",
+        "observed": 1,
+        "total": 2
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "partially_observed"
+    },
+    "tracking": {
+      "action": "Make a request to the providers that have not been seen yet, or open advanced tracking diagnostics to see which ones.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": true,
+      "label": "Partially tracked",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "partially tracked — 1 of 2 providers observed",
+      "state": "partially_tracked"
+    }
+  },
+  "project_link_unavailable": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "detail": "the project link for openai is gone (1 of 2 configured providers)",
+        "kind": "configuration_changed",
+        "link_missing": true,
+        "route_missing": false
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "needs_attention"
+    },
+    "tracking": {
+      "action": "This project is no longer attached to the destination Tethra registered for it. Select the folder again to reattach it.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Project link unavailable",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "configuration changed since verification — the project link for openai is gone (1 of 2 configured providers)",
+      "state": "project_link_unavailable"
+    }
+  },
+  "restart_required": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "needs_restart"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "awaiting_restart"
+    },
+    "tracking": {
+      "action": "Restart your project, then make one request.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Restart required",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "restart your project, then make one request",
+      "state": "restart_required"
+    }
+  },
+  "route_unavailable": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "detail": "the route for openai is gone (1 of 2 configured providers)",
+        "kind": "configuration_changed",
+        "link_missing": false,
+        "route_missing": true
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "needs_attention"
+    },
+    "tracking": {
+      "action": "The destination Tethra registered for this project is gone. Select the folder again to register it.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Route unavailable",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "configuration changed since verification — the route for openai is gone (1 of 2 configured providers)",
+      "state": "route_unavailable"
+    }
+  },
+  "setup_incomplete": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "apply_incomplete"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "applying"
+    },
+    "tracking": {
+      "action": "Select the folder again to finish setting tracking up.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Setup did not finish",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "setup has not finished applying — nothing is verified yet and no request will be observed; if no setup is running right now it was interrupted, so start tracking for this folder again to finish it",
+      "state": "setup_incomplete"
+    }
+  },
+  "tracking_off": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": false
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "verified_and_active"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": "Enable tracking to start observing again.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": true,
+      "label": "Tracking is off",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "Tracking is off for this project. The folder stays linked and everything already recorded is kept.",
+      "state": "tracking_off"
+    }
+  },
+  "tracking_on": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "verified_and_active"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "traffic_observed"
+    },
+    "tracking": {
+      "action": null,
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": true,
+      "label": "Tracking is on",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "tracking verified and active",
+      "state": "tracking_on"
+    }
+  },
+  "unsupported": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "unsupported"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "unsupported"
+    },
+    "tracking": {
+      "action": null,
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Nothing to track",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "no trackable APIs in this folder",
+      "state": "unsupported"
+    }
+  },
+  "waiting_for_first_request": {
+    "attribution_paused": false,
+    "configuration_behind": false,
+    "credentials_needing_details": 0,
+    "detected_credentials": [],
+    "folder_available": true,
+    "link": {
+      "applied_generation": 1,
+      "folder_path": "/work/app",
+      "last_activity_refresh_at": null,
+      "last_scan_at": "2026-07-29T10:00:00Z",
+      "linked_at": "2026-07-29T10:00:00Z",
+      "project_id": "p1",
+      "row_version": 2,
+      "scan_fingerprint": "fp-1",
+      "tracking_enabled": true
+    },
+    "project_id": "p1",
+    "scan_stale": false,
+    "status": {
+      "current": {
+        "kind": "waiting_for_first_request"
+      },
+      "freshness": [
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:05:00Z",
+          "link_present": true,
+          "provider_id": "openai",
+          "route_present": true
+        },
+        {
+          "fresh": true,
+          "last_observed_at": "2026-07-29T10:07:00Z",
+          "link_present": true,
+          "provider_id": "anthropic",
+          "route_present": true
+        }
+      ],
+      "history": {
+        "config_generation": 1,
+        "first_verified_at": "2026-07-29T10:01:00Z",
+        "session_first_observed_at": "2026-07-29T10:02:00Z",
+        "verification_session": "sess-1"
+      },
+      "state": "awaiting_first_request"
+    },
+    "tracking": {
+      "action": "Run your project and make one API request.",
+      "attribution": "not_enabled",
+      "configuration_behind": false,
+      "first_verified_at": "2026-07-29T10:01:00Z",
+      "folder_available": true,
+      "is_working": false,
+      "label": "Waiting for first request",
+      "last_observed_at": "2026-07-29T10:07:00Z",
+      "sentence": "waiting for the first request",
+      "state": "waiting_for_first_request"
+    }
+  }
+}

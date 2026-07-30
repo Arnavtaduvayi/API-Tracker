@@ -39,6 +39,10 @@ export function ProjectTracking(props: {
   const [confirmUnlink, setConfirmUnlink] = useState(false);
 
   const link = overview?.link ?? null;
+  // The projected status. Always present on a real overview — a project with no
+  // link or no setup is a STATE, not a missing field — so the only `null` here
+  // is "the overview has not loaded yet".
+  const tracking = overview?.tracking ?? null;
 
   const pickFolder = useCallback(async () => {
     setError(null);
@@ -157,28 +161,53 @@ export function ProjectTracking(props: {
             <dt>Folder</dt>
             <dd className="mono">{link.folder_path}</dd>
             <dt>Tracking</dt>
-            <dd>
-              {!link.tracking_enabled ? (
-                "off"
-              ) : overview?.status?.health?.currently_working ? (
-                "on"
-              ) : overview?.status ? (
-                <>needs attention</>
-              ) : (
-                "waiting for setup"
-              )}
+            {/*
+              One field, resolved in Rust. This used to read
+              `overview.status.health.currently_working`, a path
+              `project_tracking_overview` cannot emit — so it was `undefined`
+              for every setup and a verified, actively tracked project rendered
+              "needs attention" permanently (AUD-05). Nothing here interprets a
+              Rust enum; `tracking.label` and `tracking.is_working` come from
+              `CurrentHealth::describe` and `CurrentHealth::is_currently_working`
+              through one projection.
+            */}
+            <dd data-testid="tracking-state" data-state={tracking?.state}>
+              {tracking?.label ?? "unknown"}
             </dd>
             <dt>Last scanned</dt>
             <dd>{link.last_scan_at ?? "never"}</dd>
           </dl>
 
-          {overview?.attribution_paused && (
-            <p className="warnbox">
+          {tracking && !tracking.is_working && (
+            <p
+              className={tracking.state === "tracking_off" ? "notice" : "warnbox"}
+              data-testid="tracking-detail"
+            >
+              {tracking.sentence}
+              {tracking.action && ` ${tracking.action}`}
+            </p>
+          )}
+          {/* Attribution rides BESIDE health: a gateway forwarding without a
+              matching key is still tracking, so this never contradicts an
+              "on" state above (SI-11/SI-12). */}
+          {tracking?.attribution === "paused" && (
+            <p className="warnbox" data-testid="attribution-paused">
               Requests are still being recorded, but credential attribution is paused until the
               vault is unlocked for it.
             </p>
           )}
-          {overview?.scan_stale && (
+          {/* A missing folder is reported as a missing folder. The stale-scan
+              notice below is suppressed for it: an unreadable folder
+              fingerprints differently from a real one, which used to make
+              "your files changed" the sentence for a folder that is not there
+              — and offer a Rescan that fails (AUD-06). */}
+          {overview?.folder_available === false && (
+            <p className="warnbox" data-testid="folder-missing">
+              Tethra cannot find <span className="mono">{link.folder_path}</span>. Choose the
+              folder again if it moved, or unlink it. Your recorded activity is kept either way.
+            </p>
+          )}
+          {overview?.scan_stale && overview.folder_available && (
             <p className="notice" data-testid="scan-stale">
               This project&apos;s dependency or environment files changed since the last scan.
               Rescanning updates what Tethra knows; it does not change your files.
@@ -199,7 +228,7 @@ export function ProjectTracking(props: {
               onClick={() =>
                 void run(() => api.projectRescan(props.projectIdent), "Rescan complete.")
               }
-              disabled={busy}
+              disabled={busy || overview?.folder_available === false}
             >
               Rescan project
             </button>

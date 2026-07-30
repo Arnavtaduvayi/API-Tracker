@@ -194,20 +194,22 @@ pub fn record_applied_generation(
     Ok(())
 }
 
-/// Stamp the last successful local activity refresh.
-pub fn record_activity_refresh(conn: &Connection, link: &mut ProjectFolderLink) -> Result<()> {
-    let now = clock::now_rfc3339();
-    let changed = conn.execute(
-        "UPDATE project_folder_links
-         SET last_activity_refresh_at = ?2, row_version = row_version + 1
-         WHERE project_id = ?1 AND row_version = ?3",
-        params![link.project_id, now, link.row_version],
-    )?;
-    cas_check(changed, link)?;
-    link.last_activity_refresh_at = Some(now);
-    link.row_version += 1;
-    Ok(())
-}
+// There is deliberately no `record_activity_refresh`. The five-second activity
+// poll used to call one, compare-and-swapping `last_activity_refresh_at` and
+// incrementing `row_version` twelve times a minute per open project page — and
+// nothing read the column it wrote. The "Last updated" line comes from the
+// client's own last successful fetch, which is the only place that knows whether
+// the refresh the user is looking at actually landed.
+//
+// The cost was not the write. It was `row_version`: this row's compare-and-swap
+// token is the guard for Disable tracking, Rescan and the applied-generation
+// record, so a poll landing between a caller's read and its write made that
+// caller fail with a raw StateConflict for no product reason (`AUD-03`).
+// Reading activity now leaves the durable configuration byte-for-byte unchanged.
+//
+// The COLUMN stays in the schema and in this struct: existing vaults hold values
+// for it, and dropping a column to remove a write would break the data format
+// for nothing. It is read from the row and never written.
 
 /// Turn tracking for this project's folder on or off without deleting the
 /// project, the linkage, the credentials or the history.

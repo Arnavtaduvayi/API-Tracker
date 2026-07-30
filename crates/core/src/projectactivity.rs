@@ -135,14 +135,21 @@ pub struct ActivityFilter<'a> {
     pub model: Option<&'a str>,
 }
 
+/// Parameter slots every project-scoped read binds *before* its filter values:
+/// `?1` = project id, `?2` = window start, `?3` = exclusive window end
+/// (nullable).
+///
+/// [`ActivityFilter::clauses`] numbers its own placeholders from `?4`, so a
+/// caller binding a different prefix would silently reuse `until` as a filter
+/// value instead of failing. That is why no query in this crate writes its own
+/// project/window predicate: every one of them is built by
+/// [`ActivityFilter::event_scope`] or [`ActivityFilter::usage_scope`].
+pub(crate) const BASE_PARAMS: usize = 3;
+
 impl ActivityFilter<'_> {
     /// Render the filter as SQL conditions over `runtime_request_events e`,
     /// with bound parameters. Parameters are bound, never interpolated.
     fn clauses(&self) -> (String, Vec<&dyn ToSql>) {
-        // Every caller binds (project_id, since, until) as ?1..?3, so the first
-        // filter parameter is ?4. Off-by-one here silently reuses `until` as a
-        // filter value instead of failing, which is why the offset is named.
-        const BASE_PARAMS: usize = 3;
         let mut sql = String::new();
         let mut binds: Vec<&dyn ToSql> = Vec::new();
         // The bound value is the `Option` itself, which rusqlite renders as its
@@ -200,10 +207,10 @@ impl ActivityFilter<'_> {
 
     /// Whether this filter constrains anything.
     ///
-    /// Load-bearing for the series' usage query: with no filter, usage rows are
+    /// Load-bearing for the usage-side queries: with no filter, usage rows are
     /// read directly so that usage whose event row has already been pruned by
     /// retention still counts. With a filter, they must be restricted to events
-    /// that match it — see [`project_series`].
+    /// that match it — see [`ActivityFilter::usage_scope`].
     pub fn is_empty(&self) -> bool {
         self.host.is_none()
             && self.provider.is_none()
@@ -212,6 +219,56 @@ impl ActivityFilter<'_> {
             && self.endpoint.is_none()
             && self.observation_source.is_none()
             && self.model.is_none()
+    }
+
+    /// The complete `WHERE` predicate for a project-scoped, windowed, filtered
+    /// read rooted at `runtime_request_events e`, with its bound parameters.
+    ///
+    /// This is the ONE place the project and window predicates are written.
+    /// Before it existed, `project_series` and `recent_activity` threaded the
+    /// filter while `project_metrics`, `project_cost_coverage` and
+    /// `observed_integrations` each wrote their own project/window predicate and
+    /// took no filter at all — so a page showed a filtered chart beside
+    /// unfiltered totals (`AUD-01`). A shared builder makes "this query forgot
+    /// the filter" impossible to express: there is no other way to scope a read.
+    ///
+    /// Callers bind `(project_id, since, until)` as `?1..?3` — see
+    /// [`BASE_PARAMS`] — and then `params.extend(binds)`.
+    pub(crate) fn event_scope(&self) -> (String, Vec<&dyn ToSql>) {
+        let (extra, binds) = self.clauses();
+        (
+            format!("e.project_id = ?1 AND e.at >= ?2 AND (?3 IS NULL OR e.at < ?3){extra}"),
+            binds,
+        )
+    }
+
+    /// [`ActivityFilter::event_scope`] for a read rooted at
+    /// `gateway_usage_events u` — the token and cost side.
+    ///
+    /// A usage row carries a provider, a model and token counts, but none of the
+    /// request metadata the filter selects on (host, status class, endpoint,
+    /// observation source, credential). So the filter reaches usage through the
+    /// event that produced it.
+    ///
+    /// With NO filter the usage rows are read directly, so usage whose event row
+    /// has already been pruned by retention still counts. With a filter they are
+    /// restricted to matching events, which necessarily drops usage that has no
+    /// event left to match: an unattributable row cannot be said to satisfy a
+    /// filter, and counting it would put the wrong tokens back into a total the
+    /// user narrowed.
+    pub(crate) fn usage_scope(&self) -> (String, Vec<&dyn ToSql>) {
+        let (extra, binds) = self.clauses();
+        let base = "u.project_id = ?1 AND u.at >= ?2 AND (?3 IS NULL OR u.at < ?3)";
+        if self.is_empty() {
+            return (base.to_string(), binds);
+        }
+        (
+            format!(
+                "{base} AND EXISTS (SELECT 1 FROM runtime_request_events e \
+                 WHERE e.id = u.event_id AND e.project_id = ?1{extra})"
+            ),
+            binds,
+        )
     }
 }
 
@@ -229,14 +286,14 @@ pub fn project_series(
     filter: &ActivityFilter<'_>,
 ) -> Result<Vec<ProjectSeriesPoint>> {
     let bucket = granularity.bucket_expr("e.at");
-    let (extra, binds) = filter.clauses();
+    let (scope, binds) = filter.event_scope();
     let sql = format!(
         "SELECT {bucket} AS b, COUNT(*),
                 SUM(CASE WHEN e.status_class IN ('4xx','5xx')
                           OR e.transport_error <> 'none' THEN 1 ELSE 0 END),
                 SUM(e.latency_ms), COUNT(e.latency_ms)
          FROM runtime_request_events e
-         WHERE e.project_id = ?1 AND e.at >= ?2 AND (?3 IS NULL OR e.at < ?3){extra}
+         WHERE {scope}
          GROUP BY b ORDER BY b LIMIT {}",
         MAX_BUCKETS
     );
@@ -271,31 +328,18 @@ pub fn project_series(
 
     // Tokens and cost come from the usage table, bucketed the same way. Usage
     // rows are joined to the event they describe so the filter applies to both.
-    let ubucket = granularity.bucket_expr("u.at");
+    //
     // The filter MUST reach this query too. Restricting only the request query
     // and then merging unfiltered usage into whichever buckets survived reports
     // one host's request count beside every host's tokens and cost — a wrong
     // number, not merely an imprecise one.
-    //
-    // With no filter the usage rows are read directly, so usage whose event row
-    // has already been pruned by retention still counts. With a filter they are
-    // restricted to matching events, which necessarily drops usage that has no
-    // event left to match: an unattributable row cannot be said to satisfy a
-    // filter, and counting it would put the wrong tokens back.
-    let (extra_usage, usage_binds) = filter.clauses();
-    let usage_filter = if filter.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " AND EXISTS (SELECT 1 FROM runtime_request_events e \
-              WHERE e.id = u.event_id AND e.project_id = ?1{extra_usage})"
-        )
-    };
+    let ubucket = granularity.bucket_expr("u.at");
+    let (usage_scope, usage_binds) = filter.usage_scope();
     let usql = format!(
         "SELECT {ubucket} AS b, u.provider_id, u.model, substr(u.at, 1, 10),
                 SUM(u.input_tokens), SUM(u.output_tokens), SUM(u.cached_input_tokens)
          FROM gateway_usage_events u
-         WHERE u.project_id = ?1 AND u.at >= ?2 AND (?3 IS NULL OR u.at < ?3){usage_filter}
+         WHERE {usage_scope}
          GROUP BY b, u.provider_id, u.model
          ORDER BY b LIMIT {}",
         MAX_BUCKETS * 8
@@ -422,7 +466,7 @@ pub fn recent_activity(
     limit: usize,
 ) -> Result<Vec<ActivityRow>> {
     let limit = limit.clamp(1, MAX_RECENT_ROWS);
-    let (extra, binds) = filter.clauses();
+    let (scope, binds) = filter.event_scope();
     let sql = format!(
         "SELECT e.id, e.at, e.host,
                 COALESCE(NULLIF(s.provider_id, ''), s.user_provider),
@@ -433,7 +477,7 @@ pub fn recent_activity(
          FROM runtime_request_events e
          LEFT JOIN observed_api_services s ON s.id = e.service_id
          LEFT JOIN gateway_usage_events u ON u.event_id = e.id
-         WHERE e.project_id = ?1 AND e.at >= ?2 AND (?3 IS NULL OR e.at < ?3){extra}
+         WHERE {scope}
          ORDER BY e.at DESC, e.rowid DESC LIMIT {limit}"
     );
     let mut params: Vec<&dyn ToSql> = vec![&project_id, &since, &before];
@@ -573,25 +617,36 @@ impl ObservedIntegration {
 /// errors, latency, first/last seen — because those are recorded for every
 /// observation. It carries no cost and no credential attribution, and this
 /// function does not invent either.
+///
+/// `filter` narrows this the same way it narrows the chart beside it. This is a
+/// SUMMARY OF THE RESULT SET, not a picker: with a host filter active it lists
+/// that host alone. The values a filter UI offers come from [`activity_facets`],
+/// which is deliberately broader — see its own documentation.
 pub fn observed_integrations(
     conn: &Connection,
     project_id: &str,
     since: &str,
     until: Option<&str>,
+    filter: &ActivityFilter<'_>,
 ) -> Result<Vec<ObservedIntegration>> {
-    let mut stmt = conn.prepare(
+    let (scope, binds) = filter.event_scope();
+    let sql = format!(
         "SELECT e.host, s.provider_id, s.user_provider, s.user_api_name, COUNT(*),
                 SUM(CASE WHEN e.status_class IN ('4xx','5xx')
                           OR e.transport_error <> 'none' THEN 1 ELSE 0 END),
                 SUM(e.latency_ms), COUNT(e.latency_ms), MIN(e.at), MAX(e.at)
          FROM runtime_request_events e
          LEFT JOIN observed_api_services s ON s.id = e.service_id
-         WHERE e.project_id = ?1 AND e.at >= ?2 AND (?3 IS NULL OR e.at < ?3)
+         WHERE {scope}
          GROUP BY e.host, s.provider_id, s.user_provider, s.user_api_name
          ORDER BY COUNT(*) DESC, e.host
-         LIMIT 200",
-    )?;
-    let rows = stmt.query_map(params![project_id, since, until], |r| {
+         LIMIT 200"
+    );
+    let mut params: Vec<&dyn ToSql> = vec![&project_id, &since, &until];
+    params.extend(binds);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |r| {
         let host: String = r.get(0)?;
         let latency_sum: Option<i64> = r.get(6)?;
         let latency_n: i64 = r.get(7)?;
@@ -627,6 +682,26 @@ pub struct ActivityFacets {
 }
 
 /// Collect the filterable values present in the window. Each list is bounded.
+///
+/// # Why this one is NOT filtered
+///
+/// Every other project-activity read takes an [`ActivityFilter`] and describes
+/// the filtered population, because a summary shown beside a filtered chart must
+/// describe the same rows the chart does (`AUD-01`). Facets are the deliberate
+/// exception: they populate the filter controls themselves.
+///
+/// Narrowing them by the current selection would make the controls one-way. Pick
+/// host `api.openai.com` and a self-filtered host list contains only
+/// `api.openai.com`, so there is no control left to pick a different host with
+/// and no way back except "Clear filters". The same applies across dimensions:
+/// choosing a host would empty the model list of every model that host did not
+/// serve, and choosing that model would then be the only model offered.
+///
+/// So facets answer "what exists in this time window?", which is the question a
+/// picker needs, while [`observed_integrations`] answers "what is in the result
+/// you are looking at?", which is the question a summary needs. The two are
+/// different questions and are deliberately allowed to disagree; the time window
+/// is the one bound they share.
 pub fn activity_facets(conn: &Connection, project_id: &str, since: &str) -> Result<ActivityFacets> {
     Ok(ActivityFacets {
         hosts: distinct(
@@ -962,7 +1037,14 @@ mod tests {
         for _ in 0..12 {
             event(&conn, &sid, at, "api.example.com", None, 200, 420);
         }
-        let found = observed_integrations(&conn, "p1", "2000-01-01T00:00:00Z", None).unwrap();
+        let found = observed_integrations(
+            &conn,
+            "p1",
+            "2000-01-01T00:00:00Z",
+            None,
+            &ActivityFilter::default(),
+        )
+        .unwrap();
         assert_eq!(found.len(), 1);
         let it = &found[0];
         assert_eq!(it.host, "api.example.com");
@@ -994,7 +1076,14 @@ mod tests {
             .unwrap()
             .unwrap();
         store::set_service_correction(&conn, &svc.id, None, Some("Acme"), None, None).unwrap();
-        let found = observed_integrations(&conn, "p1", "2000-01-01T00:00:00Z", None).unwrap();
+        let found = observed_integrations(
+            &conn,
+            "p1",
+            "2000-01-01T00:00:00Z",
+            None,
+            &ActivityFilter::default(),
+        )
+        .unwrap();
         assert_eq!(found[0].user_api_name.as_deref(), Some("Acme"));
         assert_eq!(found[0].provider, None, "a name is not a detected provider");
         assert_eq!(found[0].display_name(), "Acme");

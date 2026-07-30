@@ -12,8 +12,9 @@
 //! `vault_meta` records the last processed hour.
 
 use crate::error::Result;
+use crate::projectactivity::ActivityFilter;
 use crate::runtime::store;
-use rusqlite::{params, Connection, Row};
+use rusqlite::{params, Connection, Row, ToSql};
 use serde::Serialize;
 
 const WATERMARK: &str = "runtime_aggregate_watermark";
@@ -161,12 +162,30 @@ pub fn session_metrics(conn: &Connection, session_id: &str) -> Result<Metrics> {
     scope_metrics(conn, "session_id = ?1", session_id, "")
 }
 
+/// Metrics for one project over `[since, until)`, narrowed by `filter`.
+///
+/// Takes the same [`ActivityFilter`] as the chart and the recent table rather
+/// than a bare project id, because these ARE the summary cards rendered beside
+/// them: "Requests", "Error rate" and "Average latency" describing the whole
+/// window while the chart described one host was `AUD-01`. The predicate comes
+/// from [`ActivityFilter::event_scope`], so this query cannot drift from the
+/// others.
+///
+/// Pass `&ActivityFilter::default()` for "the whole project in this window".
 pub fn project_metrics(
     conn: &Connection,
     project_id: &str,
-    since: Option<&str>,
+    since: &str,
+    until: Option<&str>,
+    filter: &ActivityFilter<'_>,
 ) -> Result<Metrics> {
-    scope_metrics(conn, "project_id = ?1", project_id, since.unwrap_or(""))
+    let (scope, binds) = filter.event_scope();
+    // `EVENT_AGG` names its columns unqualified; under the `e` alias SQLite
+    // resolves each of them to `e.<column>`, which is the only table in scope.
+    let sql = format!("SELECT {EVENT_AGG} FROM runtime_request_events e WHERE {scope}");
+    let mut params: Vec<&dyn ToSql> = vec![&project_id, &since, &until];
+    params.extend(binds);
+    Ok(conn.query_row(&sql, params.as_slice(), metrics_from_row)?)
 }
 
 /// Overview metrics across all services since `since`.

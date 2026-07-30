@@ -28,6 +28,7 @@ pub mod origin;
 pub mod plan;
 pub mod project;
 pub mod state;
+pub mod statusview;
 pub mod undo;
 pub mod verify;
 

@@ -4012,31 +4012,14 @@ struct TrackingHistoryDto {
     sentence: Option<String>,
 }
 
-fn health_kind(health: &tracking_state::CurrentHealth) -> &'static str {
-    use tracking_state::CurrentHealth as H;
-    match health {
-        H::VerifiedAndActive => "verified_and_active",
-        H::PartiallyTracked { .. } => "partially_tracked",
-        H::VerifiedPreviouslyGatewayDown => "verified_previously_gateway_down",
-        H::VerifiedPreviouslyIdle { .. } => "verified_previously_idle",
-        H::WaitingForFirstRequest => "waiting_for_first_request",
-        // An apply that started and never reported an outcome. It is its own
-        // kind because the row it describes is not waiting for anything the
-        // user can do by making a request (`NEW-35`).
-        H::ApplyIncomplete => "apply_incomplete",
-        H::NeedsRestart => "needs_restart",
-        H::ConfigurationChanged { .. } => "configuration_changed",
-        H::GatewayUnavailable => "gateway_unavailable",
-        H::NeedsAttention { .. } => "needs_attention",
-        H::AttributionPaused => "attribution_paused",
-        H::NotConfigured => "not_configured",
-        H::Unsupported => "unsupported",
-    }
-}
-
 fn health_dto(health: &tracking_state::CurrentHealth) -> TrackingHealthDto {
     TrackingHealthDto {
-        kind: health_kind(health).to_string(),
+        // `CurrentHealth::kind`, not a copy of its match. This function used to
+        // hold its own `health_kind`, so a variant added in the tracking crate
+        // and forgotten here would have serialized under a name no surface
+        // matched — silently, because a `&'static str` mismatch is not a type
+        // error.
+        kind: health.kind().to_string(),
         sentence: health.describe(),
         currently_working: health.is_currently_working(),
     }
@@ -4562,15 +4545,19 @@ fn project_activity(
     let range = tracking_project::TimeRange::parse(&range);
     with_vault_background(&state, |vault| {
         let project = vault.get_project(&project)?;
-        let snapshot = tracking_project::activity_only(
+        // Read-only, deliberately. This command used to stamp
+        // `last_activity_refresh_at` on the linkage row afterwards, which
+        // bumped the compare-and-swap token that guards Disable tracking and
+        // Rescan — twelve times a minute, for a column nothing read
+        // (`AUD-03`). "Last updated" comes from the client's own last
+        // successful fetch.
+        tracking_project::activity_only(
             vault.connection(),
             &project.id,
             range,
             &filter.as_filter(),
             limit.unwrap_or(50),
-        )?;
-        tracking_project::note_activity_refresh(vault.connection(), &project.id);
-        Ok(snapshot)
+        )
     })
 }
 

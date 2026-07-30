@@ -58,6 +58,7 @@ use crate::detect::{self, ProjectDetection};
 use crate::health;
 use crate::plan::{self, Selections, TrackingPlan};
 use crate::state::{self, GatewayLiveness, TrackingSetup, TrackingStatusReport};
+use crate::statusview::{self, StatusContext, TrackingStatusView};
 
 /// Filenames whose size and modification time make up a folder's scan
 /// fingerprint: the dependency manifests and env-class files whose contents
@@ -207,18 +208,52 @@ pub struct ProjectOverview {
     /// `None` when the project has never had a folder selected — the state the
     /// "Select project folder" call to action exists for.
     pub link: Option<ProjectFolderLink>,
-    /// Present-tense health from [`crate::health`], or `None` when there is no
-    /// setup for the linked folder yet.
+    /// **What a surface renders.** The projection of present-tense health into
+    /// a state, a label, a sentence and an action, produced in Rust by
+    /// [`TrackingStatusView::of`] from the report below.
+    ///
+    /// Always present: a project with no link or no setup is a state
+    /// ([`statusview::TrackingStateTag::NotLinked`],
+    /// [`statusview::TrackingStateTag::AwaitingSetup`]), not a missing field. A
+    /// surface that has to test for absence before it can read a status is a
+    /// surface that can read the wrong absence — which is exactly what happened
+    /// when the project page reached into `status` for a key that command
+    /// cannot emit and got "needs attention" forever (`AUD-05`).
+    pub tracking: TrackingStatusView,
+    /// The raw present-tense report from [`crate::health`], or `None` when
+    /// there is no setup for the linked folder yet.
+    ///
+    /// Kept for diagnostics and for callers that want the per-provider
+    /// freshness detail. It is NOT what a surface switches on: `current` is an
+    /// internally tagged Rust enum, and reading it from TypeScript is a second
+    /// interpretation of health with nothing to check it against. Read
+    /// [`ProjectOverview::tracking`].
     pub status: Option<TrackingStatusReport>,
     /// True when the folder's manifests have changed since the last scan, so a
     /// rescan is worth offering. A hint; it authorizes nothing.
+    ///
+    /// Only ever true for a folder that is actually there: an unreadable folder
+    /// fingerprints to a sentinel that differs from every real one, which used
+    /// to make a deleted folder report "your files changed" and offer a rescan
+    /// that fails. See [`ProjectOverview::folder_available`].
     pub scan_stale: bool,
+    /// Whether the linked folder is readable right now.
+    ///
+    /// `true` when there is no link at all — there is no missing folder to
+    /// report for a project that never chose one.
+    pub folder_available: bool,
     /// True when the configuration an apply reached is behind the setup's
     /// current generation.
     pub configuration_behind: bool,
     pub detected_credentials: Vec<DetectedCredential>,
     /// How many detections still want the user's attention.
     pub credentials_needing_details: usize,
+    /// Whether the gateway is forwarding without a usable matching key.
+    ///
+    /// A machine-level fact, true for every project on the machine. Whether it
+    /// MEANS anything for this project is
+    /// [`TrackingStatusView::attribution`], which is `not_enabled` for a setup
+    /// that never asked for attribution.
     pub attribution_paused: bool,
 }
 
@@ -828,21 +863,31 @@ pub fn overview(conn: &Connection, data_dir: &Path, project_id: &str) -> Result<
         .iter()
         .filter(|d| d.status.needs_attention())
         .count();
+    let attribution_paused = health::attribution_is_paused(data_dir);
 
     let mut status = None;
     let mut configuration_behind = false;
     let mut scan_stale = false;
+    let mut folder_available = true;
+    let mut attribution_requested = false;
 
     if let Some(link) = &link {
         let folder = PathBuf::from(&link.folder_path);
+        // Asked first, because the fingerprint below cannot tell "these files
+        // changed" from "there are no files to look at": an unreadable folder
+        // hashes to the empty-entry sentinel, which differs from any real
+        // fingerprint and so reported a deleted folder as an edited one
+        // (`AUD-06`).
+        folder_available = folder_is_available(&folder);
         scan_stale = match &link.scan_fingerprint {
-            Some(previous) => folder_fingerprint(&folder) != *previous,
+            Some(previous) => folder_available && folder_fingerprint(&folder) != *previous,
             // Never scanned: not "stale", just not done yet.
             None => false,
         };
         if let Some(mut setup) = state::find_setup(conn, project_id, Path::new(&link.folder_path))?
         {
             configuration_behind = setup.config_generation > link.applied_generation;
+            attribution_requested = statusview::attribution_was_requested(&setup);
             // Present-tense health has exactly one resolver. Reading
             // `setup.state` here would report a setup as tracking after the
             // service was killed.
@@ -851,22 +896,66 @@ pub fn overview(conn: &Connection, data_dir: &Path, project_id: &str) -> Result<
         }
     }
 
+    // The projection is built HERE, from the report the resolver just produced,
+    // so the frontend renders a finished answer instead of re-deriving one from
+    // an enum it cannot type-check (`AUD-05`).
+    let tracking = TrackingStatusView::of(
+        status.as_ref(),
+        &StatusContext {
+            linked: link.is_some(),
+            tracking_enabled: link.as_ref().is_some_and(|l| l.tracking_enabled),
+            folder_available,
+            configuration_behind,
+            attribution_paused,
+            attribution_requested,
+        },
+    );
+
     Ok(ProjectOverview {
         project_id: project_id.to_string(),
         link,
+        tracking,
         status,
         scan_stale,
+        folder_available,
         configuration_behind,
         detected_credentials,
         credentials_needing_details,
-        attribution_paused: health::attribution_is_paused(data_dir),
+        attribution_paused,
     })
+}
+
+/// Whether a linked folder is readable as a directory right now.
+///
+/// `metadata` rather than `symlink_metadata`: a folder the user linked through
+/// a symlink is still their folder, and refusing to follow it here would report
+/// a present folder as missing. What must not be followed is a symlink found
+/// *inside* a scan, which is a different question answered by the readers.
+fn folder_is_available(folder: &Path) -> bool {
+    std::fs::metadata(folder)
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
 }
 
 /// The live activity snapshot: observations only.
 ///
 /// Deliberately performs no tracking-state write, no service probe and no
 /// filesystem access, so it is safe on a short timer.
+///
+/// # One filter, one window, every figure
+///
+/// `range` and `filter` are resolved ONCE here and handed to every query below.
+/// That is the whole point of this function: the chart, the recent table, the
+/// summary cards, the cost-coverage block and the observed integrations are
+/// rendered together on one screen, so they must describe one population. They
+/// did not — the filter reached the series and the table while the metrics, the
+/// cost coverage and the integrations described the unfiltered window, putting a
+/// dollar figure labelled "Estimated known cost" beside a chart of a different
+/// dataset (`AUD-01`).
+///
+/// `activity_facets` is the deliberate exception and takes no filter: it
+/// populates the filter controls themselves, and a self-filtered control cannot
+/// be changed. See [`projectactivity::activity_facets`].
 pub fn activity_only(
     conn: &Connection,
     project_id: &str,
@@ -874,22 +963,31 @@ pub fn activity_only(
     filter: &ActivityFilter<'_>,
     recent_limit: usize,
 ) -> Result<ProjectActivitySnapshot> {
+    // Computed once. Calling `range.since()` per query would give each of them
+    // a slightly later boundary than the last, so figures meant to agree could
+    // disagree by whatever rows landed between two clock reads.
     let since = range.since();
+    let until: Option<&str> = None;
     let granularity = range.granularity();
-    let metrics = aggregate::project_metrics(conn, project_id, Some(&since))?;
+
+    let metrics = aggregate::project_metrics(conn, project_id, &since, until, filter)?;
     let series =
-        projectactivity::project_series(conn, project_id, &since, None, granularity, filter)?;
-    let integrations = projectactivity::observed_integrations(conn, project_id, &since, None)?;
+        projectactivity::project_series(conn, project_id, &since, until, granularity, filter)?;
+    let integrations =
+        projectactivity::observed_integrations(conn, project_id, &since, until, filter)?;
     let recent =
-        projectactivity::recent_activity(conn, project_id, &since, None, filter, recent_limit)?;
-    let cost = projectcost::project_cost_coverage(conn, project_id, &since, None)?;
+        projectactivity::recent_activity(conn, project_id, &since, until, filter, recent_limit)?;
+    let cost = projectcost::project_cost_coverage(conn, project_id, &since, until, filter)?;
     let facets = projectactivity::activity_facets(conn, project_id, &since)?;
 
     Ok(ProjectActivitySnapshot {
         project_id: project_id.to_string(),
+        // "Nothing was observed" now means "nothing matched the filter", which
+        // is what the surface needs: with a filter that excludes everything the
+        // page says so instead of rendering empty cards.
         no_observations: metrics.total == 0,
         since,
-        until: None,
+        until: until.map(str::to_string),
         granularity,
         metrics,
         series,
@@ -899,17 +997,6 @@ pub fn activity_only(
         facets,
         refreshed_at: clock::now_rfc3339(),
     })
-}
-
-/// Stamp a successful activity refresh on the linkage row, best effort.
-///
-/// A refresh that read fine but could not record that it did is still a
-/// successful refresh, so a conflict here is swallowed rather than turned into
-/// a failed refresh the user would see.
-pub fn note_activity_refresh(conn: &Connection, project_id: &str) {
-    if let Ok(Some(mut link)) = projectlink::get_link(conn, project_id) {
-        let _ = projectlink::record_activity_refresh(conn, &mut link);
-    }
 }
 
 /// Whether this folder is already linked, scanned and applied at the current

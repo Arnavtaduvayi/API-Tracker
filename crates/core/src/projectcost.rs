@@ -33,11 +33,12 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, ToSql};
 use serde::Serialize;
 
 use crate::error::Result;
 use crate::pricing::{self, PricingRecord};
+use crate::projectactivity::ActivityFilter;
 
 /// The currency every local estimate is summed in. Records in any other
 /// currency are reported as unpriced rather than converted or mixed, matching
@@ -243,18 +244,33 @@ struct UsageGroup {
     cached_input_tokens: Option<i64>,
 }
 
-/// Estimate cost for `project_id` over `[since, until)`.
+/// Estimate cost for `project_id` over `[since, until)`, narrowed by `filter`.
 ///
 /// `since` / `until` are RFC 3339 timestamps compared as strings against
 /// `gateway_usage_events.at`, which is what `idx_gue_project_at` (schema v20)
-/// indexes. Pass `until = None` for "up to now".
+/// indexes. Pass `until = None` for "up to now", and
+/// `&ActivityFilter::default()` for the whole project.
+///
+/// # Filtered cost is cost, not a share of cost
+///
+/// Every figure below is computed from the filtered rows alone: the estimate,
+/// the priced and known token totals, the unpriced counts, the
+/// unknown-usage count, and therefore `token_coverage`, whose denominator is the
+/// filtered known-token total. Nothing here is scaled or apportioned from an
+/// unfiltered figure — a coverage percentage computed over traffic the user
+/// filtered out is a wrong number, not an approximate one (`AUD-01`).
+///
+/// The distinctions the unfiltered call preserves are preserved unchanged:
+/// priced vs known-but-unpriced vs never-reported, a floor never presented as a
+/// total, and a known zero never rendered as unknown.
 pub fn project_cost_coverage(
     conn: &Connection,
     project_id: &str,
     since: &str,
     until: Option<&str>,
+    filter: &ActivityFilter<'_>,
 ) -> Result<ProjectCostCoverage> {
-    let groups = load_groups(conn, project_id, since, until)?;
+    let groups = load_groups(conn, project_id, since, until, filter)?;
     let truncated = groups.len() > MAX_GROUPS;
     let groups = &groups[..groups.len().min(MAX_GROUPS)];
 
@@ -540,36 +556,48 @@ fn load_groups(
     project_id: &str,
     since: &str,
     until: Option<&str>,
+    filter: &ActivityFilter<'_>,
 ) -> Result<Vec<UsageGroup>> {
+    // The scope — project, window, and the filter reaching usage through the
+    // event that produced it — comes from the shared builder every other
+    // project-activity read uses, so a filtered cost total cannot describe a
+    // different population from the filtered chart above it.
+    let (scope, binds) = filter.usage_scope();
     // `SUM` over a column that is NULL for every row in the group yields NULL,
     // which is exactly the distinction that matters: it means "nobody reported
     // this", not "the total was zero". COALESCE(...,0) here would erase it.
-    let mut stmt = conn.prepare(
-        "SELECT provider_id, model, substr(at, 1, 10) AS day, COUNT(*),
-                SUM(CASE WHEN input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+    //
+    // The row cap is interpolated rather than bound: `clauses()` numbers its
+    // placeholders from ?4 upwards, so a trailing `?4` would collide with the
+    // first filter value. It is a `usize` constant, never user input.
+    let sql = format!(
+        "SELECT u.provider_id, u.model, substr(u.at, 1, 10) AS day, COUNT(*),
+                SUM(CASE WHEN u.input_tokens IS NOT NULL OR u.output_tokens IS NOT NULL
                          THEN 1 ELSE 0 END),
-                SUM(input_tokens), SUM(output_tokens), SUM(cached_input_tokens)
-         FROM gateway_usage_events
-         WHERE project_id = ?1 AND at >= ?2 AND (?3 IS NULL OR at < ?3)
-         GROUP BY provider_id, model, day
-         ORDER BY day, provider_id, model
-         LIMIT ?4",
-    )?;
-    let rows = stmt.query_map(
-        params![project_id, since, until, MAX_GROUPS as i64 + 1],
-        |r| {
-            Ok(UsageGroup {
-                provider: r.get(0)?,
-                model: r.get(1)?,
-                day: r.get(2)?,
-                requests: r.get(3)?,
-                with_usage: r.get(4)?,
-                input_tokens: r.get(5)?,
-                output_tokens: r.get(6)?,
-                cached_input_tokens: r.get(7)?,
-            })
-        },
-    )?;
+                SUM(u.input_tokens), SUM(u.output_tokens), SUM(u.cached_input_tokens)
+         FROM gateway_usage_events u
+         WHERE {scope}
+         GROUP BY u.provider_id, u.model, day
+         ORDER BY day, u.provider_id, u.model
+         LIMIT {}",
+        MAX_GROUPS + 1
+    );
+    let mut params: Vec<&dyn ToSql> = vec![&project_id, &since, &until];
+    params.extend(binds);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params.as_slice(), |r| {
+        Ok(UsageGroup {
+            provider: r.get(0)?,
+            model: r.get(1)?,
+            day: r.get(2)?,
+            requests: r.get(3)?,
+            with_usage: r.get(4)?,
+            input_tokens: r.get(5)?,
+            output_tokens: r.get(6)?,
+            cached_input_tokens: r.get(7)?,
+        })
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -578,6 +606,7 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::runtime::store::testutil;
+    use rusqlite::params;
 
     fn mem() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -628,7 +657,14 @@ mod tests {
     }
 
     fn coverage(conn: &Connection) -> ProjectCostCoverage {
-        project_cost_coverage(conn, "p1", "2000-01-01T00:00:00Z", None).unwrap()
+        project_cost_coverage(
+            conn,
+            "p1",
+            "2000-01-01T00:00:00Z",
+            None,
+            &ActivityFilter::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -1243,6 +1279,7 @@ mod tests {
             "p1",
             "2026-07-15T00:00:00Z",
             Some("2026-07-25T00:00:00Z"),
+            &ActivityFilter::default(),
         )
         .unwrap();
         assert_eq!(windowed.priced_requests, 1);

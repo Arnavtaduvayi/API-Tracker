@@ -4,7 +4,7 @@
 // model must never render as "$0.00", an unknown provider must keep its
 // universal metadata, and a partial total must be labelled as a floor.
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ProjectActivitySnapshot,
@@ -509,5 +509,51 @@ describe("ProjectActivity", () => {
     mocked.projectActivity.mockResolvedValue(snapshot());
     render(<ProjectActivity projectIdent="p1" enabled={false} />);
     expect(mocked.projectActivity).not.toHaveBeenCalled();
+  });
+
+  // AUD-08 — ADR 0029 says Refresh "resolves health"; it only re-read
+  // observations, so a gateway that died with the page open went unreported
+  // until the user navigated away and back.
+  it("manual Refresh re-resolves health as well as re-reading observations", async () => {
+    mocked.projectActivity.mockResolvedValue(snapshot());
+    const onRefreshHealth = vi.fn();
+    render(<ProjectActivity projectIdent="p1" enabled onRefreshHealth={onRefreshHealth} />);
+    await screen.findByTestId("summary-cards");
+    const readsBefore = mocked.projectActivity.mock.calls.length;
+    expect(onRefreshHealth).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByText("Refresh"));
+
+    await waitFor(() => expect(onRefreshHealth).toHaveBeenCalledTimes(1));
+    expect(mocked.projectActivity.mock.calls.length).toBeGreaterThan(readsBefore);
+  });
+
+  it("the five-second timer refreshes observations only, never health", async () => {
+    vi.useFakeTimers();
+    try {
+      mocked.projectActivity.mockResolvedValue(snapshot());
+      const onRefreshHealth = vi.fn();
+      render(<ProjectActivity projectIdent="p1" enabled onRefreshHealth={onRefreshHealth} />);
+      // Several ticks of the shipped cadence.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(mocked.projectActivity.mock.calls.length).toBeGreaterThan(1);
+      expect(
+        onRefreshHealth,
+        "resolving health performs guarded writes and probes the service; it does \
+not belong on a timer",
+      ).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("works without a health-refresh hook", async () => {
+    mocked.projectActivity.mockResolvedValue(snapshot());
+    render(<ProjectActivity projectIdent="p1" enabled />);
+    await screen.findByTestId("summary-cards");
+    fireEvent.click(screen.getByText("Refresh"));
+    await waitFor(() => expect(mocked.projectActivity.mock.calls.length).toBeGreaterThan(1));
   });
 });

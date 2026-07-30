@@ -49,7 +49,23 @@ const METRICS: ChartMetric[] = [
   "cost",
 ];
 
-export function ProjectActivity(props: { projectIdent: string; enabled: boolean }) {
+export function ProjectActivity(props: {
+  projectIdent: string;
+  enabled: boolean;
+  /**
+   * Re-resolve tracking and gateway health. Invoked by the manual Refresh
+   * button only — never by the five-second timer, which calls the read-only
+   * snapshot command instead.
+   *
+   * ADR 0029 says Refresh "resolves health", and it did not: Refresh re-read
+   * observations while the health line beside them stayed as it was until the
+   * user navigated away and back, so a gateway that died with the page open
+   * went unreported indefinitely (AUD-08). This runs
+   * `project_tracking_overview` and nothing else: no detection, no project
+   * file, no service install, no configuration apply.
+   */
+  onRefreshHealth?: () => void;
+}) {
   const [range, setRange] = useState("24h");
   const [metric, setMetric] = useState<ChartMetric>("requests");
   const [filter, setFilter] = useState<ProjectActivityFilter>({});
@@ -64,6 +80,12 @@ export function ProjectActivity(props: { projectIdent: string; enabled: boolean 
 
   const live = useLiveRefresh<ProjectActivitySnapshot>(fetcher, { enabled: props.enabled });
   const snap = live.data;
+
+  const { onRefreshHealth } = props;
+  const refreshAll = useCallback(() => {
+    void live.refresh();
+    onRefreshHealth?.();
+  }, [live, onRefreshHealth]);
 
   const onFilterChange = useCallback((key: keyof ProjectActivityFilter, value: string) => {
     setFilter((prev) => ({ ...prev, [key]: value === "" ? null : value }));
@@ -93,7 +115,7 @@ export function ProjectActivity(props: { projectIdent: string; enabled: boolean 
             ))}
           </select>
         </label>
-        <button onClick={() => void live.refresh()} disabled={live.refreshing}>
+        <button onClick={refreshAll} disabled={live.refreshing}>
           {live.refreshing ? "Refreshing…" : "Refresh"}
         </button>
         <span className="muted" aria-live="polite">

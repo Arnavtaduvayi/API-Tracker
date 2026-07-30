@@ -276,6 +276,19 @@ pub enum CurrentHealth {
     /// A route or link this setup configured has gone away.
     ConfigurationChanged {
         detail: String,
+        /// A gateway route this setup configured is gone or disabled, so
+        /// nothing will forward for that provider.
+        ///
+        /// Carried as its own flag rather than left for a reader to recover
+        /// from `detail`: the two causes need different sentences ("the
+        /// destination Tethra registered is gone" vs "this project is no
+        /// longer attached to it"), and a surface that re-derived the
+        /// distinction by parsing prose would be a second interpretation of
+        /// health living outside this module.
+        route_missing: bool,
+        /// The project link binding this project's traffic to that route is
+        /// gone. Both flags can be true at once.
+        link_missing: bool,
     },
     /// The gateway is not answering and this setup was never verified.
     GatewayUnavailable,
@@ -314,7 +327,7 @@ impl CurrentHealth {
                                                it"
             .into(),
             CurrentHealth::NeedsRestart => "restart your project, then make one request".into(),
-            CurrentHealth::ConfigurationChanged { detail } => {
+            CurrentHealth::ConfigurationChanged { detail, .. } => {
                 format!("configuration changed since verification — {detail}")
             }
             CurrentHealth::GatewayUnavailable => "the local tracking service is not running".into(),
@@ -336,6 +349,33 @@ impl CurrentHealth {
             self,
             CurrentHealth::VerifiedAndActive | CurrentHealth::PartiallyTracked { .. }
         )
+    }
+
+    /// The stable machine tag for this variant — byte-for-byte the token
+    /// `serde` writes into the `kind` field, because both come from the
+    /// `#[serde(tag = "kind", rename_all = "snake_case")]` naming above.
+    ///
+    /// It exists as a function so there is ONE answer. The desktop's
+    /// `TrackingStatusDto` used to carry a hand-written copy of this match in
+    /// `main.rs`; a variant added here and forgotten there would have
+    /// serialized under one name on one command and another name on the next.
+    /// Every surface that needs the tag calls this.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            CurrentHealth::VerifiedAndActive => "verified_and_active",
+            CurrentHealth::PartiallyTracked { .. } => "partially_tracked",
+            CurrentHealth::VerifiedPreviouslyGatewayDown => "verified_previously_gateway_down",
+            CurrentHealth::VerifiedPreviouslyIdle { .. } => "verified_previously_idle",
+            CurrentHealth::WaitingForFirstRequest => "waiting_for_first_request",
+            CurrentHealth::ApplyIncomplete => "apply_incomplete",
+            CurrentHealth::NeedsRestart => "needs_restart",
+            CurrentHealth::ConfigurationChanged { .. } => "configuration_changed",
+            CurrentHealth::GatewayUnavailable => "gateway_unavailable",
+            CurrentHealth::NeedsAttention { .. } => "needs_attention",
+            CurrentHealth::AttributionPaused => "attribution_paused",
+            CurrentHealth::NotConfigured => "not_configured",
+            CurrentHealth::Unsupported => "unsupported",
+        }
     }
 }
 
@@ -1406,15 +1446,30 @@ fn derive_health(
         .map(|f| f.provider_id.as_str())
         .collect();
     if !missing.is_empty() {
+        // WHICH of the two went missing is decided here, where the evidence
+        // is, and carried on the variant. A surface needs it to say the right
+        // sentence, and re-deriving it downstream would put a second reading
+        // of health outside this function.
+        let route_missing = freshness.iter().any(|f| !f.route_present);
+        let link_missing = freshness.iter().any(|f| !f.link_present);
         // Name the providers rather than counting them: "the route for
         // supabase is gone" is actionable, "1 of 3 routes is gone" is not.
+        let what = match (route_missing, link_missing) {
+            (true, true) => "the route and the project link",
+            (true, false) => "the route",
+            _ => "the project link",
+        };
         let detail = format!(
-            "the route or project link for {} is gone ({} of {} configured providers)",
+            "{what} for {} is gone ({} of {} configured providers)",
             missing.join(", "),
             missing.len(),
             total
         );
-        return CurrentHealth::ConfigurationChanged { detail };
+        return CurrentHealth::ConfigurationChanged {
+            detail,
+            route_missing,
+            link_missing,
+        };
     }
 
     match liveness {

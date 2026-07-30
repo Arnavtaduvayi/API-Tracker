@@ -266,7 +266,15 @@ export function ProjectDetail(props: {
       />
 
       {overview?.link && overview.link.tracking_enabled && (
-        <ProjectActivity projectIdent={props.ident} enabled={!project.archived} />
+        <ProjectActivity
+          projectIdent={props.ident}
+          enabled={!project.archived}
+          // Manual Refresh re-resolves health as well as re-reading
+          // observations, which is what ADR 0029 always said it did (AUD-08).
+          // `reloadOverview` calls `project_tracking_overview` and nothing
+          // else — no detection, no file write, no service install, no apply.
+          onRefreshHealth={() => void reloadOverview()}
+        />
       )}
 
       <h2>Credentials</h2>

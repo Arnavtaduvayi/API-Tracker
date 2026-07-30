@@ -1672,11 +1672,140 @@ export interface LinkOutcome {
   detected_credentials: DetectedCredential[];
 }
 
+// --- The project tracking-status contract ------------------------------
+//
+// These describe `api_tracker_tracking::state` and
+// `api_tracker_tracking::statusview` as `project_tracking_overview` ACTUALLY
+// serializes them, and they are pinned by a Rust contract test
+// (`crates/tracking/tests/status_contract.rs`) that serializes the real DTO and
+// asserts every field name and tag below. That test exists because the previous
+// declaration here was the DTO of a DIFFERENT command (`tracking_status`), so
+// the project page read `status.health.currently_working` — a key this payload
+// cannot contain — and reported a healthy project as needing attention forever
+// (`AUD-05`). A hand-written interface that nothing checks is how that happened;
+// do not add a field here without adding it to that test.
+
+/** `state::TrackingState` — the persisted cache, re-derived on every read. */
+export type TrackingSetupState =
+  | "not_configured"
+  | "scanning"
+  | "ready_to_configure"
+  | "applying"
+  | "awaiting_restart"
+  | "awaiting_first_request"
+  | "traffic_observed"
+  | "partially_observed"
+  | "needs_attention"
+  | "unsupported";
+
+/** `state::ProviderFreshness`. */
+export interface ProviderFreshness {
+  provider_id: string;
+  last_observed_at: string | null;
+  route_present: boolean;
+  link_present: boolean;
+  fresh: boolean;
+}
+
+/** `state::VerificationHistory` — what was true before, never instead of now. */
+export interface VerificationHistory {
+  first_verified_at: string | null;
+  session_first_observed_at: string | null;
+  verification_session: string | null;
+  config_generation: number;
+}
+
+/**
+ * `state::CurrentHealth`, internally tagged on `kind` exactly as
+ * `#[serde(tag = "kind", rename_all = "snake_case")]` writes it.
+ *
+ * A discriminated union rather than `{ kind: string }` so that reading a
+ * payload field the variant does not carry is a compile error. Nothing in the
+ * app should switch on this: read `ProjectOverview.tracking`, which is the same
+ * information already projected in Rust.
+ */
+export type CurrentHealth =
+  | { kind: "verified_and_active" }
+  | { kind: "partially_tracked"; observed: number; total: number }
+  | { kind: "verified_previously_gateway_down" }
+  | { kind: "verified_previously_idle"; last_observed_at: string }
+  | { kind: "waiting_for_first_request" }
+  | { kind: "apply_incomplete" }
+  | { kind: "needs_restart" }
+  | {
+      kind: "configuration_changed";
+      detail: string;
+      route_missing: boolean;
+      link_missing: boolean;
+    }
+  | { kind: "gateway_unavailable" }
+  | { kind: "needs_attention"; reason: string }
+  | { kind: "attribution_paused" }
+  | { kind: "not_configured" }
+  | { kind: "unsupported" };
+
+/** `state::TrackingStatusReport` — the raw resolver output. */
+export interface TrackingStatusReport {
+  current: CurrentHealth;
+  history: VerificationHistory;
+  freshness: ProviderFreshness[];
+  state: TrackingSetupState;
+}
+
+/** `statusview::TrackingStateTag` — the product state a surface switches on. */
+export type TrackingStateTag =
+  | "not_linked"
+  | "tracking_off"
+  | "folder_missing"
+  | "awaiting_setup"
+  | "tracking_on"
+  | "partially_tracked"
+  | "waiting_for_first_request"
+  | "restart_required"
+  | "gateway_unavailable"
+  | "route_unavailable"
+  | "project_link_unavailable"
+  | "idle"
+  | "configuration_changed"
+  | "attribution_paused"
+  | "setup_incomplete"
+  | "needs_attention"
+  | "unsupported";
+
+/** `statusview::AttributionState`. Reported beside health, never as health. */
+export type AttributionState = "not_enabled" | "active" | "paused";
+
+/**
+ * `statusview::TrackingStatusView` — what the project page renders.
+ *
+ * Every field is present for every state, including "no folder linked" and "no
+ * setup yet", so a surface never has to test for absence before it can say what
+ * is true. `is_working` is `CurrentHealth::is_currently_working` and is the ONE
+ * answer to "is tracking on?"; `last_observed_at` is history and must never be
+ * used to derive it.
+ */
+export interface TrackingStatusView {
+  state: TrackingStateTag;
+  label: string;
+  is_working: boolean;
+  sentence: string;
+  action: string | null;
+  last_observed_at: string | null;
+  first_verified_at: string | null;
+  attribution: AttributionState;
+  configuration_behind: boolean;
+  folder_available: boolean;
+}
+
 export interface ProjectOverview {
   project_id: string;
   link: ProjectFolderLink | null;
-  status: TrackingStatus | null;
+  /** The projected status. This is what a surface renders. */
+  tracking: TrackingStatusView;
+  /** The raw resolver output, for diagnostics. Not what a surface switches on. */
+  status: TrackingStatusReport | null;
   scan_stale: boolean;
+  folder_available: boolean;
   configuration_behind: boolean;
   detected_credentials: DetectedCredential[];
   credentials_needing_details: number;
