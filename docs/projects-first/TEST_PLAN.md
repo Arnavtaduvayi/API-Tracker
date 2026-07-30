@@ -138,7 +138,7 @@ payload.
 | Test | Holds |
 |---|---|
 | `the_overview_status_is_a_tracking_status_report_with_no_health_key` | `status.current.kind` exists; `status.health`, `status.health.currently_working`, `setup_id` and `watch` do not |
-| `the_projected_view_is_present_and_complete_for_every_state` | `tracking` is an object with all ten fields for all 19 fixtures, never null |
+| `the_projected_view_is_present_and_complete_for_every_state` | `tracking` is an object with all eleven fields for all 19 fixtures, never null |
 | `every_user_visible_state_projects_to_its_label` | the state token, label and `is_working` for every user-visible state |
 | `attribution_is_beside_health_not_instead_of_it` | paused/active/not-enabled; a paused key never makes `is_working` false |
 | `historical_traffic_cannot_create_present_tense_health` | observations present, gateway down ⇒ not working; idle ⇒ no action |
@@ -190,7 +190,7 @@ the negative control that fails if any of them equals its unfiltered counterpart
 | `an_edited_folder_is_still_reported_as_stale` | the negative control for the row above |
 | `the_overview_re_resolves_health_instead_of_reading_the_cached_row` | the cached row says `traffic_observed`; nothing is listening; health says so |
 
-## Frontend — `ProjectTrackingStatus.test.tsx` (15) — AUD-05
+## Frontend — `ProjectTrackingStatus.test.tsx` (17) — AUD-05
 
 Every fixture is bytes Rust wrote (`src/test/fixtures/project-overview.generated.json`,
 generated and verified by `status_contract.rs`). Covers: the projected object
@@ -227,12 +227,12 @@ frontend        new: 64        (18 + 15 + 15 + 16)
 targeted remediation (AUD-05 / AUD-01 / AUD-03 / AUD-06 / AUD-08)
 crates/tracking new: 33        (10 status_contract + 10 filter consistency
                                 + 13 live_activity_readonly)
-frontend        new: 21        (15 ProjectTrackingStatus + 6 ProjectActivity)
+frontend        new: 23        (17 ProjectTrackingStatus + 6 ProjectActivity)
                      ----
-                     54
+                     56
 
-                total new: 191
+                total new: 193
 ```
 
-Whole-suite totals on the remediated head: **1 486** Rust tests and **259**
+Whole-suite totals on the remediated head: **1 486** Rust tests and **261**
 frontend tests, 0 failures.

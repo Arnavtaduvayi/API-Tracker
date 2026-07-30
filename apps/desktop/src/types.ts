@@ -1787,6 +1787,9 @@ export type AttributionState = "not_enabled" | "active" | "paused";
 export interface TrackingStatusView {
   state: TrackingStateTag;
   label: string;
+  /** Whether `state` is something to act on. NOT `!is_working`: off, idle,
+   *  waiting and unsupported are all "not working" and none is a fault. */
+  is_fault: boolean;
   is_working: boolean;
   sentence: string;
   action: string | null;

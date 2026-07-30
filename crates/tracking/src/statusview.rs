@@ -214,6 +214,14 @@ pub struct TrackingStatusView {
     /// The short label for `state`, already resolved so no surface has to own
     /// a mapping from token to English.
     pub label: String,
+    /// Whether `state` is something the user should act on, for styling.
+    ///
+    /// Resolved here so a surface does not have to sort the states itself. It is
+    /// NOT `!is_working`: a project the user switched off, one that is idle, one
+    /// waiting for its first request and one with nothing trackable are all "not
+    /// working" and none of them is a fault, so keying a warning box off
+    /// `is_working` puts an idle project in a warning box.
+    pub is_fault: bool,
     /// Whether tracking is working RIGHT NOW.
     ///
     /// Straight from [`state::CurrentHealth::is_currently_working`] — the one
@@ -277,6 +285,7 @@ impl TrackingStatusView {
         Self {
             state,
             label: state.label().to_string(),
+            is_fault: state.is_fault(),
             is_working,
             sentence,
             action,

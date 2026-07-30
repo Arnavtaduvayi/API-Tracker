@@ -178,9 +178,21 @@ export function ProjectTracking(props: {
             <dd>{link.last_scan_at ?? "never"}</dd>
           </dl>
 
-          {tracking && !tracking.is_working && (
+          {/*
+            Shown for everything except the one case with nothing to say —
+            tracking working, no fault, no action. `tracking_off` reaches this
+            through `action`, which matters: a project the user disabled still
+            has a live route and a rewritten `.env`, so `is_working` can be true
+            and the explanation is exactly what they need.
+          */}
+          {tracking && (!tracking.is_working || tracking.is_fault || tracking.action) && (
             <p
-              className={tracking.state === "tracking_off" ? "notice" : "warnbox"}
+              // `is_fault` is resolved in Rust. Testing the state token here
+              // would put a second reading of "is this a problem?" in
+              // TypeScript, which is the class of thing AUD-05 was — and
+              // `!is_working` is not the same question: an idle project and one
+              // waiting for its first request are neither working nor faults.
+              className={tracking.is_fault ? "warnbox" : "notice"}
               data-testid="tracking-detail"
             >
               {tracking.sentence}

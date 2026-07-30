@@ -417,9 +417,10 @@ fn the_overview_status_is_a_tracking_status_report_with_no_health_key() {
 /// report at all, and carries every field the frontend type declares.
 #[test]
 fn the_projected_view_is_present_and_complete_for_every_state() {
-    const FIELDS: [&str; 10] = [
+    const FIELDS: [&str; 11] = [
         "state",
         "label",
+        "is_fault",
         "is_working",
         "sentence",
         "action",

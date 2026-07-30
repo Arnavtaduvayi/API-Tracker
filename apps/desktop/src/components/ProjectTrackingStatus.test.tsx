@@ -58,6 +58,7 @@ describe("the serialized ProjectOverview contract", () => {
       expect(typeof o.tracking.state, `${name}: state`).toBe("string");
       expect(typeof o.tracking.label, `${name}: label`).toBe("string");
       expect(o.tracking.label.length, `${name}: empty label`).toBeGreaterThan(0);
+      expect(typeof o.tracking.is_fault, `${name}: is_fault`).toBe("boolean");
       expect(typeof o.tracking.is_working, `${name}: is_working`).toBe("boolean");
       expect(typeof o.tracking.sentence, `${name}: sentence`).toBe("string");
       expect(o.tracking.sentence.length, `${name}: empty sentence`).toBeGreaterThan(0);
@@ -188,6 +189,40 @@ describe("ProjectTracking against real payloads", () => {
       expect(detail, `${name}: action`).toContain(o.tracking.action!);
       unmount();
     }
+  });
+
+  it("styles a fault as a warning and a non-fault as a notice, from `is_fault`", () => {
+    // `is_fault` is not `!is_working`: an idle project and one waiting for its
+    // first request are neither working nor faults, and putting them in a
+    // warning box overstates what is happening.
+    const fault = fixture("needs_attention");
+    expect(fault.tracking.is_fault).toBe(true);
+    const { unmount } = renderWith(fault);
+    expect(screen.getByTestId("tracking-detail").className).toBe("warnbox");
+    unmount();
+
+    for (const name of ["idle", "waiting_for_first_request", "unsupported"] as const) {
+      const calm = fixture(name);
+      expect(calm.tracking.is_fault, `${name}`).toBe(false);
+      const r = renderWith(calm);
+      expect(screen.getByTestId("tracking-detail").className, `${name}`).toBe("notice");
+      r.unmount();
+    }
+  });
+
+  it("a disabled project still explains itself, even though traffic is flowing", () => {
+    // `tracking_off` keeps the resolver's `is_working`, because disabling
+    // changes no route and rewrites no `.env` — so the explanation has to be
+    // reached through `action`, not through `!is_working`.
+    const o = fixture("tracking_off");
+    expect(o.tracking.is_working).toBe(true);
+    expect(o.tracking.is_fault).toBe(false);
+    renderWith(o);
+    expect(trackingLabel()).toBe("Tracking is off");
+    const detail = screen.getByTestId("tracking-detail");
+    expect(detail.className).toBe("notice");
+    expect(detail.textContent).toContain("folder stays linked");
+    expect(detail.textContent).toContain("Enable tracking");
   });
 
   it("an idle project is not asked to fix anything", () => {

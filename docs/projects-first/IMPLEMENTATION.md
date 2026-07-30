@@ -100,6 +100,9 @@ decides nothing: `is_working` is `CurrentHealth::is_currently_working` and
 ```text
 state             a product-level tag (tracking_on, route_unavailable, …)
 label             the short line a status row shows
+is_fault          whether the state is something to act on, for styling.
+                  NOT `!is_working`: off, idle, waiting and unsupported are all
+                  "not working" and none of them is a fault
 is_working        CurrentHealth::is_currently_working — the ONE answer
 sentence          CurrentHealth::describe, verbatim
 action            what to do next, or None when there is nothing to do

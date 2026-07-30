@@ -53,7 +53,7 @@ npm ci                    (locked install)                  PASS
 npm run format:check                                        PASS
 npm run lint                                                PASS
 npm run typecheck                                           PASS
-npm test                                                    PASS 259 passed / 22 files
+npm test                                                    PASS 261 passed / 22 files
 npm run build             (tsc --noEmit && vite build)      PASS
 cargo build --release -p api-tracker-desktop (Tauri backend) PASS
 ```
