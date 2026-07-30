@@ -224,11 +224,19 @@ export default function App() {
         >
           Activity
         </button>
-        <button onClick={() => setView({ name: "track" })}>Track API activity</button>
-        <span className="navgroup">Vault</span>
-        <button className="link" onClick={() => setView({ name: "projects" })}>
+        {/* Projects is the primary surface: folder selection, detection,
+            tracking setup and live activity all live on a project page. The
+            standalone "Track API activity" flow is NOT deleted — its
+            diagnostics, destination approvals and undo are still the only place
+            some of those decisions can be made — but it moves under Advanced so
+            the normal path never needs it (ADR 0029). */}
+        <button
+          className={view.name === "projects" ? undefined : "link"}
+          onClick={() => setView({ name: "projects" })}
+        >
           Projects
         </button>
+        <span className="navgroup">Vault</span>
         <button className="link" onClick={() => setView({ name: "providers" })}>
           Providers
         </button>
@@ -260,6 +268,9 @@ export default function App() {
         <span className="navgroup">Advanced</span>
         <button className="link" onClick={() => setView({ name: "usage" })}>
           Usage
+        </button>
+        <button className="link" onClick={() => setView({ name: "track" })}>
+          Tracking setup (advanced)
         </button>
         <button className="link" onClick={() => setView({ name: "api-activity" })}>
           Observation runs
@@ -323,6 +334,7 @@ export default function App() {
           onEdit={() => setView({ name: "project-edit", ident: view.ident })}
           onOpenCredential={(id) => setView({ name: "credential", id })}
           onAddCredential={() => setView({ name: "credential-new", project: view.ident })}
+          onOpenAdvanced={() => setView({ name: "track" })}
         />
       )}
       {view.name === "credential-new" && (

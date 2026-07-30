@@ -2521,7 +2521,8 @@ use api_tracker_gateway::{
 use api_tracker_tracking::{
     apply as tracking_apply, detect as tracking_detect, diagnose as tracking_diagnose,
     health as tracking_health, origin as tracking_origin, plan as tracking_plan,
-    state as tracking_state, undo as tracking_undo, verify as tracking_verify,
+    project as tracking_project, state as tracking_state, undo as tracking_undo,
+    verify as tracking_verify,
 };
 
 #[tauri::command]
@@ -4011,31 +4012,14 @@ struct TrackingHistoryDto {
     sentence: Option<String>,
 }
 
-fn health_kind(health: &tracking_state::CurrentHealth) -> &'static str {
-    use tracking_state::CurrentHealth as H;
-    match health {
-        H::VerifiedAndActive => "verified_and_active",
-        H::PartiallyTracked { .. } => "partially_tracked",
-        H::VerifiedPreviouslyGatewayDown => "verified_previously_gateway_down",
-        H::VerifiedPreviouslyIdle { .. } => "verified_previously_idle",
-        H::WaitingForFirstRequest => "waiting_for_first_request",
-        // An apply that started and never reported an outcome. It is its own
-        // kind because the row it describes is not waiting for anything the
-        // user can do by making a request (`NEW-35`).
-        H::ApplyIncomplete => "apply_incomplete",
-        H::NeedsRestart => "needs_restart",
-        H::ConfigurationChanged { .. } => "configuration_changed",
-        H::GatewayUnavailable => "gateway_unavailable",
-        H::NeedsAttention { .. } => "needs_attention",
-        H::AttributionPaused => "attribution_paused",
-        H::NotConfigured => "not_configured",
-        H::Unsupported => "unsupported",
-    }
-}
-
 fn health_dto(health: &tracking_state::CurrentHealth) -> TrackingHealthDto {
     TrackingHealthDto {
-        kind: health_kind(health).to_string(),
+        // `CurrentHealth::kind`, not a copy of its match. This function used to
+        // hold its own `health_kind`, so a variant added in the tracking crate
+        // and forgotten here would have serialized under a name no surface
+        // matched — silently, because a `&'static str` mismatch is not a type
+        // error.
+        kind: health.kind().to_string(),
         sentence: health.describe(),
         currently_working: health.is_currently_working(),
     }
@@ -4415,6 +4399,355 @@ fn tracking_resume_attribution(state: State<'_, AppState>, password: String) -> 
     tracking_apply::ServiceOps::push_matching_key(&ops, key).map_err(ErrDto::from)
 }
 
+// ---------------------------------------------------------------------------
+// Projects-first surface (ADR 0029)
+// ---------------------------------------------------------------------------
+//
+// These commands sit in front of `api_tracker_tracking::project`, which owns
+// the sequencing. Nothing here re-implements detection, planning, health
+// resolution or pricing — a Tauri command that computed any of those would be
+// a second implementation the CLI could not share.
+//
+// Two placement rules are load-bearing:
+//
+// * The read commands a live page polls use `with_vault_background`, so a
+//   five-second timer cannot keep refreshing the inactivity clock and defeat
+//   auto-lock. `project_activity` is the only one on that timer.
+// * These are appended AFTER every existing command, never between
+//   `fn vault_unlock` and its `upgrade_restore_records` call —
+//   `crates/gateway/tests/legacy_rollback_migration.rs` slices main.rs at that
+//   boundary and asserts on the slice.
+
+/// Service status and listener liveness — host facts, resolved OUTSIDE the
+/// vault mutex.
+///
+/// The service identity probe can take up to 10 seconds. Holding the state
+/// mutex across it would stall every other command, including the lock
+/// screen's status strip (CONC-01/CONC-06).
+fn tracking_host_facts(state: &AppState) -> CmdResult<(gw_lifecycle::ServiceStatus, bool)> {
+    let service = gw_lifecycle::Lifecycle::for_host(&state.data_dir)
+        .map(|lc| lc.status())
+        .map_err(ErrDto::from)?;
+    let port = with_vault(state, |vault| {
+        Ok(gw_store::load_config(vault.connection())?.port)
+    })?;
+    let listener_live = matches!(
+        gw_control::verify_listener(&state.data_dir, port.unwrap_or(0)),
+        gw_control::ListenerIdentity::Verified { .. }
+    );
+    Ok((service, listener_live))
+}
+
+/// Preview what selecting `folder` for this project would do.
+///
+/// The bounded scan runs while the vault mutex is HELD, because detection needs
+/// the connection for its vault-side signals. `DiscoveryLimits::default()` caps
+/// it at 20 seconds for one folder, and only one folder is ever scanned per
+/// call — the same bound `tracking_scan` already operates under.
+#[tauri::command]
+fn project_folder_preview(
+    state: State<'_, AppState>,
+    project: String,
+    folder: String,
+) -> CmdResult<tracking_project::FolderLinkPreview> {
+    let folder = PathBuf::from(&folder);
+    let (service, listener_live) = tracking_host_facts(&state)?;
+    let data_dir = state.data_dir.clone();
+    with_vault(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        tracking_project::prepare_link(
+            vault.connection(),
+            &data_dir,
+            &project.id,
+            &project.name,
+            &folder,
+            &service,
+            listener_live,
+        )
+    })
+}
+
+/// Apply a previewed folder link. `digest` is the token from the preview the
+/// user actually saw; a mismatch is refused rather than reconciled.
+#[tauri::command]
+fn project_folder_link(
+    state: State<'_, AppState>,
+    project: String,
+    folder: String,
+    digest: String,
+    password: Option<String>,
+) -> CmdResult<tracking_project::LinkOutcome> {
+    let folder = PathBuf::from(&folder);
+    let helper = locate_cli(&state.data_dir).ok_or_else(|| ErrDto {
+        code: "cli_not_found".into(),
+        message: "the helper that runs tracking could not be found or executed. It \
+                  normally ships inside the app — reinstalling Tethra restores it."
+            .into(),
+    })?;
+    let (service, listener_live) = tracking_host_facts(&state)?;
+    let data_dir = state.data_dir.clone();
+    let outcome = with_vault(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        let port = tracking_plan::ensure_port(vault.connection())?;
+        let ops = tracking_apply::HostServiceOps {
+            data_dir: data_dir.clone(),
+            helper_source: helper.clone(),
+            port,
+        };
+        let options = tracking_apply::ApplyOptions {
+            master_password: password.clone().map(SecretString::new),
+        };
+        tracking_project::confirm_link(
+            vault,
+            &data_dir,
+            &project.id,
+            &project.name,
+            &folder,
+            &digest,
+            &service,
+            listener_live,
+            &options,
+            &ops,
+        )
+    })?;
+    // A running gateway will 404 a freshly created slug for up to 5s otherwise.
+    gateway_nudge(&state.data_dir);
+    Ok(outcome)
+}
+
+/// Configuration and health for one project. Resolves present-tense health, so
+/// this belongs on page open, manual refresh and focus — not on a timer.
+#[tauri::command]
+fn project_tracking_overview(
+    state: State<'_, AppState>,
+    project: String,
+) -> CmdResult<tracking_project::ProjectOverview> {
+    let data_dir = state.data_dir.clone();
+    with_vault(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        tracking_project::overview(vault.connection(), &data_dir, &project.id)
+    })
+}
+
+/// The live activity snapshot. Reads observations only.
+///
+/// `with_vault_background` on purpose: this is the command a five-second timer
+/// calls, and touching the activity clock here would mean an open project page
+/// never auto-locks.
+#[tauri::command]
+fn project_activity(
+    state: State<'_, AppState>,
+    project: String,
+    range: String,
+    filter: ProjectActivityFilterDto,
+    limit: Option<usize>,
+) -> CmdResult<tracking_project::ProjectActivitySnapshot> {
+    let range = tracking_project::TimeRange::parse(&range);
+    with_vault_background(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        // Read-only, deliberately. This command used to stamp
+        // `last_activity_refresh_at` on the linkage row afterwards, which
+        // bumped the compare-and-swap token that guards Disable tracking and
+        // Rescan — twelve times a minute, for a column nothing read
+        // (`AUD-03`). "Last updated" comes from the client's own last
+        // successful fetch.
+        tracking_project::activity_only(
+            vault.connection(),
+            &project.id,
+            range,
+            &filter.as_filter(),
+            limit.unwrap_or(50),
+        )
+    })
+}
+
+/// Re-run detection for a linked folder. Explicitly not an apply: no project
+/// file is written, no service is touched, no route is created.
+#[tauri::command]
+fn project_rescan(
+    state: State<'_, AppState>,
+    project: String,
+) -> CmdResult<Vec<api_tracker_core::projectlink::DetectedCredential>> {
+    with_vault(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        tracking_project::rescan(vault.connection(), &project.id)
+    })
+}
+
+/// Turn tracking for this project on or off without deleting anything.
+#[tauri::command]
+fn project_set_tracking_enabled(
+    state: State<'_, AppState>,
+    project: String,
+    enabled: bool,
+) -> CmdResult<()> {
+    with_vault(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        tracking_project::set_tracking_enabled(vault.connection(), &project.id, enabled)
+    })
+}
+
+/// Forget the folder association. The project, its credentials, its detections
+/// and its recorded activity all survive, and so does the folder on disk.
+/// Undoing the managed file changes is the separate `tracking_undo` call, so
+/// that unlinking never edits a project file without being asked.
+#[tauri::command]
+fn project_unlink_folder(state: State<'_, AppState>, project: String) -> CmdResult<bool> {
+    with_vault(&state, |vault| {
+        let project = vault.get_project(&project)?;
+        tracking_project::unlink(vault.connection(), &project.id)
+    })
+}
+
+/// Record the user's decision about a detected credential.
+///
+/// `Completed`/`Merged` require the credential they resolved to; `ignored` and
+/// `external` refuse one, because both mean "there is no Tethra record for
+/// this" and storing one would contradict the sentence the user was shown.
+#[tauri::command]
+fn project_resolve_detection(
+    state: State<'_, AppState>,
+    id: String,
+    status: String,
+    credential: Option<String>,
+) -> CmdResult<api_tracker_core::projectlink::DetectedCredential> {
+    let status = api_tracker_core::projectlink::DetectedStatus::parse(&status)?;
+    with_vault(&state, |vault| {
+        api_tracker_core::projectlink::resolve_detection(
+            vault.connection(),
+            &id,
+            status,
+            credential.as_deref(),
+        )
+    })
+}
+
+/// Rename, reassign or scope a detected credential. Each is a suggestion the
+/// user is correcting; none of them decides anything about the value.
+#[tauri::command]
+fn project_update_detection(
+    state: State<'_, AppState>,
+    id: String,
+    name: Option<String>,
+    provider: Option<String>,
+    environment: Option<String>,
+) -> CmdResult<api_tracker_core::projectlink::DetectedCredential> {
+    with_vault(&state, |vault| {
+        let conn = vault.connection();
+        let mut row = api_tracker_core::projectlink::get_detection(conn, &id)?;
+        if let Some(name) = name.as_deref() {
+            row = api_tracker_core::projectlink::rename_detection(conn, &id, name)?;
+        }
+        if let Some(provider) = provider.as_deref() {
+            row = api_tracker_core::projectlink::reassign_detection_provider(conn, &id, provider)?;
+        }
+        if let Some(environment) = environment.as_deref() {
+            row = api_tracker_core::projectlink::set_detection_environment(conn, &id, environment)?;
+        }
+        Ok(row)
+    })
+}
+
+/// Give an observed host a name, or a provider, when Tethra's catalog has none.
+///
+/// This is the existing service-correction mechanism (schema v12). It creates
+/// no route, approves no destination, and makes the host eligible for nothing:
+/// forwarding trust stays a `tracking_approved_origins` + `gateway_routes`
+/// decision (ADR 0024).
+#[tauri::command]
+fn project_name_unknown_api(
+    state: State<'_, AppState>,
+    host: String,
+    provider: Option<String>,
+    api_name: Option<String>,
+) -> CmdResult<()> {
+    // `set_service_correction` sets `confirmed = 1` unconditionally, which
+    // permanently suppresses the "unknown API first observed" alert for that
+    // host. A call carrying neither a name nor a provider corrects nothing, so
+    // accepting it would silence an alert in exchange for no information.
+    if provider.as_deref().map(str::trim).unwrap_or("").is_empty()
+        && api_name.as_deref().map(str::trim).unwrap_or("").is_empty()
+    {
+        return Err(ErrDto {
+            code: "nothing_to_record".into(),
+            message: "give this API a name or a provider — an empty correction would only \
+                      stop Tethra telling you about it."
+                .into(),
+        });
+    }
+    with_vault(&state, |vault| {
+        let conn = vault.connection();
+        let Some(service) = api_tracker_core::runtime::store::get_service_by_host(conn, &host)?
+        else {
+            return Err(CoreError::NotFound {
+                kind: "observed API",
+                ident: host.clone(),
+            });
+        };
+        api_tracker_core::runtime::store::set_service_correction(
+            conn,
+            &service.id,
+            provider.as_deref(),
+            api_name.as_deref(),
+            None,
+            None,
+        )
+    })
+}
+
+/// Restore what was being observed, on launch. Reads state and resolves health;
+/// rescans nothing and re-applies nothing.
+#[tauri::command]
+fn project_restore_tracking(state: State<'_, AppState>) -> CmdResult<Vec<ProjectRestoreDto>> {
+    let data_dir = state.data_dir.clone();
+    with_vault_background(&state, |vault| {
+        let restored = tracking_project::restore_on_launch(vault.connection(), &data_dir)?;
+        Ok(restored
+            .into_iter()
+            .map(|(project_id, status)| ProjectRestoreDto {
+                project_id,
+                tracking: status.is_some(),
+            })
+            .collect())
+    })
+}
+
+/// What `project_restore_tracking` reports per project. Deliberately minimal:
+/// the project page fetches its own overview, and a launch summary that carried
+/// health would be a second place for health to go stale.
+#[derive(serde::Serialize)]
+struct ProjectRestoreDto {
+    project_id: String,
+    tracking: bool,
+}
+
+/// The activity filter as it crosses IPC. Every field is an equality filter on
+/// a column the database already holds; there is no free-text predicate.
+#[derive(Default, serde::Deserialize)]
+struct ProjectActivityFilterDto {
+    host: Option<String>,
+    provider: Option<String>,
+    credential_id: Option<String>,
+    status_class: Option<String>,
+    endpoint: Option<String>,
+    observation_source: Option<String>,
+    model: Option<String>,
+}
+
+impl ProjectActivityFilterDto {
+    fn as_filter(&self) -> api_tracker_core::projectactivity::ActivityFilter<'_> {
+        api_tracker_core::projectactivity::ActivityFilter {
+            host: self.host.as_deref(),
+            provider: self.provider.as_deref(),
+            credential_id: self.credential_id.as_deref(),
+            status_class: self.status_class.as_deref(),
+            endpoint: self.endpoint.as_deref(),
+            observation_source: self.observation_source.as_deref(),
+            model: self.model.as_deref(),
+        }
+    }
+}
+
 fn main() {
     // Absolutize for the same reason the CLI does: this path is baked into
     // the installed service's argv, and service managers start with a working
@@ -4633,6 +4966,17 @@ fn main() {
             tracking_foreground_active,
             tracking_foreground_stop,
             tracking_resume_attribution,
+            project_folder_preview,
+            project_folder_link,
+            project_tracking_overview,
+            project_activity,
+            project_rescan,
+            project_set_tracking_enabled,
+            project_unlink_folder,
+            project_resolve_detection,
+            project_update_detection,
+            project_name_unknown_api,
+            project_restore_tracking,
             gateway_activity,
             gateway_activity_by_project,
             credential_activity_sources,

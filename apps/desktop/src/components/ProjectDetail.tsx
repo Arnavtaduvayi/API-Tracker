@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, isApiError } from "../api";
-import type { Credential, Project } from "../types";
+import type { Credential, Project, ProjectOverview } from "../types";
 import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
+import { ProjectActivity } from "./ProjectActivity";
+import { ProjectTracking } from "./ProjectTracking";
 
 export function ProjectDetail(props: {
   ident: string;
@@ -9,9 +11,13 @@ export function ProjectDetail(props: {
   onEdit: () => void;
   onOpenCredential: (id: string) => void;
   onAddCredential: () => void;
+  onOpenAdvanced: () => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [overview, setOverview] = useState<ProjectOverview | null>(null);
+  const [overviewLoading, setOverviewLoading] = useState(true);
+  const [overviewFailed, setOverviewFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [passwordPrompt, setPasswordPrompt] = useState<"set" | "unlock" | "remove" | null>(
@@ -31,9 +37,36 @@ export function ProjectDetail(props: {
     }
   }, [props.ident]);
 
+  /**
+   * Configuration and health. Separate from `reload` because this one resolves
+   * present-tense health, which performs guarded writes on the Rust side — it
+   * belongs on page open, an explicit refresh, and after a change. Never on the
+   * activity timer, which calls the read-only snapshot command instead.
+   *
+   * A failure here leaves the tracking panel absent rather than claiming the
+   * project is untracked, which is a different and much worse thing to say.
+   */
+  const reloadOverview = useCallback(async () => {
+    setOverviewLoading(true);
+    try {
+      setOverview(await api.projectTrackingOverview(props.ident));
+      setOverviewFailed(false);
+    } catch (e) {
+      // `overview` is left as it was rather than nulled. Nulling it renders the
+      // "Select project folder" call to action for a project that may well BE
+      // linked, which is a claim about the project's state derived from a failed
+      // read — the opposite of what this catch is for.
+      setOverviewFailed(true);
+      setError(isApiError(e) ? e.message : String(e));
+    } finally {
+      setOverviewLoading(false);
+    }
+  }, [props.ident]);
+
   useEffect(() => {
     void reload();
-  }, [reload]);
+    void reloadOverview();
+  }, [reload, reloadOverview]);
 
   const run = async (action: () => Promise<unknown>, done?: string) => {
     setError(null);
@@ -214,6 +247,35 @@ export function ProjectDetail(props: {
 
       {error && <p className="error">{error}</p>}
       {notice && <p className="notice">{notice}</p>}
+
+      {overviewFailed && (
+        <p className="error">
+          Tethra could not read this project&apos;s tracking state, so what is shown below may
+          be incomplete. It is not a statement that tracking is off.
+        </p>
+      )}
+      <ProjectTracking
+        projectIdent={props.ident}
+        overview={overview}
+        reloading={overviewLoading}
+        onChanged={() => {
+          void reloadOverview();
+          void reload();
+        }}
+        onOpenAdvanced={props.onOpenAdvanced}
+      />
+
+      {overview?.link && overview.link.tracking_enabled && (
+        <ProjectActivity
+          projectIdent={props.ident}
+          enabled={!project.archived}
+          // Manual Refresh re-resolves health as well as re-reading
+          // observations, which is what ADR 0029 always said it did (AUD-08).
+          // `reloadOverview` calls `project_tracking_overview` and nothing
+          // else — no detection, no file write, no service install, no apply.
+          onRefreshHealth={() => void reloadOverview()}
+        />
+      )}
 
       <h2>Credentials</h2>
       <p>

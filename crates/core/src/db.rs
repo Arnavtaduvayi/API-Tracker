@@ -1174,6 +1174,134 @@ ALTER TABLE tracking_setups ADD COLUMN applied_event_rowid INTEGER NOT NULL DEFA
 ALTER TABLE tracking_setups ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
 "#,
     },
+    Migration {
+        version: 20,
+        name: "projects-first folder linkage, detected credential stubs, unknown API labels",
+        sql: r#"
+-- ONE primary folder per project, so "select project folder" is a thing the
+-- user does once and Tethra remembers (ADR 0029).
+--
+-- This is deliberately NOT a second tracking state machine. `tracking_setups`
+-- keeps owning apply/health/verification per (project, folder); this table
+-- records the product-level fact "THIS is the project's folder, and tracking
+-- for it is on/off", which `tracking_setups` cannot express because its key
+-- admits many folders per project and its row is destroyed and re-minted by
+-- `upsert_setup` on every apply.
+--
+-- `project_id` is the PRIMARY KEY, not part of a composite: a project has at
+-- most one primary folder. Re-selecting a folder UPDATEs this row rather than
+-- accumulating rows, which is what makes repeated selection idempotent.
+--
+-- `scan_fingerprint` is a non-secret digest over the (relative path, byte
+-- length, mtime) of the dependency/env manifests the scan looked at. It exists
+-- so a relaunch can answer "did anything change?" WITHOUT re-running the
+-- 20-second bounded scan and without rewriting the user's files. It is a
+-- change HINT that gates offering a rescan; it never authorizes an apply.
+--
+-- `applied_generation` snapshots `tracking_setups.config_generation` at the
+-- moment an apply for this folder completed. v16 added that counter but
+-- nothing ever compared it to a desired value, so "is the applied
+-- configuration still the current one?" had no answer. Storing the generation
+-- an apply actually reached gives the comparison a left-hand side.
+--
+-- `tracking_enabled = 0` is "disable tracking without deleting the project":
+-- the linkage and the history stay, future automatic configuration stops.
+--
+-- Contents are non-secret: a folder path the user chose in a native picker,
+-- RFC 3339 timestamps, a digest of file sizes, and integers.
+CREATE TABLE project_folder_links (
+    project_id               TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    folder_path              TEXT NOT NULL,
+    tracking_enabled         INTEGER NOT NULL DEFAULT 1,
+    linked_at                TEXT NOT NULL,
+    last_scan_at             TEXT,
+    scan_fingerprint         TEXT,
+    applied_generation       INTEGER NOT NULL DEFAULT 0,
+    last_activity_refresh_at TEXT,
+    row_version              INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+-- An integration Tethra can see the project uses, but whose vault record it
+-- cannot safely or confidently complete on its own.
+--
+-- THERE IS NO COLUMN CAPABLE OF HOLDING A SECRET VALUE, and that is the
+-- point: the guarantee "a discovered plaintext value is never persisted
+-- merely because it was found in a project file" is enforced by the shape of
+-- this table, not by a predicate that a future edit could loosen. The scanner
+-- already refuses to carry values out of a project
+-- (`UnrecognizedCredential` "carries the variable NAME and the file, never
+-- the value", crates/tracking/src/detect.rs:206-217); this table cannot
+-- store one even if a caller had it.
+--
+-- `env_var` is an environment-variable NAME (`ANTHROPIC_API_KEY`).
+-- `source_file` is a FOLDER-RELATIVE path (`.env`), never absolute, so the
+-- row does not leak where on disk the user keeps their work.
+-- `suggested_provider` / `suggested_name` are presentation-only guesses; they
+-- never select a provider, create a route, or raise detection confidence.
+--
+-- `status` is the user's decision about the row, and every value except
+-- 'pending' is one the user chose:
+--   pending   — Tethra detected it; nobody has decided anything
+--   completed — the user supplied the value; `resolved_credential_id` points
+--               at the real vault record
+--   ignored   — the user does not want to be asked again
+--   external  — intentionally managed outside Tethra
+--   merged    — the user pointed it at an existing credential
+-- The CHECK keeps an unrecognized status out of the table rather than letting
+-- it reach a screen as a bare enum token.
+CREATE TABLE detected_credentials (
+    id                     TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    env_var                TEXT NOT NULL,
+    suggested_provider     TEXT,
+    suggested_name         TEXT,
+    suggested_environment  TEXT,
+    source_kind            TEXT NOT NULL,
+    source_file            TEXT NOT NULL DEFAULT '',
+    status                 TEXT NOT NULL DEFAULT 'pending',
+    resolved_credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    first_detected_at      TEXT NOT NULL,
+    last_detected_at       TEXT NOT NULL,
+    row_version            INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (project_id, env_var, source_file),
+    CHECK (status IN ('pending', 'completed', 'ignored', 'external', 'merged')),
+    -- 'completed' means "the user supplied the value and it lives in the
+    -- vault", so it is unrepresentable without the vault row it points at.
+    CHECK (status <> 'completed' OR resolved_credential_id IS NOT NULL)
+) STRICT;
+CREATE INDEX idx_detcred_project ON detected_credentials(project_id);
+-- FK child-key index. `foreign_keys = 1` is on for every connection, so
+-- without this SQLite full-scans this table once per DELETED credential row —
+-- the exact cost migration v14 exists to fix for gateway_usage_events.
+CREATE INDEX idx_detcred_resolved ON detected_credentials(resolved_credential_id);
+
+-- NOTE: naming an unknown API deliberately adds NO table here. v12 already
+-- gave `observed_api_services` the `user_provider` / `user_api_name` columns
+-- and `runtime::store::set_service_correction` to write them, keyed by host —
+-- which is the right key, since a host is a host regardless of which project
+-- reached it. A second per-project label table would be a second
+-- implementation of an existing feature, and the two would disagree the first
+-- time one was written without the other.
+
+-- The project activity surface windows BOTH tables by (project, time).
+--
+-- v13 gave gateway_usage_events only the single-column idx_gue_at and
+-- idx_gue_project, so a per-project time window scanned every row that project
+-- ever produced.
+--
+-- runtime_request_events has idx_rre_project (project_id) and v16's
+-- idx_rre_project_source_at (project_id, observation_source, at). Neither
+-- serves "this project, this window": the composite has observation_source
+-- BETWEEN the two columns the range needs, so a query that does not also
+-- constrain the source cannot use its `at` component and degrades to scanning
+-- every row for the project. Every query the live surface issues is exactly
+-- that shape.
+CREATE INDEX IF NOT EXISTS idx_gue_project_at
+    ON gateway_usage_events(project_id, at);
+CREATE INDEX IF NOT EXISTS idx_rre_project_at
+    ON runtime_request_events(project_id, at);
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

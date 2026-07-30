@@ -533,40 +533,71 @@ pub fn lookup_as_of(
     model: &str,
     as_of: &str,
 ) -> Result<Option<PricingRecord>> {
-    let provider = provider.to_lowercase();
+    let candidates = candidates_for(conn, provider)?;
+    Ok(choose_as_of(&candidates, model, as_of))
+}
+
+/// Every record that could price anything for `provider`, database rows first
+/// then the bundled table — the input [`choose_as_of`] resolves against.
+///
+/// Exposed separately so a caller pricing many (model, date) groups for one
+/// provider pays ONE query instead of one per group. The project activity
+/// surface prices up to ~30 integrations across a 30-day window on every
+/// manual refresh; resolving each group through [`lookup_as_of`] would issue
+/// a query per group for a candidate set that never changes within the call.
+pub fn candidates_for(conn: &Connection, provider: &str) -> Result<Vec<PricingRecord>> {
+    // `to_lowercase` alone found zero records for any provider string that
+    // needs alias resolution — the catalog's own `normalize` maps a known
+    // provider to its stable manifest id and leaves an unknown one as trimmed
+    // lowercase, which is what the previous call did for every input. So this
+    // is strictly wider: already-canonical ids resolve exactly as before.
+    let provider = crate::providers::normalize(provider);
+    let mut candidates: Vec<PricingRecord> = load_db_records(conn, Some(&provider))?;
+    candidates.extend(bundled().into_iter().filter(|r| r.provider == provider));
+    Ok(candidates)
+}
+
+/// Pick the record effective for `model` as of `as_of` from a candidate set.
+///
+/// This is the whole of the resolution rule, in one place, so the batch path
+/// and [`lookup_as_of`] cannot drift: same substring/longest-match
+/// specificity, same origin precedence, same backwards-extrapolation note.
+pub fn choose_as_of(
+    candidates: &[PricingRecord],
+    model: &str,
+    as_of: &str,
+) -> Option<PricingRecord> {
     let model_l = model.to_lowercase();
     let as_of_date = date_prefix(as_of);
     let now = clock::now_rfc3339();
 
-    let mut candidates: Vec<PricingRecord> = load_db_records(conn, Some(&provider))?;
-    candidates.extend(bundled().into_iter().filter(|r| r.provider == provider));
-    let matching: Vec<PricingRecord> = candidates
-        .into_iter()
+    let matching: Vec<&PricingRecord> = candidates
+        .iter()
         .filter(|r| model_l == r.model || model_l.contains(&r.model))
         .collect();
     if matching.is_empty() {
-        return Ok(None);
+        return None;
     }
     // Most specific model string wins.
     let best_len = matching.iter().map(|r| r.model.len()).max().unwrap_or(0);
-    let specific: Vec<PricingRecord> = matching
+    let specific: Vec<&PricingRecord> = matching
         .into_iter()
         .filter(|r| r.model.len() == best_len)
         .collect();
 
-    let effective: Option<&PricingRecord> = specific
+    let effective: Option<&&PricingRecord> = specific
         .iter()
         .filter(|r| r.effective_from.as_str() <= as_of_date)
         .max_by_key(|r| (r.origin.rank(), r.effective_from.clone()));
     let chosen = match effective {
-        Some(r) => r.clone(),
+        Some(r) => (*r).clone(),
         None => {
             // Nothing effective yet at this date: apply the earliest known
             // record, annotated so the extrapolation is visible.
             let mut earliest = specific
                 .iter()
                 .min_by_key(|r| (std::cmp::Reverse(r.origin.rank()), r.effective_from.clone()))
-                .cloned()
+                .map(|r| (*r).clone())
                 .expect("non-empty");
             earliest.note = format!(
                 "price effective {} applied to earlier usage{}",
@@ -582,7 +613,7 @@ pub fn lookup_as_of(
     };
     let mut chosen = chosen;
     chosen.stale = chosen.is_stale(&now);
-    Ok(Some(chosen))
+    Some(chosen)
 }
 
 /// The parameters accepted when setting a manual override.
@@ -1009,6 +1040,19 @@ pub struct CostEstimate {
     pub is_override: bool,
     pub stale: bool,
     pub note: String,
+    /// The currency `micros` is denominated in, carried from the record that
+    /// priced it. Two records in different currencies must never be summed,
+    /// and a caller cannot notice that without being told the currency.
+    pub currency: String,
+    /// The record's model string that actually matched — not the model id the
+    /// caller passed in. Model resolution is "longest matching record model
+    /// wins", so a dated id like `gpt-4o-2024-08-06` is priced by the `gpt-4o`
+    /// record and a `claude-sonnet-4-9` by the `claude-sonnet` family
+    /// fallback. Reporting the id the caller supplied would hide which price
+    /// was applied; this field is what makes the estimate auditable.
+    pub matched_model: String,
+    /// The provider id after normalization, for the same reason.
+    pub matched_provider: String,
     /// True when every dimension with non-zero usage had a price, i.e.
     /// `micros` is the whole estimate rather than a floor.
     pub complete: bool,
@@ -1052,13 +1096,26 @@ pub fn estimate_token_cost_as_of(
     let Some(rec) = lookup_as_of(conn, provider, model, as_of)? else {
         return Ok(None);
     };
+    Ok(estimate_token_cost_from(&rec, input_tokens, output_tokens))
+}
+
+/// Price token usage against a record already resolved by [`choose_as_of`].
+///
+/// The whole of the token-cost rule lives here so the batch path and
+/// [`estimate_token_cost_as_of`] cannot disagree about what "unpriced",
+/// "partial" or "no estimate at all" mean.
+pub fn estimate_token_cost_from(
+    rec: &PricingRecord,
+    input_tokens: i64,
+    output_tokens: i64,
+) -> Option<CostEstimate> {
     if rec.unit != Unit::Tokens {
-        return Ok(None);
+        return None;
     }
     // A record with no token price at all prices nothing; returning a
     // $0.00 estimate here would invent a number, so there is no estimate.
     if rec.input_price_per_m_micros.is_none() && rec.output_price_per_m_micros.is_none() {
-        return Ok(None);
+        return None;
     }
     // A missing price is not a price of zero. Track every dimension that
     // had usage but no price: those tokens contribute nothing to `micros`,
@@ -1075,7 +1132,7 @@ pub fn estimate_token_cost_as_of(
     // micros = tokens * price_per_million_micros / 1_000_000
     let micros = (input_tokens.saturating_mul(inp) / 1_000_000)
         + (output_tokens.saturating_mul(out) / 1_000_000);
-    Ok(Some(CostEstimate {
+    Some(CostEstimate {
         micros,
         pricing_source: rec.source.clone(),
         effective_from: rec.effective_from.clone(),
@@ -1083,9 +1140,12 @@ pub fn estimate_token_cost_as_of(
         is_override: rec.origin == Origin::Override,
         stale: rec.stale,
         note: rec.note.clone(),
+        currency: rec.currency.clone(),
+        matched_model: rec.model.clone(),
+        matched_provider: rec.provider.clone(),
         complete: unpriced_dimensions.is_empty(),
         unpriced_dimensions,
-    }))
+    })
 }
 
 /// Estimate the cost of request-unit usage as of a date. Only records whose
@@ -1111,6 +1171,9 @@ pub fn estimate_request_cost_as_of(
         is_override: rec.origin == Origin::Override,
         stale: rec.stale,
         note: rec.note.clone(),
+        currency: rec.currency.clone(),
+        matched_model: rec.model.clone(),
+        matched_provider: rec.provider.clone(),
         // Request pricing has a single dimension, and the destructuring
         // above already required it to be present.
         complete: true,

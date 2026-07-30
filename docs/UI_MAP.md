@@ -1098,20 +1098,44 @@ section 3.23, and the runtime-observability mapping rows) reflect the
 `docs/observability/` for the authoritative architecture, threat model,
 and privacy model.
 
-## Activity dashboard and Track API activity (ADR 0022)
+## Projects-first live activity (ADR 0029)
 
-Added by the zero-friction tracking milestone. The app's default view is
-now **Activity**; navigation is grouped ACTIVITY / VAULT / SECURITY /
-ADVANCED, with the previous Gateway view under **Advanced → Gateway
-internals** and the previous API activity view as **Observation runs**.
-Nothing was deleted.
+The current primary surface. **Projects** is the first navigation item, and a
+project page carries the whole normal path: folder selection, the single
+disclosure, detected credentials, and live activity.
+
+### Project page (`ProjectDetail.tsx`)
+
+| Section | Component | Notes |
+|---|---|---|
+| Project folder | `ProjectTracking.tsx` | Select/Change folder, Rescan, Disable tracking, Unlink, Advanced tracking diagnostics |
+| Detected credentials | `ProjectTracking.tsx` | one row per detected variable; Ignore / Managed elsewhere |
+| Live activity | `ProjectActivity.tsx` | period selector, Refresh, last-updated, cards, chart, cost coverage, detected APIs, filters, recent requests |
+| Chart | `ActivityChart.tsx` | inline SVG, `role="img"`, plus a visually-hidden data table |
+| Credentials | `ProjectDetail.tsx` | unchanged |
+
+Refresh is one shared loop (`useLiveRefresh.ts`): 5 s visible, 60 s hidden,
+immediate on open and on focus, backoff on failure, no overlap, no stale
+overwrite, cleared on unmount.
+
+`Track API activity` moved from the primary navigation to
+**Advanced → Tracking setup (advanced)**. It was not removed: destination
+approvals, per-step diagnostics and undo are still only reachable there, and its
+screens below are unchanged.
+
+## Activity dashboard and the advanced tracking flow (ADR 0022)
+
+Added by the zero-friction tracking milestone. Navigation is grouped
+ACTIVITY / VAULT / SECURITY / ADVANCED, with the previous Gateway view under
+**Advanced → Gateway internals** and the previous API activity view as
+**Observation runs**. Nothing was deleted.
 
 ### Activity (`DashboardView.tsx`) — default view
 
 | Control | Behavior |
 |---|---|
 | Today / 7 days / 30 days | time-range selector for the observed-traffic panel |
-| Track API activity | opens the Track flow |
+| Track API activity | opens the advanced tracking flow (the normal path is a project page) |
 | Retry (activity) | re-fetches after a visible load failure |
 | Retry (tracked projects) | independent of the activity panel |
 | Resume attribution | master-password dialog; appears only when attribution is paused |
@@ -1124,7 +1148,7 @@ and last observed), endpoints, models, attribution states, tracked-project
 cards, and a coverage-honesty footer. Every panel distinguishes loading,
 empty, and error.
 
-### Track API activity (`TrackFlow.tsx`)
+### Tracking setup (advanced) (`TrackFlow.tsx`)
 
 | Screen | Controls |
 |---|---|

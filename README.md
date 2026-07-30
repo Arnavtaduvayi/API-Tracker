@@ -242,11 +242,19 @@ tethra track doctor        # ranked diagnosis when nothing arrives
 tethra track undo          # restore the files, remove what track made
 ```
 
-In the desktop app the equivalent is **Track API activity** on the
-Activity dashboard: pick a folder, review one screen, click Start
-tracking. No terminal, no route forms, no separate attribution step —
-the app ships the helper it needs. Full walkthrough:
-[docs/activity-onboarding/USER_GUIDE.md](docs/activity-onboarding/USER_GUIDE.md).
+In the desktop app this lives on the project itself. Open **Projects**, open or
+create a project, and click **Select project folder**. Tethra scans the folder,
+shows one disclosure of exactly what it will change, and on your confirmation
+sets everything up — then the live request, token, latency and cost activity
+appears on that same page and refreshes itself. No terminal, no route forms, no
+separate attribution step, and the folder is linked once. Full walkthrough:
+[docs/projects-first/PRODUCT_BEHAVIOR.md](docs/projects-first/PRODUCT_BEHAVIOR.md).
+
+The older standalone flow remains under **Advanced → Tracking setup (advanced)**
+for the decisions the project page deliberately does not make for you: approving
+a destination discovered in your own project files, per-step apply diagnostics,
+and undoing managed file changes
+([docs/activity-onboarding/USER_GUIDE.md](docs/activity-onboarding/USER_GUIDE.md)).
 
 Tethra records metadata only — provider, endpoint template, status,
 latency, sizes, and token counts and model names when responses carry
