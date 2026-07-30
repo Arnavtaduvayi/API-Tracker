@@ -23,6 +23,30 @@ merged.
 as working while requests no longer pass through. This is a pre-existing
 limitation and is not fixed here.
 
+## Filtering
+
+**Facets are broader than the result they filter.** `activity_facets` is scoped by
+the time window only, deliberately: it populates the filter controls, and a
+self-filtered control cannot be changed without clearing it first. So the Host
+dropdown may offer a host the current result set contains none of. The summary
+shown as a *result* — Detected APIs — always matches the active filter. The two
+answer different questions, and `LIVE_ACTIVITY.md` says which is which.
+
+**Filtered cost drops usage whose event row has been pruned.** With no filter,
+`gateway_usage_events` rows are read directly, so usage that outlived its request
+event still counts. With a filter active they are restricted to events that match,
+which necessarily excludes those orphans: a row with no event left cannot be said
+to satisfy a host or status filter. A filtered total over a window older than the
+raw-event retention can therefore be lower than the unfiltered one by more than
+the filter alone would explain.
+
+**The cards and the cost block bound different columns.**
+`runtime_request_events.at` and `gateway_usage_events.at` are written by the same
+exchange but are not guaranteed to be the same instant, so a request landing
+within milliseconds of a window boundary can be inside one figure and outside the
+other. Pre-existing, unchanged by the filter work, and far below the resolution of
+anything the surface displays.
+
 ## Cost
 
 **Only bundled and imported pricing records.** OpenAI and Anthropic, 29 bundled
@@ -62,6 +86,26 @@ retention.
 **A bucket exists only if something was observed in it.** For requests and errors
 an absent bucket means none arrived. For tokens, latency and cost it means
 unknown, and the chart leaves a gap.
+
+## Tracking status
+
+**`CurrentHealth::AttributionPaused` is unreachable from the current resolver.**
+The variant exists, the projection handles it and both suites cover it, but
+`derive_health` never selects it — attribution is reported through
+`ProjectOverview.attribution_paused` and `TrackingStatusView.attribution` instead.
+It is kept because the projection is exhaustive over the enum, so an unhandled
+variant is a compile error rather than a blank label.
+
+**`folder_available` is a point-in-time answer.** It is resolved on page open,
+manual refresh and after a change, like the rest of `overview` — not watched. A
+folder deleted while a project page is open reads as present until the next
+overview read.
+
+**Two projects can still link the same folder** (AUD-06's sibling, AUD-07).
+`project_folder_links.project_id` is the primary key with no uniqueness on
+`folder_path`, and no field reports the other claim. `envlink::apply_link` binds
+the file bytes with its own digest and refuses when they no longer match, so the
+second apply cannot silently corrupt the first's work.
 
 ## Scope of this iteration
 

@@ -100,7 +100,7 @@ rendered hollow with a floor tooltip; metric change; granularity change;
 value as "not reported" and never `0`; 720 points bounded to ≤10 axis labels; an
 all-zero series not collapsing.
 
-## Frontend — `ProjectActivity.test.tsx` (15) / `ProjectTracking.test.tsx` (16)
+## Frontend — `ProjectActivity.test.tsx` (19) / `ProjectTracking.test.tsx` (16)
 
 Waiting-for-first-request instead of zeroes; summary cards; **an unpriced cost
 never rendering a dollar amount**; the coverage percentage; unknown-usage
@@ -108,7 +108,13 @@ requests as "unknown — not zero"; the unpriced-model drill-down; the complete
 case; an unknown API keeping its metadata with cost unavailable; naming it sending
 only a display name; an unavailable per-row estimate; a per-row floor labelled;
 range and filter changes refetching; a failed refresh keeping figures; disabled
-not fetching.
+not fetching; **manual Refresh re-resolving health** while the five-second timer
+never does, and the panel still working with no health hook (AUD-08).
+
+`ProjectTracking.test.tsx`'s two overview helpers are no longer hand-written:
+they start from the Rust-generated fixture. Hand-written fixtures with
+`status: null` throughout are precisely why a full suite passed while the page
+could not report a healthy project.
 
 Scope stated before the picker; the backend's own disclosure rendered; the digest
 echoed on confirm; a cancelled picker configuring nothing; a refused digest
@@ -119,6 +125,84 @@ elsewhere; the rescan offer wording; rescan calling rescan and not a re-link;
 disable wording; unlink confirmation listing every consequence; the ADR-0020
 oracle disclosure wherever the matching key is minted; a partial apply reported
 as stopped.
+
+## Rust — `crates/tracking/tests/status_contract.rs` (10) — AUD-05
+
+The tracking-status contract, asserted against the **real** `ProjectOverview`
+serialized by serde. No test in this file writes a JSON literal and calls it a
+payload.
+
+| Test | Holds |
+|---|---|
+| `the_overview_status_is_a_tracking_status_report_with_no_health_key` | `status.current.kind` exists; `status.health`, `status.health.currently_working`, `setup_id` and `watch` do not |
+| `the_projected_view_is_present_and_complete_for_every_state` | `tracking` is an object with all ten fields for all 19 fixtures, never null |
+| `every_user_visible_state_projects_to_its_label` | the state token, label and `is_working` for every user-visible state |
+| `attribution_is_beside_health_not_instead_of_it` | paused/active/not-enabled; a paused key never makes `is_working` false |
+| `historical_traffic_cannot_create_present_tense_health` | observations present, gateway down ⇒ not working; idle ⇒ no action |
+| `last_observed_at_is_the_newest_observation_and_is_display_only` | the newest of two providers, not the first |
+| `the_health_kind_helper_matches_what_serde_writes` | `CurrentHealth::kind()` == serde's tag, all 13 variants |
+| `a_missing_route_and_a_missing_link_are_different_states` | different labels, different actions |
+| `the_tauri_command_returns_the_project_overview_this_suite_asserts` | `project_tracking_overview` returns the struct verbatim; the desktop has no local `health_kind` |
+| `the_frontend_fixture_is_what_rust_serializes` | the committed frontend fixture equals the bytes Rust emits |
+
+## Rust — `crates/tracking/tests/activity_filter_consistency.rs` (10) — AUD-01
+
+Every fixture is deliberately asymmetric: excluded rows carry different token
+counts, models with different prices, different statuses, latencies and hosts, so
+a query that ignores the filter cannot accidentally produce the filtered answer.
+`assert_consistent` checks ten figures at once — request total, recent rows,
+series requests, series tokens, known input/output tokens, estimated cost,
+unpriced requests/tokens, unknown-usage requests, coverage percentage, error
+count, series errors, latency and observed integrations — and `assert_narrows` is
+the negative control that fails if any of them equals its unfiltered counterpart.
+
+| Test | Holds |
+|---|---|
+| `aud_01_regression_a_host_filter_reaches_every_metric` | the audit's exact fixture: 2 requests, 1 OpenAI, 1 other host, different tokens and cost. Unfiltered 2 / 5 000 000 / 14 500 000 / 2 integrations; filtered 1 / 1 000 000 / 2 500 000 / 1 |
+| `every_filter_dimension_narrows_every_figure` | host, provider, credential, model, endpoint, two-at-once and all-seven-at-once, each selecting one row of six |
+| `status_class_and_observation_source_narrow_every_figure` | the 4xx row and the intercept row, with their own hand-computed expectations |
+| `the_time_range_narrows_every_figure_too` | 1h vs 24h moves requests, tokens, cost and the integration list together |
+| `filtered_cost_preserves_every_coverage_distinction` | priced / unpriced / never-reported all survive; coverage denominator is the filtered known-token total (1M of 2M = 0.5); an excluded observation appears in neither the priced nor the unpriced detail |
+| `a_filtered_known_zero_is_still_a_measured_zero` | 0 tokens priced is complete, `micros_if_complete() == Some(0)`, coverage `None` |
+| `a_filter_that_matches_nothing_empties_every_figure` | cards, chart, table, integrations and cost all empty; `no_observations` true |
+| `facets_stay_broad_while_the_integrations_summary_narrows` | both halves of the intended facet behaviour, in one test |
+| `another_projects_traffic_is_excluded_under_every_filter` | same host, same model, 90× the tokens, another project |
+| `orphaned_usage_counts_unfiltered_and_cannot_satisfy_a_filter` | the documented usage-scope asymmetry |
+
+## Rust — `crates/tracking/tests/live_activity_readonly.rs` (13) — AUD-03/05/06/08
+
+| Test | Holds |
+|---|---|
+| `repeated_polling_leaves_durable_tracking_configuration_unchanged` | 50 polls; `project_folder_links`, `tracking_setups`, `gateway_routes`, `gateway_project_links` dumped and compared byte-for-byte; `row_version` still 0 |
+| `a_control_action_survives_a_page_that_is_polling` | a Disable holding a link read from before ten ticks still commits |
+| `nothing_stamps_the_activity_refresh_column_any_more` | the function is gone, nothing writes the column, the column itself stays |
+| `a_verified_and_active_setup_projects_to_tracking_is_on` | real `refresh_with` ⇒ `VerifiedAndActive` ⇒ "Tracking is on", `is_working`, no action |
+| `the_same_setup_with_a_dead_gateway_projects_to_gateway_unavailable` | same rows, gateway down; history kept, `is_working` false |
+| `a_removed_route_projects_to_route_unavailable` | a disabled route, link intact |
+| `a_removed_project_link_projects_to_project_link_unavailable` | the other half, with a different action |
+| `an_unlinked_project_overview_still_carries_a_tracking_state` | no folder is a state, not a null |
+| `a_linked_folder_with_no_setup_is_awaiting_setup` | never-scanned is not stale |
+| `a_disabled_project_reads_as_tracking_off` | and is not styled as a fault |
+| `a_deleted_folder_reports_as_missing_not_as_edited` | `folder_available` false, `scan_stale` false, the link survives |
+| `an_edited_folder_is_still_reported_as_stale` | the negative control for the row above |
+| `the_overview_re_resolves_health_instead_of_reading_the_cached_row` | the cached row says `traffic_observed`; nothing is listening; health says so |
+
+## Frontend — `ProjectTrackingStatus.test.tsx` (15) — AUD-05
+
+Every fixture is bytes Rust wrote (`src/test/fixtures/project-overview.generated.json`,
+generated and verified by `status_contract.rs`). Covers: the projected object
+present for all 19 fixtures; only declared state tokens emitted **and** no
+declared token without a fixture; `status` carrying no `health` key; **"Tracking
+is on" for a verified and active setup**; the negative control (deleting `status`
+entirely, and injecting the old impossible `{health:{currently_working:false}}`
+shape, both leave the label unchanged); every fixture's label with no bare token
+rendered; the call-to-action for an unlinked project; sentence + action for the
+six states a user must act on; an idle project asked to do nothing; historical
+traffic not creating present-tense success; attribution paused shown beside
+"Tracking is on"; the `AttributionPaused` health variant still saying tracking is
+active; a project that never enabled attribution not warned about it; a missing
+folder reported as missing with Rescan disabled; a present folder with changed
+files still offering Rescan.
 
 ## Regression suites re-run unchanged
 
@@ -135,5 +219,17 @@ crates/core     new: 42        (21 cost + 21 activity)
 crates/tracking new: 31
 frontend        new: 64        (18 + 15 + 15 + 16)
                      ----
-                total new: 137
+                     137
+
+targeted remediation (AUD-05 / AUD-01 / AUD-03 / AUD-06 / AUD-08)
+crates/tracking new: 33        (10 status_contract + 10 filter consistency
+                                + 13 live_activity_readonly)
+frontend        new: 19        (15 ProjectTrackingStatus + 4 ProjectActivity)
+                     ----
+                     52
+
+                total new: 189
 ```
+
+Whole-suite totals on the remediated head: **1 486** Rust tests and **257**
+frontend tests, 0 failures.

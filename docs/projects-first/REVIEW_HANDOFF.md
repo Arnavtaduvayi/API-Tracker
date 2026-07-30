@@ -13,19 +13,39 @@ Base: `main` @ `b6f6692` (PR #16 merge commit, verified from git)
 | Cost with coverage | `crates/core/src/projectcost.rs` (new) |
 | Pricing metadata + batch lookup | `crates/core/src/pricing.rs` |
 | Projects-first facade | `crates/tracking/src/project.rs` (new) |
+| Tracking-status projection | `crates/tracking/src/statusview.rs` (new) |
 | 11 commands | `apps/desktop/src-tauri/src/main.rs` |
 | Project page | `ProjectTracking.tsx`, `ProjectActivity.tsx`, `ActivityChart.tsx` (new) |
 | Shared refresh | `apps/desktop/src/useLiveRefresh.ts` (new) |
 | Availability helpers | `apps/desktop/src/usage.ts` |
 | Navigation | `apps/desktop/src/App.tsx` |
 
+## Targeted remediation of the bounded audit
+
+`audit/pr17-projects-first-bounded` (`971ee46`) raised two merge blockers against
+head `f0ff1a1`. Both are fixed, with two adjacent follow-ups:
+
+| ID | What | Where it is written up |
+|---|---|---|
+| AUD-05 | The project page read `status.health.currently_working`, a path the backend cannot emit, so a healthy project rendered "needs attention" forever | `audit/TARGETED_REMEDIATION.md` |
+| AUD-01 | A filter reached the chart and the recent table but not the summary cards, the cost-coverage block or Detected APIs | `audit/TARGETED_REMEDIATION.md` |
+| AUD-08 | Manual Refresh did not re-resolve health, contrary to ADR 0029 | `LIVE_ACTIVITY.md` |
+| AUD-03 | The five-second poll wrote a row nothing read and consumed a compare-and-swap token other writers need | `LIVE_ACTIVITY.md` |
+| AUD-06 | A deleted folder reported as an edited one, and offered a Rescan that fails | `audit/TARGETED_REMEDIATION.md` |
+
+`audit/TARGETED_VERIFICATION_HANDOFF.md` records what the audit's own
+reproductions now do against the fixed head, including the two that no longer hold
+because they assert the defects.
+
+AUD-02, AUD-07 and AUD-09 remain open; none was a merge blocker. They are in
+`KNOWN_LIMITATIONS.md`.
+
 ## Local validation — measured, on this branch's head
 
 ```text
 cargo fmt --all --check                                    PASS (exit 0)
 cargo +1.97.0 clippy --workspace --all-targets -D warnings PASS (exit 0)
-cargo test --workspace --all-targets                       PASS 1453 passed / 0 failed
-                                                                (97 test binaries)
+cargo test --workspace --all-targets                       PASS 1486 passed / 0 failed
 cargo build --workspace --release                           PASS (exit 0)
 bash scripts/smoke.sh                                       PASS 140 passed / 0 failed
 
@@ -33,9 +53,9 @@ npm ci                    (locked install)                  PASS
 npm run format:check                                        PASS
 npm run lint                                                PASS
 npm run typecheck                                           PASS
-npm test                                                    PASS 239 passed / 21 files
+npm test                                                    PASS 257 passed / 22 files
 npm run build             (tsc --noEmit && vite build)      PASS
-cargo build -p api-tracker-desktop  (Tauri backend)         PASS
+cargo build --release -p api-tracker-desktop (Tauri backend) PASS
 ```
 
 Two prerequisites, both documented rather than worked around:
@@ -112,6 +132,17 @@ added rather than the sequence check removed.
 
 ## Please look hardest at
 
+0. **The tracking-status projection.** `crates/tracking/src/statusview.rs` is the
+   whole of the AUD-05 fix, and it is the file where a wrong sentence would now
+   live. Specifically: the precedence in `TrackingStatusView::resolve` (an
+   unlinked project, then tracking switched off, then a missing folder, then the
+   resolver's verdict); that `folder_missing` names the state without overriding
+   `is_working`; that `attribution` rides beside health rather than replacing it;
+   and that `idle` and `unsupported` deliberately carry no action. Nothing there
+   decides health — `is_working` and `sentence` come from
+   `CurrentHealth::is_currently_working` and `CurrentHealth::describe` — and the
+   match is exhaustive over the enum so a new variant is a compile error rather
+   than a blank label.
 1. **The consent gate.** `crates/tracking/src/project.rs` `link_digest` and
    `confirm_link`. The digest binds the decisions, not the envlink plan digest,
    because the latter embeds a per-link CSPRNG slug and would reject every
@@ -161,6 +192,14 @@ of holding a value, swept by a canary test over every column of every row.
 
 ## Follow-ups (not blocking)
 
+* **AUD-02** — add an in-flow "Approve this destination" affordance to the preview
+  panel, or at minimum render the `Advanced tracking diagnostics` button there so
+  the screen the disclosure names is one click away on the first-time path. Top
+  remaining follow-up from the bounded audit.
+* **AUD-07** — detect an existing claim on a folder in `prepare_link` and surface
+  it, or refuse with an actionable message.
+* **AUD-09** — dedupe `PlanSummaryView::files_to_edit` and render it
+  folder-relative, as its own doc comment says.
 * Scope destination approvals per project — changes the MAC message, ADR-level.
 * Surface provider-reported cost beside the local estimate on the project page,
   clearly separated.

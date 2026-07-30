@@ -44,9 +44,50 @@ one success resets.
 setup. A 5-second timer over it is a guarded-write storm contending with the
 gateway's own writer. So:
 
-* `project_tracking_overview` resolves health — page open, manual refresh, after
-  a change.
+* `project_tracking_overview` resolves health — page open, **manual refresh**,
+  after a change.
 * `project_activity` reads observations and touches no tracking state.
+
+### Manual Refresh resolves health (AUD-08)
+
+The **Refresh** button on the activity panel calls both the snapshot command and
+`project_tracking_overview`. It previously called only the first, so the health
+line beside the figures stayed as it was until the user navigated away and back —
+a gateway that died with the page open went unreported indefinitely, contrary to
+what ADR 0029 said Refresh did.
+
+`ProjectActivity` takes an `onRefreshHealth` prop, wired by `ProjectDetail` to
+`reloadOverview`. Refresh therefore re-reads local observations, recalculates
+aggregates, and re-resolves gateway and tracking health. It does **not** re-run
+detection, rewrite a project file, reinstall the service or re-apply
+configuration — `project_tracking_overview` does none of those, which is why it
+is the only extra call.
+
+`manual Refresh re-resolves health as well as re-reading observations` and
+`the five-second timer refreshes observations only, never health` pin both
+halves.
+
+## Reads do not write (AUD-03)
+
+`project_activity` is read-only. It used to call `project::note_activity_refresh`
+after every read, which compare-and-swapped `last_activity_refresh_at` on
+`project_folder_links` and incremented `row_version` — twelve guarded writes a
+minute per open project page, for a column nothing read ("Last updated" comes
+from the client's own last successful fetch).
+
+The write was not the cost; `row_version` was. That column is the compare-and-swap
+token guarding Disable tracking, Rescan and the applied-generation record, so a
+poll landing between a caller's read and its write made that caller fail with a
+raw `StateConflict` for no product reason.
+
+`projectlink::record_activity_refresh` and `project::note_activity_refresh` are
+gone. The **column** stays in the schema and in `ProjectFolderLink`: existing
+vaults hold values for it, and dropping a column to remove a write would break the
+data format for nothing. It is read from the row and never written.
+
+Pinned by `repeated_polling_leaves_durable_tracking_configuration_unchanged`
+(fifty polls, four tables dumped and compared byte-for-byte) and
+`a_control_action_survives_a_page_that_is_polling`.
 
 ## Why polling does not defeat auto-lock
 
@@ -120,6 +161,66 @@ no free-text predicate.
 specifically: the first filter parameter is `?4` because the window binds `?1..?3`,
 and an off-by-one there would silently reuse `until` as a filter value instead of
 failing.
+
+### One filter, one population (AUD-01)
+
+`project::activity_only` resolves the window and the filter **once** and hands
+both to every query. Previously it threaded the filter into `project_series` and
+`recent_activity` only — `aggregate::project_metrics`,
+`projectcost::project_cost_coverage` and `observed_integrations` took no filter
+parameter at all — so a filtered chart sat beside unfiltered summary cards, an
+unfiltered "Estimated known cost", an unfiltered coverage percentage and an
+unfiltered "Detected APIs".
+
+There is now no way to write a project-activity query that forgets the filter,
+because there is no way to scope one by hand:
+
+| Builder | Root | Used by |
+|---|---|---|
+| `ActivityFilter::event_scope` | `runtime_request_events e` | `project_series`, `recent_activity`, `observed_integrations`, `aggregate::project_metrics` |
+| `ActivityFilter::usage_scope` | `gateway_usage_events u` | the series' token/cost query, `projectcost::load_groups` |
+
+Both emit the project predicate, the half-open window and every active filter, and
+bind `(project_id, since, until)` as `?1..?3` with filter values from `?4`.
+
+`usage_scope` reaches usage through the event that produced it, because a usage
+row carries a provider, a model and token counts but none of the request metadata
+the filter selects on. With **no** filter it reads usage rows directly, so usage
+whose event row retention has already pruned still counts; with a filter it
+restricts to matching events, which drops that orphaned usage — a row with no
+event left cannot be said to satisfy a host filter, and counting it would put the
+wrong tokens back into a total the user narrowed. Both directions are asserted by
+`orphaned_usage_counts_unfiltered_and_cannot_satisfy_a_filter`.
+
+### Filtered cost
+
+Filtered cost is cost, not a share of cost. The estimate, the priced and known
+token totals, the unpriced counts, the unknown-usage count and therefore
+`token_coverage` are all computed from the filtered rows alone. Nothing is scaled
+or apportioned from an unfiltered figure: a coverage percentage computed over
+traffic the user filtered out is a wrong number, not an approximate one.
+
+Every distinction the unfiltered call preserves survives filtering — priced,
+known-but-unpriced, never-reported, partial coverage, a floor never presented as a
+total (`micros_if_complete` still returns `None`), and a known zero still a
+measured zero rather than "unknown".
+
+### Facets are deliberately broader
+
+`activity_facets` takes no filter. It populates the filter controls, and a
+self-filtered control is one-way: pick host `api.openai.com` and a self-filtered
+host list contains only `api.openai.com`, so there is no control left to pick a
+different host with and no way back except "Clear filters". Choosing a host would
+likewise empty the model list of every model that host did not serve.
+
+So facets answer **"what exists in this time window?"**, which is what a picker
+needs, and `observed_integrations` answers **"what is in the result you are
+looking at?"**, which is what a summary needs. The two are different questions and
+are allowed to disagree; the time window is the one bound they share — a facet
+never offers a value from outside the selected window.
+
+`facets_stay_broad_while_the_integrations_summary_narrows` asserts both halves, so
+the intent cannot be "fixed" in either direction by accident.
 
 ## What is not polled
 

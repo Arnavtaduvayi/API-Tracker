@@ -13,8 +13,10 @@ apps/desktop/src/                       the project page
 apps/desktop/src-tauri/src/main.rs      11 project_* commands
 
 crates/tracking/src/project.rs          the projects-first facade
+crates/tracking/src/statusview.rs       the ONE tracking-status projection
 crates/core/src/projectlink.rs          v20 storage: linkage + detections
 crates/core/src/projectactivity.rs      bounded project-scoped reads
+                                        + the shared filter/scope builder
 crates/core/src/projectcost.rs          cost with coverage
 crates/core/src/pricing.rs              +matched_model/currency, batch lookup
 crates/core/src/db.rs                   migration v20
@@ -79,6 +81,60 @@ folder_fingerprint(folder)     -> String
 free loopback port so the previewed base URL is the one that will be used. It
 starts nothing.
 
+## The tracking-status contract
+
+`ProjectOverview` carries **two** status fields, and only one of them is for a
+surface:
+
+```text
+tracking: TrackingStatusView   what a screen renders. ALWAYS present.
+status:   Option<TrackingStatusReport>   the raw resolver output, for diagnostics
+```
+
+`statusview::TrackingStatusView::of` is the only place a `CurrentHealth` variant
+is turned into something a person reads. It is exhaustive over the enum, so a new
+variant is a compile error there rather than a blank label on screen, and it
+decides nothing: `is_working` is `CurrentHealth::is_currently_working` and
+`sentence` is `CurrentHealth::describe`, both from the shared resolver.
+
+```text
+state             a product-level tag (tracking_on, route_unavailable, …)
+label             the short line a status row shows
+is_working        CurrentHealth::is_currently_working — the ONE answer
+sentence          CurrentHealth::describe, verbatim
+action            what to do next, or None when there is nothing to do
+last_observed_at  HISTORY. Displayed beside `state`, never used to derive it
+first_verified_at HISTORY.
+attribution       not_enabled | active | paused — beside health, never as health
+configuration_behind / folder_available
+```
+
+The tag vocabulary is deliberately not `CurrentHealth`'s serde tag. The enum has
+two variants that are one sentence to a user (`gateway_unavailable` and
+`verified_previously_gateway_down`: nothing is listening) and one variant that
+hides two different user problems — `ConfigurationChanged` now carries
+`route_missing` / `link_missing`, decided in `derive_health` where the evidence
+is, so "Route unavailable" and "Project link unavailable" are distinct states with
+distinct actions rather than a sentence a surface would have to parse.
+
+The desktop's `TrackingStatusDto` no longer keeps its own copy of the tag mapping;
+`CurrentHealth::kind()` is the single source, checked against serde's own output
+by `the_health_kind_helper_matches_what_serde_writes`.
+
+Why this exists: `project_tracking_overview` returns `ProjectOverview` verbatim,
+so `status` serializes as `{"current":{"kind":…},"history":…,"freshness":…,
+"state":…}`. The project page read `status.health.currently_working`, a path that
+payload cannot contain — `health` belongs to the *other* command's DTO — so the
+expression was `undefined` for every setup and a verified, actively tracked
+project rendered "needs attention" permanently (AUD-05). Correcting the
+TypeScript interface alone would have left the frontend deciding health from an
+enum it cannot type-check; the projection moves that decision into Rust.
+
+`apps/desktop/src/test/fixtures/project-overview.generated.json` is written and
+verified by `crates/tracking/tests/status_contract.rs` from the real DTO, and the
+frontend tests load it. A field renamed in Rust fails both suites instead of
+becoming `undefined` on a screen.
+
 ## Cost derivation
 
 Group `gateway_usage_events` by (provider, model, day) in SQL, then per group:
@@ -103,9 +159,15 @@ convention, which makes the estimate a documented lower bound.
 | Path | Writes? | Cadence |
 |---|---|---|
 | `overview` | yes (health CAS) | page open, manual refresh, after a change |
-| `activity_only` | no | every ~5s while visible |
+| `activity_only` | **no** | every ~5s while visible |
 | `rescan` | linkage row only | explicit user action |
 | `confirm_link` | yes (full apply) | explicit user action |
+
+`activity_only` writes nothing at all. It used to stamp
+`last_activity_refresh_at` on the linkage row, bumping the compare-and-swap token
+that guards Disable tracking and Rescan twelve times a minute for a column nothing
+read (AUD-03); `record_activity_refresh` and `note_activity_refresh` are gone and
+the column is now read-only. See `LIVE_ACTIVITY.md`.
 
 `project_activity` and `project_restore_tracking` are `with_vault_background`
 commands, so polling does not refresh the inactivity clock.
