@@ -110,6 +110,14 @@ convention. The estimate is a documented lower bound.
 ## Pricing records
 
 Only Tethra's existing bundled and imported records, through the existing
-reviewable versioned process. 29 bundled entries covering OpenAI and Anthropic,
-with one verification date. Nothing is scraped at display time. Unknown models
-stay visible and unpriced.
+reviewable versioned process. 30 bundled entries — 17 Anthropic, 13 OpenAI —
+each carrying the verification date of the source page it was checked against
+(the two providers are dated independently, so re-reading one provider's pricing
+cannot reset the other's staleness clock). Nothing is scraped at display time.
+Unknown models stay visible and unpriced.
+
+A model with no bundled entry resolves to no record at all rather than to a
+near-neighbour: `choose_as_of` matches on equality or substring, and only
+`claude-sonnet` and `claude-haiku` have family-level fallback rows. So a new
+Opus or GPT id is reported unpriced until it gets its own entry — visible and
+honest, never silently priced at a sibling's rate.

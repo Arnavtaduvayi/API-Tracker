@@ -49,8 +49,17 @@ anything the surface displays.
 
 ## Cost
 
-**Only bundled and imported pricing records.** OpenAI and Anthropic, 29 bundled
-entries, one verification date. Everything else is visible and unpriced.
+**Only bundled and imported pricing records.** OpenAI and Anthropic, 30 bundled
+entries, verification dated per source page. Everything else is visible and
+unpriced.
+
+**A model without its own entry is unpriced, not approximated.** Only
+`claude-sonnet` and `claude-haiku` have family-level fallback rows, so a newly
+released model id — a future Opus, a new GPT — produces no estimate until an
+entry is added for it. That is the intended failure mode (unpriced beats
+mispriced), but it means the cost surface silently under-reports a project that
+has moved to a model Tethra does not yet know, and nothing on screen says
+"this model is new" as distinct from "this model has no published price".
 
 **Cache reads are excluded from billable input**, so an estimate is a lower bound
 for cache-heavy usage. Note the admin-sync path prices all input at the base

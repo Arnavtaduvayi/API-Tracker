@@ -43,7 +43,10 @@ use uuid::Uuid;
 pub const STALE_AFTER_DAYS: i64 = 45;
 
 /// Revision counter for the bundled table; bump when the bundled set changes.
-pub const BUNDLED_REVISION: i64 = 2;
+///
+/// 3: added `claude-opus-5` and split the single verification date into one per
+/// source, so re-checking one provider's page cannot re-date the other's rows.
+pub const BUNDLED_REVISION: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -152,10 +155,19 @@ impl PricingRecord {
 /// users should verify against the provider's pricing page and import or
 /// override locally when rates change. Prices are per 1M tokens in micro-USD.
 fn bundled() -> Vec<PricingRecord> {
-    // The date the bundled set was last checked against the sources below.
-    const VERIFIED: &str = "2026-07-18";
+    // The date each source was last checked, paired with that source. These are
+    // separate because a verification date is a claim about ONE page: bumping a
+    // single shared constant while re-reading one provider's pricing would
+    // silently re-date the other provider's rows and reset their staleness clock
+    // on evidence that was never gathered. `last_verified` gates
+    // `STALE_AFTER_DAYS`, so an overstated date suppresses the warning that the
+    // figure needs re-checking.
     const OPENAI_SRC: &str = "https://developers.openai.com/api/docs/pricing";
+    const OPENAI_VERIFIED: &str = "2026-07-18";
     const ANTHROPIC_SRC: &str = "https://platform.claude.com/docs/en/about-claude/pricing";
+    // Every Anthropic row below re-read against the page on this date, not just
+    // the one added that day.
+    const ANTHROPIC_VERIFIED: &str = "2026-07-30";
 
     struct B {
         provider: &'static str,
@@ -297,6 +309,21 @@ fn bundled() -> Vec<PricingRecord> {
             input: 10_000_000,
             cached: Some(1_000_000),
             output: 50_000_000,
+            source: ANTHROPIC_SRC,
+        },
+        // Same rates as Opus 4.8, and deliberately its own row rather than a
+        // family fallback: `choose_as_of` matches on `model == r.model ||
+        // model.contains(r.model)`, and "claude-opus-5" contains none of the
+        // 4.x ids, so without this entry Opus 5 usage resolves to no record and
+        // is reported unpriced. There is no `claude-opus` family row (unlike
+        // sonnet/haiku), so every Opus id needs its own entry.
+        B {
+            provider: "anthropic",
+            model: "claude-opus-5",
+            effective: "2026-07-18",
+            input: 5_000_000,
+            cached: Some(500_000),
+            output: 25_000_000,
             source: ANTHROPIC_SRC,
         },
         B {
@@ -458,7 +485,13 @@ fn bundled() -> Vec<PricingRecord> {
                 currency: "USD".to_string(),
                 source: b.source.to_string(),
                 effective_from: b.effective.to_string(),
-                last_verified: VERIFIED.to_string(),
+                // Keyed off the source, so a row can never carry a verification
+                // date belonging to a page it was not checked against.
+                last_verified: if b.source == ANTHROPIC_SRC {
+                    ANTHROPIC_VERIFIED.to_string()
+                } else {
+                    OPENAI_VERIFIED.to_string()
+                },
                 origin: Origin::Bundled,
                 version: BUNDLED_REVISION,
                 note: if family_fallback {
@@ -1270,6 +1303,97 @@ mod tests {
         assert_eq!(est.micros, 12_500_000);
         assert!(!est.is_override);
         assert!(est.pricing_source.contains("openai.com"));
+    }
+
+    /// `claude-opus-5` prices from its own bundled record.
+    ///
+    /// It needs one: `choose_as_of` matches on equality or `contains`, and
+    /// "claude-opus-5" contains none of the `claude-opus-4-*` ids. There is also
+    /// no `claude-opus` family fallback (only sonnet and haiku have one), so
+    /// before this record existed the model resolved to `None` and every Opus 5
+    /// request was reported as unpriced rather than mispriced.
+    #[test]
+    fn opus_5_prices_from_its_own_bundled_record() {
+        let conn = mem();
+        // Published: $5/MTok input, $25/MTok output.
+        // 1M in + 1M out = $30.00.
+        let est = estimate_token_cost_as_of(
+            &conn,
+            "anthropic",
+            "claude-opus-5",
+            "2026-07-30",
+            1_000_000,
+            1_000_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(est.micros, 30_000_000);
+        assert_eq!(est.matched_model, "claude-opus-5");
+        assert!(est.complete);
+        assert!(est.pricing_source.contains("claude.com"));
+        assert!(!est.stale, "verified 2026-07-30, well inside the horizon");
+
+        // A dated snapshot of the same model resolves to the same record via
+        // `contains`, and must not fall through to an Opus 4.x row.
+        let dated = estimate_token_cost_as_of(
+            &conn,
+            "anthropic",
+            "claude-opus-5-20260715",
+            "2026-07-30",
+            1_000_000,
+            1_000_000,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(dated.matched_model, "claude-opus-5");
+        assert_eq!(dated.micros, 30_000_000);
+    }
+
+    /// The published cache-read rate is carried on the record.
+    ///
+    /// It is deliberately NOT applied to estimates — usage snapshots do not
+    /// break out cached tokens, so this module prices all input at the base
+    /// rate and the real bill can be lower (see the module docs). This test
+    /// pins the published figure so an import or override has something correct
+    /// to compare against.
+    #[test]
+    fn opus_5_carries_the_published_cache_read_rate() {
+        let rec = bundled()
+            .into_iter()
+            .find(|r| r.model == "claude-opus-5")
+            .expect("claude-opus-5 must be in the bundled table");
+        assert_eq!(rec.input_price_per_m_micros, Some(5_000_000)); // $5.00
+        assert_eq!(rec.cached_input_price_per_m_micros, Some(500_000)); // $0.50
+        assert_eq!(rec.output_price_per_m_micros, Some(25_000_000)); // $25.00
+                                                                     // Batch is the documented flat 50%, derived rather than restated.
+        assert_eq!(rec.batch_input_price_per_m_micros, Some(2_500_000)); // $2.50
+        assert_eq!(rec.batch_output_price_per_m_micros, Some(12_500_000)); // $12.50
+        assert_eq!(rec.currency, "USD");
+        assert_eq!(rec.origin, Origin::Bundled);
+    }
+
+    /// A verification date describes one source page, so the two providers
+    /// carry their own. Re-reading Anthropic's page must not silently re-date
+    /// OpenAI's rows and reset their staleness clock.
+    #[test]
+    fn verification_dates_are_per_source() {
+        let records = bundled();
+        for r in &records {
+            let expected = if r.provider == "anthropic" {
+                "2026-07-30"
+            } else {
+                "2026-07-18"
+            };
+            assert_eq!(
+                r.last_verified, expected,
+                "{} carries a verification date for a page it was not checked against",
+                r.model
+            );
+        }
+        // And the two are genuinely different, or this test proves nothing.
+        let anthropic = records.iter().find(|r| r.provider == "anthropic").unwrap();
+        let openai = records.iter().find(|r| r.provider == "openai").unwrap();
+        assert_ne!(anthropic.last_verified, openai.last_verified);
     }
 
     #[test]
