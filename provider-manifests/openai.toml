@@ -38,6 +38,17 @@ name = "openai-legacy-key"
 regex = "sk-[A-Za-z0-9]{32,}"
 confidence = "medium"
 
+# Local Gateway routing (ADR 0019 D10). The compiled-in origin — never a
+# database row — is where an `openai` route forwards. base_path is CLIENT-side
+# only: the OpenAI SDKs join base + "/chat/completions", so the written base
+# URL must end in /v1 (the forwarding path itself only strips the /openai
+# prefix). OPENAI_API_BASE is the known alias honored by litellm/aider.
+[gateway]
+origins = ["https://api.openai.com"]
+base_path = "/v1"
+env_vars = ["OPENAI_BASE_URL", "OPENAI_API_BASE"]
+usage_shape = "openai"
+
 [capabilities]
 validate_credential = { support = "implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
 fetch_metadata = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Tethra lists the organization's projects and each project's API keys (id, name, redacted value) via the Admin API; requires an organization admin key." }

@@ -105,12 +105,26 @@ pub fn usage(ctx: &Ctx, cmd: UsageCmd) -> Result<()> {
                 None => None,
             };
             if ctx.json {
+                // Additive only: `totals` and `records` keep their exact
+                // shape and meaning (`totals` itself gained residual
+                // `*_rows` counts, which are new keys, not repurposed
+                // ones). `availability` is the pre-computed verdict for
+                // each folded number so a JSON consumer does not have to
+                // re-derive the rule and drift from the CLI and desktop.
                 render::emit(
                     true,
                     &serde_json::json!({
                         "totals": totals,
                         "records": rows,
                         "connection": connection,
+                        "availability": {
+                            "requests": totals.request_availability(),
+                            "input_tokens": totals.input_token_availability(),
+                            "output_tokens": totals.output_token_availability(),
+                            "total_tokens": totals.total_token_availability(),
+                            "reported_cost": totals.reported_cost_availability(),
+                            "estimated_cost": totals.estimated_cost_availability(),
+                        },
                     }),
                     || {},
                 );
@@ -122,6 +136,10 @@ pub fn usage(ctx: &Ctx, cmd: UsageCmd) -> Result<()> {
     Ok(())
 }
 
+/// What a per-record table cell says when the record did not carry that
+/// measurement. Never blank and never a zero.
+const NOT_REPORTED: &str = "not reported";
+
 fn print_usage_report(
     totals: &usage::UsageTotals,
     start: &str,
@@ -130,18 +148,71 @@ fn print_usage_report(
     limit: usize,
 ) {
     println!("Usage since {start} (current month):");
+    // `Snapshots` is a count of the rows in scope, so it is always known —
+    // it is the denominator every other line's availability is measured
+    // against. Everything below folds `Option` columns, and is printed only
+    // when the records in scope actually carried the value: an absent token
+    // count or cost is a state, never a silent 0 / $0.00 (NEW-37).
     println!("  Snapshots:      {}", totals.snapshots);
-    println!("  Requests:       {}", totals.request_count);
-    println!("  Input tokens:   {}", totals.input_tokens);
-    println!("  Output tokens:  {}", totals.output_tokens);
-    println!("  Total tokens:   {}", totals.total_tokens);
     println!(
-        "  Reported cost:  {} (provider-reported)",
-        usage::format_micros(totals.reported_cost_micros)
+        "  Requests:       {}",
+        usage::render_count(
+            totals.request_count,
+            &totals.request_availability(),
+            &usage::SUBJECT_REQUESTS
+        )
     );
     println!(
-        "  Estimated cost: {} (estimated locally — may differ from the provider's bill)",
-        usage::format_micros(totals.estimated_cost_micros)
+        "  Input tokens:   {}",
+        usage::render_count(
+            totals.input_tokens,
+            &totals.input_token_availability(),
+            &usage::SUBJECT_INPUT_TOKENS
+        )
+    );
+    println!(
+        "  Output tokens:  {}",
+        usage::render_count(
+            totals.output_tokens,
+            &totals.output_token_availability(),
+            &usage::SUBJECT_OUTPUT_TOKENS
+        )
+    );
+    println!(
+        "  Total tokens:   {}",
+        usage::render_count(
+            totals.total_tokens,
+            &totals.total_token_availability(),
+            &usage::SUBJECT_TOTAL_TOKENS
+        )
+    );
+    let reported = totals.reported_cost_availability();
+    println!(
+        "  Reported cost:  {}{}",
+        usage::render_micros(
+            totals.reported_cost_micros,
+            &reported,
+            &usage::SUBJECT_REPORTED_COST
+        ),
+        if reported.has_value() {
+            " (provider-reported)"
+        } else {
+            ""
+        }
+    );
+    let estimated = totals.estimated_cost_availability();
+    println!(
+        "  Estimated cost: {}{}",
+        usage::render_micros(
+            totals.estimated_cost_micros,
+            &estimated,
+            &usage::SUBJECT_ESTIMATED_COST
+        ),
+        if estimated.has_value() {
+            " (estimated locally — may differ from the provider's bill)"
+        } else {
+            ""
+        }
     );
     if totals.has_non_usd_reported {
         println!(
@@ -188,18 +259,21 @@ fn print_usage_report(
                     .clone()
                     .or_else(|| r.line_item.clone())
                     .unwrap_or_default(),
+                // Per-record measurements: a column the record did not
+                // carry says so. A blank cell reads as "nothing was used",
+                // which is the same fabrication as a zero (NEW-37).
                 match (r.total_tokens, r.quantity, r.unit.as_deref()) {
                     // Non-token units are shown verbatim, never as tokens.
                     (_, Some(q), Some(unit)) => format!("{q} {unit}"),
                     (Some(t), _, _) => format!("{t} tokens"),
-                    _ => String::new(),
+                    _ => NOT_REPORTED.to_string(),
                 },
                 r.reported_cost_micros
                     .map(usage::format_micros)
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| NOT_REPORTED.to_string()),
                 r.estimated_cost_micros
                     .map(|m| format!("{} (est.)", usage::format_micros(m)))
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| NOT_REPORTED.to_string()),
                 attribution.as_str().to_string(),
                 r.provider_api_key_id
                     .clone()
@@ -321,25 +395,55 @@ fn print_budget(r: &budget::BudgetReport) {
             .map(usage::format_micros)
             .unwrap_or_else(|| "(none set)".into())
     );
+    // `used_micros` is a floor whenever some record in scope carried no
+    // cost, so it is labelled "at least" rather than printed as if it were
+    // the whole spend (NEW-37).
     println!(
-        "  Used:          {} ({}; source setting: {})",
+        "  Used:          {}{} ({}; source setting: {}) — {} of {} usage record(s) costed",
+        if r.used_is_complete { "" } else { "at least " },
         usage::format_micros(r.used_micros),
         if r.used_is_estimated {
             "estimated"
         } else {
             "provider-reported"
         },
-        r.cost_source
+        r.cost_source,
+        r.costed_rows,
+        r.usage_rows
     );
     if let Some(rem) = r.remaining_micros {
-        println!("  Remaining:     {}", usage::format_micros(rem));
+        println!(
+            "  Remaining:     {}{}",
+            usage::format_micros(rem),
+            if r.used_is_complete {
+                ""
+            } else {
+                " (at most — computed from a floor on spend)"
+            }
+        );
     }
     println!(
-        "  Projected end: {}",
-        usage::format_micros(r.projected_period_end_micros)
+        "  Projected end: {}{}",
+        usage::format_micros(r.projected_period_end_micros),
+        if r.used_is_complete {
+            ""
+        } else {
+            " (at least — projected from a floor on spend)"
+        }
     );
-    if r.over_budget {
-        println!("  STATUS: OVER BUDGET");
+    match r.status {
+        budget::BudgetStatus::Over => println!("  STATUS: OVER BUDGET"),
+        budget::BudgetStatus::Under => println!("  STATUS: under budget"),
+        // Never printed as "under budget": the costed floor is below the
+        // budget, but records that carried no cost are not zero, so the
+        // true spend is unknown and may be over.
+        budget::BudgetStatus::Indeterminate => {
+            println!("  STATUS: CANNOT EVALUATE — usage data is incomplete");
+            if let Some(note) = &r.completeness_note {
+                println!("  {note}");
+            }
+        }
+        budget::BudgetStatus::NoBudget => println!("  STATUS: no budget set"),
     }
     if let Some(note) = &r.attribution_note {
         println!("  {note}");

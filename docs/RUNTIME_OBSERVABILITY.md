@@ -6,9 +6,12 @@ fast, with what outcomes — without ever recording what it sends or receives.
 
 It is a **local, metadata-only HTTPS observation proxy**. It runs entirely on
 your machine, observes only the process you explicitly launch, and stores
-nothing but sanitized metadata. There is no cloud component, no telemetry,
-and no capability — anywhere in the design — to record request or response
-bodies, headers, query strings, or credential values.
+nothing but sanitized metadata. There is no cloud component and no telemetry,
+and the observation proxy has no capability to record request or response
+bodies, headers, query strings, or credential values. (The optional **Local
+Gateway** is a separate, consent-gated component that observes traffic you
+explicitly route through it; it is metadata-only by the same structural
+construction and has its own privacy statement — `docs/gateway/PRIVACY.md`.)
 
 ---
 

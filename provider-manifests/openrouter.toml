@@ -1,0 +1,43 @@
+# OpenRouter provider manifest.
+#
+# NO [gateway] SECTION — deliberately. OpenRouter ships no SDK of its own: its
+# documentation configures the base URL (https://openrouter.ai/api/v1) as a
+# constructor argument to the OpenAI SDK or as a literal in an HTTP call, and
+# documents no base-URL environment variable. Third-party tools invent their
+# own names (litellm reads OPENROUTER_API_BASE), but Tethra will not write a
+# variable no official client reads. OpenRouter is detected, listed and
+# honestly labelled unsupported.
+id = "openrouter"
+name = "OpenRouter"
+description = "OpenRouter unified API gateway to many model providers."
+website = "https://openrouter.ai"
+api_docs_url = "https://openrouter.ai/docs"
+auth_docs_url = "https://openrouter.ai/docs/api-reference/authentication"
+manage_url = "https://openrouter.ai/settings/keys"
+pricing_url = "https://openrouter.ai/models"
+login_url = "https://openrouter.ai/"
+billing_url = "https://openrouter.ai/credits"
+# OPENROUTER_API_KEY is the name OpenRouter's own examples use for the key;
+# it is a convention rather than a variable an official SDK reads, because
+# there is no official SDK. Listing it is still correct for scan detection.
+env_vars = ["OPENROUTER_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted. A key may carry a credit limit instead."
+watch_docs = [
+    "https://openrouter.ai/docs/api-reference/authentication",
+    "https://openrouter.ai/docs/api-reference/limits",
+]
+# No detection pattern: the official authentication documentation shows only a
+# `<OPENROUTER_API_KEY>` placeholder and does not publish the key format.
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "OpenRouter documents GET /api/v1/key, which reports the calling key's own status; Tethra has no OpenRouter connector yet." }
+fetch_metadata = { support = "supported_not_implemented", attribution = "exact_credential", note = "GET /api/v1/key returns the calling key's label, limit and limit_remaining — for that key only, never for other keys." }
+fetch_usage = { support = "supported_not_implemented", attribution = "exact_credential", note = "GET /api/v1/key reports the calling key's own credit usage (usage, usage_daily, usage_weekly, usage_monthly). That is the key doing the asking, not an account-wide usage API, and the Local Gateway cannot observe OpenRouter because there is no base-URL environment variable to write." }
+read_permissions = { support = "unsupported", note = "OpenRouter keys carry no documented per-key scopes; they carry credit limits, which are not permissions." }
+change_permissions = { support = "unsupported", note = "There are no documented per-key scopes to change." }
+create_credential = { support = "manual_only", note = "Keys are created in the key settings page; no key-creation API is claimed here." }
+disable_credential = { support = "manual_only", note = "Keys are disabled or removed in the key settings page." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the key settings page." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Per-model prices are published on the models page; Tethra does not claim a pricing API here." }

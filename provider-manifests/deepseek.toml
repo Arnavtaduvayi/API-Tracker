@@ -1,0 +1,45 @@
+# DeepSeek provider manifest.
+#
+# NO [gateway] SECTION — deliberately. DeepSeek publishes no SDK of its own:
+# its official documentation tells you to use the OpenAI or Anthropic SDK with
+# an explicit `base_url` argument ("https://api.deepseek.com", or
+# ".../anthropic" for the Anthropic shape). The only base-URL environment
+# variables in play therefore belong to those SDKs — OPENAI_BASE_URL and
+# ANTHROPIC_BASE_URL — and they are already claimed by the openai and
+# anthropic manifests. Writing one of them for DeepSeek would hijack the other
+# provider's route in the same project, so Tethra lists DeepSeek and labels it
+# unsupported instead.
+id = "deepseek"
+name = "DeepSeek"
+description = "DeepSeek API platform (OpenAI- and Anthropic-compatible endpoints)."
+website = "https://www.deepseek.com"
+api_docs_url = "https://api-docs.deepseek.com/"
+auth_docs_url = "https://api-docs.deepseek.com/"
+manage_url = "https://platform.deepseek.com/api_keys"
+pricing_url = "https://api-docs.deepseek.com/quick_start/pricing"
+login_url = "https://platform.deepseek.com/"
+billing_url = "https://platform.deepseek.com/usage"
+# Verified from the official documentation's code samples.
+env_vars = ["DEEPSEEK_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in the platform console."
+watch_docs = [
+    "https://api-docs.deepseek.com/",
+    "https://api-docs.deepseek.com/updates",
+]
+# No detection pattern: DeepSeek keys use the same `sk-` + hex shape as legacy
+# OpenAI keys, which the openai manifest's `openai-legacy-key` rule already
+# matches at medium confidence. Adding a second, identical rule here would
+# double-report one secret and assert the wrong provider.
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /models would confirm the key; Tethra has no DeepSeek connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names are shown in the platform console; no public key-management API is documented." }
+fetch_usage = { support = "supported_not_implemented", attribution = "account_level", note = "DeepSeek documents a balance endpoint (GET /user/balance) at account level; there is no per-key usage API, and the Local Gateway cannot observe DeepSeek because it has no provider-specific base-URL variable." }
+read_permissions = { support = "unsupported", note = "DeepSeek API keys carry no documented per-key scopes." }
+change_permissions = { support = "unsupported", note = "There are no documented per-key scopes to change." }
+create_credential = { support = "manual_only", note = "Keys are created in the platform console; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the platform console; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the platform console, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published in the documentation; there is no official pricing API." }

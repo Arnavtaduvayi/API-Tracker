@@ -55,8 +55,34 @@ import type {
   Template,
   TemplateApplyOutcome,
   Project,
+  ProjectActivityFilter,
+  ProjectActivitySnapshot,
+  ProjectOverview,
+  ProjectRestoreEntry,
+  DetectedCredential,
+  DetectedStatus,
+  FolderLinkPreview,
+  LinkOutcome,
   ProviderConnection,
   ProviderKeyListing,
+  CredentialActivitySources,
+  GatewayActivitySummary,
+  ProjectActivity,
+  TrackingScan,
+  TrackingPlan,
+  TrackingApplyReport,
+  TrackingStatus,
+  TrackingDiagnosis,
+  TrackingOriginRequest,
+  TrackingUndoReport,
+  ForegroundStatus,
+  GatewayDisableReport,
+  GatewayDoctor,
+  GatewayInstallReport,
+  GatewayLinkPlan,
+  GatewayRouteList,
+  GatewayUninstallReport,
+  GatewayUnlinkReport,
   ProviderKeyOverview,
   ProviderManifest,
   ProviderProjectOverview,
@@ -536,4 +562,137 @@ export const api = {
     call<void>("observe_allowlist_add", { project, host, port, note }),
   observeAllowlistRemove: (project: string, host: string, port: number) =>
     call<boolean>("observe_allowlist_remove", { project, host, port }),
+
+  // --- Local Gateway (ADR 0019, Phase 3) ---
+  // Doctor/status/start/stop/restart are lock-free on the backend so the
+  // lock screen's status strip keeps working; route/link mutations and
+  // install/disable/uninstall require the unlocked vault.
+  gatewayDoctor: () => call<GatewayDoctor>("gateway_doctor"),
+  gatewayLocateCli: () => call<string | null>("gateway_locate_cli"),
+  gatewayInstall: (force: boolean) => call<GatewayInstallReport>("gateway_install", { force }),
+  gatewayDisable: (keepEnv: boolean) =>
+    call<GatewayDisableReport>("gateway_disable", { keepEnv }),
+  gatewayUninstall: (keepEnv: boolean) =>
+    call<GatewayUninstallReport>("gateway_uninstall", { keepEnv }),
+  gatewayStart: () => call<void>("gateway_start"),
+  gatewayStop: () => call<void>("gateway_stop"),
+  gatewayRestart: () => call<void>("gateway_restart"),
+  gatewayRepair: () => call<GatewayInstallReport>("gateway_repair"),
+  gatewayRouteList: () => call<GatewayRouteList>("gateway_route_list"),
+  gatewayRouteAdd: (provider: string, prefix: string | null, origin: string | null) =>
+    call<void>("gateway_route_add", { provider, prefix, origin }),
+  gatewayRouteRemove: (prefix: string) => call<boolean>("gateway_route_remove", { prefix }),
+  gatewayRouteSetEnabled: (prefix: string, enabled: boolean) =>
+    call<boolean>("gateway_route_set_enabled", { prefix, enabled }),
+  gatewayLinkPlan: (args: {
+    project: string;
+    route: string;
+    envFiles: string[];
+    dir: string | null;
+    var: string | null;
+  }) => call<GatewayLinkPlan>("gateway_link_plan", { ...args }),
+  gatewayLinkApply: (args: {
+    project: string;
+    route: string;
+    envFiles: string[];
+    dir: string | null;
+    var: string | null;
+    slug: string;
+    digest: string;
+  }) => call<void>("gateway_link_apply", { ...args }),
+  gatewayUnlink: (project: string, route: string) =>
+    call<GatewayUnlinkReport>("gateway_unlink", { project, route }),
+  gatewayPushKey: (password: string) => call<void>("gateway_push_key", { password }),
+  gatewayRevokeKey: () => call<void>("gateway_revoke_key"),
+  gatewayMatchWhileLockedGet: () => call<boolean>("gateway_match_while_locked_get"),
+  gatewayMatchWhileLockedSet: (enabled: boolean, password?: string) =>
+    call<void>("gateway_match_while_locked_set", { enabled, password: password ?? null }),
+  gatewayRecording: (pause: boolean) => call<void>("gateway_recording", { pause }),
+  gatewayActivity: (since: string | null) =>
+    call<GatewayActivitySummary>("gateway_activity", { since }),
+  /** Same rows and window as `gatewayActivity`, split by project. */
+  gatewayActivityByProject: (since: string | null) =>
+    call<ProjectActivity[]>("gateway_activity_by_project", { since }),
+  credentialActivitySources: (selector: string) =>
+    call<CredentialActivitySources>("credential_activity_sources", { selector }),
+
+  // --- Track API activity (ADR 0022) ----------------------------------
+  trackingScan: (folder: string) => call<TrackingScan>("tracking_scan", { folder }),
+  /** Every repository-discovered destination, with its full disclosure. */
+  trackingOriginRequests: () => call<TrackingOriginRequest[]>("tracking_origin_requests"),
+  /**
+   * The ONLY way a repository-discovered destination enters a plan.
+   * Deliberately separate from planning and applying: neither of those can
+   * approve anything (ADR 0024, ZFT-004).
+   */
+  trackingOriginApprove: (providerId: string, origin: string) =>
+    call<TrackingOriginRequest>("tracking_origin_approve", { providerId, origin }),
+  trackingOriginRevoke: (providerId: string) =>
+    call<void>("tracking_origin_revoke", { providerId }),
+  /** Providers only — destinations come from the approvals above. */
+  trackingPlanBuild: (providers: string[]) =>
+    call<TrackingPlan>("tracking_plan_build", { providers }),
+  trackingApply: (password: string | null) =>
+    call<TrackingApplyReport>("tracking_apply", { password }),
+  trackingStatus: (setupId: string) => call<TrackingStatus>("tracking_status", { setupId }),
+  trackingList: () => call<TrackingStatus[]>("tracking_list"),
+  trackingDiagnose: (setupId: string) =>
+    call<TrackingDiagnosis[]>("tracking_diagnose", { setupId }),
+  trackingUndo: (setupId: string) => call<TrackingUndoReport>("tracking_undo", { setupId }),
+  trackingForegroundStart: () => call<void>("tracking_foreground_start"),
+  trackingForegroundActive: () => call<ForegroundStatus>("tracking_foreground_active"),
+  trackingForegroundStop: () => call<void>("tracking_foreground_stop"),
+  trackingResumeAttribution: (password: string) =>
+    call<void>("tracking_resume_attribution", { password }),
+
+  // --- Projects-first live activity (ADR 0029) -------------------------
+
+  /** What selecting this folder would do, plus the digest that binds a
+   *  confirmation to it. Read-only with respect to the user's files. */
+  projectFolderPreview: (project: string, folder: string) =>
+    call<FolderLinkPreview>("project_folder_preview", { project, folder }),
+  /** Apply the previewed configuration. `digest` must be the one the user was
+   *  shown; a mismatch is refused rather than reconciled. */
+  projectFolderLink: (
+    project: string,
+    folder: string,
+    digest: string,
+    password: string | null,
+  ) => call<LinkOutcome>("project_folder_link", { project, folder, digest, password }),
+  /** Configuration and health. Resolves present-tense health, so this is for
+   *  page open, manual refresh and focus — not for the 5s timer. */
+  projectTrackingOverview: (project: string) =>
+    call<ProjectOverview>("project_tracking_overview", { project }),
+  /** The live snapshot. Lock-free-ish by design: the backend reads it without
+   *  touching the inactivity clock, so polling cannot defeat auto-lock. */
+  projectActivity: (
+    project: string,
+    range: string,
+    filter: ProjectActivityFilter = {},
+    limit?: number,
+  ) => call<ProjectActivitySnapshot>("project_activity", { project, range, filter, limit }),
+  /** Re-run detection. Writes no project file and creates no route. */
+  projectRescan: (project: string) => call<DetectedCredential[]>("project_rescan", { project }),
+  projectSetTrackingEnabled: (project: string, enabled: boolean) =>
+    call<void>("project_set_tracking_enabled", { project, enabled }),
+  /** Forget the folder association. Undoing managed file changes is the
+   *  separate `trackingUndo` call. */
+  projectUnlinkFolder: (project: string) => call<boolean>("project_unlink_folder", { project }),
+  projectResolveDetection: (id: string, status: DetectedStatus, credential: string | null) =>
+    call<DetectedCredential>("project_resolve_detection", { id, status, credential }),
+  projectUpdateDetection: (
+    id: string,
+    fields: { name?: string; provider?: string; environment?: string },
+  ) =>
+    call<DetectedCredential>("project_update_detection", {
+      id,
+      name: fields.name ?? null,
+      provider: fields.provider ?? null,
+      environment: fields.environment ?? null,
+    }),
+  /** Name an observed host the catalog does not know. Creates no route and
+   *  approves no destination. */
+  projectNameUnknownApi: (host: string, provider: string | null, apiName: string | null) =>
+    call<void>("project_name_unknown_api", { host, provider, apiName }),
+  projectRestoreTracking: () => call<ProjectRestoreEntry[]>("project_restore_tracking"),
 };

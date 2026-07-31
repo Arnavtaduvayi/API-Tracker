@@ -65,6 +65,35 @@ can use both.
 > If you lose it, the vault is unrecoverable by design. Make encrypted backups
 > (`tethra backup create <path>` or the desktop Backup screen).
 
+## Tracking your API activity
+
+Tethra's main workflow — seeing what your APIs actually do — needs no
+extra installation. The desktop app **ships the helper it needs inside
+the app bundle**: open it, click **Track API activity**, pick your
+project folder, review one screen, and click Start tracking. No CLI
+install, no PATH changes, no terminal.
+
+**Where this has actually been executed.** The zero-terminal claim above is
+verified end to end on **macOS arm64**, against the packaged `.app` with no
+CLI on PATH. The Windows and Linux desktop builds compile and are covered by
+CI, but the packaged install-and-track lifecycle has **not** been executed on
+either platform; the claim is not made for them. See
+`docs/activity-onboarding/PACKAGED_VALIDATION.md` for exactly what was run
+where (audit finding `ZFT-044`).
+
+If you prefer the terminal, the whole flow is one command:
+
+```bash
+tethra track .
+```
+
+Full walkthrough: [activity-onboarding/USER_GUIDE.md](activity-onboarding/USER_GUIDE.md).
+When traffic does not appear:
+[activity-onboarding/TROUBLESHOOTING.md](activity-onboarding/TROUBLESHOOTING.md).
+The low-level `tethra gateway …` commands and the Gateway internals panel
+remain available for diagnostics and expert configurations
+([gateway/USER_GUIDE.md](gateway/USER_GUIDE.md)).
+
 ## Where your data lives
 
 The vault database (`vault.db`), CLI session file, and WAL files live in the
@@ -115,10 +144,38 @@ in the data directory and is **not** touched by installing a new version.
 
 ## Uninstall
 
-1. Remove the app (drag to Trash on macOS / uninstall on Windows / remove the
+**Do step 1 first, or a background service outlives the app.** Dragging
+`Tethra.app` to the Trash does NOT remove the login item that starts the
+tracking service. With your data directory still in place, the gateway keeps
+starting at every login with the app gone — it exits cleanly rather than
+crash-looping, but it stays in System Settings → General → Login Items
+(audit finding `ZFT-042`).
+
+1. **Turn the background service off, while the app is still installed:**
+
+   ```bash
+   tethra gateway uninstall
+   ```
+
+   or, from the desktop app, **Advanced → Gateway → Uninstall**. This also
+   restores every `.env` file Tethra edited to its recorded prior state.
+
+   If you already removed the app, delete the login item by hand. The file
+   is named after your data directory:
+
+   ```bash
+   ls ~/Library/LaunchAgents/dev.api-tracker.gateway*.plist
+   launchctl bootout "gui/$(id -u)/dev.api-tracker.gateway.<id>"
+   rm ~/Library/LaunchAgents/dev.api-tracker.gateway.<id>.plist
+   ```
+
+   (Service names carry a per-data-directory suffix — ADR 0026 — so there
+   is one file per Tethra installation you had.)
+
+2. Remove the app (drag to Trash on macOS / uninstall on Windows / remove the
    `.AppImage` or `sudo apt remove tethra` on Linux) and delete the CLI
    binary from your `PATH`.
-2. Delete the data directory (table above) to remove your vault. **This is
+3. Delete the data directory (table above) to remove your vault. **This is
    irreversible** — back up first if you may want the data later.
-3. Remove any exported `TETHRA_SESSION` (or legacy `API_TRACKER_SESSION`)
+4. Remove any exported `TETHRA_SESSION` (or legacy `API_TRACKER_SESSION`)
    from your shell profile.

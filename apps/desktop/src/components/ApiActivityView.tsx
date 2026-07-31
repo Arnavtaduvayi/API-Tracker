@@ -114,12 +114,23 @@ function Overview({ onError }: { onError: (s: string) => void }) {
   const [selected, setSelected] = useState<ServiceOverview | null>(null);
   const [endpoints, setEndpoints] = useState<ObservedEndpoint[]>([]);
   const [events, setEvents] = useState<RuntimeEvent[]>([]);
+  // "Nothing was observed" and "the overview could not be read" are opposite
+  // findings on an observability screen; the initial empty array made them
+  // render identically, so a failed read told the user their app made no API
+  // calls (NEW-41).
+  const [loadFailure, setLoadFailure] = useState<string | null>(null);
 
   useEffect(() => {
     api
       .observeOverview()
-      .then(setServices)
-      .catch((e) => onError(errMsg(e)));
+      .then((s) => {
+        setServices(s);
+        setLoadFailure(null);
+      })
+      .catch((e) => {
+        setLoadFailure(errMsg(e));
+        onError(errMsg(e));
+      });
   }, [onError]);
 
   const open = useCallback(
@@ -199,11 +210,19 @@ function Overview({ onError }: { onError: (s: string) => void }) {
     );
   }
 
+  if (loadFailure !== null) {
+    return (
+      <p className="error" role="alert">
+        The observed-traffic overview could not be read: {loadFailure}. This screen therefore
+        cannot say whether any API traffic was observed — do not read it as none.
+      </p>
+    );
+  }
   if (services.length === 0) {
     return (
       <p className="muted">
-        No API traffic observed yet. Launch a monitored run:{" "}
-        <span className="mono">tethra run --observe -- &lt;command&gt;</span>
+        No API traffic observed yet (from the proxy or the local gateway). Launch a monitored
+        run: <span className="mono">tethra run --observe -- &lt;command&gt;</span>
       </p>
     );
   }

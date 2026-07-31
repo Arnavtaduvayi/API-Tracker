@@ -219,6 +219,51 @@ npx tauri build          # bundles the app (unsigned)
 npx tauri dev            # or run it in development mode
 ```
 
+## See your APIs in action (the main workflow)
+
+Tethra's primary job is showing you what your APIs are actually doing.
+Turning that on takes one screen in the desktop app, or one command:
+
+```bash
+tethra track .          # detect this project's APIs, configure, verify
+```
+
+`track` scans only the folder you point it at, shows you every API it
+found and the exact `.env` diff it proposes, asks once, then installs the
+local tracking service, creates the provider routes, applies the file
+edits, and turns on credential attribution — in one go. It reports
+"Tracking verified" only after a real request from your project has been
+observed.
+
+```bash
+tethra track . --dry-run   # show the plan and diff, change nothing
+tethra track status        # state and per-API freshness
+tethra track doctor        # ranked diagnosis when nothing arrives
+tethra track undo          # restore the files, remove what track made
+```
+
+In the desktop app this lives on the project itself. Open **Projects**, open or
+create a project, and click **Select project folder**. Tethra scans the folder,
+shows one disclosure of exactly what it will change, and on your confirmation
+sets everything up — then the live request, token, latency and cost activity
+appears on that same page and refreshes itself. No terminal, no route forms, no
+separate attribution step, and the folder is linked once. Full walkthrough:
+[docs/projects-first/PRODUCT_BEHAVIOR.md](docs/projects-first/PRODUCT_BEHAVIOR.md).
+
+The older standalone flow remains under **Advanced → Tracking setup (advanced)**
+for the decisions the project page deliberately does not make for you: approving
+a destination discovered in your own project files, per-step apply diagnostics,
+and undoing managed file changes
+([docs/activity-onboarding/USER_GUIDE.md](docs/activity-onboarding/USER_GUIDE.md)).
+
+Tethra records metadata only — provider, endpoint template, status,
+latency, sizes, and token counts and model names when responses carry
+them. It never records API keys, authorization headers, cookies, query
+values, prompts, request bodies, or response bodies. Only traffic whose
+base URL points at Tethra is observed;
+[known limitations](docs/activity-onboarding/KNOWN_LIMITATIONS.md) are
+stated plainly.
+
 ## Try it in two minutes (no real keys needed)
 
 ```bash

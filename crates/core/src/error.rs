@@ -58,6 +58,12 @@ pub enum CoreError {
     #[error("another Tethra process is writing to the vault; try again")]
     Busy,
 
+    #[error(
+        "{kind} '{ident}' changed while this operation was deciding what to write; \
+         nothing was overwritten — re-read it and try again"
+    )]
+    StateConflict { kind: &'static str, ident: String },
+
     #[error("backup file is not valid: {0}")]
     BackupInvalid(String),
 
@@ -70,6 +76,12 @@ pub enum CoreError {
          instead of opening the vault with an older build"
     )]
     SchemaTooNew { found: i64, supported: i64 },
+
+    #[error(
+        "the vault database is at schema v{found}, but this component requires v{supported}; \
+         unlock the vault with the app or CLI once to apply pending migrations"
+    )]
+    SchemaNotCurrent { found: i64, supported: i64 },
 
     #[error("{provider} does not support '{capability}' this way: {hint}")]
     Unsupported {
@@ -127,9 +139,11 @@ impl CoreError {
             CoreError::InvalidInput(_) => "invalid_input",
             CoreError::Crypto { .. } => "crypto_error",
             CoreError::Busy => "vault_busy",
+            CoreError::StateConflict { .. } => "state_conflict",
             CoreError::BackupInvalid(_) => "backup_invalid",
             CoreError::VaultCorrupted(_) => "vault_corrupted",
             CoreError::SchemaTooNew { .. } => "schema_too_new",
+            CoreError::SchemaNotCurrent { .. } => "schema_not_current",
             CoreError::Unsupported { .. } => "unsupported",
             CoreError::Provider(_) => "provider_error",
             CoreError::ProviderAuth { .. } => "provider_auth_error",

@@ -1,0 +1,67 @@
+# xAI (Grok) provider manifest.
+#
+# NO [gateway] SECTION — deliberately. The official xai-sdk reads the key from
+# `XAI_API_KEY`, but its endpoint override is an `api_host` CONSTRUCTOR
+# ARGUMENT, not an environment variable. xAI also exposes an
+# OpenAI-compatible endpoint at https://api.x.ai/v1, but reaching it means
+# setting OPENAI_BASE_URL — a variable the openai manifest already owns, and
+# repointing it would silently redirect that project's OpenAI traffic. So xAI
+# is detected, listed and honestly labelled unsupported.
+id = "xai"
+name = "xAI"
+description = "xAI API platform (Grok models)."
+website = "https://x.ai"
+api_docs_url = "https://docs.x.ai/"
+auth_docs_url = "https://docs.x.ai/developers/quickstart"
+manage_url = "https://console.x.ai/team/default/api-keys"
+pricing_url = "https://x.ai/api"
+permissions_docs_url = "https://docs.x.ai/developers/management-api-guide"
+login_url = "https://console.x.ai/"
+# Secret-bearing variables only.
+#
+# XAI_API_KEY: verified from the official quickstart and the official xai-sdk,
+# which raises "Trying to read the xAI API key from the XAI_API_KEY environment
+# variable but it doesn't exist" when the key is neither passed nor set.
+#
+# The MANAGEMENT key is a second, HIGHER-PRIVILEGE credential (console →
+# Settings → Management Keys, base URL https://management-api.x.ai): it creates,
+# rotates and deletes the API keys above. Two names, because xAI itself uses
+# two, and a scanner that knows only one leaves the more dangerous credential
+# in the unrecognised bucket:
+#   * XAI_MANAGEMENT_KEY     — the SDK's own fallback. `xai_sdk`'s sync AND aio
+#     clients both do `management_api_key or os.getenv("XAI_MANAGEMENT_KEY")`,
+#     so this is the name in a `.env` when the key is not passed explicitly.
+#   * XAI_MANAGEMENT_API_KEY — the name every official docs example uses
+#     (`os.getenv(...)`, `process.env....`, `$XAI_MANAGEMENT_API_KEY` in curl),
+#     where the value IS passed explicitly, so this is the name in a `.env`
+#     when the developer followed the documentation.
+# Neither is a guess; both were read from primary sources. Declaring only the
+# SDK name would miss every project written from the docs, and vice versa.
+env_vars = ["XAI_API_KEY", "XAI_MANAGEMENT_KEY", "XAI_MANAGEMENT_API_KEY"]
+credential_types = ["api_key", "management_key"]
+expiration = "Keys do not expire by default. The Management API can set an expireTime on a key (and on a rotated secret), after which the key is rejected; otherwise a key stays valid until it is disabled or deleted."
+watch_docs = [
+    "https://docs.x.ai/",
+    "https://docs.x.ai/developers/quickstart",
+    "https://docs.x.ai/developers/management-api-guide",
+]
+# No detection pattern: the official documentation does not publish the key
+# format.
+
+# These said "no public key-management API is documented" — which was a claim
+# about xAI, not about Tethra, and it is false: the Management API declared
+# above creates, lists, updates, rotates and deletes API keys and reports each
+# key's ACLs. Nothing here becomes "implemented" (Tethra still has no xAI
+# connector), but "supported, not implemented" is the honest label for a
+# capability the provider offers and we have not built.
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/models against https://api.x.ai would confirm an API key, and GET /auth/management-keys/validation would confirm a management key; Tethra has no xAI connector yet." }
+fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "GET /auth/teams/{teamId}/api-keys returns each key's id, name, redacted value, ACLs, disabled flag and timestamps — requires a management key. Without one, key names are visible only in the console." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Usage and spend are shown in the console; the Management API documents no usage or billing endpoint, and the Local Gateway cannot observe xAI because the SDK has no base-URL environment variable." }
+read_permissions = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "A key's endpoint/model ACLs come back with the key itself; GET /auth/teams/{teamId}/endpoints and /auth/teams/{teamId}/models enumerate the assignable values. Requires a management key." }
+change_permissions = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "PUT /auth/api-keys/{api_key_id} updates a key's ACLs under a fieldMask; requires a management key. A key with no ACLs can call nothing, so this is the switch that makes a key useful or useless." }
+create_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "POST /auth/teams/{teamId}/api-keys creates a key inside a team and returns the full secret ONCE together with its id; requires a management key." }
+disable_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "PUT /auth/api-keys/{api_key_id} sets the disabled flag under a fieldMask — reversible, unlike deletion. Requires a management key." }
+revoke_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "DELETE /auth/api-keys/{apiKeyId} removes a key permanently; requires a management key." }
+rotate_credential = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "exact_credential", note = "POST /auth/api-keys/{apiKeyId}/rotate issues a new secret for the SAME key id, so ACLs and limits survive the rotation, and GET /auth/api-keys/{apiKeyId}/propagation reports when the change has taken effect. Requires a management key." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the API page; there is no official pricing API." }

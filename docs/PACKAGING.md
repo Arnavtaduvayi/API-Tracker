@@ -8,7 +8,8 @@ artifacts to a **draft** GitHub Release when a `v*` tag is pushed.
 
 | Platform | Desktop | CLI |
 | --- | --- | --- |
-| macOS (arm64 + x64) | `.dmg`, `.app` | `tethra-<target>.tar.gz` |
+| macOS (arm64) | `.dmg`, `.app` | `tethra-<target>.tar.gz` |
+| macOS (x64) | **not built** — the release matrix produces arm64 desktop artifacts only | `tethra-x86_64-apple-darwin.tar.gz` |
 | Windows (x64) | `.msi` / `.exe` (NSIS) | `tethra-x86_64-pc-windows-msvc.zip` |
 | Linux (x64) | `.AppImage`, `.deb` | `tethra-x86_64-unknown-linux-gnu.tar.gz` |
 
@@ -28,11 +29,16 @@ Tauri desktop bundle (`npx tauri build` → `Tethra.app` + a `.dmg`). The
 bundle was swept for leaked dev vaults, `.env` files, backups, logs,
 machine-specific paths, test-fixture secrets, and Claude attribution — clean.
 
-The **Windows, Linux, and macOS x64** artifacts are produced by
-`release.yml` in CI and were **not** built on the alpha-completion machine
+The **Windows and Linux** artifacts, and the macOS **x64 CLI**, are produced
+by `release.yml` in CI and were **not** built on the alpha-completion machine
 (only the host `aarch64-apple-darwin` toolchain is installed here). Their
 build configuration is verified by review; download and smoke-test each
 platform artifact from the draft release before publishing.
+
+There is **no macOS x64 desktop artifact**: `release.yml`'s desktop matrix
+builds `aarch64-apple-darwin` only. This table previously listed
+"macOS (arm64 + x64)" for the desktop, which the matrix never produced
+(audit finding `ZFT-043`).
 
 ## Signing & notarization — NOT configured (alpha)
 

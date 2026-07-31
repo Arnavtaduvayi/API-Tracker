@@ -1,0 +1,59 @@
+# Azure OpenAI Service provider manifest.
+id = "azure-openai"
+name = "Azure OpenAI"
+description = "Azure OpenAI Service (OpenAI models hosted on a per-resource Azure endpoint)."
+website = "https://azure.microsoft.com/products/ai-services/openai-service"
+api_docs_url = "https://learn.microsoft.com/azure/ai-services/openai/reference"
+auth_docs_url = "https://learn.microsoft.com/azure/ai-services/openai/how-to/switching-endpoints"
+manage_url = "https://portal.azure.com/"
+pricing_url = "https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/"
+login_url = "https://portal.azure.com/"
+# Verified against the official openai-python `AzureOpenAI` client
+# (`src/openai/lib/azure.py`): `api_key = os.environ.get("AZURE_OPENAI_API_KEY")`.
+# AZURE_OPENAI_AD_TOKEN is the Entra ID bearer-token alternative and is
+# likewise secret-bearing. OPENAI_API_VERSION is non-secret and excluded.
+env_vars = ["AZURE_OPENAI_API_KEY", "AZURE_OPENAI_AD_TOKEN"]
+credential_types = ["resource_api_key", "entra_id_token"]
+expiration = "Resource keys do not expire; they stay valid until regenerated. Entra ID tokens are short-lived by design."
+watch_docs = [
+    "https://learn.microsoft.com/azure/ai-services/openai/reference",
+    "https://learn.microsoft.com/azure/ai-services/openai/whats-new",
+]
+# No detection pattern: Azure OpenAI resource keys are undelimited hex strings
+# shared in shape with every other Azure AI Services key, so a regex could not
+# attribute a finding to this provider honestly.
+
+# Local Gateway routing (ADR 0019 D10, KNOWN_CONFLICTS C11). Azure OpenAI has
+# NO fixed data-plane origin: every resource gets its own
+# `<resource>.openai.azure.com` (or custom-domain) host, exactly like Supabase.
+# `origins` is therefore empty (custom-only) — routes can be registered only
+# through the MAC'd custom-origin flow with the user's own resource origin,
+# and `add_manifest_route` refuses this provider.
+#
+# Verified against the official openai-python `AzureOpenAI` client:
+#   * base URL env var: `azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT")`
+#   * base URL shape:   `https://<resource>.openai.azure.com` (per resource)
+#   * API key env var:  `AZURE_OPENAI_API_KEY`
+# Microsoft's own samples write AZURE_OPENAI_ENDPOINT with a trailing slash.
+# Such a value is not a bare origin, so origin inference rejects it and the
+# user is asked to confirm the origin instead of Tethra guessing — a visible
+# extra step, not a silent misroute.
+[gateway]
+origins = []
+base_path = ""
+env_vars = ["AZURE_OPENAI_ENDPOINT"]
+# Azure's chat-completions responses are OpenAI-shaped
+# (usage.prompt_tokens / usage.completion_tokens).
+usage_shape = "openai"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "A key can be checked against its own resource endpoint, which Tethra only knows once the user supplies it; there is no Azure OpenAI connector yet." }
+fetch_metadata = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "account_level", note = "The Azure Resource Manager API can list a resource's keys and deployments, but it needs Azure ARM credentials — a different, higher-privilege credential than the data-plane key this manifest describes." }
+fetch_usage = { support = "supported_not_implemented", requires_admin_credential = true, attribution = "account_level", note = "Token usage is available through Azure Monitor metrics per resource and deployment, never per data-plane key, and requires ARM credentials." }
+read_permissions = { support = "unsupported", note = "A resource key grants full data-plane access to its resource; there are no per-key scopes. Fine-grained access is expressed with Entra ID roles instead." }
+change_permissions = { support = "unsupported", note = "There are no per-key scopes to change; use Entra ID role assignments." }
+create_credential = { support = "manual_only", note = "A resource is created with two keys in the Azure portal; keys are regenerated rather than created." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; a key is invalidated by regenerating it." }
+revoke_credential = { support = "manual_only", requires_admin_credential = true, note = "Regenerating a key in the portal (or via ARM) revokes the previous value." }
+rotate_credential = { support = "manual_only", note = "Azure issues two keys per resource precisely so one can be regenerated while the other serves traffic; the swap is done in the portal." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the Azure pricing page; the Azure Retail Prices API is not an Azure OpenAI API and is not claimed here." }

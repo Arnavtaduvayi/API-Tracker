@@ -1,0 +1,48 @@
+# Cerebras provider manifest.
+id = "cerebras"
+name = "Cerebras"
+description = "Cerebras Inference API (OpenAI-compatible chat completions)."
+website = "https://www.cerebras.ai"
+api_docs_url = "https://inference-docs.cerebras.ai/api-reference"
+auth_docs_url = "https://inference-docs.cerebras.ai/introduction"
+manage_url = "https://cloud.cerebras.ai/platform/"
+pricing_url = "https://www.cerebras.ai/pricing"
+login_url = "https://cloud.cerebras.ai/"
+# Verified against the official cerebras-cloud-sdk-python client, which infers
+# `api_key` from `CEREBRAS_API_KEY`.
+env_vars = ["CEREBRAS_API_KEY"]
+credential_types = ["api_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in the console."
+watch_docs = [
+    "https://inference-docs.cerebras.ai/api-reference",
+    "https://inference-docs.cerebras.ai/introduction",
+]
+# No detection pattern: the key format is not published in the official
+# documentation, so no regex is declared rather than guessing a prefix.
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# cerebras-cloud-sdk-python client:
+#   * base URL env var: `base_url = os.environ.get("CEREBRAS_BASE_URL")`
+#   * default base URL: `https://api.cerebras.ai`
+#   * API key env var:  `CEREBRAS_API_KEY`
+# The default base URL is a bare origin and the SDK carries `/v1` in its own
+# route strings, so base_path stays empty.
+[gateway]
+origins = ["https://api.cerebras.ai"]
+base_path = ""
+env_vars = ["CEREBRAS_BASE_URL"]
+# /v1/chat/completions is OpenAI-compatible and reports
+# usage.prompt_tokens / usage.completion_tokens.
+usage_shape = "openai"
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /v1/models would confirm the key; Tethra has no Cerebras connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key metadata is shown in the console; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Usage is shown in the console; no public usage API is documented. Per-response token counts remain observable locally through the Local Gateway." }
+read_permissions = { support = "unsupported", note = "Cerebras API keys carry no documented per-key scopes." }
+change_permissions = { support = "unsupported", note = "There are no documented per-key scopes to change." }
+create_credential = { support = "manual_only", note = "Keys are created in the console; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in the console; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in the console, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

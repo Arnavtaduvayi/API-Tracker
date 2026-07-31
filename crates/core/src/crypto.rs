@@ -169,6 +169,33 @@ pub mod aad {
     pub fn fingerprint_key(vault_id: &str) -> String {
         format!("api-tracker:v1:fingerprint-key:{vault_id}")
     }
+    /// The gateway route-MAC key (ADR 0019 D3): a matching/MAC-only key that
+    /// authenticates CUSTOM-ORIGIN route rows, so a same-uid `UPDATE` of a
+    /// stored custom origin in the plaintext gateway_routes table stops the
+    /// route rather than redirecting it, and no destination the user never
+    /// approved can be injected. It does not cover built-in routes, whose
+    /// `provider_id` selector is unauthenticated, and it is not consulted for
+    /// a row whose custom columns have been nulled (SEC-01 / NEW-49 — accepted
+    /// exclusion, see docs/gateway/SECURITY.md). Like the fingerprint key it
+    /// can never decrypt anything.
+    pub fn gateway_mac_key(vault_id: &str) -> String {
+        format!("api-tracker:v1:gateway-mac-key:{vault_id}")
+    }
+    /// The env-restore-record key (ADR 0028): wraps the *prior values* a
+    /// link recorded so they can be put back on unlink.
+    ///
+    /// Unlike the two keys above this one really does decrypt — that is its
+    /// whole job — so it is held only by a process with an unlocked vault
+    /// and is never pushed over the gateway control socket.
+    pub fn env_restore_key(vault_id: &str) -> String {
+        format!("api-tracker:v1:env-restore-key:{vault_id}")
+    }
+    /// One recorded prior value, bound to the link and the exact file and
+    /// variable it belongs to, so a ciphertext cannot be moved between
+    /// variables, files or links and still decrypt.
+    pub fn env_restore_value(vault_id: &str, link_slug: &str, path: &str, key: &str) -> String {
+        format!("api-tracker:v1:env-restore-value:{vault_id}:{link_slug}:{path}:{key}")
+    }
     /// Outer wrap of a project key (under the vault key).
     pub fn project_key(vault_id: &str, project_id: &str) -> String {
         format!("api-tracker:v1:project-key:{vault_id}:{project_id}")

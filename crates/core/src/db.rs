@@ -860,6 +860,448 @@ CREATE TABLE observe_internal_allowlist (
 ) STRICT;
 "#,
     },
+    Migration {
+        version: 13,
+        name: "local gateway (loopback reverse gateway, metadata-only)",
+        sql: r#"
+-- Local Gateway (ADR 0019). These tables store ONLY non-secret routing
+-- configuration and sanitized usage metadata. Like the runtime observability
+-- tables, no column can hold a body, header value, cookie, query string,
+-- credential value, or raw URL. Gateway usage is kept out of usage_snapshots
+-- so locally observed consumption is never summed with provider-reported
+-- usage (double-count guard, KNOWN_CONFLICTS C8).
+
+-- Singleton gateway configuration. The bind address is deliberately NOT a
+-- column: the listener is hard-coded to loopback (SECURITY_INVARIANTS SI-1;
+-- a host-configuration surface would be an invariant violation, so the
+-- ARCHITECTURE.md sketch's `bind` field was dropped). `port` is a random
+-- persisted high port chosen at enable time (ADR 0019 D8/O3), NULL until
+-- then. `match_while_locked` is the consented, default-OFF fingerprint-key
+-- retention toggle (ADR 0019 D5, OPEN_DECISIONS O2).
+CREATE TABLE gateway_config (
+    id                         TEXT PRIMARY KEY CHECK (id = 'gateway'),
+    enabled                    INTEGER NOT NULL DEFAULT 0,
+    port                       INTEGER,
+    match_while_locked         INTEGER NOT NULL DEFAULT 0,
+    service_version            TEXT,
+    usage_event_retention_days INTEGER,
+    usage_daily_retention_days INTEGER,
+    created_at                 TEXT NOT NULL,
+    updated_at                 TEXT NOT NULL
+) STRICT;
+
+-- Registered routes, keyed by the first path segment. Manifest routes store
+-- NO origin at all — the upstream is resolved from the compiled-in provider
+-- manifest at forward time, so no attacker-chosen destination can be written
+-- into this same-uid-writable table (ADR 0019 D3, the route-row-tampering
+-- blocker). Custom-origin routes store the origin string ONLY next to a MAC
+-- over (vault_id, route_prefix, provider_id, origin, port, consent_ts)
+-- computed under a vault-derived key at consent time; the gateway verifies
+-- the MAC before forwarding and never obeys the bare DB value, so an edited
+-- stored origin STOPS the route instead of redirecting it.
+--
+-- Scope limit (SEC-01 / NEW-49): provider_id IS stored here, is not covered
+-- by any MAC for a manifest row, and selects which compiled-in origin a
+-- built-in route resolves to. The three CHECK constraints below also let all
+-- four custom columns go NULL together, which downgrades a MAC'd custom row
+-- to the unauthenticated manifest path. Both need local write access to
+-- vault.db and are an accepted, documented exclusion, not a defence — see
+-- docs/gateway/SECURITY.md and docs/gateway/THREAT_MODEL.md GW-3.
+CREATE TABLE gateway_routes (
+    route_prefix             TEXT PRIMARY KEY,
+    provider_id              TEXT NOT NULL,
+    enabled                  INTEGER NOT NULL DEFAULT 1,
+    custom_origin            TEXT,
+    custom_origin_port       INTEGER,
+    custom_origin_mac        BLOB,
+    custom_origin_consent_at TEXT,
+    created_at               TEXT NOT NULL,
+    updated_at               TEXT NOT NULL,
+    CHECK ((custom_origin IS NULL) = (custom_origin_mac IS NULL)),
+    CHECK ((custom_origin IS NULL) = (custom_origin_port IS NULL)),
+    CHECK ((custom_origin IS NULL) = (custom_origin_consent_at IS NULL))
+) STRICT;
+
+-- Project links. `link_slug` is a >=128-bit CSPRNG value (never name-derived,
+-- SI-4) that scopes /p/<slug>/<route> traffic to a project. `env_path` and
+-- `prior_env_json` record what the .env onboarding rewrote so disable/unlink
+-- can restore the exact prior state (ADR 0019 D9).
+CREATE TABLE gateway_project_links (
+    link_slug      TEXT PRIMARY KEY,
+    project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    route_prefix   TEXT NOT NULL REFERENCES gateway_routes(route_prefix) ON DELETE CASCADE,
+    env_path       TEXT,
+    prior_env_json TEXT,
+    created_at     TEXT NOT NULL,
+    UNIQUE (project_id, route_prefix)
+) STRICT;
+CREATE INDEX idx_gpl_project ON gateway_project_links(project_id);
+
+-- Best-effort usage extracted in flight from provider responses (bounded
+-- extractor, PRIVACY_MODEL gateway §3). Raw events ride the short retention
+-- window; gateway_usage_daily keeps the long series. `usage_state` records
+-- WHY usage may be absent (absent | extracted | unsupported_shape |
+-- oversized_dropped | malformed) so a missing number is never a silent zero.
+-- `model` is length-capped and charset-filtered before insert; a hostile
+-- model value stores NULL plus a model_rejected counter, never a truncated
+-- attacker string.
+CREATE TABLE gateway_usage_events (
+    id                    TEXT PRIMARY KEY,
+    event_id              TEXT REFERENCES runtime_request_events(id) ON DELETE SET NULL,
+    at                    TEXT NOT NULL,
+    route_prefix          TEXT NOT NULL,
+    provider_id           TEXT NOT NULL,
+    project_id            TEXT REFERENCES projects(id) ON DELETE CASCADE,
+    model                 TEXT,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    total_tokens          INTEGER,
+    cached_input_tokens   INTEGER,
+    usage_available       INTEGER NOT NULL DEFAULT 0,
+    usage_state           TEXT NOT NULL DEFAULT 'absent',
+    estimated_cost_micros INTEGER,
+    was_streamed          INTEGER NOT NULL DEFAULT 0
+) STRICT;
+CREATE INDEX idx_gue_at ON gateway_usage_events(at);
+CREATE INDEX idx_gue_project ON gateway_usage_events(project_id);
+
+-- ~90-day daily rollup of gateway usage (raw events expire sooner). '' is
+-- the "all" sentinel for project_id/model, mirroring runtime_metric_buckets.
+CREATE TABLE gateway_usage_daily (
+    day                   TEXT NOT NULL,
+    provider_id           TEXT NOT NULL,
+    project_id            TEXT NOT NULL DEFAULT '',
+    model                 TEXT NOT NULL DEFAULT '',
+    request_count         INTEGER NOT NULL DEFAULT 0,
+    usage_event_count     INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (day, provider_id, project_id, model)
+) STRICT;
+
+-- Route-level daily counters: unlinked traffic, rejected browser writes
+-- (the ONLY record a rejected request produces, THREAT_MODEL GW-2), dropped
+-- observation events, and extraction/attribution accounting. route_prefix ''
+-- holds gateway-global counters that have no route.
+CREATE TABLE gateway_route_counters (
+    route_prefix TEXT NOT NULL DEFAULT '',
+    day          TEXT NOT NULL,
+    counter      TEXT NOT NULL,
+    count        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (route_prefix, day, counter)
+) STRICT;
+
+-- Distinguishes value-derived attribution (gateway keyed-fingerprint match,
+-- 'observed_fingerprint') from injection-derived attribution ('injected'),
+-- preserving the truth of attribution.rs's "never reads an Authorization
+-- value" for the injection path (ADR 0019 D5). NULL on pre-v13 rows.
+ALTER TABLE runtime_request_events ADD COLUMN attribution_method TEXT;
+"#,
+    },
+    Migration {
+        version: 14,
+        name: "index gateway_usage_events.event_id (FK-scan cost)",
+        sql: r#"
+-- `gateway_usage_events.event_id` REFERENCES runtime_request_events(id) with
+-- ON DELETE SET NULL, and foreign keys are enforced on every connection — so
+-- with no index on the child key, SQLite full-scans gateway_usage_events once
+-- PER deleted parent row. That fires on the hot path: the gateway's own
+-- writer runs `retention::sweep` every 5 minutes, deleting a whole cohort of
+-- expired runtime events at a time.
+CREATE INDEX IF NOT EXISTS idx_gue_event ON gateway_usage_events(event_id);
+"#,
+    },
+    Migration {
+        version: 15,
+        name: "tracking_setups (zero-friction tracking state machine)",
+        sql: r#"
+-- One row per (project, folder) tracking setup — the persisted product-level
+-- state behind "Track API activity" / `tethra track` (ADR 0022 D8). The row
+-- caches the state machine value; readers re-derive it against the
+-- observation tables on every load, so a stale row can never overclaim
+-- `traffic_observed` (SI-19). Contents carry NO SECRET VALUES: provider ids,
+-- confidence labels, evidence kinds, and file paths — never a credential,
+-- a header, a body, or wire data.
+--
+-- One NON-SECRET value is carried, deliberately: a repository-discovered
+-- origin the user explicitly approved (`NeedsOriginConfirm.inferred_origin`,
+-- read from a manifest-declared base-URL variable such as `SUPABASE_URL`).
+-- It is a host name the user was shown verbatim at the approval point, and
+-- undo needs it. This comment previously said "value-free", which the
+-- crate's own test contradicts by asserting the host IS present
+-- (audit finding `ZFT-047`).
+CREATE TABLE tracking_setups (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    folder_path TEXT NOT NULL,            -- canonicalized at insert
+    state TEXT NOT NULL,
+    detection_json TEXT NOT NULL,
+    plan_summary_json TEXT,
+    applied_at TEXT,
+    first_traffic_at TEXT,
+    last_transition_at TEXT NOT NULL,
+    attention_reason TEXT,
+    UNIQUE(project_id, folder_path)
+) STRICT;
+CREATE INDEX IF NOT EXISTS idx_tracking_setups_project
+    ON tracking_setups(project_id);
+"#,
+    },
+    Migration {
+        version: 16,
+        name: "tracking verification sessions (current health vs historical verification)",
+        sql: r#"
+-- v15 collapsed several distinct facts into one durable `state` value plus a
+-- `first_traffic_at` watermark, and the audit showed what that costs: a
+-- setup stayed "tracking verified" after the gateway was killed, a FAILED
+-- re-run was promoted back to verified by the PREVIOUS run's traffic, and
+-- nulling one column skipped re-derivation entirely (ZFT-005, ZFT-006,
+-- ZFT-008).
+--
+-- The fix separates them. Each apply or repair attempt opens a new
+-- verification SESSION with its own non-secret id and its own generation
+-- number; only observations recorded during the CURRENT session can verify
+-- the CURRENT setup. Historical success keeps its own column so it can still
+-- be displayed without implying present health, and a failure carries its own
+-- timestamp so newer bad news is never erased by older good news.
+--
+-- All values remain non-secret: opaque ids, integers and RFC 3339 timestamps.
+ALTER TABLE tracking_setups ADD COLUMN verification_session TEXT;
+ALTER TABLE tracking_setups ADD COLUMN config_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tracking_setups ADD COLUMN first_verified_at TEXT;
+ALTER TABLE tracking_setups ADD COLUMN attention_at TEXT;
+
+-- Existing rows: carry the historical watermark across so an already-verified
+-- user keeps their "first verified" date, and open a generation so the next
+-- read re-derives against the new rules instead of trusting the cached value.
+UPDATE tracking_setups SET first_verified_at = first_traffic_at
+    WHERE first_traffic_at IS NOT NULL;
+UPDATE tracking_setups SET attention_at = last_transition_at
+    WHERE attention_reason IS NOT NULL;
+
+-- The re-derivation query filters observations by project, source, session
+-- window and freshness; this is the index that keeps it cheap.
+CREATE INDEX IF NOT EXISTS idx_rre_project_source_at
+    ON runtime_request_events(project_id, observation_source, at);
+"#,
+    },
+    Migration {
+        version: 17,
+        name: "approved route origins (repository content is not authorization)",
+        sql: r#"
+-- Destinations a user has explicitly approved for API traffic (ADR 0024).
+--
+-- The audit showed a repository with no secrets in it — just a committed
+-- `package.json` and a committed `SUPABASE_URL` — driving the creation of a
+-- MAC'd, enabled route to an attacker-chosen host (ZFT-004). Project content
+-- may suggest that an API exists; it may never authorize a destination.
+-- Origins that come from a compiled-in Tethra manifest stay automatic;
+-- origins read from project files need a row here first.
+--
+-- `mac` is a keyed BLAKE3 over (vault id, origin, provider id, approved_at)
+-- using the vault's route MAC key, in the same length-prefixed shape as
+-- `gateway_routes`. A hand-edited row fails verification and is treated as
+-- ABSENT, so tampering downgrades to "ask the user again" rather than to
+-- "silently trusted".
+--
+-- Contents are non-secret: a host name the user was shown verbatim at the
+-- moment they approved it, a provider id, and a timestamp.
+CREATE TABLE tracking_approved_origins (
+    origin TEXT NOT NULL,             -- canonical https://<host>:<port>
+    provider_id TEXT NOT NULL,
+    approved_at TEXT NOT NULL,
+    mac TEXT NOT NULL,
+    PRIMARY KEY (origin, provider_id)
+) STRICT;
+"#,
+    },
+    Migration {
+        version: 18,
+        name: "insertion-ordered verification watermark (timestamps are untrusted input)",
+        sql: r#"
+-- v16 bound an observation to the current verification session by comparing
+-- its `at` timestamp against the setup's `applied_at`. The re-audit showed
+-- what that costs: `at` is a wall-clock string written by another process
+-- and stored in a plain column, and it was only ever bounded from BELOW. A
+-- row dated a year ahead therefore read as a present-tense success and
+-- stayed one until the clock caught up, and — being the largest timestamp in
+-- the table — it also out-ranked a failure recorded now and caused the
+-- failure reason to be nulled (RA-005).
+--
+-- The bound from above is a clock-skew window, but a window is still a
+-- judgement about two clocks. This column adds a signal that does not depend
+-- on any clock at all: the highest observation rowid at the moment the setup
+-- was applied. SQLite assigns rowids monotonically on insert, so
+-- `rowid > applied_event_rowid` means "physically recorded after this setup
+-- was applied" regardless of what time the writer claims it was.
+--
+-- Existing rows get 0, which admits every row exactly as before, so an
+-- already-applied setup is not retroactively un-verified by the upgrade; its
+-- timestamp bounds still apply, and its next apply stamps a real watermark.
+ALTER TABLE tracking_setups ADD COLUMN applied_event_rowid INTEGER NOT NULL DEFAULT 0;
+"#,
+    },
+    Migration {
+        version: 19,
+        name: "tracking setup row version (compare-and-swap, not last-writer-wins)",
+        sql: r#"
+-- Every write to a tracking setup's health columns used to be
+-- `UPDATE tracking_setups SET ... WHERE id = ?1` — a blind write. The state
+-- the write was DECIDED from was read into memory earlier, so any change
+-- another process made in between was overwritten without anyone noticing.
+--
+-- That is a lost update, and it reproduces `ZFT-006` with no attacker and no
+-- clock skew: the desktop lists setups, refreshes each one, and while it is
+-- deciding, the CLI (or the gateway, or a second window) records a failure.
+-- The refresh then writes the conclusion it reached from the PRE-failure row,
+-- nulling `attention_reason`/`attention_at` and reporting `VerifiedAndActive`
+-- for a setup that is, right now, broken (`VER-01`). WAL and `busy_timeout`
+-- do not help — both transactions commit, in order, and the second one is
+-- simply wrong.
+--
+-- This column is the compare-and-swap token. A reader carries the version it
+-- read; the writer requires the row to still be at that version and bumps it.
+-- A concurrent change makes the UPDATE affect zero rows, which is a signal
+-- rather than a silent overwrite: the caller re-reads and re-derives against
+-- what is actually there. `crates/core/src/rotation.rs` has used this shape
+-- since rotations existed; this brings tracking to the same standard.
+--
+-- Existing rows start at 0, which is exactly right: the first CAS write
+-- against an un-upgraded row reads 0, requires 0, and moves it to 1.
+ALTER TABLE tracking_setups ADD COLUMN row_version INTEGER NOT NULL DEFAULT 0;
+"#,
+    },
+    Migration {
+        version: 20,
+        name: "projects-first folder linkage, detected credential stubs, unknown API labels",
+        sql: r#"
+-- ONE primary folder per project, so "select project folder" is a thing the
+-- user does once and Tethra remembers (ADR 0029).
+--
+-- This is deliberately NOT a second tracking state machine. `tracking_setups`
+-- keeps owning apply/health/verification per (project, folder); this table
+-- records the product-level fact "THIS is the project's folder, and tracking
+-- for it is on/off", which `tracking_setups` cannot express because its key
+-- admits many folders per project and its row is destroyed and re-minted by
+-- `upsert_setup` on every apply.
+--
+-- `project_id` is the PRIMARY KEY, not part of a composite: a project has at
+-- most one primary folder. Re-selecting a folder UPDATEs this row rather than
+-- accumulating rows, which is what makes repeated selection idempotent.
+--
+-- `scan_fingerprint` is a non-secret digest over the (relative path, byte
+-- length, mtime) of the dependency/env manifests the scan looked at. It exists
+-- so a relaunch can answer "did anything change?" WITHOUT re-running the
+-- 20-second bounded scan and without rewriting the user's files. It is a
+-- change HINT that gates offering a rescan; it never authorizes an apply.
+--
+-- `applied_generation` snapshots `tracking_setups.config_generation` at the
+-- moment an apply for this folder completed. v16 added that counter but
+-- nothing ever compared it to a desired value, so "is the applied
+-- configuration still the current one?" had no answer. Storing the generation
+-- an apply actually reached gives the comparison a left-hand side.
+--
+-- `tracking_enabled = 0` is "disable tracking without deleting the project":
+-- the linkage and the history stay, future automatic configuration stops.
+--
+-- Contents are non-secret: a folder path the user chose in a native picker,
+-- RFC 3339 timestamps, a digest of file sizes, and integers.
+CREATE TABLE project_folder_links (
+    project_id               TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    folder_path              TEXT NOT NULL,
+    tracking_enabled         INTEGER NOT NULL DEFAULT 1,
+    linked_at                TEXT NOT NULL,
+    last_scan_at             TEXT,
+    scan_fingerprint         TEXT,
+    applied_generation       INTEGER NOT NULL DEFAULT 0,
+    last_activity_refresh_at TEXT,
+    row_version              INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+-- An integration Tethra can see the project uses, but whose vault record it
+-- cannot safely or confidently complete on its own.
+--
+-- THERE IS NO COLUMN CAPABLE OF HOLDING A SECRET VALUE, and that is the
+-- point: the guarantee "a discovered plaintext value is never persisted
+-- merely because it was found in a project file" is enforced by the shape of
+-- this table, not by a predicate that a future edit could loosen. The scanner
+-- already refuses to carry values out of a project
+-- (`UnrecognizedCredential` "carries the variable NAME and the file, never
+-- the value", crates/tracking/src/detect.rs:206-217); this table cannot
+-- store one even if a caller had it.
+--
+-- `env_var` is an environment-variable NAME (`ANTHROPIC_API_KEY`).
+-- `source_file` is a FOLDER-RELATIVE path (`.env`), never absolute, so the
+-- row does not leak where on disk the user keeps their work.
+-- `suggested_provider` / `suggested_name` are presentation-only guesses; they
+-- never select a provider, create a route, or raise detection confidence.
+--
+-- `status` is the user's decision about the row, and every value except
+-- 'pending' is one the user chose:
+--   pending   — Tethra detected it; nobody has decided anything
+--   completed — the user supplied the value; `resolved_credential_id` points
+--               at the real vault record
+--   ignored   — the user does not want to be asked again
+--   external  — intentionally managed outside Tethra
+--   merged    — the user pointed it at an existing credential
+-- The CHECK keeps an unrecognized status out of the table rather than letting
+-- it reach a screen as a bare enum token.
+CREATE TABLE detected_credentials (
+    id                     TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    env_var                TEXT NOT NULL,
+    suggested_provider     TEXT,
+    suggested_name         TEXT,
+    suggested_environment  TEXT,
+    source_kind            TEXT NOT NULL,
+    source_file            TEXT NOT NULL DEFAULT '',
+    status                 TEXT NOT NULL DEFAULT 'pending',
+    resolved_credential_id TEXT REFERENCES credentials(id) ON DELETE SET NULL,
+    first_detected_at      TEXT NOT NULL,
+    last_detected_at       TEXT NOT NULL,
+    row_version            INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (project_id, env_var, source_file),
+    CHECK (status IN ('pending', 'completed', 'ignored', 'external', 'merged')),
+    -- 'completed' means "the user supplied the value and it lives in the
+    -- vault", so it is unrepresentable without the vault row it points at.
+    CHECK (status <> 'completed' OR resolved_credential_id IS NOT NULL)
+) STRICT;
+CREATE INDEX idx_detcred_project ON detected_credentials(project_id);
+-- FK child-key index. `foreign_keys = 1` is on for every connection, so
+-- without this SQLite full-scans this table once per DELETED credential row —
+-- the exact cost migration v14 exists to fix for gateway_usage_events.
+CREATE INDEX idx_detcred_resolved ON detected_credentials(resolved_credential_id);
+
+-- NOTE: naming an unknown API deliberately adds NO table here. v12 already
+-- gave `observed_api_services` the `user_provider` / `user_api_name` columns
+-- and `runtime::store::set_service_correction` to write them, keyed by host —
+-- which is the right key, since a host is a host regardless of which project
+-- reached it. A second per-project label table would be a second
+-- implementation of an existing feature, and the two would disagree the first
+-- time one was written without the other.
+
+-- The project activity surface windows BOTH tables by (project, time).
+--
+-- v13 gave gateway_usage_events only the single-column idx_gue_at and
+-- idx_gue_project, so a per-project time window scanned every row that project
+-- ever produced.
+--
+-- runtime_request_events has idx_rre_project (project_id) and v16's
+-- idx_rre_project_source_at (project_id, observation_source, at). Neither
+-- serves "this project, this window": the composite has observation_source
+-- BETWEEN the two columns the range needs, so a query that does not also
+-- constrain the source cannot use its `at` component and degrades to scanning
+-- every row for the project. Every query the live surface issues is exactly
+-- that shape.
+CREATE INDEX IF NOT EXISTS idx_gue_project_at
+    ON gateway_usage_events(project_id, at);
+CREATE INDEX IF NOT EXISTS idx_rre_project_at
+    ON runtime_request_events(project_id, at);
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.
@@ -945,6 +1387,31 @@ pub fn migrate_with(conn: &mut Connection, migrations: &[Migration]) -> Result<(
 /// The schema version this build reads and writes.
 pub fn current_schema_version() -> i64 {
     MIGRATIONS.last().map(|m| m.version).unwrap_or(0)
+}
+
+/// Open the database ONLY if its schema is exactly this build's version.
+///
+/// `open()` performs no schema check at all, and `migrate()` mutates the
+/// schema — neither is safe for a long-lived background process (the gateway
+/// service) that may outlive an app upgrade in either direction
+/// (KNOWN_CONFLICTS C15). A newer schema returns `SchemaTooNew`; an older
+/// (not-yet-migrated) schema returns `SchemaNotCurrent` — migration v13+ is
+/// applied only by the enable/unlock flow, never by a background service.
+/// Callers treat both as "persistence degraded, keep forwarding".
+pub fn open_at_current_version(path: &Path) -> Result<Connection> {
+    if !path.exists() {
+        return Err(crate::error::CoreError::VaultNotFound(path.to_path_buf()));
+    }
+    let conn = open(path)?;
+    let found = user_version(&conn)?;
+    let supported = current_schema_version();
+    if found > supported {
+        return Err(crate::error::CoreError::SchemaTooNew { found, supported });
+    }
+    if found < supported {
+        return Err(crate::error::CoreError::SchemaNotCurrent { found, supported });
+    }
+    Ok(conn)
 }
 
 #[cfg(test)]

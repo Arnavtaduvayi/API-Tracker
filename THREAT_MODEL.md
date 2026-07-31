@@ -42,18 +42,24 @@ integrations land.
   findings, alerts, and suppressions store no secret values (findings keep a
   redacted preview and a non-secret suppression key; the raw value lives only
   in a `#[serde(skip)]` in-memory buffer used for vault matching). ADR 0008.
-- Outbound network use is limited to three things, all direct from the device:
+- Outbound network use is limited to four things, all direct from the device:
   the **documentation watcher** (explicit user-selected official URLs,
   conditional GETs, 8 MiB body cap, stores only validators/hash/timestamps,
   no crawling); **provider connectors** (validation, metadata, permission
   reads, and usage/cost sync) that send the credential only in a request
-  header to the provider's own official API endpoint; and, when the user
+  header to the provider's own official API endpoint; when the user
   explicitly opts in, the **loopback observation proxy** (`observe` /
   `run --observe`), which relays the user's own application traffic onward
   to the API hosts that application was already contacting — it originates
-  no requests of its own. No secret is ever sent to a Tethra-operated
-  server. Connectors are built to the documented API shapes and tested
-  offline against fixtures.
+  no requests of its own; and, when the user explicitly enables it, the
+  **Local Gateway** — a loopback-only reverse gateway that relays traffic
+  from explicitly linked projects to their REGISTERED provider origins
+  (compiled-in manifest or MAC-verified custom origins; never a
+  client-chosen host). Once enabled it runs as a per-user login service —
+  a standing local egress relay to those registered providers, disclosed
+  as such at consent time (`docs/gateway/`). No secret is ever sent to a
+  Tethra-operated server. Connectors are built to the documented API
+  shapes and tested offline against fixtures.
 - The **OpenAI administrative connection** stores an Admin API key encrypted
   under the vault key (AAD binds it to this vault + provider). It is
   write-only after storage (replace/remove, never reveal); replacing,
@@ -148,7 +154,7 @@ integrations land.
 | Thief with the powered-off device / stolen disk image | Gets ciphertext. Values are protected by Argon2id (64 MiB, t=3) + AEAD. Metadata (project/credential names, providers, notes) is readable — see trade-offs. |
 | Someone who copies `vault.db` (cloud sync, backup leak) | Same as above. Keyed fingerprints prevent offline guess-confirmation of values. |
 | Someone who obtains a backup file | Needs the backup password (Argon2id-stretched). Contents beyond that are the same ciphertext as at rest. |
-| Attacker who can *modify* the database | AEAD + per-record associated data detect value tampering, truncation, and ciphertext swapping between records. Metadata edits (e.g., renaming, changing an expiration date) are NOT cryptographically detected. |
+| Attacker who can *modify* the database | AEAD + per-record associated data detect value tampering, truncation, and ciphertext swapping between records. Metadata edits (e.g., renaming, changing an expiration date) are NOT cryptographically detected. One consequence worth naming: `gateway_routes.provider_id` is metadata, so editing it repoints a built-in gateway route at a **different shipped provider's** origin with the pass-through credential attached, and nulling a custom route's four authenticated columns downgrades it onto that same unauthenticated path (SEC-01 — accepted, `docs/gateway/SECURITY.md`, `docs/gateway/THREAT_MODEL.md` GW-3). No attacker-chosen destination can be injected either way. |
 | Snooper at an unattended, *locked* machine | Needs the master password; reauthentication also gates reveal/copy/export **and credential deletion** inside live sessions (enforced in core, not by the UI). Auto-lock (default 15 min) bounds exposure of an unlocked app. |
 | Malware running as the user | **Not defended.** It can keylog the master password, read process memory, read the session file plus environment, or capture the clipboard. Local encryption cannot beat an attacker inside your account. |
 | Compromised OS, debugger, cold-boot/memory dump | **Not defended.** Zeroization is best-effort; plaintext exists in memory during use. |

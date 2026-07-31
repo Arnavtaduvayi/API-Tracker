@@ -7,6 +7,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, isApiError } from "../api";
 import type {
   Credential,
+  CredentialActivitySources,
   CredentialVersionInfo,
   PermissionsPreview,
   ProviderManifest,
@@ -16,6 +17,23 @@ import type {
 import { formatTimestamp, safeExternalUrl, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
 import { ConfirmDialog, PromptDialog } from "./ConfirmDialog";
+
+function activitySourceLabel(source: string): string {
+  switch (source) {
+    case "local_gateway":
+      return "locally observed by gateway";
+    case "interception_proxy":
+      return "locally observed by proxy";
+    case "provider_reported":
+      return "provider-reported";
+    case "manually_marked":
+      return "manually marked";
+    case "validated":
+      return "validated against the provider";
+    default:
+      return source;
+  }
+}
 
 type SensitiveAction =
   "reveal" | "copy" | "delete" | "versions" | "provider-revoke" | "test-key";
@@ -36,6 +54,7 @@ export function CredentialDetail(props: {
   const [exposurePromptOpen, setExposurePromptOpen] = useState(false);
   const [permissions, setPermissions] = useState<StoredPermissions | null>(null);
   const [manifest, setManifest] = useState<ProviderManifest | null>(null);
+  const [manifestError, setManifestError] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[] | null>(null);
   const [versions, setVersions] = useState<CredentialVersionInfo[] | null>(null);
   const [permPreview, setPermPreview] = useState<PermissionsPreview | null>(null);
@@ -45,6 +64,7 @@ export function CredentialDetail(props: {
   const [tkName, setTkName] = useState("");
   const [tkTtl, setTkTtl] = useState("60");
   const [testKeyNotes, setTestKeyNotes] = useState<string[] | null>(null);
+  const [activity, setActivity] = useState<CredentialActivitySources | null>(null);
   const revealTimer = useRef<number | null>(null);
 
   // A small async wrapper that surfaces errors and a success notice.
@@ -64,6 +84,13 @@ export function CredentialDetail(props: {
     } catch (e) {
       setError(isApiError(e) ? e.message : String(e));
     }
+    // Source-labeled activity is supplementary; its absence never blocks
+    // the detail view. Wrapped in Promise.resolve so even a synchronous
+    // throw (e.g. an older backend without the command) becomes a handled
+    // rejection rather than an unhandled one.
+    void Promise.resolve()
+      .then(() => api.credentialActivitySources(props.id))
+      .then(setActivity, () => setActivity(null));
   }, [props.id]);
 
   useEffect(() => {
@@ -80,12 +107,25 @@ export function CredentialDetail(props: {
 
   // The provider manifest gates the provider-side lifecycle actions so only
   // truly implemented capabilities get buttons (honest representation).
+  //
+  // A failed read is NOT "this provider cannot do it" (NEW-38). Swallowing
+  // the error into `null` left `manifest?.capabilities…support ===
+  // "implemented"` false, and the screen then asserted "This provider has no
+  // API key creation" — a fabricated capability claim about OpenAI and
+  // Supabase, which both implement it, on the one surface whose purpose is
+  // capability honesty. The failure is now its own state.
   useEffect(() => {
     if (!credential) return;
     api
       .providerGet(credential.provider)
-      .then(setManifest)
-      .catch(() => setManifest(null));
+      .then((m) => {
+        setManifest(m);
+        setManifestError(null);
+      })
+      .catch((e) => {
+        setManifest(null);
+        setManifestError(isApiError(e) ? e.message : String(e));
+      });
   }, [credential]);
 
   const hideRevealed = useCallback(() => {
@@ -228,8 +268,38 @@ export function CredentialDetail(props: {
         </dd>
         <dt>Last validated</dt>
         <dd>{formatTimestamp(c.last_validated_at)}</dd>
-        <dt>Last used</dt>
-        <dd>{formatTimestamp(c.last_used_at)}</dd>
+        <dt>Activity</dt>
+        <dd>
+          {/* Source-labeled, never a single ambiguous "last used" (SI-19):
+              each line names its evidence class, and none of them is
+              summed or substituted for another. */}
+          <div className="stack" style={{ gap: "0.15rem" }}>
+            <span>
+              Most recent known:{" "}
+              {activity?.most_recent
+                ? `${formatTimestamp(activity.most_recent.at)} (${activitySourceLabel(
+                    activity.most_recent.source,
+                  )})`
+                : "none recorded"}
+            </span>
+            <span className="muted">
+              Locally observed by gateway: {formatTimestamp(activity?.last_gateway_observed)}
+            </span>
+            <span className="muted">
+              Locally observed by proxy: {formatTimestamp(activity?.last_proxy_observed)}
+            </span>
+            <span className="muted">
+              Provider-reported (synced): {formatTimestamp(activity?.last_provider_reported)}
+            </span>
+            <span className="muted">
+              Manually marked used: {formatTimestamp(c.last_used_at)}
+            </span>
+            <span className="muted">
+              Local observation covers only traffic routed through Tethra; absence here is not
+              evidence the key is unused.
+            </span>
+          </div>
+        </dd>
         <dt>Documentation</dt>
         <dd>
           {(() => {
@@ -467,23 +537,40 @@ export function CredentialDetail(props: {
             These act on REAL provider-side keys through the provider&apos;s administrative
             connection.
           </p>
+          {manifestError !== null && (
+            <p className="error" role="alert">
+              {c.provider}&apos;s capability manifest could not be read: {manifestError}. What
+              this provider supports is therefore UNKNOWN on this screen — the absence of the
+              buttons below is not evidence that it lacks these operations.
+            </p>
+          )}
           <p style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
             {manifest?.capabilities.create_credential.support === "implemented" ? (
               <button onClick={() => setTestKeyOpen(true)}>Create test key…</button>
+            ) : manifest === null ? (
+              <span className="muted">
+                Whether {c.provider} supports API key creation is unknown — its manifest was not
+                read.
+              </span>
             ) : (
               <span className="muted">
                 This provider has no API key creation — create keys in its dashboard
-                {manifest?.manage_url ? ` (${manifest.manage_url})` : ""}.
+                {manifest.manage_url ? ` (${manifest.manage_url})` : ""}.
               </span>
             )}
             {manifest?.capabilities.revoke_credential.support === "implemented" ? (
               <button className="danger" onClick={() => setRevokeConfirmOpen(true)}>
                 Revoke at provider…
               </button>
+            ) : manifest === null ? (
+              <span className="muted">
+                Whether {c.provider} supports API revocation is unknown — its manifest was not
+                read.
+              </span>
             ) : (
               <span className="muted">
                 This provider has no API revocation — revoke keys in its dashboard
-                {manifest?.manage_url ? ` (${manifest.manage_url})` : ""}.
+                {manifest.manage_url ? ` (${manifest.manage_url})` : ""}.
               </span>
             )}
           </p>

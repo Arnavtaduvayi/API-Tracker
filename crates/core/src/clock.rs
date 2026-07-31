@@ -29,6 +29,20 @@ pub fn parse_rfc3339(s: &str) -> Result<OffsetDateTime> {
         .map_err(|_| CoreError::InvalidInput(format!("'{s}' is not an RFC 3339 timestamp")))
 }
 
+/// `at` minus `secs`, as an RFC 3339 string.
+///
+/// Used to build freshness cut-offs compared by plain string ordering
+/// against stored timestamps (`observed_at >= cutoff` means "fresh").
+/// When `at` cannot be parsed the cut-off is a timestamp no stored value
+/// can reach, so an unparseable clock degrades to "treat every observation
+/// as STALE" — the direction that under-claims rather than over-claims.
+pub fn rfc3339_minus_seconds(at: &str, secs: i64) -> String {
+    match parse_rfc3339(at) {
+        Ok(t) => to_rfc3339(t - time::Duration::seconds(secs)),
+        Err(_) => "9999-12-31T23:59:59Z".to_string(),
+    }
+}
+
 /// Parse either a full RFC 3339 timestamp or a plain `YYYY-MM-DD` date
 /// (interpreted as UTC midnight). Used for user-entered dates such as
 /// credential creation and expiration dates.

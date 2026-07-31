@@ -23,8 +23,10 @@ Encrypted local vault (Argon2id + XChaCha20-Poly1305, per-project keys,
 optional per-project password locks); projects and credentials with an
 explainable status engine; keyed-fingerprint reuse detection; complete
 encrypted backups (every table) with verify/restore and forward migration;
-provider catalog with an honest capability matrix; OpenAI and Anthropic
-per-key usage/cost sync, GitHub billing, and Stripe Events (admin key,
+provider catalog with an honest capability matrix; OpenAI per-key usage and
+cost sync and Anthropic per-key usage sync (Anthropic cost stays at workspace
+granularity — its cost API has no per-key grouping, so cost is never divided
+among keys); GitHub billing, and Stripe Events (admin key,
 honest attribution); cost estimation kept separate from provider-reported
 cost; budgets and 20 explainable suspicious-activity rules; local repository
 secret scanning (staged / working tree / history incl. full history) with a

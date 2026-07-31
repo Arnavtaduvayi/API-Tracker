@@ -385,7 +385,7 @@ check $? "notify history records the delivery"
 { kill "$WEBHOOK_SERVER_PID" && wait "$WEBHOOK_SERVER_PID"; } >/dev/null 2>&1
 
 echo "-- migration/data-safety and mocked provider-sync suites --"
-(cd "$REPO_ROOT" && cargo test --release --quiet -p api-tracker-core --test migration_safety 2>&1 | grep -q "test result: ok. 8")
+(cd "$REPO_ROOT" && cargo test --release --quiet -p api-tracker-core --test migration_safety 2>&1 | grep -q "test result: ok. 9")
 check $? "migration + backup-completeness suite passes against the release core"
 (cd "$REPO_ROOT" && API_TRACKER_INSECURE_FAST_KDF=1 cargo test --quiet -p api-tracker-core \
     --test openai_sync --test anthropic_sync --test env_destinations --test rotation_access 2>&1 | \
@@ -441,6 +441,49 @@ check $? "the old master password stops working"
 export API_TRACKER_PASSWORD="$MASTER-changed01"
 "$BIN" key list >/dev/null 2>&1
 check $? "the new master password unlocks the vault"
+
+echo "-- zero-friction tracking (offline: dry-run, status, undo honesty) --"
+TRACKAPP="$WORK/trackapp"
+mkdir -p "$TRACKAPP"
+printf 'OPENAI_API_KEY=sk-proj-SMOKE-FAKE-TRACK-NOT-A-REAL-KEY-01\n' > "$TRACKAPP/.env"
+printf '{ "dependencies": { "openai": "^4.0.0", "dotenv": "^16.0.0" } }\n' > "$TRACKAPP/package.json"
+# A real byte snapshot, not a shell string. `[ "$(cat a)" = "$b" ]` strips
+# trailing newlines from BOTH sides, so it cannot see a dry run that added or
+# removed one — the same defect the audit found in the packaged harness
+# (ZFT-VAL-10). The `.snapshot` suffix keeps it out of the earlier
+# "no plaintext .env file is ever created" sweep, which matches *.env/.env.
+ENV_BEFORE="$WORK/trackapp-env-before.snapshot"
+cp "$TRACKAPP/.env" "$ENV_BEFORE"
+TRACK_OUT=$("$BIN" track "$TRACKAPP" --dry-run 2>&1)
+check $? "track --dry-run succeeds on a detectable project"
+echo "$TRACK_OUT" | grep -q "openai" && echo "$TRACK_OUT" | grep -q "OPENAI_BASE_URL"
+check $? "the dry run shows the detection and the exact env diff"
+echo "$TRACK_OUT" | grep -q "Dry run: nothing was changed."
+check $? "the dry run says it changed nothing"
+cmp -s "$ENV_BEFORE" "$TRACKAPP/.env"
+check $? "the dry run really changed nothing on disk (cmp, not string equality)"
+echo "$TRACK_OUT" | grep -q "sk-proj-SMOKE-FAKE-TRACK" && bad "track output leaked a key value" || ok "no key value appears in track output"
+echo "$TRACK_OUT" | grep -q "print-export" && bad "track printed shell-export choreography" || ok "track never prints shell-export choreography"
+"$BIN" project list 2>/dev/null | grep -q "trackapp" && bad "dry-run created a project" || ok "the dry run created no project"
+"$BIN" track status "$TRACKAPP" >/dev/null 2>&1; [ $? -eq 2 ]
+check $? "track status exits 2 while tracking is not configured"
+"$BIN" track status "$TRACKAPP" 2>&1 | grep -q "not configured"
+check $? "track status names the unconfigured state honestly"
+"$BIN" track undo "$TRACKAPP" --yes 2>&1 | grep -q "nothing to undo"
+check $? "track undo is honest when there is nothing to undo"
+EMPTYAPP="$WORK/emptyapp"; mkdir -p "$EMPTYAPP"
+"$BIN" track "$EMPTYAPP" >/dev/null 2>&1; [ $? -eq 2 ]
+check $? "an empty folder exits 2 (no trackable APIs), not an error"
+EMPTY_OUT="$("$BIN" track "$EMPTYAPP" 2>&1 || true)"
+printf '%s' "$EMPTY_OUT" | grep -q "No API integrations found"
+check $? "the empty-folder message names the outcome plainly"
+printf '%s' "$EMPTY_OUT" | grep -q "wrong folder"
+check $? "the empty-folder message says what the user can do about it"
+# ZFT-009: the desktop-only user has no `tethra` on PATH — the CLI lives
+# inside Tethra.app/Contents/MacOS. An empty state that sends them to a
+# terminal command is a dead end, not guidance.
+! printf '%s' "$EMPTY_OUT" | grep -qE "tethra provider list|tethra gateway route add"
+check $? "the empty-folder message points at no unexecutable CLI command"
 
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0

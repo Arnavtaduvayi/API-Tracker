@@ -10,7 +10,7 @@ use api_tracker_core::providers::Confidence;
 use api_tracker_core::secret::SecretString;
 use api_tracker_core::status::Status;
 use api_tracker_core::vault::AddCredential;
-use api_tracker_core::{gitrepo, hooks};
+use api_tracker_core::{envgov, gitrepo, hooks, scanner};
 use common::*;
 use std::process::Command;
 
@@ -360,6 +360,64 @@ fn reuse_alerts_survive_a_password_locked_project_across_monitor_runs() {
     );
 }
 
+/// A masking bypass, black-box through the surface a user actually sees.
+///
+/// `envgov`'s diff renderer treats "this is a placeholder" as permission to
+/// print a value verbatim, and the placeholder test was a bare substring
+/// match over twelve common words. A HOSTNAME is enough to plant one, so a
+/// `DATABASE_URL` pointing at `db.example.com` was printed in full —
+/// password included — to stdout and across IPC (ZFT-017).
+#[test]
+fn a_database_url_containing_example_is_masked_not_printed() {
+    // Unmistakably fake, and shaped like the real thing.
+    const DB_PASSWORD: &str = "S3cr3t-CANARY-8f21c9d0";
+    let value = format!("postgresql://app:{DB_PASSWORD}@db.example.com:5432/appdb");
+
+    // The consent diff shown before an `.env` rewrite.
+    let diff = envgov::render_diff("/proj/.env", &format!("DATABASE_URL={value}\n"), "KEEP=1\n");
+    assert!(
+        !diff.contains(DB_PASSWORD),
+        "the connection string's password was printed verbatim: {diff}"
+    );
+    assert!(
+        !diff.contains("db.example.com"),
+        "the value must be masked as a whole, not just its password: {diff}"
+    );
+    // The removed line really is in the diff (otherwise this proves nothing).
+    assert!(diff.contains("DATABASE_URL="), "{diff}");
+
+    // Same bypass one step further out: the key in a query string, the
+    // placeholder word again in the host. This is the shape the `.env` link
+    // writer's restore record was leaking.
+    const QUERY_KEY: &str = "sk-QUERYCANARY-3f7a19d4c8e25b60";
+    let url = format!("https://api.example.com/v1?api_key={QUERY_KEY}");
+    let diff = envgov::render_diff(
+        "/proj/.env",
+        &format!("OPENAI_BASE_URL={url}\n"),
+        "KEEP=1\n",
+    );
+    assert!(!diff.contains(QUERY_KEY), "{diff}");
+
+    // The judgement underneath, stated directly.
+    assert!(!scanner::is_placeholder_value(&value));
+    assert!(!scanner::is_placeholder_value(&url));
+
+    // ...and the word needles still do their job where the word IS the whole
+    // story. Without these the fix could be "always return false".
+    for placeholder in [
+        "your-api-key-here",
+        "<YOUR_DATABASE_URL>",
+        "changeme-please",
+        "replace-with-your-openai-key",
+        "sk-proj-EXAMPLE00000000000000000000000000",
+    ] {
+        assert!(
+            scanner::is_placeholder_value(placeholder),
+            "a real placeholder stopped being recognised: {placeholder}"
+        );
+    }
+}
+
 #[test]
 fn documentation_change_raises_an_alert() {
     let (_dir, _paths, vault) = new_vault();
@@ -394,4 +452,104 @@ fn documentation_change_raises_an_alert() {
     assert_eq!(r2, CheckResult::Changed);
     let open = alerts::list(vault.connection(), false).unwrap();
     assert!(open.iter().any(|a| a.kind == "documentation_changed"));
+}
+
+/// ZFT-017 — a value must not become legible because a word inside it looks
+/// like a placeholder.
+///
+/// The audit's reproduction: a `DATABASE_URL` whose HOST contains "example".
+/// `is_placeholder_value` was a substring test, and `envgov::mask_assignment`
+/// read `true` as permission to print the line verbatim to stdout and across
+/// IPC.
+#[test]
+fn a_credential_bearing_url_is_never_unmasked_by_a_placeholder_word() {
+    let credential = "s3cr3t-p4ssw0rd-0123456789abcdef";
+    for host_word in ["example", "test", "sample", "changeme", "localhost", "demo"] {
+        let line =
+            format!("DATABASE_URL=postgres://admin:{credential}@db.{host_word}.com:5432/app");
+        let diff = api_tracker_core::envgov::render_diff(".env", &format!("{line}\n"), "");
+        assert!(
+            !diff.contains(credential),
+            "a credential leaked because the host contained {host_word:?}:\n{diff}"
+        );
+    }
+}
+
+#[test]
+fn a_query_string_credential_is_never_unmasked() {
+    // The position the audit recovered a planted key from.
+    let line = "OPENAI_BASE_URL=https://gateway.example.com/v1?api_key=sk-QUERYCANARY-0123456789";
+    let diff = api_tracker_core::envgov::render_diff(".env", &format!("{line}\n"), "");
+    assert!(!diff.contains("sk-QUERYCANARY-0123456789"), "{diff}");
+}
+
+#[test]
+fn ordinary_configuration_stays_legible_in_the_diff() {
+    // The control. The diff exists so the user can see what changes; a rule
+    // that masked everything would pass every assertion above and destroy
+    // the consent surface the diff serves.
+    let old = "NODE_ENV=production\nPORT=3000\nDEBUG=true\nA=1\n";
+    let diff = api_tracker_core::envgov::render_diff(".env", old, "");
+    for legible in ["NODE_ENV=production", "PORT=3000", "DEBUG=true", "A=1"] {
+        assert!(
+            diff.contains(legible),
+            "ordinary configuration must stay readable: {legible} missing from\n{diff}"
+        );
+    }
+}
+
+/// The regression an adversarial reviewer caught, and the shape of rule
+/// that caused it.
+///
+/// The first replacement for the ZFT-017 needle bypass was "short AND not
+/// key-shaped" — a denylist wearing a length limit. It printed
+/// `DB_PASSWORD=Tr0ub4dor3` and `SHORT_KEY=9f2c8a71e45b30d6` in full, both
+/// of which the ORIGINAL code masked. A fix that leaks more than the defect
+/// it replaces is not a fix, and no test written for the fix caught it —
+/// only running the two trees side by side did.
+///
+/// So this test asserts the property directly: a value stays legible only
+/// if it is on the tiny allowlist of shapes that cannot be a credential.
+#[test]
+fn a_short_credential_is_still_masked_in_the_diff() {
+    for line in [
+        "DB_PASSWORD=Tr0ub4dor3",
+        "SHORT_KEY=9f2c8a71e45b30d6",
+        "REDIS_PASSWORD=hunter2xyz",
+        "API_TOKEN=abc123XYZ789def",
+        "SESSION_SECRET=s3cr3t",
+        "SIGNING_KEY=deadbeef",
+    ] {
+        let value = line.split_once('=').unwrap().1;
+        let diff = api_tracker_core::envgov::render_diff(".env", &format!("{line}\n"), "");
+        assert!(
+            !diff.contains(value),
+            "a short credential printed in full — the exact regression an \
+             adversarial reviewer caught: {line}\n{diff}"
+        );
+    }
+}
+
+#[test]
+fn the_legible_allowlist_is_the_whole_exemption() {
+    // Everything on the allowlist stays readable...
+    for line in [
+        "NODE_ENV=production",
+        "PORT=3000",
+        "DEBUG=true",
+        "A=1",
+        "LOG_LEVEL=info",
+        "TIMEOUT=30.5",
+        "OPENAI_BASE_URL=https://api.openai.com/v1",
+    ] {
+        let diff = api_tracker_core::envgov::render_diff(".env", &format!("{line}\n"), "");
+        assert!(
+            diff.contains(line),
+            "the diff must stay usable as a consent surface: {line}\n{diff}"
+        );
+    }
+    // ...and a value that merely LOOKS like one of them does not. A
+    // variable named for a secret is masked whatever its value looks like.
+    let diff = api_tracker_core::envgov::render_diff(".env", "API_SECRET=true-ish-value\n", "");
+    assert!(!diff.contains("true-ish-value"), "{diff}");
 }

@@ -34,6 +34,15 @@ name = "anthropic-key-generic"
 regex = "sk-ant-[A-Za-z0-9_-]{20,}"
 confidence = "medium"
 
+# Local Gateway routing (ADR 0019 D10). The Anthropic SDK sends /v1/messages
+# itself, so the written base URL ends at .../anthropic with NO /v1 — the
+# deliberate asymmetry with OpenAI (OPEN_DECISIONS O11).
+[gateway]
+origins = ["https://api.anthropic.com"]
+base_path = ""
+env_vars = ["ANTHROPIC_BASE_URL"]
+usage_shape = "anthropic"
+
 [capabilities]
 validate_credential = { support = "implemented", attribution = "exact_credential", note = "A lightweight authenticated GET /v1/models confirms the key is accepted." }
 fetch_metadata = { support = "implemented", requires_admin_credential = true, attribution = "exact_credential", note = "Workspace and API-key metadata (ids, names, status, partial hints, provider-reported expirations) sync via the Admin API." }

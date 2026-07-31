@@ -185,6 +185,52 @@ fn cleanup_sweeps_orphaned_atomic_write_temp_files() {
     let _ = std::fs::remove_file(&fresh);
 }
 
+/// `NEW-29`: the orphan sweep was reachable only from export cleanup, which
+/// reads the directories to sweep from `env_exports`. Tracking's link and
+/// unlink paths call the same `atomic_write` on the user's `.env` and never
+/// write that table, so their orphans — each holding the COMPLETE new file,
+/// credential values included — were collected by nothing at all.
+#[test]
+fn the_orphan_sweep_is_reachable_for_a_directory_no_export_ever_touched() {
+    let dir = tempfile::tempdir().unwrap();
+    let orphan = dir.path().join("..env.api-tracker-tmp-deadbeef");
+    std::fs::write(&orphan, "OPENAI_API_KEY=FAKE-TEST-NOT-A-REAL-KEY-000029\n").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+    let file = std::fs::File::options().write(true).open(&orphan).unwrap();
+    file.set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    drop(file);
+
+    // An in-flight write in another process must never be raced.
+    let fresh = dir.path().join("..env.api-tracker-tmp-cafef00d");
+    std::fs::write(&fresh, "in-flight").unwrap();
+    // Nor may an ordinary file that merely lives beside them.
+    let real = dir.path().join(".env");
+    std::fs::write(&real, "KEEP=1\n").unwrap();
+
+    api_tracker_core::envgov::sweep_orphaned_temp_files_in(dir.path());
+
+    assert!(!orphan.exists(), "the old orphan was not swept");
+    assert!(fresh.exists(), "a fresh temp file must not be raced");
+    assert!(real.exists(), "the sweep must touch only temp names");
+}
+
+/// The temp name for `.env` is `..env.api-tracker-tmp-<uuid>`, which neither
+/// `.env` nor `.env.*` matches. Committing one would publish a complete set
+/// of the project's credentials.
+#[test]
+fn the_atomic_write_temp_name_is_gitignored() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let ignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert!(
+        ignore.lines().any(|l| l.trim() == ".*.api-tracker-tmp-*"),
+        ".gitignore must exclude atomic-write temp files (NEW-29); it reads:\n{ignore}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn dead_injection_sessions_are_swept_by_monitor() {

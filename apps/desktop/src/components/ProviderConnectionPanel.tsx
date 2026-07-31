@@ -12,7 +12,7 @@ import type {
   ProviderProjectOverview,
   SyncReport,
 } from "../types";
-import { formatMicros } from "../utils";
+import { PROJECT_REPORTED_COST, ambiguousSumAvailability, formatCostMicros } from "../usage";
 import { ReauthDialog } from "./ReauthDialog";
 
 type Period = "auto" | "7" | "30" | "90";
@@ -125,7 +125,29 @@ export function ProviderConnectionPanel(props: { provider: string }) {
     }
   };
 
-  if (!status) return null;
+  // A failed status read is not "no administrative connection" (NEW-41).
+  // Returning null rendered the panel away entirely, so a vault or transport
+  // error looked identical to a provider the user had never connected — and
+  // the user's next move (connect again) would have been decided by an error
+  // they never saw.
+  if (!status) {
+    return (
+      <div>
+        <h2>Administrative connection</h2>
+        {error ? (
+          <p className="error" role="alert">
+            The administrative connection for {props.provider} could not be read: {error}. This
+            is not evidence that none exists.{" "}
+            <button className="link" onClick={() => void reload()}>
+              Retry
+            </button>
+          </p>
+        ) : (
+          <p className="muted">Reading the administrative connection…</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -385,7 +407,10 @@ export function ProviderConnectionPanel(props: { provider: string }) {
           <h3>Provider-side projects</h3>
           <p className="muted">
             Month-to-date provider-reported cost per provider project. Projects without any
-            linked usage stay visible — their cost is never divided among local keys.
+            linked usage stay visible — their cost is never divided among local keys. A project
+            with no USD cost row this month reads &ldquo;not reported&rdquo; rather than $0.00:
+            the rollup sums only rows that carried a cost, so an unreported month and a reported
+            zero arrive as the same number and cannot be told apart (NEW-37).
           </p>
           <table>
             <thead>
@@ -402,7 +427,16 @@ export function ProviderConnectionPanel(props: { provider: string }) {
                     {p.name || p.provider_project_id}{" "}
                     <span className="muted mono">{p.name ? p.provider_project_id : ""}</span>
                   </td>
-                  <td>{formatMicros(p.reported_cost_micros_month)}</td>
+                  <td>
+                    {formatCostMicros(
+                      p.reported_cost_micros_month,
+                      ambiguousSumAvailability(
+                        p.reported_cost_micros_month,
+                        "no USD provider-reported cost row exists for this project this month",
+                      ),
+                      PROJECT_REPORTED_COST,
+                    )}
+                  </td>
                   <td>{p.has_linked_usage ? "yes" : <span className="muted">none</span>}</td>
                 </tr>
               ))}

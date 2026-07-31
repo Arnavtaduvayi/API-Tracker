@@ -1,0 +1,57 @@
+# LangSmith provider manifest.
+# LangSmith is an observability backend rather than a model provider, but it is
+# reached with a long-lived API key over a base URL the SDK reads from the
+# environment, so it is trackable in exactly the same way.
+id = "langsmith"
+name = "LangSmith"
+description = "LangSmith tracing and evaluation platform (LangChain)."
+website = "https://smith.langchain.com"
+api_docs_url = "https://api.smith.langchain.com/redoc"
+auth_docs_url = "https://docs.langchain.com/langsmith/create-account-api-key"
+manage_url = "https://smith.langchain.com/settings"
+pricing_url = "https://www.langchain.com/pricing-langsmith"
+login_url = "https://smith.langchain.com/"
+# The official langsmith SDK resolves each setting under BOTH the LANGSMITH_
+# and the legacy LANGCHAIN_ prefix, so both spellings are real credentials in
+# a project's .env and both must be detected.
+env_vars = ["LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"]
+credential_types = ["personal_access_token", "service_key"]
+expiration = "No key expiration is documented; keys stay valid until deleted in the workspace settings."
+watch_docs = [
+    "https://docs.langchain.com/langsmith/create-account-api-key",
+    "https://api.smith.langchain.com/redoc",
+]
+# No detection pattern: the official documentation shows the `lsv2_pt_`
+# personal-token spelling in examples but does not publish the full format for
+# both key types, so no regex is declared rather than half-covering the space
+# and reporting a misleading confidence.
+
+# Local Gateway routing (ADR 0019 D10). Verified against the official
+# langsmith Python SDK and the LangSmith documentation:
+#   * base URL env vars: `LANGSMITH_ENDPOINT`, legacy alias `LANGCHAIN_ENDPOINT`
+#     (the SDK resolves each setting under both prefixes, in that order)
+#   * default base URL:  `https://api.smith.langchain.com`
+#   * API key env vars:  `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY`
+# Self-hosted LangSmith installations point these at their own host; this
+# manifest declares only the managed origin, so a self-hosted deployment stays
+# on the custom-origin path rather than being silently forwarded to the
+# managed service.
+[gateway]
+origins = ["https://api.smith.langchain.com"]
+base_path = ""
+env_vars = ["LANGSMITH_ENDPOINT", "LANGCHAIN_ENDPOINT"]
+# Trace ingestion carries no token-usage object either extractor understands;
+# the gateway records request counts only.
+usage_shape = ""
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", attribution = "exact_credential", note = "An authenticated GET /api/v1/sessions would confirm the key; Tethra has no LangSmith connector yet." }
+fetch_metadata = { support = "manual_only", note = "Key names and scopes are shown in workspace settings; no public key-management API is documented." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Trace and seat usage are shown in the LangSmith usage page; no public usage API is documented." }
+read_permissions = { support = "manual_only", note = "A key's kind (personal access token vs workspace/organization service key) determines its reach and is shown in settings; it is not readable through a public API." }
+change_permissions = { support = "unsupported", note = "A key's scope is fixed at creation; create a key of the desired kind instead." }
+create_credential = { support = "manual_only", note = "Keys are created in workspace settings; no key-creation API is documented." }
+disable_credential = { support = "unsupported", note = "No disable state is documented; keys are deleted instead." }
+revoke_credential = { support = "manual_only", note = "Keys are deleted in workspace settings; no key-deletion API is documented." }
+rotate_credential = { support = "manual_only", note = "Create a replacement key in workspace settings, deploy it, then delete the old one." }
+fetch_pricing = { support = "manual_only", note = "Pricing is published on the pricing page; there is no official pricing API." }

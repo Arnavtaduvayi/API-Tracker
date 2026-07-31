@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -20,7 +20,15 @@ vi.mock("../api", async () => {
   };
 });
 
+import { api } from "../api";
 import { ApiActivityView } from "./ApiActivityView";
+
+const mockApi = api as unknown as { observeOverview: ReturnType<typeof vi.fn> };
+
+beforeEach(() => {
+  mockApi.observeOverview.mockReset();
+  mockApi.observeOverview.mockResolvedValue([]);
+});
 
 describe("ApiActivityView", () => {
   it("states the metadata-only guarantee and empty state", async () => {
@@ -40,5 +48,21 @@ describe("ApiActivityView", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/Query strings are discarded/i)).toBeInTheDocument();
     expect(screen.getByText(/nothing is uploaded to Tethra/i)).toBeInTheDocument();
+  });
+});
+
+describe("ApiActivityView load failure (NEW-41)", () => {
+  it("does not report a failed overview read as 'no traffic observed'", async () => {
+    mockApi.observeOverview.mockRejectedValue({
+      code: "db_error",
+      message: "database is locked",
+    });
+    render(<ApiActivityView />);
+    expect(
+      await screen.findByText(/overview could not be read: database is locked/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/do not read it as none/)).toBeInTheDocument();
+    // The negative control: the empty state the audited screen fell back to.
+    expect(document.body.textContent).not.toMatch(/No API traffic observed yet/);
   });
 });

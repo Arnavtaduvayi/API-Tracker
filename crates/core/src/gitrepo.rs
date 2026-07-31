@@ -9,6 +9,8 @@
 //! scanner sees exactly what is committed, not just the working tree.
 
 use crate::error::{CoreError, Result};
+use crate::gitsafe;
+use crate::gitseal::{self, SealParts, SealedRepo};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -119,12 +121,268 @@ fn git_program() -> String {
     "git".to_string()
 }
 
-fn spawn_git(repo: &Path, args: &[&str]) -> Result<Child> {
-    Command::new(git_program())
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .stdin(Stdio::null())
+// ---------------------------------------------------------------------------
+// Execution hardening (ADR 0023, superseded in part by ADR 0027)
+//
+// Git is not a passive reader. A repository's own `.git/config` — which an
+// attacker controls in any repository the user clones, extracts, or is
+// handed — can name programs that Git executes during commands that look
+// read-only: `core.fsmonitor` (ls-files, status, diff), external diff
+// drivers and textconv (log -p, show), signature verifiers
+// (`log.showSignature` + `gpg.program`), pagers, editors, credential and
+// askpass helpers. `safe.directory` does not help: it only fires for
+// repositories owned by a *different* user, and a cloned repository is
+// owned by the user running the scan.
+//
+// The PRIMARY control is now structural, not enumerated: every isolated
+// invocation runs against a sealed Git directory built by
+// [`crate::gitseal`], which reproduces the repository's *content* while
+// excluding its *configuration* entirely. Repository config, worktree
+// config, and anything they include are simply not part of the repository
+// Git is looking at.
+//
+// The `-c` overrides below are kept as an independent second layer. They
+// cost nothing, they cover the global/system files on the one read-through
+// path, and if a future change ever reintroduced a repository-config read
+// they would still neutralize the keys they name. They are NOT relied on
+// for completeness — that is exactly the property an enumeration cannot
+// have, and `log.showSignature` is the proof.
+// ---------------------------------------------------------------------------
+
+/// A path Git can open but that can never contain a hook or a config file.
+#[cfg(windows)]
+const NULL_PATH: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_PATH: &str = "/dev/null";
+
+/// The null path, for the sealed-directory builder.
+pub(crate) fn null_path() -> &'static str {
+    NULL_PATH
+}
+
+/// `-c key=value` overrides applied to every Git invocation.
+///
+/// Each entry neutralizes one documented way repository or user
+/// configuration turns a Git command into a program launch. The list is
+/// pinned by `tests/git_execution_canaries.rs`, which plants an executable
+/// canary for each one and fails if it ever runs.
+fn hardened_config() -> Vec<String> {
+    vec![
+        // Runs a program on ls-files / status / diff. The ZFT-001 vector.
+        "core.fsmonitor=false".to_string(),
+        // Hooks: no command Tethra runs fires one today, but a future Git
+        // could, and the cost of pinning it is nil.
+        format!("core.hooksPath={NULL_PATH}"),
+        // Pager and editor: both are shell commands when set.
+        "core.pager=cat".to_string(),
+        "core.editor=".to_string(),
+        "sequence.editor=".to_string(),
+        // External diff drivers and textconv: run by `log -p` / `show`
+        // when `.gitattributes` (also attacker-controlled) assigns them.
+        "diff.external=".to_string(),
+        // Credential and askpass helpers: shell commands on any operation
+        // Git decides needs authentication.
+        "credential.helper=".to_string(),
+        "core.askPass=".to_string(),
+        // Transports that execute a helper program by name.
+        "protocol.ext.allow=never".to_string(),
+        "core.gitProxy=".to_string(),
+        "core.sshCommand=".to_string(),
+        // Signature verification. `log.showSignature` makes `git log`
+        // verify every commit carrying a `gpgsig` header, and the verifier
+        // is whatever `gpg.program` / `gpg.<format>.program` names. The
+        // signature does not have to be valid: Git pattern-matches the
+        // header and then hands the blob to the configured program. This
+        // is the RA-001 vector.
+        "log.showSignature=false".to_string(),
+        "merge.verifySignatures=false".to_string(),
+        format!("gpg.program={NULL_PATH}"),
+        format!("gpg.openpgp.program={NULL_PATH}"),
+        format!("gpg.ssh.program={NULL_PATH}"),
+        format!("gpg.x509.program={NULL_PATH}"),
+        format!("gpg.ssh.allowedSignersFile={NULL_PATH}"),
+        format!("gpg.ssh.revocationFile={NULL_PATH}"),
+        // Attribute and exclude files outside the repository must not be
+        // consulted either: `.gitattributes` is how a diff driver gets
+        // *assigned*, and a global one is not repository-controlled but is
+        // still an input we do not need.
+        format!("core.attributesFile={NULL_PATH}"),
+        format!("core.excludesFile={NULL_PATH}"),
+        // Nothing Tethra runs should trigger background repacking, which
+        // would spawn a child of its own.
+        "gc.auto=0".to_string(),
+        "gc.autoDetach=false".to_string(),
+        "maintenance.auto=false".to_string(),
+        "fetch.writeCommitGraph=false".to_string(),
+        // Hook-shaped keys on the server-side verbs. None of Tethra's
+        // commands reach them today; pinning them costs nothing and keeps
+        // the list honest about what "no program launch" means.
+        "uploadpack.packObjectsHook=".to_string(),
+        "core.fsmonitorHookVersion=1".to_string(),
+    ]
+}
+
+/// Environment variables that must not reach a Git child: the
+/// variable-shaped equivalents of the config above, the state variables
+/// that would redirect Git at another repository, and the dynamic-loader
+/// hooks that inject code into any process.
+const SCRUBBED_ENV: &[&str] = &[
+    "GIT_EXTERNAL_DIFF",
+    "GIT_DIFF_OPTS",
+    "GIT_PAGER",
+    "PAGER",
+    "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR",
+    "EDITOR",
+    "VISUAL",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_PROXY_COMMAND",
+    "GIT_ATTR_SOURCE",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NAMESPACE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    // A linked worktree's shared directory. Left unscrubbed it would
+    // redirect Git at a different repository's refs and objects even when
+    // `--git-dir` names the sealed one.
+    "GIT_COMMON_DIR",
+    // Where Git looks for its own subcommands: pure code execution.
+    "GIT_EXEC_PATH",
+    "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    // Trace sinks accept a path or an `af_unix:` target, so they are an
+    // exfiltration surface even though they launch nothing.
+    "GIT_TRACE",
+    "GIT_TRACE2",
+    "GIT_TRACE2_EVENT",
+    "GIT_TRACE2_PERF",
+    "GIT_TRACE_PACK_ACCESS",
+    "GIT_TRACE_PACKET",
+    "GIT_TRACE_SETUP",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+];
+
+/// Apply every hardening measure to a prepared command.
+///
+/// Public so the hooks module and any future Git caller share exactly one
+/// definition of "hardened" — there must never be a second, weaker spawn.
+pub fn harden(cmd: &mut Command) {
+    harden_execution_env(cmd);
+    harden_config_sources(cmd);
+}
+
+/// The part of the hardening every invocation gets, including the
+/// read-through one: remove the environment variables that name a program
+/// for Git (or the dynamic loader) to run, and the ones that would
+/// redirect Git at a different repository.
+fn harden_execution_env(cmd: &mut Command) {
+    // Never block on a prompt, never take an index lock we do not need.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.env("GIT_FLUSH", "1");
+    // A deterministic, minimal locale keeps stderr parsing stable.
+    cmd.env("LC_ALL", "C");
+    for var in SCRUBBED_ENV {
+        cmd.env_remove(var);
+    }
+    // `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` are pure injection — there
+    // is no legitimate reason for Tethra's parent process to set them — so
+    // they are cleared even on the read-through path. Clearing the count
+    // is what makes the pairs inert.
+    cmd.env("GIT_CONFIG_COUNT", "0");
+    for i in 0..64 {
+        cmd.env_remove(format!("GIT_CONFIG_KEY_{i}"));
+        cmd.env_remove(format!("GIT_CONFIG_VALUE_{i}"));
+    }
+}
+
+/// Cut off the system and global configuration files.
+///
+/// A compromised `~/.gitconfig` or `/etc/gitconfig` must not be able to
+/// inject an executable value. Consequence, documented in
+/// `docs/activity-onboarding/KNOWN_LIMITATIONS.md`: `core.excludesFile`
+/// (the user's global ignore list) is not honoured by these commands.
+///
+/// Deliberately NOT applied by [`config_get`], whose contract is to report
+/// the value Git itself would use — including one set globally.
+fn harden_config_sources(cmd: &mut Command) {
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", NULL_PATH);
+    cmd.env("GIT_CONFIG_SYSTEM", NULL_PATH);
+}
+
+/// Arguments that must precede the subcommand on every invocation.
+fn hardened_leading_args() -> Vec<String> {
+    let mut out = vec!["--no-pager".to_string()];
+    for entry in hardened_config() {
+        out.push("-c".to_string());
+        out.push(entry);
+    }
+    out
+}
+
+/// Spawn Git against a sealed directory. The repository's own
+/// configuration is not present in the repository Git is looking at, so it
+/// cannot participate.
+fn spawn_git_sealed(sealed: &SealedRepo, args: &[&str]) -> Result<Child> {
+    let mut cmd = Command::new(git_program());
+    harden_execution_env(&mut cmd);
+    harden_config_sources(&mut cmd);
+    // A controlled working directory: the child must not inherit a cwd
+    // that has since been deleted, and must not pick up an unrelated
+    // enclosing repository. Deliberately NOT the scanned repository:
+    // a relative program name in a configuration value (`./payload.sh`)
+    // resolves against the child's cwd, and the temp dir contains none.
+    cmd.current_dir(std::env::temp_dir());
+    // `--no-pager` and every `-c` override must come before the
+    // subcommand; Git only accepts them as leading options.
+    cmd.args(hardened_leading_args());
+    cmd.arg("--git-dir").arg(sealed.git_dir());
+    cmd.args(args);
+    finish_spawn(cmd)
+}
+
+/// Spawn Git addressed by `-C <repo>`, with the repository's configuration
+/// intact.
+///
+/// Exactly one caller may use this: [`config_get`], whose entire job is to
+/// report the value Git itself would use. Overriding a key and then reading
+/// it back would return Tethra's own placeholder — which is how `hooks
+/// install` briefly tried to write a pre-commit hook into `/dev/null`.
+/// `git config --get` reads and prints: it consults no fsmonitor, and runs
+/// no hook, filter, diff driver or signature verifier, so leaving the
+/// values intact adds no execution surface. This is the one documented
+/// exception to "repository configuration never participates", and it is
+/// why the canary suite exercises `config_get` against every vector too.
+fn spawn_git_read_through(repo: &Path, args: &[&str]) -> Result<Child> {
+    let mut cmd = Command::new(git_program());
+    harden_execution_env(&mut cmd);
+    cmd.current_dir(std::env::temp_dir());
+    cmd.arg("--no-pager");
+    cmd.arg("-C").arg(repo);
+    cmd.args(args);
+    finish_spawn(cmd)
+}
+
+/// Git is always executed directly — never through a shell, and never with
+/// a caller-composed command string. Arguments are passed as an argv array,
+/// so no quoting, expansion or word-splitting is possible.
+fn finish_spawn(mut cmd: Command) -> Result<Child> {
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -211,11 +469,21 @@ fn timeout_error(args: &[&str], limits: &GitLimits) -> CoreError {
     ))
 }
 
-/// Run a short git command to completion under limits. Timeout or output
-/// overflow kills and reaps the child and returns a loud error — a bounded
-/// failure, never a hang and never silently-partial output.
-fn run_git_bounded(repo: &Path, args: &[&str], limits: &GitLimits) -> Result<GitCapture> {
-    let mut child = spawn_git(repo, args)?;
+/// Run a short git command against a sealed directory, to completion under
+/// limits. Timeout or output overflow kills and reaps the child and returns
+/// a loud error — a bounded failure, never a hang and never silently-partial
+/// output.
+fn run_git_sealed(sealed: &SealedRepo, args: &[&str], limits: &GitLimits) -> Result<GitCapture> {
+    drive_child(spawn_git_sealed(sealed, args)?, args, limits)
+}
+
+/// Seal `repo` and run one short command against it.
+fn run_git_once(repo: &Path, args: &[&str], parts: SealParts) -> Result<GitCapture> {
+    let sealed = gitseal::seal(repo, parts)?;
+    run_git_sealed(&sealed, args, &GitLimits::command())
+}
+
+fn drive_child(mut child: Child, args: &[&str], limits: &GitLimits) -> Result<GitCapture> {
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let mut guard = ChildGuard(child);
@@ -269,24 +537,31 @@ fn run_git_bounded(repo: &Path, args: &[&str], limits: &GitLimits) -> Result<Git
     })
 }
 
-/// Back-compat shim used by the short-command helpers below.
-fn run_git(repo: &Path, args: &[&str]) -> Result<GitCapture> {
-    run_git_bounded(repo, args, &GitLimits::command())
-}
-
-/// Bounded git probe for sibling modules (env governance): same limits as
-/// every other short git command, so no caller in the crate can spawn an
-/// unbounded git subprocess.
+/// Bounded git probe for sibling modules (env governance): same limits and
+/// the same sealed isolation as every other git command, so no caller in
+/// the crate can spawn an unbounded or unsealed git subprocess.
 pub(crate) fn run_git_probe(repo: &Path, args: &[&str]) -> Result<GitCapture> {
-    run_git_bounded(repo, args, &GitLimits::command())
+    run_git_once(repo, args, SealParts::refs_only())
 }
 
 /// Whether `git` is usable.
+///
+/// Bounded like every other invocation — a hung `git --version` (a wedged
+/// binary on a dead network mount) must not hang Tethra — and run with the
+/// full environment and config-source hardening, with no repository
+/// involved at all.
 pub fn git_available() -> bool {
-    Command::new(git_program())
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
+    let mut cmd = Command::new(git_program());
+    harden(&mut cmd);
+    cmd.current_dir(std::env::temp_dir());
+    cmd.args(hardened_leading_args());
+    cmd.arg("--version");
+    let limits = GitLimits::command();
+    let Ok(child) = finish_spawn(cmd) else {
+        return false;
+    };
+    drive_child(child, &["--version"], &limits)
+        .map(|o| o.success)
         .unwrap_or(false)
 }
 
@@ -294,7 +569,15 @@ pub fn git_available() -> bool {
 /// local/global/system scopes, exactly the value git itself would use), or
 /// `None` when the key is unset. Errors only when git cannot run.
 pub fn config_get(repo: &Path, key: &str) -> Result<Option<String>> {
-    let out = run_git(repo, &["config", "--get", key])?;
+    // Read-through: this function exists to report the value Git itself
+    // would use, so it must not observe Tethra's own hardening overrides
+    // and must address the real repository rather than a sealed copy.
+    let args = ["config", "--get", key];
+    let out = drive_child(
+        spawn_git_read_through(repo, &args)?,
+        &args,
+        &GitLimits::command(),
+    )?;
     if out.success {
         return Ok(Some(
             String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -314,23 +597,40 @@ pub fn config_get(repo: &Path, key: &str) -> Result<Option<String>> {
 }
 
 /// The repository root containing `path`, or an error if it is not a repo.
+///
+/// Resolved in process by [`crate::gitsafe::discover`] — reading `.git`,
+/// following a `gitdir:` pointer for linked worktrees and submodules — so
+/// locating a repository spawns nothing at all. Previously this ran
+/// `git rev-parse --show-toplevel`, which needed the work tree and so could
+/// not be answered from a sealed directory.
 pub fn repo_root(path: &Path) -> Result<PathBuf> {
-    let out = run_git(path, &["rev-parse", "--show-toplevel"])?;
-    if !out.success {
-        return Err(CoreError::InvalidInput(format!(
-            "{} is not inside a Git repository",
-            path.display()
-        )));
-    }
-    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Ok(PathBuf::from(root))
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    gitsafe::discover(&canonical)
+        .map(|layout| layout.work_tree)
+        .ok_or_else(|| {
+            CoreError::InvalidInput(format!("{} is not inside a Git repository", path.display()))
+        })
 }
 
 /// Names of files staged for commit (added/copied/modified).
 pub fn staged_files(repo: &Path) -> Result<Vec<String>> {
-    let out = run_git(
-        repo,
-        &["diff", "--cached", "--name-only", "--diff-filter=ACM", "-z"],
+    let sealed = gitseal::seal(repo, SealParts::with_index())?;
+    staged_files_in(&sealed)
+}
+
+fn staged_files_in(sealed: &SealedRepo) -> Result<Vec<String>> {
+    let out = run_git_sealed(
+        sealed,
+        &[
+            "diff",
+            "--cached",
+            "--name-only",
+            "--diff-filter=ACM",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-z",
+        ],
+        &GitLimits::command(),
     )?;
     if !out.success {
         return Err(CoreError::InvalidInput(
@@ -350,7 +650,13 @@ pub fn staged_files(repo: &Path) -> Result<Vec<String>> {
 /// working-tree scan applies, so a multi-GB staged file cannot OOM the
 /// pre-commit hook.
 pub fn staged_blob(repo: &Path, path: &str) -> Result<Option<Vec<u8>>> {
-    let size = run_git(repo, &["cat-file", "-s", &format!(":{path}")])?;
+    let sealed = gitseal::seal(repo, SealParts::with_index())?;
+    staged_blob_in(&sealed, path)
+}
+
+fn staged_blob_in(sealed: &SealedRepo, path: &str) -> Result<Option<Vec<u8>>> {
+    let limits = GitLimits::command();
+    let size = run_git_sealed(sealed, &["cat-file", "-s", &format!(":{path}")], &limits)?;
     if size.success {
         if let Ok(bytes) = String::from_utf8_lossy(&size.stdout).trim().parse::<u64>() {
             if bytes > MAX_FILE_BYTES {
@@ -358,7 +664,7 @@ pub fn staged_blob(repo: &Path, path: &str) -> Result<Option<Vec<u8>>> {
             }
         }
     }
-    let out = run_git(repo, &["show", &format!(":{path}")])?;
+    let out = run_git_sealed(sealed, &["show", &format!(":{path}")], &limits)?;
     if !out.success {
         return Ok(None);
     }
@@ -366,10 +672,15 @@ pub fn staged_blob(repo: &Path, path: &str) -> Result<Option<Vec<u8>>> {
 }
 
 /// Scan units for everything currently staged.
+///
+/// One seal is built for the whole pass and reused for every blob, so a
+/// repository with many staged files costs one isolation setup, not one per
+/// file.
 pub fn staged_units(repo: &Path) -> Result<Vec<ScanUnit>> {
+    let sealed = gitseal::seal(repo, SealParts::with_index())?;
     let mut units = Vec::new();
-    for path in staged_files(repo)? {
-        if let Some(bytes) = staged_blob(repo, &path)? {
+    for path in staged_files_in(&sealed)? {
+        if let Some(bytes) = staged_blob_in(&sealed, &path)? {
             if crate::scanner::looks_binary(&bytes) {
                 continue;
             }
@@ -386,7 +697,7 @@ pub fn staged_units(repo: &Path) -> Result<Vec<ScanUnit>> {
 /// as scan units labelled `commit <short>:<file>`.
 /// The current HEAD commit hash of a repository.
 pub fn head_commit(repo: &Path) -> Result<String> {
-    let out = run_git(repo, &["rev-parse", "HEAD"])?;
+    let out = run_git_once(repo, &["rev-parse", "HEAD"], SealParts::refs_only())?;
     if !out.success {
         return Err(CoreError::InvalidInput(
             "could not read the repository HEAD (no commits yet?)".into(),
@@ -428,12 +739,18 @@ pub fn range_added_units_with_limits(
         }
     }
     let range = format!("{old}..{new}");
+    // `--no-ext-diff` and `--no-textconv` are load-bearing here: `log -p`
+    // is the one command Tethra runs that would honour a repository's
+    // `.gitattributes` diff driver or textconv filter, both of which name
+    // programs Git executes (ADR 0023).
     let args = [
         "log",
         "-p",
         "--no-color",
         "-U0",
         "--no-merges",
+        "--no-ext-diff",
+        "--no-textconv",
         "--end-of-options",
         range.as_str(),
     ];
@@ -450,7 +767,15 @@ pub fn history_added_units_with_limits(
     limits: &GitLimits,
 ) -> Result<HistoryScan> {
     let count = n.map(|c| format!("-n{c}"));
-    let mut args: Vec<&str> = vec!["log", "-p", "--no-color", "-U0", "--no-merges"];
+    let mut args: Vec<&str> = vec![
+        "log",
+        "-p",
+        "--no-color",
+        "-U0",
+        "--no-merges",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
     if let Some(c) = &count {
         args.push(c);
     } else {
@@ -469,7 +794,11 @@ fn stream_log_units(
     limits: &GitLimits,
     what: &str,
 ) -> Result<HistoryScan> {
-    let mut child = spawn_git(repo, args)?;
+    // `git log -p` is the command that verifies signatures, and therefore
+    // the command a hostile repository aims at (RA-001). It runs against a
+    // sealed directory like every other isolated invocation.
+    let sealed = gitseal::seal(repo, SealParts::refs_only())?;
+    let mut child = spawn_git_sealed(&sealed, args)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let mut guard = ChildGuard(child);

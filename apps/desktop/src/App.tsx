@@ -43,11 +43,16 @@ import { RotationView } from "./components/RotationView";
 import { AccessView } from "./components/AccessView";
 import { NotifyView } from "./components/NotifyView";
 import { ApiActivityView } from "./components/ApiActivityView";
+import { GatewayView, GatewayLockStrip } from "./components/GatewayView";
+import { DashboardView } from "./components/DashboardView";
+import { TrackFlow } from "./components/TrackFlow";
 import { Gate } from "./components/visuals/Gate";
 import { WireGlobe } from "./components/visuals/WireGlobe";
 import { NavIcon } from "./components/visuals/NavIcons";
 
 export type View =
+  | { name: "dashboard" }
+  | { name: "track" }
   | { name: "projects" }
   | { name: "project"; ident: string }
   | { name: "project-new" }
@@ -67,6 +72,7 @@ export type View =
   | { name: "notify" }
   | { name: "usage" }
   | { name: "api-activity" }
+  | { name: "gateway" }
   | { name: "pricing" }
   | { name: "templates" }
   | { name: "settings" }
@@ -80,9 +86,15 @@ type VaultState = "loading" | "missing" | "locked" | "unlocked";
  */
 const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
   {
+    label: "Activity",
+    items: [
+      ["dashboard", "Activity"],
+      ["projects", "Projects"],
+    ],
+  },
+  {
     label: "Vault",
     items: [
-      ["projects", "Projects"],
       ["providers", "Providers"],
     ],
   },
@@ -113,6 +125,13 @@ const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
     ],
   },
   {
+    label: "Advanced",
+    items: [
+      ["track", "Tracking setup"],
+      ["gateway", "Gateway internals"],
+    ],
+  },
+  {
     label: "System",
     items: [
       ["templates", "Templates"],
@@ -124,6 +143,8 @@ const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
 
 /** Nested views highlight (and breadcrumb to) their owning nav destination. */
 const SECTION_OF: Record<View["name"], View["name"]> = {
+  dashboard: "dashboard",
+  track: "track",
   projects: "projects",
   project: "projects",
   "project-new": "projects",
@@ -143,6 +164,7 @@ const SECTION_OF: Record<View["name"], View["name"]> = {
   notify: "notify",
   usage: "usage",
   "api-activity": "api-activity",
+  gateway: "gateway",
   pricing: "pricing",
   templates: "templates",
   backup: "backup",
@@ -174,7 +196,7 @@ async function notifyNewAlerts(severities: string[]) {
 export default function App() {
   const [vaultState, setVaultState] = useState<VaultState>("loading");
   const [dataDir, setDataDir] = useState("");
-  const [view, setView] = useState<View>({ name: "projects" });
+  const [view, setView] = useState<View>({ name: "dashboard" });
   const [fatal, setFatal] = useState<string | null>(null);
   const [monitorMinutes, setMonitorMinutes] = useState(0);
   const [navCollapsed, setNavCollapsed] = useState(false);
@@ -253,8 +275,25 @@ export default function App() {
     return () => clearInterval(timer);
   }, [vaultState, monitorMinutes, runBackgroundMonitor]);
 
+  const [lockError, setLockError] = useState<string | null>(null);
+
+  // A failed lock must never look like a successful one. Without the catch,
+  // a rejected `vaultLock` left the UI on whatever screen it was on with an
+  // unhandled rejection in the console — and the user, having clicked "Lock
+  // vault", reasonably believed the vault was locked when it was not
+  // (ZFT-031). The view and the state flag move only after the backend
+  // confirms.
   const lockNow = async () => {
-    await api.vaultLock();
+    setLockError(null);
+    try {
+      await api.vaultLock();
+    } catch (e) {
+      setLockError(
+        `The vault could NOT be locked: ${isApiError(e) ? e.message : String(e)}. It is still ` +
+          `unlocked. Try again, or quit Tethra — quitting ends the session.`,
+      );
+      return;
+    }
     setView({ name: "projects" });
     setVaultState("locked");
   };
@@ -284,9 +323,12 @@ export default function App() {
     );
   }
   if (vaultState === "locked") {
+    // The gateway keeps forwarding while the vault is locked; the strip
+    // keeps that visible (its backend commands are lock-free).
     return (
       <Gate eyebrow="Vault locked">
         <VaultUnlock dataDir={dataDir} onUnlocked={() => void refreshStatus()} />
+        <GatewayLockStrip />
       </Gate>
     );
   }
@@ -359,6 +401,23 @@ export default function App() {
           <button onClick={() => void lockNow()}>Lock vault</button>
         </header>
         <main className="content">
+          {lockError && (
+            <p className="error" role="alert">
+              {lockError}
+            </p>
+          )}
+          {view.name === "dashboard" && (
+            <DashboardView onTrack={() => setView({ name: "track" })} />
+          )}
+          {view.name === "track" && (
+            // The manual route form lives in Advanced → Gateway internals. A
+            // desktop-only user must be able to REACH it, not be told to run a
+            // CLI command they do not have (ZFT-009).
+            <TrackFlow
+              onDone={() => setView({ name: "dashboard" })}
+              onOpenAdvanced={() => setView({ name: "gateway" })}
+            />
+          )}
           {view.name === "projects" && (
             <ProjectList
               onOpen={(ident) => setView({ name: "project", ident })}
@@ -387,6 +446,7 @@ export default function App() {
               onEdit={() => setView({ name: "project-edit", ident: view.ident })}
               onOpenCredential={(id) => setView({ name: "credential", id })}
               onAddCredential={() => setView({ name: "credential-new", project: view.ident })}
+              onOpenAdvanced={() => setView({ name: "track" })}
             />
           )}
           {view.name === "credential-new" && (
@@ -434,6 +494,7 @@ export default function App() {
           {view.name === "notify" && <NotifyView />}
           {view.name === "usage" && <UsageView />}
           {view.name === "api-activity" && <ApiActivityView />}
+          {view.name === "gateway" && <GatewayView />}
           {view.name === "pricing" && <PricingView />}
           {view.name === "templates" && <TemplatesView />}
           {view.name === "settings" && (

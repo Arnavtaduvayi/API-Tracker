@@ -350,9 +350,245 @@ fn filter_sql(filter: &UsageFilter) -> (String, Vec<String>) {
     (clauses.join(" AND "), params)
 }
 
+/// Why a folded number is, or is not, showable (NEW-37).
+///
+/// This is the Rust half of the vocabulary in `apps/desktop/src/usage.ts`
+/// (`UsageAvailability`). Every sum in [`UsageTotals`] folds `Option<i64>`
+/// columns with `unwrap_or(0)`, so the sum alone cannot distinguish "no
+/// record carried this number" from "the records carried numbers adding up
+/// to zero". The residual counts recorded alongside each sum answer that
+/// question, and this enum is the single predicate that turns a
+/// covered/total pair into a decision.
+///
+/// The rule, stated once: a number may be presented as a TOTAL only when
+/// every record in scope carried it. A sum over a mix of carrying and
+/// non-carrying records is a FLOOR, never a total. A measured zero stays
+/// expressible — hiding it would be a different lie.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Availability {
+    /// Every record in scope carried the number. The value — including 0 —
+    /// is a measurement.
+    Known { covered: i64, total: i64 },
+    /// Some records carried it. The value is a lower bound over `covered`
+    /// of `total` records.
+    Partial { covered: i64, total: i64 },
+    /// Nothing in scope carried the number. Absent is never zero.
+    Unknown { total: i64 },
+    /// The records in scope are metered in something other than this
+    /// number, by design. It does not exist; it is not merely missing.
+    Unsupported { detail: String },
+}
+
+/// The single predicate. `covered` records carried the number; `total` were
+/// in scope. Nothing in scope, or nothing carrying it, is unknown — never
+/// zero.
+pub fn from_coverage(covered: i64, total: i64) -> Availability {
+    if total <= 0 {
+        return Availability::Unknown { total: 0 };
+    }
+    if covered <= 0 {
+        return Availability::Unknown { total };
+    }
+    if covered < total {
+        return Availability::Partial { covered, total };
+    }
+    Availability::Known { covered, total }
+}
+
+impl Availability {
+    /// Whether a number may be shown at all. False means a sentence must
+    /// replace it.
+    pub fn has_value(&self) -> bool {
+        matches!(
+            self,
+            Availability::Known { .. } | Availability::Partial { .. }
+        )
+    }
+
+    /// Whether the number may be presented as a complete total. A partial
+    /// sum is a floor and must never be compared as if it were the whole.
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Availability::Known { .. })
+    }
+
+    /// How many records in scope carried the number.
+    pub fn covered(&self) -> i64 {
+        match self {
+            Availability::Known { covered, .. } | Availability::Partial { covered, .. } => *covered,
+            _ => 0,
+        }
+    }
+
+    /// How many records were in scope.
+    pub fn total(&self) -> i64 {
+        match self {
+            Availability::Known { total, .. }
+            | Availability::Partial { total, .. }
+            | Availability::Unknown { total } => *total,
+            Availability::Unsupported { .. } => 0,
+        }
+    }
+
+    /// A short machine-stable tag, for JSON consumers and tests.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Availability::Known { .. } => "known",
+            Availability::Partial { .. } => "partial",
+            Availability::Unknown { .. } => "unknown",
+            Availability::Unsupported { .. } => "unsupported",
+        }
+    }
+
+    /// The clause shown INSTEAD of a number, without the subject's name.
+    /// Surfaces that already print a label ("Input tokens: …") use this so
+    /// the name is not said twice. It never contains a figure that was not
+    /// measured.
+    pub fn sentence_body(&self, s: &UsageSubject) -> String {
+        match self {
+            Availability::Unsupported { detail } => {
+                format!("not reported by this source — {detail}")
+            }
+            Availability::Unknown { total } => {
+                let reason = if *total > 0 {
+                    format!("none of the {total} {} carried {}", s.unit, s.carrier)
+                } else {
+                    format!("no {} in this window", s.unit)
+                };
+                match s.absent_detail {
+                    Some(d) => format!("not reported — {reason} ({d})"),
+                    None => format!("not reported — {reason}"),
+                }
+            }
+            // Reached only when a value-bearing availability arrives with no
+            // value — a contradiction between the count and the payload. A
+            // missing number is never rendered as a zero.
+            _ => "not reported — the value was missing where the source said it was known"
+                .to_string(),
+        }
+    }
+
+    /// The standalone sentence shown INSTEAD of a number, for surfaces that
+    /// print no separate label.
+    pub fn sentence(&self, s: &UsageSubject) -> String {
+        format!("{} {}", s.name, self.sentence_body(s))
+    }
+
+    /// The clause qualifying a number that IS shown, or None when the
+    /// number stands alone as a complete measurement.
+    pub fn note(&self, s: &UsageSubject) -> Option<String> {
+        match self {
+            Availability::Partial { covered, total } => Some(format!(
+                "{}: {covered} of {total} {} carried {}, and the rest are NOT counted as zero",
+                s.partial_label, s.unit, s.carrier
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// The wording for one measured quantity. Only phrasing lives here — the
+/// predicate above is shared, so a new surface cannot pick up a new rule
+/// along with its new label.
+#[derive(Debug, Clone, Copy)]
+pub struct UsageSubject {
+    /// Sentence-leading noun phrase: "Input tokens", "Estimated cost".
+    pub name: &'static str,
+    /// Label for a sum that is a floor: "Partial token data".
+    pub partial_label: &'static str,
+    /// What a record must carry for the number to be known.
+    pub carrier: &'static str,
+    /// What is being counted: "usage record(s)".
+    pub unit: &'static str,
+    /// Why absence is normal, so "not reported" does not read as a fault.
+    pub absent_detail: Option<&'static str>,
+}
+
+const RECORDS: &str = "usage record(s)";
+
+pub const SUBJECT_REQUESTS: UsageSubject = UsageSubject {
+    name: "Requests",
+    partial_label: "Partial request data",
+    carrier: "a request count",
+    unit: RECORDS,
+    absent_detail: Some("many providers report consumption without a request count"),
+};
+
+pub const SUBJECT_INPUT_TOKENS: UsageSubject = UsageSubject {
+    name: "Input tokens",
+    partial_label: "Partial token data",
+    carrier: "an input token count",
+    unit: RECORDS,
+    absent_detail: Some("many providers meter products in units other than tokens"),
+};
+
+pub const SUBJECT_OUTPUT_TOKENS: UsageSubject = UsageSubject {
+    name: "Output tokens",
+    partial_label: "Partial token data",
+    carrier: "an output token count",
+    unit: RECORDS,
+    absent_detail: Some("many providers meter products in units other than tokens"),
+};
+
+pub const SUBJECT_TOTAL_TOKENS: UsageSubject = UsageSubject {
+    name: "Total tokens",
+    partial_label: "Partial token data",
+    carrier: "a token count",
+    unit: RECORDS,
+    absent_detail: Some("many providers meter products in units other than tokens"),
+};
+
+pub const SUBJECT_REPORTED_COST: UsageSubject = UsageSubject {
+    name: "Reported cost",
+    partial_label: "Partial cost data",
+    carrier: "a USD provider-reported cost",
+    unit: RECORDS,
+    absent_detail: None,
+};
+
+pub const SUBJECT_ESTIMATED_COST: UsageSubject = UsageSubject {
+    name: "Estimated cost",
+    partial_label: "Partial cost data",
+    carrier: "a local cost estimate",
+    unit: RECORDS,
+    absent_detail: Some("an estimate exists only where local pricing covers the model"),
+};
+
+/// Render a count with its qualifier, or the sentence that replaces it.
+/// `render_count` can never print "0" for an absent number.
+pub fn render_count(value: i64, a: &Availability, s: &UsageSubject) -> String {
+    if !a.has_value() {
+        return a.sentence_body(s);
+    }
+    match a.note(s) {
+        Some(note) => format!("{value} — {note}"),
+        None => value.to_string(),
+    }
+}
+
+/// Micro-USD as dollars, or the sentence that replaces it. Returns a dollar
+/// figure only for a measured or derived amount — an unknown cost never
+/// acquires a dollar sign.
+pub fn render_micros(micros: i64, a: &Availability, s: &UsageSubject) -> String {
+    if !a.has_value() {
+        return a.sentence_body(s);
+    }
+    let text = format_micros(micros);
+    match a.note(s) {
+        Some(note) => format!("{text} — {note}"),
+        None => text,
+    }
+}
+
 /// Aggregate totals over a set of snapshots. Reported and estimated costs
 /// are summed separately (they come from different rows and must never be
 /// added together — see `pick_used_cost`).
+///
+/// Every `*_micros` / token / request sum below folds `Option` columns with
+/// `unwrap_or(0)`, so each is accompanied by the count of records that
+/// actually carried it. The sums keep their original meaning (callers
+/// depend on it); the counts are what let a caller ask "how many records
+/// did this total actually fold?" and refuse to present a floor as a total.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UsageTotals {
     pub snapshots: i64,
@@ -375,6 +611,94 @@ pub struct UsageTotals {
     pub has_non_usd_reported: bool,
     /// Most recent collection time across the included snapshots.
     pub last_collected_at: Option<String>,
+
+    // --- residual coverage counts (NEW-37) ------------------------------
+    // Additive: they do not change any sum above. `rows_without_*` is
+    // always `snapshots - *_rows` and is materialised so that a JSON
+    // consumer cannot forget to compute it.
+    /// Records that carried a request count.
+    pub request_rows: i64,
+    /// Records in scope that carried no request count.
+    pub rows_without_requests: i64,
+    /// Records that carried an input token count.
+    pub input_token_rows: i64,
+    /// Records in scope that carried no input token count.
+    pub rows_without_input_tokens: i64,
+    /// Records that carried an output token count.
+    pub output_token_rows: i64,
+    /// Records in scope that carried no output token count.
+    pub rows_without_output_tokens: i64,
+    /// Records from which a token total could be derived: an explicit
+    /// `total_tokens`, or at least one of input/output. These are exactly
+    /// the records that contributed to `total_tokens`.
+    pub token_rows: i64,
+    /// Records in scope that carried no token count at all.
+    pub rows_without_tokens: i64,
+    /// Records that carried a USD provider-reported cost — exactly those
+    /// folded into `reported_cost_micros`. Non-USD rows are excluded from
+    /// the sum and so are excluded here.
+    pub reported_cost_rows: i64,
+    /// Records in scope that contributed nothing to `reported_cost_micros`.
+    pub rows_without_reported_cost: i64,
+    /// Records that carried a local cost estimate.
+    pub estimated_cost_rows: i64,
+    /// Records in scope that carried no local cost estimate.
+    pub rows_without_estimated_cost: i64,
+    /// Records metered in a non-token unit (a `quantity`/`unit` pair) that
+    /// carried no token count. Their consumption is real but is not
+    /// expressible in tokens, so it is reported as unsupported rather than
+    /// as an absent token count.
+    pub non_token_unit_rows: i64,
+    /// The distinct non-token units seen, verbatim from the provider.
+    pub non_token_units: Vec<String>,
+}
+
+impl UsageTotals {
+    fn tokens_availability(&self, covered: i64) -> Availability {
+        // Every record in scope is metered in some other unit: the token
+        // count does not exist here, rather than merely being missing.
+        if self.snapshots > 0 && self.token_rows == 0 && self.non_token_unit_rows == self.snapshots
+        {
+            return Availability::Unsupported {
+                detail: format!(
+                    "these {} record(s) are metered in {}, not tokens",
+                    self.snapshots,
+                    self.non_token_units.join(", ")
+                ),
+            };
+        }
+        from_coverage(covered, self.snapshots)
+    }
+
+    /// Availability of `request_count`.
+    pub fn request_availability(&self) -> Availability {
+        from_coverage(self.request_rows, self.snapshots)
+    }
+
+    /// Availability of `input_tokens`.
+    pub fn input_token_availability(&self) -> Availability {
+        self.tokens_availability(self.input_token_rows)
+    }
+
+    /// Availability of `output_tokens`.
+    pub fn output_token_availability(&self) -> Availability {
+        self.tokens_availability(self.output_token_rows)
+    }
+
+    /// Availability of `total_tokens`.
+    pub fn total_token_availability(&self) -> Availability {
+        self.tokens_availability(self.token_rows)
+    }
+
+    /// Availability of `reported_cost_micros`.
+    pub fn reported_cost_availability(&self) -> Availability {
+        from_coverage(self.reported_cost_rows, self.snapshots)
+    }
+
+    /// Availability of `estimated_cost_micros`.
+    pub fn estimated_cost_availability(&self) -> Availability {
+        from_coverage(self.estimated_cost_rows, self.snapshots)
+    }
 }
 
 /// Totals for the snapshots matching `filter`.
@@ -400,9 +724,42 @@ pub fn totals(conn: &Connection, filter: &UsageFilter) -> Result<UsageTotals> {
         totals.total_tokens += s
             .total_tokens
             .unwrap_or(s.input_tokens.unwrap_or(0) + s.output_tokens.unwrap_or(0));
+        // Residual coverage, counted from the SAME `Option`s the sums fold
+        // above, so a sum and its count can never disagree about which rows
+        // contributed.
+        if s.request_count.is_some() {
+            totals.request_rows += 1;
+        }
+        if s.input_tokens.is_some() {
+            totals.input_token_rows += 1;
+        }
+        if s.output_tokens.is_some() {
+            totals.output_token_rows += 1;
+        }
+        let carries_tokens =
+            s.total_tokens.is_some() || s.input_tokens.is_some() || s.output_tokens.is_some();
+        if carries_tokens {
+            totals.token_rows += 1;
+        }
+        if !carries_tokens {
+            if let Some(unit) = &s.unit {
+                totals.non_token_unit_rows += 1;
+                if !totals
+                    .non_token_units
+                    .iter()
+                    .any(|u| u.eq_ignore_ascii_case(unit))
+                {
+                    totals.non_token_units.push(unit.clone());
+                }
+            }
+        }
+        if s.estimated_cost_micros.is_some() {
+            totals.estimated_cost_rows += 1;
+        }
         if let Some(rep) = s.reported_cost_micros {
             if s.currency.eq_ignore_ascii_case("USD") {
                 totals.reported_cost_micros += rep;
+                totals.reported_cost_rows += 1;
             } else {
                 totals.has_non_usd_reported = true;
             }
@@ -432,6 +789,12 @@ pub fn totals(conn: &Connection, filter: &UsageFilter) -> Result<UsageTotals> {
             totals.last_collected_at = Some(s.collected_at.clone());
         }
     }
+    totals.rows_without_requests = totals.snapshots - totals.request_rows;
+    totals.rows_without_input_tokens = totals.snapshots - totals.input_token_rows;
+    totals.rows_without_output_tokens = totals.snapshots - totals.output_token_rows;
+    totals.rows_without_tokens = totals.snapshots - totals.token_rows;
+    totals.rows_without_reported_cost = totals.snapshots - totals.reported_cost_rows;
+    totals.rows_without_estimated_cost = totals.snapshots - totals.estimated_cost_rows;
     Ok(totals)
 }
 
@@ -500,6 +863,25 @@ pub fn pick_used_cost(totals: &UsageTotals, source: CostSource) -> (i64, bool) {
                 (totals.reported_cost_micros, false)
             } else {
                 (totals.estimated_cost_micros, true)
+            }
+        }
+    }
+}
+
+/// The availability of the figure [`pick_used_cost`] returns, for the same
+/// totals and source. It mirrors that function's branching exactly so the
+/// number and its completeness can never come from different rows: a budget
+/// compared against a floor it believes is a total is the correctness half
+/// of NEW-37, not merely a display problem.
+pub fn pick_used_cost_availability(totals: &UsageTotals, source: CostSource) -> Availability {
+    match source {
+        CostSource::ProviderReported => totals.reported_cost_availability(),
+        CostSource::Estimated => totals.estimated_cost_availability(),
+        CostSource::BestAvailable => {
+            if totals.reported_cost_micros > 0 {
+                totals.reported_cost_availability()
+            } else {
+                totals.estimated_cost_availability()
             }
         }
     }

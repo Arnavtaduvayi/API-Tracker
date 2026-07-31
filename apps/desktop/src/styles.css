@@ -1069,3 +1069,149 @@ th .mono {
     transition: none !important;
   }
 }
+
+/* Navigation group labels (ACTIVITY / VAULT / SECURITY / ADVANCED). */
+.navgroup {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.55;
+  margin-left: 0.75rem;
+  align-self: center;
+}
+
+/* --- projects-first live activity (ADR 0029) ------------------------- */
+
+/* One row of controls: period/metric selectors, refresh, last-updated. */
+.activitybar {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  margin: 0.75rem 0;
+}
+
+.field.inline {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 0.85rem;
+}
+
+.actionrow {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.inlineform {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin-top: 0.35rem;
+}
+
+/* Summary cards. A definition list so each figure keeps its label
+   programmatically, not just visually. */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.cards .card {
+  border: 1px solid #d0d0d0;
+  border-radius: 4px;
+  padding: 0.5rem 0.65rem;
+}
+
+.cards .card dt {
+  font-size: 0.8rem;
+  color: #555;
+}
+
+.cards .card dd {
+  margin: 0.2rem 0 0;
+  font-size: 1.05rem;
+}
+
+/* Chart. Wide content scrolls inside its own container so the page body
+   never scrolls sideways. */
+.chartwrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.activitychart {
+  display: block;
+  min-width: 22rem;
+}
+
+.chartgrid {
+  stroke: #e2e2e2;
+  stroke-width: 1;
+}
+
+.charttick {
+  font-size: 10px;
+  fill: #555;
+}
+
+.chartline {
+  stroke: #2f6f4f;
+  stroke-width: 2;
+}
+
+.chartdot {
+  fill: #2f6f4f;
+}
+
+/* A partially priced bucket is drawn hollow, so a floor is visibly not a
+   total even in the chart. */
+.chartdot.partial {
+  fill: #fff;
+  stroke: #2f6f4f;
+  stroke-width: 1.5;
+}
+
+/* Available to assistive technology, not shown. Used for the chart's
+   text-equivalent table. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .cards .card {
+    border-color: #3a3a3a;
+  }
+  .cards .card dt {
+    color: #aaa;
+  }
+  .chartgrid {
+    stroke: #3a3a3a;
+  }
+  .charttick {
+    fill: #aaa;
+  }
+  .chartline,
+  .chartdot {
+    stroke: #7fd0a3;
+  }
+  .chartdot {
+    fill: #7fd0a3;
+  }
+  .chartdot.partial {
+    fill: #1e1e1e;
+    stroke: #7fd0a3;
+  }
+}

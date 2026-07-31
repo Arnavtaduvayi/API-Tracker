@@ -157,11 +157,17 @@ str_enum! {
 }
 
 str_enum! {
-    /// How the event was observed.
+    /// How the event was observed. `Gateway` marks events recorded by the
+    /// optional loopback reverse gateway (ADR 0019), which forwards
+    /// pass-through credentials and terminates no TLS toward clients — a
+    /// different evidence class from the interception proxy, labeled so the
+    /// two are never conflated. (Additive variant: `from_db` has no external
+    /// call sites, audited at the v13 migration.)
     ObservationSource {
         Intercept => "intercept",
         ConnectionOnly => "connection_only",
         UpgradeThenOpaque => "upgrade_then_opaque",
+        Gateway => "gateway",
     }
 }
 
@@ -178,15 +184,20 @@ str_enum! {
 
 str_enum! {
     /// How confident we are that traffic belongs to a particular credential.
-    /// Derived only from what Tethra controls (injection, mappings, project,
-    /// host→provider, launch-time version) — never from reading an
-    /// authorization value.
+    /// The injection-derived labels (Confirmed/High/Possible/Ambiguous/
+    /// Unattributed) come only from what Tethra controls — never from
+    /// reading an authorization value. `MatchedFingerprint` is the distinct
+    /// gateway label for value-derived attribution via the keyed fingerprint
+    /// (ADR 0019 D5): kept separate so injection-derived provenance is never
+    /// conflated with a value match, and paired with
+    /// `attribution_method = 'observed_fingerprint'` on the event row.
     AttributionConfidence {
         Confirmed => "confirmed",
         High => "high",
         Possible => "possible",
         Ambiguous => "ambiguous",
         Unattributed => "unattributed",
+        MatchedFingerprint => "matched_fingerprint",
     }
 }
 

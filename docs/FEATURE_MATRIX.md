@@ -9,7 +9,9 @@ v1–v12; v12 adds the observation tables — `observation_sessions`,
 `observed_api_services`, `observed_endpoints`, `runtime_request_events`,
 `runtime_metric_buckets`, `credential_traffic_attributions`,
 `observation_compatibility_results`, `observe_certificate_state`,
-`observe_internal_allowlist`). CLI examples use the `tethra` command; the
+`observe_internal_allowlist`). Local Gateway addendum audited:
+**2026-07-26, feat/local-gateway branch** (migrations v1–v13; v13 adds the
+`gateway_*` tables). CLI examples use the `tethra` command; the
 legacy `api-tracker` command remains available as a compatibility alias for
 the same program — see
 [rebrand/TETHRA_MIGRATION_GUIDE.md](rebrand/TETHRA_MIGRATION_GUIDE.md).
@@ -202,13 +204,21 @@ events, 90-day aggregates. Tests:
 
 **The honest ceiling.** No per-request log exists in any official API.
 The 2026-07-19 audit's note that no local gateway/SDK shim was built
-(deliberate — ADR 0014) is **superseded by ADR 0017**: a local, opt-in,
-metadata-only observation proxy IS now built (above). Its own honest
-limits: it only sees traffic from processes launched under it; QUIC/HTTP-3
-bypasses it; certificate-pinned clients and runtimes that ignore trust
-environment variables are not observable (mode C system trust is a
-separate explicit opt-in); HTTP/2 is downgraded to HTTP/1.1 through the
-proxy; and it never recommends disabling TLS verification.
+(deliberate — ADR 0014) is **superseded twice**: by ADR 0017 (the local,
+opt-in, metadata-only observation proxy above) and by **ADR 0019** — an
+optional, consent-gated, loopback-only **Local Gateway** IS now built. It
+forwards traffic from explicitly linked projects to registered provider
+origins and records the same class of sanitized metadata plus bounded
+token counts; once enabled it runs as a per-user login service on macOS
+(LaunchAgent) and Linux (systemd user unit), with Windows support
+compile-validated only and foreground `tethra gateway serve` everywhere
+(`docs/gateway/`). Honest limits of each: the proxy only sees traffic
+from processes launched under it; QUIC/HTTP-3 bypasses it;
+certificate-pinned clients and runtimes that ignore trust environment
+variables are not observable (mode C system trust is a separate explicit
+opt-in); HTTP/2 is downgraded to HTTP/1.1 through the proxy; it never
+recommends disabling TLS verification. The gateway only sees traffic
+whose base URL is repointed at it (`docs/gateway/COVERAGE_LIMITATIONS.md`).
 
 ## 7. Duplicate credentials across projects — Fully implemented
 
@@ -230,7 +240,7 @@ preview redaction, import, example, export permissions, cleanup.
 
 ## 9. Provider/API catalog — Fully implemented
 
-Compile-time-embedded TOML manifests (5 providers) with validated detection
+Compile-time-embedded TOML manifests (21 providers) with validated detection
 regexes, a 10-capability honesty matrix, and changelog/pricing/permission
 URLs. CLI `provider list/show/docs/capabilities`; desktop catalog/detail.
 Manifest validation tests; smoke checks assert honest non-implemented
@@ -316,7 +326,10 @@ Native OS notifications for new medium+ alerts, driven by an in-app
 background monitor timer (`monitor_interval_minutes`, default 30, 0
 disables) that runs the full shared cycle (local rules + due doc checks +
 webhook delivery). Honest scope: the timer runs while the app is open and
-unlocked — it is **not** an OS background service, and the UI/docs say so.
+unlocked — the notification monitor is **not** an OS background service,
+and the UI/docs say so. (The optional Local Gateway, when the user enables
+it, IS a per-user login service — but it forwards and records only; it
+delivers no notifications and runs no monitor cycle.)
 Monitor status (last run/success/failure) is persisted and shown in both
 frontends (added this session).
 

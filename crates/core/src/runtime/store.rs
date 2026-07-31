@@ -572,28 +572,64 @@ pub fn delete_session(conn: &Connection, session_id: &str) -> Result<()> {
 pub fn sweep_orphaned_sessions(conn: &Connection) -> Result<usize> {
     #[cfg(unix)]
     {
-        let rows: Vec<(String, Option<i64>)> = conn
-            .prepare("SELECT id, pid FROM observation_sessions WHERE status = 'running'")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut closed = 0;
-        for (id, pid) in rows {
-            let Some(pid) = pid else { continue };
-            if pid <= 0 {
-                continue;
-            }
-            if pid_is_definitely_gone(pid) {
-                interrupt_session(conn, &id, "launcher_gone")?;
-                closed += 1;
-            }
-        }
-        Ok(closed)
+        sweep_with(conn, pid_is_definitely_gone)
     }
     #[cfg(not(unix))]
     {
-        let _ = conn;
-        Ok(0)
+        sweep_with(conn, windows_pid_is_definitely_gone)
     }
+}
+
+/// The platform-independent half: scan `running` sessions and close the ones
+/// whose recorded pid a platform probe proves gone. Shared by both cfgs so
+/// the row handling, the pid sanity check, and the fail-safe convention have
+/// exactly one implementation.
+fn sweep_with(conn: &Connection, is_gone: fn(i64) -> bool) -> Result<usize> {
+    let rows: Vec<(String, Option<i64>)> = conn
+        .prepare("SELECT id, pid FROM observation_sessions WHERE status = 'running'")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut closed = 0;
+    for (id, pid) in rows {
+        let Some(pid) = pid else { continue };
+        if pid <= 0 {
+            continue;
+        }
+        if is_gone(pid) {
+            interrupt_session(conn, &id, "launcher_gone")?;
+            closed += 1;
+        }
+    }
+    Ok(closed)
+}
+
+/// Windows liveness probe. Same fail-safe contract as the Unix ones: only an
+/// UNAMBIGUOUS "no such task" counts as gone.
+///
+/// Without this, a crashed gateway on Windows left `observation_sessions.
+/// status = 'running'` forever — a shipped, supported foreground mode where
+/// the crash-honesty claim was simply untrue, because the sweep was a
+/// `cfg(unix)` no-op.
+#[cfg(not(unix))]
+fn windows_pid_is_definitely_gone(pid: i64) -> bool {
+    use std::process::Command;
+    let Ok(out) = Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+    else {
+        // tasklist missing or unrunnable proves nothing.
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // A match prints a CSV row containing the pid; no match prints the
+    // "INFO: No tasks are running..." banner (or nothing at all). Require the
+    // banner or genuinely empty output — never infer absence from a parse
+    // failure.
+    let trimmed = stdout.trim();
+    trimmed.is_empty() || trimmed.starts_with("INFO:")
 }
 
 /// True only if `pid` is DEFINITIVELY not a live process. Fail-safe: anything
@@ -673,7 +709,10 @@ pub fn upsert_attribution(
 }
 
 /// Backfill the credential attribution onto a session's events (so per-event
-/// queries can show attribution) for one service.
+/// queries can show attribution) for one service. This is the
+/// injection-derived path, so `attribution_method` is stamped `'injected'` —
+/// distinguishable from the gateway's value-derived `'observed_fingerprint'`
+/// rows (ADR 0019 D5).
 pub fn set_event_attribution_for_session_service(
     conn: &Connection,
     session_id: &str,
@@ -686,13 +725,46 @@ pub fn set_event_attribution_for_session_service(
     Ok(conn.execute(
         "UPDATE runtime_request_events
          SET credential_id = ?3, attribution_confidence = ?4,
-             credential_version = ?5, used_current_version = ?6
+             credential_version = ?5, used_current_version = ?6,
+             attribution_method = 'injected'
          WHERE session_id = ?1 AND service_id = ?2",
         params![
             session_id,
             service_id,
             credential_id,
             confidence.as_str(),
+            credential_version,
+            used_current_version.map(|b| b as i64),
+        ],
+    )?)
+}
+
+/// Set the attribution columns of ONE event row. Used by the gateway writer,
+/// which resolves a keyed-fingerprint match per event (never per session);
+/// `method` is `'observed_fingerprint'` for value-derived matches. Only
+/// attribution METADATA is stored — never a header or credential value
+/// (SECURITY_INVARIANTS SI-8).
+#[allow(clippy::too_many_arguments)]
+pub fn set_event_attribution(
+    conn: &Connection,
+    event_id: &str,
+    credential_id: Option<&str>,
+    confidence: AttributionConfidence,
+    method: &str,
+    credential_version: Option<i64>,
+    used_current_version: Option<bool>,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE runtime_request_events
+         SET credential_id = ?2, attribution_confidence = ?3,
+             attribution_method = ?4, credential_version = ?5,
+             used_current_version = ?6
+         WHERE id = ?1",
+        params![
+            event_id,
+            credential_id,
+            confidence.as_str(),
+            method,
             credential_version,
             used_current_version.map(|b| b as i64),
         ],
@@ -727,6 +799,91 @@ pub fn session_attributions(
     ))?;
     let rows = stmt.query_map([session_id], row_to_attribution)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A credential's last-known activity, per SOURCE — never a single
+/// ambiguous "last used". Each field names exactly one evidence class
+/// (SI-19: locally observed data is never conflated with provider-reported
+/// data), and `most_recent` carries its source label so a UI can show
+/// "most recent known activity" without hiding where it came from.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CredentialActivitySources {
+    /// Last exchange the LOCAL GATEWAY attributed to this credential.
+    pub last_gateway_observed: Option<String>,
+    /// Last exchange the interception proxy (or connection-only fallback)
+    /// attributed to this credential.
+    pub last_proxy_observed: Option<String>,
+    /// End of the newest provider-reported usage window synced for this
+    /// exact credential (absent when the provider only reports coarser
+    /// granularity — never divided among keys).
+    pub last_provider_reported: Option<String>,
+    /// The manually-maintained `credentials.last_used_at` mark.
+    pub last_marked_used: Option<String>,
+    /// Last successful validation against the provider.
+    pub last_validated: Option<String>,
+    /// The newest of the above with its source label.
+    pub most_recent: Option<ActivitySample>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ActivitySample {
+    pub at: String,
+    /// `local_gateway` | `interception_proxy` | `provider_reported` |
+    /// `manually_marked` | `validated`.
+    pub source: String,
+}
+
+pub fn credential_activity_sources(
+    conn: &Connection,
+    credential_id: &str,
+) -> Result<CredentialActivitySources> {
+    let last_gateway_observed: Option<String> = conn.query_row(
+        "SELECT MAX(at) FROM runtime_request_events
+         WHERE credential_id = ?1 AND observation_source = 'gateway'",
+        params![credential_id],
+        |r| r.get(0),
+    )?;
+    let last_proxy_observed: Option<String> = conn.query_row(
+        "SELECT MAX(at) FROM runtime_request_events
+         WHERE credential_id = ?1 AND observation_source != 'gateway'",
+        params![credential_id],
+        |r| r.get(0),
+    )?;
+    let last_provider_reported: Option<String> = conn.query_row(
+        "SELECT MAX(window_end) FROM usage_snapshots WHERE credential_id = ?1",
+        params![credential_id],
+        |r| r.get(0),
+    )?;
+    let (last_marked_used, last_validated): (Option<String>, Option<String>) = conn.query_row(
+        "SELECT last_used_at, last_validated_at FROM credentials WHERE id = ?1",
+        params![credential_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut out = CredentialActivitySources {
+        last_gateway_observed,
+        last_proxy_observed,
+        last_provider_reported,
+        last_marked_used,
+        last_validated,
+        most_recent: None,
+    };
+
+    let candidates = [
+        (&out.last_gateway_observed, "local_gateway"),
+        (&out.last_proxy_observed, "interception_proxy"),
+        (&out.last_provider_reported, "provider_reported"),
+        (&out.last_marked_used, "manually_marked"),
+        (&out.last_validated, "validated"),
+    ];
+    out.most_recent = candidates
+        .iter()
+        .filter_map(|(at, source)| at.as_ref().map(|a| (a.clone(), *source)))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(at, source)| ActivitySample {
+            at,
+            source: source.to_string(),
+        });
+    Ok(out)
 }
 
 pub fn credential_attributions(
@@ -982,6 +1139,13 @@ pub fn allowlist_for_project(
 /// Delete all observability data for one project (sessions + their events/
 /// attributions/compat cascade). Services are host-scoped and shared, so they
 /// are left as inventory; use [`delete_all`] to remove everything.
+///
+/// Gateway usage rows are included: PRIVACY.md and PRIVACY_MODEL.md promise
+/// that the deletion tools "cover gateway events too, since gateway records
+/// flow through the same runtime tables". The runtime half of a gateway
+/// exchange did, but `gateway_usage_events` / `gateway_usage_daily` are
+/// separate tables that no deletion path reached — so the promise was false
+/// until this included them.
 pub fn delete_project_data(conn: &Connection, project_id: &str) -> Result<()> {
     conn.execute(
         "DELETE FROM observation_sessions WHERE project_id = ?1",
@@ -999,6 +1163,18 @@ pub fn delete_project_data(conn: &Connection, project_id: &str) -> Result<()> {
         "DELETE FROM observe_internal_allowlist WHERE project_id = ?1",
         [project_id],
     )?;
+    conn.execute(
+        "DELETE FROM gateway_usage_events WHERE project_id = ?1",
+        [project_id],
+    )?;
+    conn.execute(
+        "DELETE FROM gateway_usage_daily WHERE project_id = ?1",
+        [project_id],
+    )?;
+    // `gateway_route_counters` is route-scoped, not project-scoped: a route
+    // can serve several projects, so per-project deletion cannot attribute
+    // its counts. It carries no per-request data (route + counter name +
+    // total) and is cleared by `delete_all`.
     Ok(())
 }
 
@@ -1015,6 +1191,12 @@ pub fn delete_all(conn: &Connection) -> Result<()> {
         "observed_endpoints",
         "observed_api_services",
         "observe_internal_allowlist",
+        // Gateway tables. Before these three lines the documented
+        // "delete-all covers gateway records" promise was false: their only
+        // removal mechanism was the age-based retention sweep.
+        "gateway_usage_events",
+        "gateway_usage_daily",
+        "gateway_route_counters",
     ] {
         conn.execute(&format!("DELETE FROM {table}"), [])?;
     }

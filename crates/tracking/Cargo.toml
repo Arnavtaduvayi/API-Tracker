@@ -1,0 +1,50 @@
+# The tracking orchestrator (ADR 0022): the engine behind the desktop's
+# "Track API activity" flow and the `tethra track` CLI family. It composes
+# the audited building blocks — detection signals from core, service
+# lifecycle / routes / env linking / doctor from the gateway crate — into
+# one scan → plan → apply → verify → diagnose → undo sequence shared by
+# both apps, and owns the persisted tracking state machine (migration v15).
+#
+# It deliberately lives OUTSIDE crates/gateway so the security-audited
+# forwarding crate carries no product orchestration (ADR 0022 D6), and
+# outside crates/core because core must not depend on the gateway crate.
+#
+# Dependency policy: zero net-new third-party crates — every entry below is
+# already in the workspace lockfile via core or gateway.
+
+[package]
+name = "api-tracker-tracking"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+api-tracker-core = { version = "0.1.0", path = "../core" }
+api-tracker-gateway = { version = "0.1.0", path = "../gateway" }
+# Same versions/features already in the lockfile via core and gateway: the
+# origin-approval store MACs its rows with the same keyed BLAKE3 + constant-
+# time comparison the gateway uses for route MACs.
+blake3 = { version = "1.8.5", features = ["zeroize"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+subtle = "2.6.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[features]
+# The `state::cas_test_hook` seam: a thread-local callback invoked between the
+# read and the compare-and-swap in `refresh_with`, so a test can lose a CAS at
+# a chosen attempt without sleeps (`NEW-05`). OFF by default, so a release
+# build carries no settable hook inside the writer that decides whether a
+# tracking setup is healthy.
+test-hooks = []
+
+[dev-dependencies]
+tempfile = "3"
+# Self-dependency with the feature on: integration tests under tests/ link the
+# crate as an external dependency and do NOT get `cfg(test)`, so this is how
+# they reach the seam while `cargo build --release` does not compile it.
+api-tracker-tracking = { path = ".", features = ["test-hooks"] }

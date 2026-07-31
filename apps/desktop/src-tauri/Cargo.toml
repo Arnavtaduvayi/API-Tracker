@@ -12,6 +12,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 api-tracker-core = { path = "../../../crates/core" }
 api-tracker-observe = { path = "../../../crates/observe" }
+api-tracker-gateway = { path = "../../../crates/gateway" }
+api-tracker-tracking = { path = "../../../crates/tracking" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -19,3 +21,4 @@ arboard = "3"
 zeroize = "1"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-notification = "2.3.3"
+tauri-plugin-dialog = "2"

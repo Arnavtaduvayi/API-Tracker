@@ -741,3 +741,133 @@ fn raw_database_and_wal_never_contain_path_or_query_canaries() {
     }
     assert!(scanned >= 1, "expected to scan at least the DB file");
 }
+
+/// The documented deletion promise, asserted rather than assumed.
+///
+/// PRIVACY.md and PRIVACY_MODEL.md promise that `observe delete-all` "covers
+/// gateway events too". Three gateway tables — `gateway_usage_events`,
+/// `gateway_usage_daily`, `gateway_route_counters` — previously had NO
+/// deletion path at all; their only removal mechanism was the age-based
+/// retention sweep, so the promise was false. This test fails if any of them
+/// falls out of the deletion set again.
+#[test]
+fn deleting_all_observability_data_really_removes_gateway_rows() {
+    let (dir, _paths, mut vault) = new_vault();
+    let project = add_project(&mut vault, "app").id;
+    let conn = vault.connection();
+
+    // Rows in every gateway table, plus one runtime event to hang them off.
+    conn.execute(
+        "INSERT INTO observation_sessions
+            (id, project_id, mode, started_at, status, source, command)
+         VALUES ('s1', ?1, 'gateway', '2026-07-26T00:00:00Z', 'running', 'gateway', 'boot-1')",
+        [&project],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO observed_api_services (id, host, first_seen_at, last_seen_at)
+         VALUES ('svc1', 'api.openai.com', '2026-07-26T00:00:00Z', '2026-07-26T00:00:00Z')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO runtime_request_events
+            (id, session_id, project_id, service_id, at, host, port, method,
+             path_template, outcome, protocol, observation_source)
+         VALUES ('e1', 's1', ?1, 'svc1', '2026-07-26T00:00:00Z', 'api.openai.com', 443,
+                 'POST', '/v1/chat/completions', 'completed', 'https', 'gateway')",
+        [&project],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gateway_usage_events
+            (id, event_id, project_id, at, route_prefix, provider_id, model)
+         VALUES ('g1', 'e1', ?1, '2026-07-26T00:00:00Z', 'openai', 'openai', 'gpt-4o')",
+        [&project],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gateway_usage_daily
+            (day, project_id, provider_id, model, request_count, updated_at)
+         VALUES ('2026-07-26', ?1, 'openai', 'gpt-4o', 1, '2026-07-26T00:00:00Z')",
+        [&project],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO gateway_route_counters (route_prefix, day, counter, count)
+         VALUES ('openai', '2026-07-26', 'forwarded', 7)",
+        [],
+    )
+    .unwrap();
+
+    let count = |t: &str| -> i64 {
+        vault
+            .connection()
+            .query_row(&format!("SELECT count(*) FROM {t}"), [], |r| r.get(0))
+            .unwrap()
+    };
+    // The test is only meaningful if the rows are really there first.
+    for t in [
+        "gateway_usage_events",
+        "gateway_usage_daily",
+        "gateway_route_counters",
+    ] {
+        assert_eq!(count(t), 1, "precondition: {t} has a row to delete");
+    }
+
+    vault.observe_delete_all(&common::master_pw()).unwrap();
+
+    for t in [
+        "gateway_usage_events",
+        "gateway_usage_daily",
+        "gateway_route_counters",
+        "runtime_request_events",
+        "observation_sessions",
+    ] {
+        assert_eq!(
+            count(t),
+            0,
+            "delete-all promises to cover {t}; it must actually empty it"
+        );
+    }
+    drop(dir);
+}
+
+/// Per-project deletion covers that project's gateway usage rows too.
+#[test]
+fn deleting_one_project_removes_its_gateway_usage_rows() {
+    let (dir, _paths, mut vault) = new_vault();
+    let keep = add_project(&mut vault, "keep").id;
+    let drop_it = add_project(&mut vault, "drop").id;
+    for (pid, id) in [(&keep, "g-keep"), (&drop_it, "g-drop")] {
+        vault
+            .connection()
+            .execute(
+                "INSERT INTO gateway_usage_events
+                    (id, project_id, at, route_prefix, provider_id, model)
+                 VALUES (?1, ?2, '2026-07-26T00:00:00Z', 'openai', 'openai', 'gpt-4o')",
+                rusqlite::params![id, pid],
+            )
+            .unwrap();
+    }
+    vault.observe_delete_project("drop").unwrap();
+
+    let remaining: Vec<String> = {
+        let conn = vault.connection();
+        let mut stmt = conn
+            .prepare("SELECT id FROM gateway_usage_events ORDER BY id")
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(
+        remaining,
+        vec!["g-keep".to_string()],
+        "only the deleted project's gateway rows may go"
+    );
+    drop(dir);
+}

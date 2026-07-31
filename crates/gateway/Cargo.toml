@@ -1,0 +1,41 @@
+# The Local Gateway: an OPTIONAL, loopback-only, path-prefix reverse gateway
+# (ADR 0019). It terminates NO TLS toward clients, holds NO certificate-
+# authority key, injects NO credentials, and forwards only to registered
+# provider origins over fully-verified rustls. It is a separate crate because
+# it accepts client connections carrying live third-party credentials — a
+# distinct review boundary, mirroring crates/observe.
+#
+# Dependency policy (ADR 0019 "Dependency choice"): ZERO net-new third-party
+# crates. Every entry below is already in the workspace lockfile via core or
+# observe; `socket2` is promoted to a direct dependency for loopback peer
+# checks and (future) SO_EXCLUSIVEADDRUSE on Windows. No tokio, no hyper, no
+# new TLS or HTTP stack. The Unix-domain control channel uses std.
+
+[package]
+name = "api-tracker-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+api-tracker-core = { version = "0.1.0", path = "../core" }
+api-tracker-observe = { version = "0.1.0", path = "../observe" }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+httparse = "1.10"
+socket2 = "0.6"
+# The observation writer thread owns its own SQLite connection, exactly like
+# the observe session writer. Same pinned version/features as core.
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+time = { version = "0.3", features = ["std", "formatting", "parsing"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["derive"] }
+blake3 = { version = "1.8.5", features = ["zeroize"] }
+subtle = "2.6.1"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"

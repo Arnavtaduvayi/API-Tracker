@@ -6,6 +6,126 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Projects are the surface; selecting a folder is the tracking action
+The normal path is now one place. Open a project, click **Select project folder**,
+confirm one disclosure, and Tethra scans the folder, configures the APIs it
+recognises, starts tracking, and shows live request, token, latency and cost
+activity on that same page — refreshing about every five seconds without any
+further clicks. The folder is linked once and the link survives relaunches;
+startup restores tracking state and resolves health without rescanning the folder
+or rewriting any project file.
+
+The disclosure is generated from the plan Tethra is about to apply, so it cannot
+describe less than the plan does, and the confirmation carries a digest of what
+was reviewed. If the folder or configuration changed in between, the confirmation
+is refused and a fresh summary replaces the stale one — which also means a plan
+previewed before the vault locked can no longer be applied after unlocking.
+
+Credential variables Tethra finds by name become unfinished records that never
+block tracking. The table behind them has no column capable of holding a value,
+so a discovered plaintext cannot be persisted merely because it was found in a
+project file.
+
+Cost is estimated where the provider, model, tokens, date and a local pricing
+record are all known, and reported next to what it does not cover: unpriced
+requests and tokens, requests that reported no usage at all (unknown, not zero),
+the priced-token percentage, and a drill-down naming each model that could not be
+priced. An unpriced total is never rendered as a dollar amount, and
+provider-reported cost is never summed with a local estimate.
+
+An API Tethra does not recognise keeps its requests, status, endpoint and latency,
+and says plainly that credential attribution and cost estimation are unavailable
+for it. Naming such a host changes its label and nothing else.
+
+**Track API activity** moves from the primary navigation to **Advanced → Tracking
+setup (advanced)**. Nothing was removed: destination approvals, per-step
+diagnostics and undo are still only available there.
+
+See ADR 0029 and `docs/projects-first/`.
+
+### Fixed — `tethra track` could report success while your requests were failing
+`tethra track` printed `✓ Tracking verified` and exited 0 whenever traffic had
+*ever* been observed for the setup. That answer survived stopping the local
+service, deleting the route, and deleting the project link, so a script gating
+on `tethra track` was told yes while every API call the application made was
+failing (`NEW-01` / `VER-02`).
+
+Present-tense health is now decided in one place
+(`crates/tracking/src/health.rs`) and used by the CLI's verify loop,
+`tethra track status`, and both desktop tracking commands. `✓ Tracking
+verified` and exit 0 now require the gateway to be answering and to prove it
+is yours, the route and link to still exist, the observation to be fresh, and
+no later failure to supersede it. "Traffic was observed previously" is printed
+where it is true, and it is deliberately **not** a success: the exit status
+reflects the present.
+
+### Fixed — the dashboard showed `0 tokens` and `$0.0000` for providers that report neither
+Five of the routable providers report no usage at all. The default Activity
+view rendered their absent token and cost figures as zeros after traffic that
+had succeeded (`NEW-37`). Unknown, unavailable, unsupported, stale and partial
+are now distinct states across the dashboard, the gateway activity view, the
+usage view, provider connections and the CLI's usage output. `0 tokens` and
+`$0.0000` appear only when the source genuinely reports or derives a known
+zero — hiding a measured zero would be a different lie — and a total folded
+over a mix of known and unknown records reports itself as partial rather than
+understating.
+
+### Fixed — one client could hold a gateway connection slot indefinitely
+Every client-facing deadline was re-armed on each keep-alive request, so a
+client that kept *completing* slow work was never idle and never out of time.
+One connection held one of 128 slots for 422 seconds and could have held it
+for as long as it liked (`SEC-02` / `NEW-48`). A connection now carries a
+cumulative 600-second budget for client-paced time that is never renewed, an
+absolute one-hour age past which it serves no new request, and a 10 000-request
+cap. Upstream-paced time is deliberately not charged, so a long streaming
+response still runs to completion. The honest worst case is 720 seconds, and
+every document that states a bound now states that number.
+
+Two smaller consequences: a long-lived pooled connection now closes after 600
+seconds of *cumulative* idle rather than 120 seconds of *continuous* idle, and
+a request body cut short by the budget is recorded distinguishably from a
+client that went away (`NEW-52`).
+
+### Fixed — `tethra gateway install` started the service before persisting its port
+The install path saved the selected port *after* starting the service, so the
+service read a configuration that did not exist yet and bound an ephemeral
+port. The install primitive now validates the plan, reserves the port,
+persists configuration and the service definition, then installs, starts and
+verifies — rolling back coherently on failure — so a caller cannot get the
+order wrong (`NEW-02`). `tethra gateway doctor` reports a `port_drift` finding
+when the running gateway's port and the configured one disagree; that
+divergence was previously invisible to both `doctor` and `status`.
+
+`gateway install` and `gateway repair` now exit non-zero when the service does
+not answer its identity probe, rather than printing a note and exiting 0.
+
+### Security — corrected an overstated gateway claim (no behaviour change)
+Several documents, and one desktop string, said that editing the local
+database could not redirect a gateway route. That was not true, and the
+wording has been corrected rather than the behaviour changed (SEC-01 /
+NEW-49).
+- **What is true:** no free-form destination can be injected into
+  `gateway_routes`. A custom origin is bound into a keyed MAC, so editing the
+  stored origin makes the route stop forwarding instead of sending traffic
+  somewhere new, and an unrecognized provider id fails closed.
+- **What is not:** a built-in route picks its destination by a `provider_id`
+  column that carries no authenticated binding, so software that can already
+  write your `vault.db` can repoint one built-in prefix at a **different
+  shipped provider's** origin with your credential still attached, or null a
+  custom route's four authenticated columns to move it onto that same
+  unauthenticated path.
+- Reassignment among origins Tethra already ships is a different thing from
+  injecting an attacker's host, and the documents keep the two distinct. Both
+  require local write access to the vault database — an attacker who has that
+  can equally replace the Tethra binary or read its memory — so this is an
+  accepted, out-of-scope risk that is now disclosed instead of denied. See
+  `docs/gateway/SECURITY.md`, `docs/gateway/THREAT_MODEL.md` GW-3 (relabelled
+  `DEFENDED` → `PARTIAL`), and
+  `docs/activity-onboarding/SECURITY_AND_PRIVACY.md`.
+- `crates/gateway/tests/documentation_claims.rs` now scans the repository and
+  fails the build if the retired claim returns or the correcting section is
+  deleted.
+
 ### Changed — product renamed to Tethra
 API Tracker is now **Tethra**. The rename is compatibility-safe: no data
 migration occurs and nothing existing breaks. Details in

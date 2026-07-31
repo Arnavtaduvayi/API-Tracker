@@ -1,0 +1,54 @@
+# Amazon Bedrock provider manifest.
+#
+# NO [gateway] SECTION — deliberately, for two independent reasons:
+#
+#  1. Endpoints are per-region (`bedrock-runtime.<region>.amazonaws.com`), so
+#     Bedrock would be a custom-origin provider at best. AWS documents the
+#     generic `AWS_ENDPOINT_URL_<SERVICE>` pattern, but the exact service
+#     identifier for Bedrock Runtime was not verified against AWS's
+#     service-identifier table in this pass, and Tethra does not write a
+#     variable whose name it has not confirmed.
+#  2. The default AWS credential path signs every request with SigV4, and the
+#     signature covers the Host header. A loopback route would be signed for
+#     127.0.0.1 and rejected upstream. Only the newer bearer-token API key
+#     (AWS_BEARER_TOKEN_BEDROCK) avoids that, so even a correct endpoint
+#     variable would work for one of the two authentication modes.
+#
+# Bedrock is therefore detected, listed, and honestly labelled unsupported
+# rather than offered as a route that would break signed requests.
+id = "aws-bedrock"
+name = "Amazon Bedrock"
+description = "Amazon Bedrock model inference (per-region endpoints, SigV4 or Bedrock API keys)."
+website = "https://aws.amazon.com/bedrock/"
+api_docs_url = "https://docs.aws.amazon.com/bedrock/latest/APIReference/"
+auth_docs_url = "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html"
+manage_url = "https://console.aws.amazon.com/bedrock/"
+pricing_url = "https://aws.amazon.com/bedrock/pricing/"
+login_url = "https://console.aws.amazon.com/"
+# AWS_BEARER_TOKEN_BEDROCK is the Bedrock API key variable AWS documents
+# ("export AWS_BEARER_TOKEN_BEDROCK=${api-key}"); AWS_SECRET_ACCESS_KEY and
+# AWS_SESSION_TOKEN are the secret halves of the SigV4 credential path.
+# AWS_ACCESS_KEY_ID and AWS_REGION are non-secret identifiers and are excluded.
+env_vars = ["AWS_BEARER_TOKEN_BEDROCK", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+credential_types = ["bedrock_api_key", "iam_access_key", "session_token"]
+expiration = "Bedrock API keys may be short-term (tied to a session) or long-term; IAM session tokens always expire, long-term access keys do not."
+watch_docs = [
+    "https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys-use.html",
+    "https://docs.aws.amazon.com/sdkref/latest/guide/feature-ss-endpoints.html",
+]
+# No detection pattern: an AWS secret access key is an undelimited 40-character
+# string shared by every AWS service, so a regex here would attribute any AWS
+# credential in the repository to Bedrock specifically — a false claim about
+# which service a secret belongs to.
+
+[capabilities]
+validate_credential = { support = "supported_not_implemented", requires_admin_credential = false, attribution = "exact_credential", note = "A ListFoundationModels call against the account's regional endpoint would confirm the credential; Tethra has no Bedrock connector yet, and the region is not knowable from the credential alone." }
+fetch_metadata = { support = "manual_only", note = "IAM and Bedrock API keys are inspected in the AWS console; reading them programmatically needs IAM permissions that are a different, higher-privilege credential than the one being tracked." }
+fetch_usage = { support = "manual_only", attribution = "account_level", note = "Token usage is available through CloudWatch metrics and Cost Explorer at account/region level, not per credential, and both need their own IAM permissions." }
+read_permissions = { support = "manual_only", note = "Access is governed by IAM policies attached to the principal, not by scopes on the credential; policies are read in the IAM console." }
+change_permissions = { support = "manual_only", note = "Change the IAM policy attached to the principal in the IAM console." }
+create_credential = { support = "manual_only", note = "Bedrock API keys and IAM access keys are created in the console; programmatic creation needs IAM administrative credentials, which Tethra does not ask for." }
+disable_credential = { support = "manual_only", note = "IAM access keys have an inactive state that is set in the IAM console." }
+revoke_credential = { support = "manual_only", note = "Delete the API key or IAM access key in the console." }
+rotate_credential = { support = "manual_only", note = "AWS's documented rotation is create-new, deploy, deactivate, then delete — performed in the console." }
+fetch_pricing = { support = "manual_only", note = "Bedrock pricing is published on the pricing page. The AWS Price List API exists but is a separate service with its own credentials and is not claimed here." }
