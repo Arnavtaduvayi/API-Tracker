@@ -43,6 +43,7 @@ build/
 src-tauri/target/
 *.app
 *.dmg
+!landing/downloads/Tethra.dmg
 *.msi
 *.AppImage
 *.deb

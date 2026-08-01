@@ -31,7 +31,7 @@ returning-user mechanism after opt-in.
 | --- | --- | --- |
 | `landing_session_start` | A consented page initializes | `page_type` |
 | `landing_section_view` | A home-page section reaches 45% visibility, once per page | `page_type`, `section` |
-| `dmg_download_clicked` | A DMG CTA is clicked | `page_type`, `source` (`nav`, `hero`, `final`, `legal`) |
+| `installer_download_clicked` | A macOS or Windows installer CTA is clicked | `page_type`, `source` (`nav`, `hero`, `final`, `legal`), `platform` (`macos`, `windows`) |
 | `navigation_clicked` | An instrumented navigation link is clicked | `page_type`, `destination` |
 | `legal_document_opened` | Privacy or Terms link is clicked | `page_type`, `document` |
 | `analytics_consent_granted` | The user selects Allow | `page_type`, fixed consent-banner source |

@@ -6,7 +6,7 @@
     <title>Tethra | Local-first API credential intelligence</title>
     <meta
       name="description"
-      content="Tethra maps API routes, credentials, project activity, exposure, usage, alerts, and rotation from a local-first macOS vault."
+      content="Tethra maps API routes, credentials, project activity, exposure, usage, alerts, and rotation from a local-first desktop vault."
     />
     <meta property="og:title" content="Tethra | Local-first API credential intelligence" />
     <meta
@@ -38,10 +38,9 @@
         </nav>
         <a
           class="nav-download"
-          href="./downloads/Tethra.dmg.zip"
-          download
+          href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg"
           data-download="nav"
-          data-local-download="./downloads/Tethra.dmg"
+          data-platform="macos"
         >
           Get Tethra
         </a>
@@ -61,24 +60,31 @@
           <p class="hero-statement">Every API route. Every key. One private map.</p>
           <p class="lede">
             See where credentials live, which projects depend on them, how APIs are used, and
-            what needs attention. Your encrypted vault stays on your Mac.
+            what needs attention. Your encrypted vault stays on your device.
           </p>
           <div class="hero-actions">
             <a
               class="button primary"
-              href="./downloads/Tethra.dmg.zip"
-              download
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg"
               data-download="hero"
-              data-local-download="./downloads/Tethra.dmg"
+              data-platform="macos"
             >
               Download for macOS
+            </a>
+            <a
+              class="button quiet"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_x64-setup.exe"
+              data-download="hero"
+              data-platform="windows"
+            >
+              Download for Windows
             </a>
             <a class="button quiet" href="#intelligence" data-nav="hero_explore">
               Explore Tethra
             </a>
           </div>
           <div class="platform-line" aria-label="Product attributes">
-            <span>macOS desktop and CLI</span>
+            <span>macOS and Windows desktop + CLI</span>
             <span>Apache 2.0</span>
             <span>No Tethra account</span>
           </div>
@@ -263,25 +269,34 @@
 
       <section id="download" class="download-band" data-section="download">
         <div class="band-inner download-inner reveal">
-          <p class="eyebrow">Available for macOS</p>
+          <p class="eyebrow">Available for macOS and Windows</p>
           <h2>Bring every API credential into view.</h2>
           <p>
             Install the Tethra desktop app and bundled CLI. No Tethra account, subscription, or
             hosted vault required.
           </p>
-          <a
-            class="button primary large"
-            href="./downloads/Tethra.dmg.zip"
-            download
-            data-download="final"
-            data-local-download="./downloads/Tethra.dmg"
-          >
-            Download macOS DMG
-          </a>
+          <div class="download-actions">
+            <a
+              class="button primary large"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg"
+              data-download="final"
+              data-platform="macos"
+            >
+              Download macOS DMG
+            </a>
+            <a
+              class="button quiet large"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_x64-setup.exe"
+              data-download="final"
+              data-platform="windows"
+            >
+              Download Windows EXE
+            </a>
+          </div>
           <small>
-            Apple Silicon alpha. The DMG is delivered in a ZIP on the hosted site and directly
-            from <code>downloads/Tethra.dmg</code> in the local landing folder. Developer ID signed
-            and Apple-notarized. <a href="./downloads/SHA256SUMS.txt">SHA-256 checksums</a>.
+            macOS: Apple Silicon, Developer ID signed, and Apple-notarized. Windows: x64 alpha;
+            the installer is currently unsigned and may trigger Microsoft SmartScreen.
+            <a href="./downloads/SHA256SUMS.txt">SHA-256 checksums</a>.
           </small>
         </div>
       </section>

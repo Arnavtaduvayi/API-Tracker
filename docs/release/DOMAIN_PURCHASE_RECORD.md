@@ -27,13 +27,13 @@
 - **Current analytics (verified 2026-08-01):** consent-first GA4 web stream
   `G-MJQHJ6JT5Z`. No Google request occurs before opt-in; advertising consent
   remains denied. See `docs/ANALYTICS.md` for the finite event inventory.
-- **Current download (verified 2026-08-01):** the hosted CTA serves
-  `downloads/Tethra.dmg.zip` because Firebase Spark rejects macOS executable
-  artifacts. The archive contains the Apple Silicon DMG signed by Developer ID
+- **Current downloads (verified 2026-08-01):** the Firebase-hosted landing page
+  links directly to `.dmg` and `.exe` assets on GitHub Releases because the
+  Spark plan rejects installer binaries during upload. There is no ZIP wrapper.
+  The macOS app is signed by Developer ID
   Application `Eesh Majithia (ZT56M637KS)`, notarized by Apple, and distributed
   with a stapled notarization ticket. Public checksums are in
-  `downloads/SHA256SUMS.txt`. The raw DMG remains in the local landing folder
-  for direct-file use and release packaging.
+  `downloads/SHA256SUMS.txt`.
 - **Previous DNS / website (2026-07-24):** configured with the user's authorization on
   2026-07-24 — four apex A records to GitHub Pages (185.199.108–111.153)
   and `www` CNAME to `arnavtaduvayi.github.io`, added by the user in

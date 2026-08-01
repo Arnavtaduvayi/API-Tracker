@@ -17,21 +17,15 @@
   const allowedEvents = new Set([
     "landing_session_start",
     "landing_section_view",
-    "dmg_download_clicked",
+    "installer_download_clicked",
     "navigation_clicked",
     "legal_document_opened",
     "analytics_consent_granted",
   ]);
-  const allowedParameters = new Set(["page_type", "section", "source", "destination", "document"]);
+  const allowedParameters = new Set(["page_type", "section", "source", "platform", "destination", "document"]);
   let configured = false;
   let scriptRequested = false;
   const seenSections = new Set();
-
-  if (location.protocol === "file:") {
-    document.querySelectorAll("[data-local-download]").forEach((link) => {
-      link.setAttribute("href", link.dataset.localDownload);
-    });
-  }
 
   const readConsent = () => {
     try {
@@ -152,7 +146,10 @@
   });
 
   document.querySelectorAll("[data-download]").forEach((link) => {
-    link.addEventListener("click", () => track("dmg_download_clicked", { source: link.dataset.download }));
+    link.addEventListener("click", () => track("installer_download_clicked", {
+      source: link.dataset.download,
+      platform: link.dataset.platform,
+    }));
   });
   document.querySelectorAll("[data-nav]").forEach((link) => {
     link.addEventListener("click", () => track("navigation_clicked", { destination: link.dataset.nav }));

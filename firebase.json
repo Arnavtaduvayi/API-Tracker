@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "predeploy": "bash scripts/verify_landing_release.sh",
     "public": "landing",
     "ignore": ["firebase.json", "**/.*", "**/node_modules/**", "**/*.dmg"],
     "cleanUrls": true,
@@ -23,13 +24,6 @@
       {
         "source": "**/*.{css,js,png}",
         "headers": [{ "key": "Cache-Control", "value": "public,max-age=3600" }]
-      },
-      {
-        "source": "downloads/Tethra.dmg.zip",
-        "headers": [
-          { "key": "Cache-Control", "value": "public,max-age=3600" },
-          { "key": "Content-Type", "value": "application/zip" }
-        ]
       }
     ]
   }

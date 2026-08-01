@@ -720,6 +720,7 @@ h2 {
 
 .download-inner h2 { max-width: 850px; margin-right: auto; margin-left: auto; }
 .download-inner > p:not(.eyebrow) { max-width: 610px; margin: 0 auto 30px; color: var(--dark-copy); font-size: 17px; line-height: 1.55; }
+.download-actions { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
 .download-inner > small { display: block; margin-top: 16px; color: #5f6167; font-size: 9px; }
 .download-inner code { color: #85878d; font-family: var(--mono); }
 
