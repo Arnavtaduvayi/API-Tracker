@@ -42,7 +42,8 @@ integrations land.
   findings, alerts, and suppressions store no secret values (findings keep a
   redacted preview and a non-secret suppression key; the raw value lives only
   in a `#[serde(skip)]` in-memory buffer used for vault matching). ADR 0008.
-- Outbound network use is limited to four things, all direct from the device:
+- Operational outbound network use is direct from the device and limited to
+  explicit product functions:
   the **documentation watcher** (explicit user-selected official URLs,
   conditional GETs, 8 MiB body cap, stores only validators/hash/timestamps,
   no crawling); **provider connectors** (validation, metadata, permission
@@ -59,7 +60,12 @@ integrations land.
   a standing local egress relay to those registered providers, disclosed
   as such at consent time (`docs/gateway/`). No secret is ever sent to a
   Tethra-operated server. Connectors are built to the documented API
-  shapes and tested offline against fixtures.
+  shapes and tested offline against fixtures. Separately, the desktop UI can
+  send a fixed set of pseudonymous product events to Google Analytics only
+  after explicit consent. The analytics script is absent before consent and
+  the TypeScript event API has no parameter capable of accepting vault values,
+  names, paths, URLs, providers, request content, or usage/cost values. This
+  optional boundary is documented in `docs/ANALYTICS.md`.
 - The **OpenAI administrative connection** stores an Admin API key encrypted
   under the vault key (AAD binds it to this vault + provider). It is
   write-only after storage (replace/remove, never reveal); replacing,

@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Privacy Policy | Tethra</title>
+    <meta name="description" content="Tethra privacy policy for the website, macOS app, and CLI." />
+    <meta name="robots" content="index,follow" />
+    <link rel="canonical" href="https://usetethra.com/privacy" />
+    <link rel="icon" type="image/png" href="./assets/tethra-key.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./legal.css" />
+    <script src="./analytics.js" defer></script>
+  </head>
+  <body class="legal-page" data-page="privacy">
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="global-nav">
+      <div class="nav-inner">
+        <a class="brand" href="./index.html" aria-label="Tethra home" data-nav="home">
+          <img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" /><span>tethra.</span>
+        </a>
+        <nav aria-label="Primary navigation"><a href="./index.html#security">Security</a><a href="./terms.html" data-legal="terms">Terms</a></nav>
+        <a class="nav-download" href="./downloads/Tethra.dmg.zip" download data-download="legal" data-local-download="./downloads/Tethra.dmg">Get Tethra</a>
+      </div>
+    </header>
+
+    <main id="main" class="legal-main">
+      <article class="legal-shell">
+        <a class="back-link" href="./index.html">Back to home</a>
+        <header class="legal-header">
+          <p class="eyebrow">Legal</p>
+          <h1>Privacy Policy</h1>
+          <p>
+            This policy explains what Tethra processes locally, the limited information we receive,
+            the network actions the product can perform, and the choices available to you.
+          </p>
+          <div class="legal-meta"><span>Last updated: July 31, 2026</span><span>Effective: July 31, 2026</span></div>
+        </header>
+
+        <nav class="legal-toc" aria-label="Privacy policy contents">
+          <strong>Contents</strong>
+          <div>
+            <a href="#introduction">1. Introduction</a><a href="#architecture">2. Local-first architecture</a><a href="#local-data">3. Data stored locally</a>
+            <a href="#analytics">4. Optional analytics</a><a href="#website">5. Website and hosting</a><a href="#network">6. User-directed network activity</a>
+            <a href="#not-collected">7. Information we do not collect</a><a href="#uses">8. How information is used</a><a href="#legal-bases">9. Legal bases</a>
+            <a href="#sharing">10. Sharing and processors</a><a href="#tracking">11. Cookies and controls</a><a href="#retention">12. Retention</a>
+            <a href="#transfers">13. International transfers</a><a href="#security">14. Security</a><a href="#rights">15. Your rights</a>
+            <a href="#deletion">16. Deletion and withdrawal</a><a href="#state-rights">17. US state rights</a><a href="#children">18. Children's privacy</a>
+            <a href="#open-source">19. Open-source interactions</a><a href="#changes">20. Changes</a><a href="#contact">21. Contact</a>
+          </div>
+        </nav>
+
+        <section id="introduction" class="legal-section">
+          <h2>1. Introduction and scope</h2>
+          <p>
+            Tethra ("Tethra," "we," "us," or "our") provides the website at
+            <a href="https://usetethra.com">usetethra.com</a>, the Tethra macOS desktop application,
+            and the Tethra command-line interface (together, the "Service"). Tethra is based in
+            Atlanta, Georgia, United States.
+          </p>
+          <p>
+            This Privacy Policy applies to information processed when you visit the website, opt in
+            to product analytics, contact us, download Tethra, or use the desktop app and CLI. The
+            desktop app is designed to operate without a Tethra account or a Tethra-hosted credential
+            service. This distinction matters: most information handled by the app remains on your
+            computer and is not information that we receive or control.
+          </p>
+          <p>
+            By using the Service, you acknowledge this policy. Where consent is required, we ask for
+            it separately. Declining optional analytics does not prevent use of the website, app, or CLI.
+          </p>
+        </section>
+
+        <section id="architecture" class="legal-section">
+          <h2>2. Local-first architecture</h2>
+          <p>
+            Tethra has no hosted user account database, cloud vault, subscription system, payment
+            processor, advertising system, or Firebase Authentication integration. You do not provide
+            a name, email address, company, billing information, or login credential to use the app.
+          </p>
+          <div class="legal-callout">
+            <strong>Important:</strong> "local-first" does not mean "no network access." Tethra keeps
+            its vault and primary records locally, but it can contact providers, documentation sites,
+            destinations, webhook endpoints, and API origins when you enable or initiate features that
+            require those connections. Those communications are described in Section 6.
+          </div>
+        </section>
+
+        <section id="local-data" class="legal-section">
+          <h2>3. Information processed and stored locally</h2>
+          <p>
+            Depending on the features you use, Tethra may process and store the following on your device:
+          </p>
+          <ul>
+            <li><strong>Credential values.</strong> API keys, tokens, and destination administrative credentials that you choose to add. Secret values are encrypted in the local vault.</li>
+            <li><strong>Vault and cryptographic data.</strong> Password-verification material, wrapped encryption keys, nonces, integrity data, schema versions, and vault settings. Your master password is used locally and is not transmitted to Tethra.</li>
+            <li><strong>Operational metadata.</strong> Credential and project names, identifiers, providers, environments, labels, notes, expiry and rotation dates, status, masked forms, fingerprints, references, timestamps, audit records, and relationships. Some operational metadata is stored unencrypted in the local SQLite database so locked-state and CLI workflows can function. Protect your operating-system account and disk accordingly.</li>
+            <li><strong>Project and filesystem context.</strong> Folder paths you select, repository metadata, manifests, env-file paths and variable names, scan findings, exclusions, git history findings, and configuration needed to map a project. Scanning can read selected files and repository history locally.</li>
+            <li><strong>Usage and API activity metadata.</strong> Provider, endpoint templates, method, status category, timing, token or usage measures, cost estimates, process-session names, and attribution records. Tethra is designed not to store request bodies, response bodies, authorization headers, query secrets, or raw credential values as activity metadata.</li>
+            <li><strong>Provider, gateway, and delivery configuration.</strong> Provider links and account metadata, local gateway routes and state, pricing overrides, budgets, documentation watches, alerts, notification settings, destination definitions, sync plans, temporary access records, rotation workflows, and local backups.</li>
+          </ul>
+          <p>
+            We do not receive this local data merely because Tethra processes it. You control the
+            device, vault, backups, permissions, and any storage or synchronization service you choose
+            to use for exported files. If you place a backup in iCloud Drive, Dropbox, a source-control
+            repository, or another third-party service, that provider's terms and privacy practices apply.
+          </p>
+        </section>
+
+        <section id="analytics" class="legal-section">
+          <h2>4. Optional pseudonymous analytics</h2>
+          <p>
+            Analytics is <strong>off by default</strong> on both the website and in the desktop app. We
+            load Google Analytics 4 only after you affirmatively select "Allow analytics." Declining
+            does not reduce product functionality. You can change the website choice through "Privacy
+            choices" in the footer and the app choice in Settings.
+          </p>
+          <h3>4.1 What analytics can collect after consent</h3>
+          <p>
+            Google Analytics may process a pseudonymous browser or app-client identifier, session and
+            event timestamps, broad pages or finite app screen names, download interactions, a small set
+            of allowlisted product actions, device and browser type, operating system, language, screen
+            size, and approximate geographic information. An IP address is necessarily used to deliver
+            an internet request; Google states that Analytics uses it to derive coarse location and then
+            discards it before logging. Website page locations are normalized to fixed Tethra page paths,
+            and we suppress referrer values in our configuration.
+          </p>
+          <p>
+            The identifier is <strong>pseudonymous, not guaranteed anonymous under every privacy law</strong>.
+            Tethra does not use Firebase Authentication and does not create an analytics login. Google
+            Analytics generates a client identifier only after consent to distinguish returning browsers
+            or app webviews and measure retention.
+          </p>
+          <h3>4.2 Events we collect</h3>
+          <table class="legal-table">
+            <thead><tr><th>Surface</th><th>Event categories</th><th>Permitted detail</th></tr></thead>
+            <tbody>
+              <tr><td>Website</td><td>Session start, section viewed, navigation, DMG download click, legal-page open, consent granted</td><td>Fixed page type, section, CTA source, or destination label</td></tr>
+              <tr><td>Desktop app</td><td>Session start, finite screen view, vault unlocked/locked, tracking setup started, settings saved, legal-page open, consent granted</td><td>Fixed app surface, screen name, or legal-document type</td></tr>
+            </tbody>
+          </table>
+          <h3>4.3 What analytics is prohibited from receiving</h3>
+          <p>
+            Our analytics code uses an event and parameter allowlist. We do not intentionally send
+            credential values or fingerprints, master passwords, project or credential names, provider
+            names, file or repository paths, env variable names or values, URLs entered by users, API
+            origins or endpoints, models, prompts, request or response content, headers, webhook payloads,
+            alert text, notes, errors, exact usage, cost values, or other vault records.
+          </p>
+          <p>
+            We disable Google Signals, advertising storage, ad-user-data processing, and ad-personalization
+            signals in our implementation. Analytics is used for aggregate product measurement, not ads.
+          </p>
+        </section>
+
+        <section id="website" class="legal-section">
+          <h2>5. Website downloads and hosting data</h2>
+          <p>
+            The website and downloadable DMG archive are hosted using Firebase Hosting, a Google Cloud service. When your
+            browser requests a page or download, Google necessarily processes delivery and security data
+            such as IP address, request time, requested path, response status, user agent, and related
+            network records. This is separate from optional Google Analytics cookies. Hosting providers
+            may retain security and operational logs under their agreements and legal obligations.
+          </p>
+          <p>
+            We may receive aggregated hosting metrics or use security records to operate the website,
+            investigate abuse, prevent fraud, and maintain availability. We do not use website hosting
+            logs to build advertising profiles.
+          </p>
+        </section>
+
+        <section id="network" class="legal-section">
+          <h2>6. User-directed and configured network activity</h2>
+          <p>Tethra may make outbound connections when you use or configure features including:</p>
+          <ul>
+            <li><strong>Provider operations:</strong> credential validation, account metadata and permission retrieval, key inventory, supported usage and cost sync, test-key creation, revocation, and confirmed rotation steps.</li>
+            <li><strong>Documentation monitoring:</strong> requests to provider documentation, changelog, pricing, or other URLs you choose to watch.</li>
+            <li><strong>Destinations and notifications:</strong> test and delivery requests to configured webhook endpoints, external secret destinations, or other channels.</li>
+            <li><strong>Local gateway and process runner:</strong> API requests forwarded from your local software to the provider or origin you configured. Credentials may be attached to those provider requests when required for the request to work.</li>
+            <li><strong>Optional analytics:</strong> requests to Google Analytics after consent, as described above.</li>
+          </ul>
+          <p>
+            Provider and destination communications go directly between your device and the relevant
+            third party; they are not proxied through a Tethra-operated server. The third party may receive
+            the credential, account data, request data, IP address, and device/network metadata necessary
+            for the action. Its privacy policy, data-processing terms, retention, and security practices apply.
+          </p>
+        </section>
+
+        <section id="not-collected" class="legal-section">
+          <h2>7. Information we do not collect as the product operator</h2>
+          <p>Unless you voluntarily include it in a support email or public open-source interaction, we do not collect:</p>
+          <ul>
+            <li>Account registration details, because Tethra has no user accounts;</li>
+            <li>Payment cards, bank information, subscriptions, or purchase histories;</li>
+            <li>Your vault, credential values, master password, project content, source code, env files, prompts, or API request bodies;</li>
+            <li>Contacts, precise geolocation, biometrics, health data, government identifiers, or protected-class information;</li>
+            <li>Advertising identifiers, cross-site advertising profiles, or data for sale to data brokers;</li>
+            <li>Data to train Tethra or third-party artificial-intelligence models.</li>
+          </ul>
+        </section>
+
+        <section id="uses" class="legal-section">
+          <h2>8. How we use information we receive</h2>
+          <p>We use the limited information described in Sections 4 and 5 to:</p>
+          <ul>
+            <li>Measure website visits, download interest, app adoption, broad feature use, and retention after consent;</li>
+            <li>Identify usability problems and prioritize product improvements using aggregate trends;</li>
+            <li>Deliver and secure the website and downloads;</li>
+            <li>Respond to support, privacy, security, and legal inquiries you send us;</li>
+            <li>Detect abuse, investigate incidents, enforce our Terms, and comply with law.</li>
+          </ul>
+          <p>We do not use analytics for advertising, credit decisions, employment decisions, sensitive profiling, or automated decisions with legal or similarly significant effects.</p>
+        </section>
+
+        <section id="legal-bases" class="legal-section">
+          <h2>9. Legal bases for processing</h2>
+          <p>If the GDPR, UK GDPR, or similar law applies, our legal bases are:</p>
+          <ul>
+            <li><strong>Consent:</strong> optional Google Analytics and any optional communication for which we ask permission. You may withdraw consent at any time.</li>
+            <li><strong>Legitimate interests:</strong> securing and operating the website, preventing abuse, responding to inquiries, and protecting legal rights, balanced against your rights.</li>
+            <li><strong>Contract:</strong> steps necessary to provide a download or respond to a request you make under the Terms.</li>
+            <li><strong>Legal obligation:</strong> records or disclosures required by applicable law, court order, or lawful process.</li>
+          </ul>
+          <p>Local processing performed solely on your device under your control is generally not processing performed by Tethra as a controller.</p>
+        </section>
+
+        <section id="sharing" class="legal-section">
+          <h2>10. Sharing, disclosure, and service providers</h2>
+          <p>We disclose information only as follows:</p>
+          <ul>
+            <li><strong>Google Firebase Hosting:</strong> website and download delivery, availability, and security.</li>
+            <li><strong>Google Analytics:</strong> pseudonymous analytics only after consent. Google acts under its applicable data-processing and service terms.</li>
+            <li><strong>Third parties you direct:</strong> providers, API origins, destinations, webhook services, and storage services you configure. These are recipients you select, not Tethra subprocessors for a hosted vault.</li>
+            <li><strong>Legal and safety disclosures:</strong> when reasonably necessary to comply with law, respond to valid process, prevent harm or abuse, or protect rights and security.</li>
+            <li><strong>Business transfers:</strong> in a merger, financing, acquisition, reorganization, bankruptcy, or asset transfer, subject to applicable notice and protection requirements.</li>
+          </ul>
+          <p><strong>We do not sell personal information. We do not share personal information for cross-context behavioral advertising. We do not provide analytics data to advertisers or use vault data to train AI models.</strong></p>
+        </section>
+
+        <section id="tracking" class="legal-section">
+          <h2>11. Cookies, local storage, and tracking controls</h2>
+          <p>
+            Tethra stores your analytics choice in browser or webview local storage under a Tethra-specific
+            key. If you opt in, Google Analytics may set <code>_ga</code> and related first-party cookies or
+            equivalent local identifiers. The website has no authentication or payment cookies.
+          </p>
+          <p>
+            You may withdraw consent through "Privacy choices" on the website or the Analytics control in
+            app Settings. Withdrawal disables future Analytics events and attempts to clear Analytics cookies
+            accessible to Tethra. You can also clear site or app-webview data using system controls. Clearing
+            storage resets the choice and may cause the consent request to reappear.
+          </p>
+          <h3>11.1 Global Privacy Control and Do Not Track</h3>
+          <p>
+            Because Analytics is off by default, a browser Global Privacy Control signal leaves it off unless
+            you later make an affirmative choice. There is no uniform legal or technical standard for browser
+            Do Not Track signals; we do not rely on DNT as a substitute for the consent control.
+          </p>
+        </section>
+
+        <section id="retention" class="legal-section">
+          <h2>12. Data retention</h2>
+          <ul>
+            <li><strong>Analytics:</strong> user-level and event-level Google Analytics data is retained for no longer than 14 months, subject to shorter settings or deletion. Aggregated reports without user-level identifiers may remain longer.</li>
+            <li><strong>Consent choice:</strong> stored locally until you change it, clear storage, or uninstall/remove related application data.</li>
+            <li><strong>Hosting and security records:</strong> retained by Google and us only as needed for delivery, security, dispute resolution, and legal obligations under applicable service settings.</li>
+            <li><strong>Support correspondence:</strong> retained while needed to answer the request, maintain security records, resolve disputes, and comply with law.</li>
+            <li><strong>Local vault data:</strong> retained on your device until you delete it. Removing the app may not automatically remove its data directory or backups.</li>
+          </ul>
+        </section>
+
+        <section id="transfers" class="legal-section">
+          <h2>13. International data transfers</h2>
+          <p>
+            Tethra is based in the United States. Google and other providers may process information in
+            the United States and other countries where privacy laws differ from those in your location.
+            Where required, transfers rely on safeguards such as Standard Contractual Clauses, adequacy
+            decisions, or provider data-protection frameworks. You should review the terms of any provider
+            or destination you connect to Tethra.
+          </p>
+        </section>
+
+        <section id="security" class="legal-section">
+          <h2>14. Data security and incident notice</h2>
+          <p>
+            Tethra uses measures including local authenticated encryption for credential values, password-based
+            key derivation, integrity checks, redaction rules, reauthentication for sensitive operations, bounded
+            clipboard clearing, and local-only gateway controls. Website traffic uses HTTPS when served from
+            usetethra.com. No system is completely secure, and local-first design does not eliminate endpoint,
+            malware, backup, password, provider, supply-chain, or user-configuration risk.
+          </p>
+          <p>
+            You are responsible for a strong master password, operating-system access controls, full-disk
+            encryption, trusted backups, updates, and reviewing provider actions before confirmation. If we
+            discover an incident involving personal information we control, we will investigate and provide
+            legally required notices to affected people and authorities. Because we do not possess your local
+            vault, we generally cannot detect or remediate a compromise of your device or third-party provider.
+          </p>
+        </section>
+
+        <section id="rights" class="legal-section">
+          <h2>15. Privacy rights</h2>
+          <p>
+            Depending on your jurisdiction, you may have rights to access, correct, delete, restrict, or obtain
+            a portable copy of personal data; object to processing; withdraw consent; and complain to a data
+            protection authority. These rights may be subject to legal exceptions and identity verification.
+          </p>
+          <p>
+            Because we do not have accounts and avoid direct identifiers, we may be unable to identify a
+            particular Analytics record from an email address alone. We will not collect unnecessary identity
+            documents merely to link you to pseudonymous data. Where feasible, we may ask for a Google Analytics
+            client identifier or other limited verification information. You may use an authorized agent where law permits.
+          </p>
+        </section>
+
+        <section id="deletion" class="legal-section">
+          <h2>16. Deletion, withdrawal, and local controls</h2>
+          <ul>
+            <li>Turn off app Analytics in Tethra Settings.</li>
+            <li>Use "Privacy choices" in the website footer and select "Keep off."</li>
+            <li>Clear Tethra website or webview storage and cookies through your browser or operating system.</li>
+            <li>Delete records using Tethra's product controls, and remove the local Tethra data directory and any backups if you want to erase the entire local vault.</li>
+            <li>Contact us to request deletion of information we control. We will honor verified requests as required by law and may retain narrowly limited records for security, legal compliance, or dispute resolution.</li>
+          </ul>
+          <p class="legal-callout warning">
+            Tethra cannot delete copies held by providers, webhook recipients, backup locations, source-control
+            systems, or other third parties you selected. Contact those services directly.
+          </p>
+        </section>
+
+        <section id="state-rights" class="legal-section">
+          <h2>17. United States state privacy rights</h2>
+          <p>
+            Residents of California, Colorado, Connecticut, Delaware, Iowa, Montana, Nebraska, New Hampshire,
+            New Jersey, Oregon, Texas, Utah, Virginia, and other states may have rights to know, access, correct,
+            delete, or obtain a copy of covered personal information; opt out of sale, targeted advertising, or
+            certain profiling; and appeal a denied request. We honor applicable rights and will not discriminate
+            against you for exercising them.
+          </p>
+          <p>
+            In the preceding 12 months, the categories we may have collected after consent are identifiers
+            (pseudonymous Analytics identifiers and network identifiers), internet or electronic activity,
+            approximate geolocation derived from IP, and device/browser information. Sources, purposes, and
+            recipients are described above. We do not knowingly collect sensitive personal information through
+            Analytics, sell personal information, or share it for cross-context behavioral advertising.
+          </p>
+          <p>
+            To submit or appeal a request, email <a href="mailto:unleeshedstudios@gmail.com">unleeshedstudios@gmail.com</a>
+            with the subject "Tethra Privacy Request" or "Tethra Privacy Appeal." We will respond within the period
+            required by applicable law, generally 45 days for verified California requests.
+          </p>
+        </section>
+
+        <section id="children" class="legal-section">
+          <h2>18. Children's privacy</h2>
+          <p>
+            The Service is a developer security tool intended for adults and is not directed to children under 13.
+            The Terms require users to be at least 18 or the age of legal majority where they live. We do not knowingly
+            collect personal information from children. If you believe a child provided information to us, contact us
+            and we will take appropriate deletion steps.
+          </p>
+        </section>
+
+        <section id="open-source" class="legal-section">
+          <h2>19. Open-source repositories and public communications</h2>
+          <p>
+            Tethra source code is available under an open-source license. GitHub issues, pull requests, discussions,
+            commits, security reports posted publicly, and similar community interactions are governed by the hosting
+            platform's privacy terms and may be publicly visible indefinitely. Do not post credential values, private
+            source code, personal data, or confidential logs in public repositories. Use private contact channels for
+            sensitive security reports and only synthetic credentials in reproductions.
+          </p>
+        </section>
+
+        <section id="changes" class="legal-section">
+          <h2>20. Changes to this policy</h2>
+          <p>
+            We may update this policy as Tethra, its providers, or legal requirements change. We will post the revised
+            policy here and update the "Last updated" date. If a change materially expands optional data collection, we
+            will request any new consent required by law rather than treating prior consent as unlimited.
+          </p>
+        </section>
+
+        <section id="contact" class="legal-section">
+          <h2>21. Contact us</h2>
+          <p>Contact Tethra with privacy questions, requests, or concerns:</p>
+          <div class="legal-contact">
+            <strong>Tethra</strong>
+            <address>Atlanta, GA, United States<br />Email: <a href="mailto:unleeshedstudios@gmail.com">unleeshedstudios@gmail.com</a></address>
+          </div>
+          <p>
+            You may also complain to the data protection authority or regulator in your jurisdiction. We encourage you
+            to contact us first so we can address the issue directly.
+          </p>
+        </section>
+      </article>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div><img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" /><b>tethra.</b></div>
+        <p>Local-first API credential intelligence.</p>
+        <nav aria-label="Legal and privacy"><a href="./index.html">Home</a><a href="./terms.html" data-legal="terms">Terms</a><button type="button" data-privacy-choices>Privacy choices</button></nav>
+        <small>&copy; 2026 tethra. All rights reserved.</small>
+      </div>
+    </footer>
+
+    <aside class="consent-banner" data-consent-banner hidden aria-labelledby="consent-title">
+      <div><p class="consent-kicker">Your choice</p><h2 id="consent-title">Optional product analytics</h2><p>Allow pseudonymous Google Analytics for broad page, session, download, and feature-use measurement. No vault, credential, project, path, provider, or request data is included.</p></div>
+      <div class="consent-actions"><button type="button" class="button quiet" data-consent="denied">Keep off</button><button type="button" class="button primary" data-consent="granted">Allow analytics</button></div>
+    </aside>
+  </body>
+</html>

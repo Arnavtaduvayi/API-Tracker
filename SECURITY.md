@@ -33,14 +33,16 @@ versions, and use only fake credentials in reproductions.
 - Duplicate detection uses a *keyed* fingerprint (BLAKE3 keyed hash with a
   vault-specific wrapped key), so database access alone does not enable
   offline guess-confirmation of credential values.
-- No telemetry, no analytics, no crash reporting, and no Tethra-operated
-  server. The only network traffic the app can produce is direct traffic from
-  your device to endpoints you explicitly configure: official provider APIs
-  (validation, metadata, usage/cost sync, confirmed rotation steps),
-  destination APIs you add (e.g. GitHub Actions, AWS Secrets Manager),
-  official documentation pages you watch, and webhook URLs you configure.
-  Nothing is sent anywhere without an explicit user-configured reason, and
-  alert webhook payloads carry metadata only — never secret values.
+- No hosted vault, Tethra account service, or hosted crash reporting. Optional
+  Google Analytics is off by default and its script is not loaded until the
+  user explicitly opts in. A compile-time event API permits only fixed screen,
+  session, consent, and broad product-action labels; it accepts no arbitrary
+  vault, project, provider, path, URL, request, usage, cost, error, or secret
+  fields. Other network traffic goes directly from the device to endpoints the
+  user configures: official provider APIs, destination APIs, watched official
+  documentation pages, provider origins reached through a local gateway, and
+  webhook URLs. Alert webhook payloads carry metadata only, never secret
+  values. See `docs/ANALYTICS.md` and `landing/privacy.html`.
 
 ## What this does NOT protect against
 

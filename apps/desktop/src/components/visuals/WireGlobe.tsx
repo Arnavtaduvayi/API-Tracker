@@ -103,17 +103,17 @@ function Globe({ accent, wire }: { accent: string; wire: string }) {
       {/* Inner dark core so the far side of the wire reads as "behind". */}
       <mesh>
         <sphereGeometry args={[1.32, 48, 48]} />
-        <meshBasicMaterial color="#0b0715" transparent opacity={0.82} />
+        <meshBasicMaterial color="#02070b" transparent opacity={0.88} />
       </mesh>
-      <Nodes radius={1.36} count={9} color={accent} />
+      <Nodes radius={1.36} count={12} color={accent} />
     </group>
   );
 }
 
 export function WireGlobe({
   className,
-  accent = "#f2415a",
-  wire = "#8f86c9",
+  accent = "#7df4bd",
+  wire = "#2997ff",
 }: {
   className?: string;
   accent?: string;

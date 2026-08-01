@@ -105,6 +105,7 @@ export function ActivityChart(props: {
   const { points, metric, granularity } = props;
   const titleId = useId();
   const descId = useId();
+  const gradientId = `activity-fill-${useId().replaceAll(":", "")}`;
   const [hover, setHover] = useState<number | null>(null);
 
   const series = useMemo(
@@ -158,19 +159,32 @@ export function ActivityChart(props: {
 
   // Build one path per unbroken run, so a null leaves a visible gap instead of
   // a straight line implying measured values in between.
-  const segments: string[] = [];
+  const segments: { line: string; area: string }[] = [];
   let current: string[] = [];
+  let firstX = 0;
+  let lastX = 0;
+  const flushSegment = () => {
+    if (current.length === 0) return;
+    segments.push({
+      line: current.join(" "),
+      area: `${current.join(" ")} L${lastX.toFixed(1)},${y(0).toFixed(1)} L${firstX.toFixed(
+        1,
+      )},${y(0).toFixed(1)} Z`,
+    });
+    current = [];
+  };
   series.forEach((s, i) => {
     if (s.value === null) {
-      if (current.length > 0) segments.push(current.join(" "));
-      current = [];
+      flushSegment();
       return;
     }
+    if (current.length === 0) firstX = x(i);
+    lastX = x(i);
     current.push(
       `${current.length === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(s.value).toFixed(1)}`,
     );
   });
-  if (current.length > 0) segments.push(current.join(" "));
+  flushSegment();
 
   const label = `${CHART_METRIC_LABELS[metric]} over time, ${known.length} of ${
     series.length
@@ -192,6 +206,12 @@ export function ActivityChart(props: {
       >
         <title id={titleId}>{CHART_METRIC_LABELS[metric]}</title>
         <desc id={descId}>{label}</desc>
+        <defs>
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#2997ff" stopOpacity="0.24" />
+            <stop offset="100%" stopColor="#2997ff" stopOpacity="0" />
+          </linearGradient>
+        </defs>
 
         {ticks.map((t) => (
           <g key={t.f}>
@@ -208,8 +228,17 @@ export function ActivityChart(props: {
           </g>
         ))}
 
-        {segments.map((d, i) => (
-          <path key={i} d={d} className="chartline" fill="none" />
+        {segments.map((segment, i) => (
+          <path
+            key={`area-${i}`}
+            d={segment.area}
+            className="chartarea"
+            fill={`url(#${gradientId})`}
+          />
+        ))}
+
+        {segments.map((segment, i) => (
+          <path key={i} d={segment.line} className="chartline" fill="none" />
         ))}
 
         {series.map((s, i) =>

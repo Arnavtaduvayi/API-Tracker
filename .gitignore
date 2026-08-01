@@ -75,5 +75,6 @@ CLAUDE.local.md
 tmp/
 temp/
 .cache/
+.firebase/
 # Staged Tauri sidecar binaries (built by scripts/bundle_cli.sh)
 apps/desktop/src-tauri/binaries/

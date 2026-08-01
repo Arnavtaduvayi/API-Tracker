@@ -19,8 +19,10 @@ The mental model is:
 * All sensitive information remains on the developer’s computer.
 * The product must not require a hosted backend or a Tethra account.
 * Any requests to API providers or documentation websites must be sent directly from the user’s device.
-* No API keys, usage records, project information, or telemetry should be sent to a Tethra server.
-* Telemetry must be disabled by default. Do not add third-party analytics.
+* No API keys, usage records, project information, or vault data should be sent to a Tethra server.
+* Optional third-party product analytics must be disabled by default, require
+  explicit consent before any analytics script or request loads, and accept
+  only the finite nonsensitive event schema in `docs/ANALYTICS.md`.
 
 This product is intended to become a serious open-source developer tool, not a hackathon prototype.
 

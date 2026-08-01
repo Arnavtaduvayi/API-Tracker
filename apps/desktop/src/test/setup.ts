@@ -30,6 +30,14 @@ if (!("ResizeObserver" in globalThis)) {
   } as unknown as typeof ResizeObserver;
 }
 
+// The ambient renderer treats a missing WebGL context as its supported static
+// fallback. jsdom's default implementation emits a noisy not-implemented
+// exception before returning null, so model the browser fallback directly.
+Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+  configurable: true,
+  value: vi.fn(() => null),
+});
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();

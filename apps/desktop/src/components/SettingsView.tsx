@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, isApiError } from "../api";
+import { trackAnalytics } from "../analytics";
 import type { VaultSettings } from "../types";
+import { AnalyticsPreferences } from "./AnalyticsConsent";
 
 const FIELDS: { key: keyof VaultSettings; label: string; hint: string }[] = [
   {
@@ -65,6 +67,7 @@ export function SettingsView(props: { dataDir: string; onSaved?: () => void }) {
     try {
       await api.settingsSet(settings);
       setNotice("Settings saved.");
+      trackAnalytics({ name: "settings_saved" });
       props.onSaved?.();
     } catch (err) {
       setError(isApiError(err) ? err.message : String(err));
@@ -99,6 +102,8 @@ export function SettingsView(props: { dataDir: string; onSaved?: () => void }) {
         {notice && <p className="notice">{notice}</p>}
         <button type="submit">Save settings</button>
       </form>
+
+      <AnalyticsPreferences />
 
       <h2>Change master password</h2>
       <p className="muted">

@@ -5,12 +5,16 @@
 // the right column carries the decorative wireframe globe.
 
 import type { ReactNode } from "react";
+import { BrandLockup } from "./BrandLockup";
+import { ParticleField } from "./ParticleField";
 import { WireGlobe } from "./WireGlobe";
 
 export function Gate({ eyebrow, children }: { eyebrow: string; children: ReactNode }) {
   return (
     <div className="gate">
+      <ParticleField density={1.15} mode="vault" />
       <div className="gate-form">
+        <BrandLockup className="gate-brand" />
         <p className="gate-eyebrow">{eyebrow}</p>
         {children}
       </div>

@@ -193,21 +193,33 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
   const multiProject = (byProject ?? []).length > 1 || (setups ?? []).length > 1;
 
   return (
-    <section className="stack">
-      <h1>API activity</h1>
+    <section className="stack dashboard-view">
+      <div className="screen-heading">
+        <div>
+          <p className="screen-kicker">Local request telemetry</p>
+          <h1>API activity</h1>
+        </div>
+        <button className="primary" onClick={onTrack}>
+          Track API activity
+        </button>
+      </div>
 
-      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
-        {RANGES.map((r) => (
-          <button
-            key={r.days}
-            className={days === r.days ? undefined : "link"}
-            onClick={() => setDays(r.days)}
-          >
-            {r.label}
-          </button>
-        ))}
-        <span className="spacer" />
-        <button onClick={onTrack}>Track API activity</button>
+      <div className="dashboard-toolbar">
+        <div className="segmented" role="group" aria-label="Activity range">
+          {RANGES.map((r) => (
+            <button
+              key={r.days}
+              className={days === r.days ? "segment active" : "segment"}
+              aria-pressed={days === r.days}
+              onClick={() => setDays(r.days)}
+            >
+              {r.label}
+            </button>
+          ))}
+        </div>
+        <span className="dashboard-signal">
+          <i aria-hidden="true" /> Observing locally
+        </span>
       </div>
 
       {foreground?.active && (
@@ -291,50 +303,64 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         </div>
       )}
       {summary && summary.total_requests > 0 && (
-        <dl className="detail-grid">
-          <dt>Requests</dt>
-          <dd>{summary.total_requests}</dd>
-          <dt>Success rate</dt>
-          <dd>{successRate !== null ? `${successRate}%` : "—"}</dd>
-          <dt>Errors</dt>
-          <dd>
-            {summary.error_count}
-            {summary.transport_error_count > 0 &&
-              ` (+${summary.transport_error_count} transport)`}
-          </dd>
-          <dt>Latency p50 / p95 / p99</dt>
-          <dd>
-            {summary.p50_latency_ms ?? "—"} / {summary.p95_latency_ms ?? "—"} /{" "}
-            {summary.p99_latency_ms ?? "—"} ms
-          </dd>
-          <dt>Tokens in / out</dt>
-          <dd>
-            {formatTokenPair(
-              summary.input_tokens,
-              summary.output_tokens,
-              tokenAvailability,
-              GATEWAY_TOKENS,
-            )}
-          </dd>
-          <dt>Estimated cost</dt>
-          <dd>
-            {formatCostMicros(
-              summary.estimated_cost_micros,
-              costAvailability,
-              GATEWAY_ESTIMATED_COST,
-              4,
-            )}{" "}
-            {/* The lower-bound caveat describes a figure. Printing it beside
-                "not reported" would attach an estimate's disclaimer to an
-                estimate that does not exist. */}
-            {hasValue(costAvailability) && (
-              <span className="muted">(lower bound; cache reads excluded)</span>
-            )}
-          </dd>
-          <dt>First / last observed</dt>
-          <dd>
-            {summary.first_event_at ?? "—"} / {summary.last_event_at ?? "—"}
-          </dd>
+        <dl className="metric-grid">
+          <div>
+            <dt>Requests</dt>
+            <dd>{summary.total_requests}</dd>
+          </div>
+          <div>
+            <dt>Success rate</dt>
+            <dd>{successRate !== null ? `${successRate}%` : "—"}</dd>
+          </div>
+          <div>
+            <dt>Errors</dt>
+            <dd>
+              {summary.error_count}
+              {summary.transport_error_count > 0 &&
+                ` (+${summary.transport_error_count} transport)`}
+            </dd>
+          </div>
+          <div>
+            <dt>Latency p50 / p95 / p99</dt>
+            <dd>
+              {summary.p50_latency_ms ?? "—"} / {summary.p95_latency_ms ?? "—"} /{" "}
+              {summary.p99_latency_ms ?? "—"} ms
+            </dd>
+          </div>
+          <div>
+            <dt>Tokens in / out</dt>
+            <dd>
+              {formatTokenPair(
+                summary.input_tokens,
+                summary.output_tokens,
+                tokenAvailability,
+                GATEWAY_TOKENS,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>Estimated cost</dt>
+            <dd>
+              {formatCostMicros(
+                summary.estimated_cost_micros,
+                costAvailability,
+                GATEWAY_ESTIMATED_COST,
+                4,
+              )}{" "}
+              {/* The lower-bound caveat describes a figure. Printing it beside
+                  "not reported" would attach an estimate's disclaimer to an
+                  estimate that does not exist. */}
+              {hasValue(costAvailability) && (
+                <span className="muted">(lower bound; cache reads excluded)</span>
+              )}
+            </dd>
+          </div>
+          <div className="metric-wide">
+            <dt>Observation window</dt>
+            <dd>
+              {summary.first_event_at ?? "—"} / {summary.last_event_at ?? "—"}
+            </dd>
+          </div>
         </dl>
       )}
 
@@ -353,7 +379,7 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         <p className="muted">No requests in this window, so there is nothing to attribute.</p>
       )}
       {byProject && byProject.length > 0 && (
-        <ul>
+        <ul className="project-activity-list">
           {byProject.map((p) => (
             <li key={p.project_id}>
               <strong>{p.project_name ?? "A project that has since been removed"}</strong> —{" "}
@@ -420,7 +446,7 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
         </p>
       )}
       {setups?.map((s) => (
-        <div key={s.setup_id} className="stack">
+        <div key={s.setup_id} className="stack tracked-project">
           <div>
             <strong className="mono">{s.folder}</strong>
           </div>

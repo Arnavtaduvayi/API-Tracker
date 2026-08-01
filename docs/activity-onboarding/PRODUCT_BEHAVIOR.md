@@ -280,7 +280,8 @@ plans · pricing table management.
 * No weakening of any invariant in `docs/gateway/SECURITY_INVARIANTS.md`
   (see `SECURITY_AND_PRIVACY.md` for the reconciliation).
 * No whole-computer scanning; detection reads only the selected folder.
-* No cloud dependency, telemetry, or hosted service.
+* No cloud dependency or hosted credential service. Optional product analytics
+  remains off until explicit consent and cannot receive scan or project data.
 * No removal of existing security or lifecycle features — they move, they
   do not disappear.
 * No rewrite of the forwarding engine, vault, or observation pipelines.

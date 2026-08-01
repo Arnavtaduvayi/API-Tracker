@@ -288,13 +288,13 @@ Sensitive user information must remain on the user’s computer, including:
 
 Do not add:
 
-* Analytics
-* Telemetry
+* Analytics or telemetry outside the consent-first, fixed nonsensitive schema
+  documented in `docs/ANALYTICS.md`
 * Advertising
-* User tracking
+* Cross-site or advertising tracking
 * Cloud synchronization
 * Hosted crash reporting
-* Requests to a Tethra-owned server
+* Requests carrying vault or project data to a Tethra-owned server
 
 Provider requests and documentation checks must be made directly from the user’s device.
 
@@ -604,4 +604,3 @@ At the end of every major coding session, report:
 10. Repository status
 11. Any action required from the user
 12. Recommended next milestone
-
