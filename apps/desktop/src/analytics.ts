@@ -1,8 +1,10 @@
 const MEASUREMENT_ID = "G-MJQHJ6JT5Z";
 const CONSENT_KEY = "tethra.analytics-consent.v1";
+const INVENTORY_STATE_KEY = "tethra.analytics-inventory.v1";
 const CONSENT_EVENT = "tethra:analytics-consent";
 const REGION_URL = "https://usetethra.com/region.json";
 const REGION_TIMEOUT_MS = 4_000;
+const MAX_INVENTORY_COUNT = 10_000_000;
 
 export type AnalyticsConsent = "granted" | "denied" | "unset" | "resolving";
 
@@ -34,6 +36,34 @@ export type AnalyticsScreen =
   | "settings"
   | "backup";
 
+export type DesktopProductEvent =
+  | { name: "project_created" }
+  | { name: "project_updated" }
+  | { name: "project_archived" }
+  | { name: "project_restored" }
+  | {
+      name: "credential_tracked";
+      tracking_method: "stored_secret" | "reference" | "provider_test_key";
+    }
+  | { name: "credential_updated" }
+  | { name: "credential_deleted" }
+  | { name: "credential_validated" }
+  | { name: "credential_copied" }
+  | { name: "credential_revealed" }
+  | { name: "credential_value_replaced" }
+  | { name: "credential_provider_revoked" }
+  | { name: "credentials_imported" }
+  | { name: "project_tracking_configured" }
+  | { name: "project_tracking_enabled" }
+  | { name: "project_tracking_disabled" }
+  | { name: "project_tracking_unlinked" }
+  | { name: "tracking_setup_completed" }
+  | { name: "template_applied" }
+  | { name: "backup_created" }
+  | { name: "backup_restored" }
+  | { name: "credential_rotation_planned" }
+  | { name: "credential_rotation_completed" };
+
 export type DesktopAnalyticsEvent =
   | { name: "app_session_start" }
   | { name: "screen_view"; screen_name: AnalyticsScreen }
@@ -42,7 +72,14 @@ export type DesktopAnalyticsEvent =
   | { name: "tracking_setup_started" }
   | { name: "settings_saved" }
   | { name: "analytics_consent_granted" }
-  | { name: "legal_document_opened"; document: "privacy" | "terms" };
+  | { name: "legal_document_opened"; document: "privacy" | "terms" }
+  | {
+      name: "inventory_snapshot";
+      project_count: number;
+      credential_count: number;
+      snapshot_reason: "session_start" | "inventory_changed";
+    }
+  | DesktopProductEvent;
 
 declare global {
   interface Window {
@@ -55,7 +92,13 @@ let configured = false;
 let scriptRequested = false;
 let sessionReported = false;
 let lastScreen: AnalyticsScreen | null = null;
+let lastInventorySnapshot: string | null = null;
 let initialization: Promise<AnalyticsConsent> | null = null;
+
+interface InventoryState {
+  project_count: number;
+  credential_count: number;
+}
 
 function storageAvailable() {
   try {
@@ -72,6 +115,45 @@ function readStoredConsent(): Exclude<AnalyticsConsent, "resolving"> {
   if (!storageAvailable()) return "unset";
   const saved = localStorage.getItem(CONSENT_KEY);
   return saved === "granted" || saved === "denied" ? saved : "unset";
+}
+
+function validInventoryCount(value: unknown): value is number {
+  return (
+    Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= MAX_INVENTORY_COUNT
+  );
+}
+
+function readInventoryState(): InventoryState | null {
+  if (!storageAvailable()) return null;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(INVENTORY_STATE_KEY) ?? "null") as {
+      project_count?: unknown;
+      credential_count?: unknown;
+    } | null;
+    if (
+      !parsed ||
+      !validInventoryCount(parsed.project_count) ||
+      !validInventoryCount(parsed.credential_count)
+    ) {
+      return null;
+    }
+    return {
+      project_count: parsed.project_count,
+      credential_count: parsed.credential_count,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeInventoryState(state: InventoryState): boolean {
+  if (!storageAvailable()) return false;
+  try {
+    localStorage.setItem(INVENTORY_STATE_KEY, JSON.stringify(state));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const initialStoredConsent = readStoredConsent();
@@ -223,6 +305,7 @@ export function setAnalyticsConsent(consent: Exclude<AnalyticsConsent, "unset" |
     deleteAnalyticsCookies();
     sessionReported = false;
     lastScreen = null;
+    lastInventorySnapshot = null;
   }
 
   broadcastConsent(consent);
@@ -255,8 +338,53 @@ export function trackAnalytics(event: DesktopAnalyticsEvent) {
     lastScreen = event.screen_name;
   }
 
-  const parameters: Record<string, string> = { app_surface: "desktop" };
+  if (event.name === "inventory_snapshot") {
+    if (
+      !validInventoryCount(event.project_count) ||
+      !validInventoryCount(event.credential_count)
+    ) {
+      return;
+    }
+    const fingerprint = `${event.project_count}:${event.credential_count}`;
+    if (lastInventorySnapshot === fingerprint) return;
+    lastInventorySnapshot = fingerprint;
+  }
+
+  const parameters: Record<string, string | number> = { app_surface: "desktop" };
   if (event.name === "screen_view") parameters.screen_name = event.screen_name;
   if (event.name === "legal_document_opened") parameters.document = event.document;
+  if (event.name === "credential_tracked") parameters.tracking_method = event.tracking_method;
+  if (event.name === "inventory_snapshot") {
+    const previous = readInventoryState();
+    parameters.project_count = event.project_count;
+    parameters.credential_count = event.credential_count;
+    parameters.snapshot_reason = event.snapshot_reason;
+
+    if (previous) {
+      parameters.snapshot_mode = "reconciled";
+      parameters.project_count_delta = event.project_count - previous.project_count;
+      parameters.credential_count_delta = event.credential_count - previous.credential_count;
+    } else {
+      // The first report from this app data store establishes its contribution
+      // to the aggregate. No identifier, name, or vault record accompanies it.
+      parameters.snapshot_mode = "baseline";
+      parameters.project_count_delta = event.project_count;
+      parameters.credential_count_delta = event.credential_count;
+    }
+
+    if (
+      !writeInventoryState({
+        project_count: event.project_count,
+        credential_count: event.credential_count,
+      })
+    ) {
+      // Without durable reconciliation state, sending deltas on every launch
+      // would inflate the global estimate. Keep the useful absolute snapshot,
+      // but deliberately omit unreliable delta fields.
+      parameters.snapshot_mode = "unpersisted";
+      delete parameters.project_count_delta;
+      delete parameters.credential_count_delta;
+    }
+  }
   window.gtag("event", event.name, parameters);
 }

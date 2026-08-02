@@ -122,22 +122,25 @@
     if (usRegionalDefault && effectiveConsent === "granted") {
       copy.textContent =
         "Measurement analytics is on by default for U.S. visitors. It uses only broad, " +
-        "allowlisted product events and excludes vault, credential, project, path, provider, " +
-        "and request data. You can turn it off now.";
+        "allowlisted product events. Desktop events may include numeric project and credential-record " +
+        "totals, but never names, secrets, paths, providers, request data, or other vault contents. " +
+        "You can turn it off now.";
     } else if (effectiveConsent === "granted") {
       copy.textContent =
         "Measurement analytics is currently on. It uses only broad, allowlisted product events " +
-        "and excludes vault, credential, project, path, provider, and request data. You can " +
+        "and may include numeric project and credential-record totals from the desktop app, but " +
+        "never names, secrets, paths, providers, request data, or other vault contents. You can " +
         "turn it off now.";
     } else if (effectiveConsent === "denied") {
       copy.textContent =
         "Measurement analytics is off. You can allow broad, pseudonymous product events; " +
-        "vault, credential, project, path, provider, and request data remain excluded.";
+        "desktop totals may include record counts, while names, secrets, paths, providers, " +
+        "request data, and other vault contents remain excluded.";
     } else {
       copy.textContent =
         "Analytics is off until you allow it. If enabled, Tethra measures only broad, " +
-        "pseudonymous product events and excludes vault, credential, project, path, provider, " +
-        "and request data.";
+        "pseudonymous product events and numeric desktop record totals; names, secrets, paths, " +
+        "providers, request data, and other vault contents are excluded.";
     }
   };
   const hideBanner = () => {

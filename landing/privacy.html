@@ -20,7 +20,7 @@
           <img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" /><span>tethra.</span>
         </a>
         <nav aria-label="Primary navigation"><a href="./index.html#security">Security</a><a href="./docs.html">Docs</a><a href="./teams.html">Teams</a><a href="./terms.html" data-legal="terms">Terms</a></nav>
-        <a class="nav-download" href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_aarch64.dmg" data-download="legal" data-platform="macos">Get Tethra</a>
+        <a class="nav-download" href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/Tethra_0.1.0_aarch64.dmg" data-download="legal" data-platform="macos">Get Tethra</a>
       </div>
     </header>
 
@@ -131,8 +131,9 @@
           <p>
             Google Analytics may process a pseudonymous browser or app-client identifier, session and
             event timestamps, broad pages or finite app screen names, download interactions, a small set
-            of allowlisted product actions, device and browser type, operating system, language, screen
-            size, and approximate geographic information. An IP address is necessarily used to deliver
+            of allowlisted product actions, numeric totals of projects and credential records managed in
+            the local app, device and browser type, operating system, language, screen size, and
+            approximate geographic information. An IP address is necessarily used to deliver
             an internet request; Google states that Analytics uses it to derive coarse location and then
             discards it before logging. Website page locations are normalized to fixed Tethra page paths,
             and we suppress referrer values in our configuration.
@@ -148,7 +149,7 @@
             <thead><tr><th>Surface</th><th>Event categories</th><th>Permitted detail</th></tr></thead>
             <tbody>
               <tr><td>Website</td><td>Session start, section viewed, navigation, installer download click, legal-page open, consent granted</td><td>Fixed page type, section, CTA source, platform, or destination label</td></tr>
-              <tr><td>Desktop app</td><td>Session start, finite screen view, vault unlocked/locked, tracking setup started, settings saved, legal-page open, consent granted</td><td>Fixed app surface, screen name, or legal-document type</td></tr>
+              <tr><td>Desktop app</td><td>Session start, finite screen view, vault unlocked/locked, project and credential lifecycle actions, tracking configuration, backup and rotation milestones, settings saved, legal-page open, consent granted, inventory snapshot</td><td>Fixed app surface, screen name, action category, credential tracking method, legal-document type, and integer project/credential-record totals and count changes</td></tr>
             </tbody>
           </table>
           <h3>4.3 What analytics is prohibited from receiving</h3>
@@ -158,7 +159,8 @@
             names, file or repository paths, env variable names or values, URLs entered by users, API
             origins or endpoints, models, prompts, request or response content, headers, webhook payloads,
             alert text, notes, errors, exact usage, cost values, Teams waitlist field values, or
-            other vault records.
+            other vault contents. The numeric project and credential-record totals described above are
+            the only vault-inventory metadata permitted by the analytics allowlist.
           </p>
           <p>
             We disable Google Signals, advertising storage, ad-user-data processing, and ad-personalization
@@ -457,7 +459,7 @@
     </footer>
 
     <aside class="consent-banner" data-consent-banner hidden aria-labelledby="consent-title">
-      <div><p class="consent-kicker">Your choice</p><h2 id="consent-title">Product analytics</h2><p data-consent-copy>Allow pseudonymous Google Analytics for broad page, session, download, and feature-use measurement. No vault, credential, project, path, provider, or request data is included.</p></div>
+      <div><p class="consent-kicker">Your choice</p><h2 id="consent-title">Product analytics</h2><p data-consent-copy>Allow pseudonymous Google Analytics for broad page, session, download, feature-use, and numeric desktop inventory measurement. Names, secrets, paths, providers, request data, and other vault contents are excluded.</p></div>
       <div class="consent-actions"><button type="button" class="button quiet" data-consent="denied">Turn off</button><button type="button" class="button primary" data-consent="granted">Allow analytics</button></div>
     </aside>
   </body>

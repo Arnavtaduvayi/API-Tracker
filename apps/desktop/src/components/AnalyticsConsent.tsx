@@ -49,9 +49,11 @@ export function AnalyticsConsentBanner() {
         <p className="consent-kicker">Optional analytics</p>
         <h2 id="analytics-consent-title">Help improve Tethra</h2>
         <p>
-          With your permission, Google Analytics records broad screen use and app sessions. It
-          never receives credentials, project names, file paths, provider names, URLs, request
-          content, or vault data. Nothing is sent unless you choose Allow.
+          With your permission, Google Analytics records broad screen use, app sessions, fixed
+          product actions, and numeric totals of projects and credential records. It never
+          receives credential values, project or credential names, file paths, provider names,
+          URLs, request content, or other vault contents. Nothing is sent unless you choose
+          Allow.
         </p>
         <p className="consent-links">
           <LegalLink document="privacy">Privacy policy</LegalLink>
@@ -113,8 +115,9 @@ export function AnalyticsPreferences() {
       <p className="muted">
         Measurement analytics is on by default for users in the United States unless Global
         Privacy Control or a prior opt-out applies; elsewhere Tethra asks before enabling it.
-        The allowlisted events exclude vault contents and free-form values. Turning this off
-        stops future collection and clears accessible Analytics cookies.
+        The allowlisted events may include numeric project and credential-record totals, but
+        exclude names, secrets, vault contents, and free-form values. Turning this off stops
+        future collection and clears accessible Analytics cookies.
       </p>
       <p className="consent-links">
         <LegalLink document="privacy">Read privacy policy</LegalLink>

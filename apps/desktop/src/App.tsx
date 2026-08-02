@@ -16,8 +16,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { api, isApiError } from "./api";
-import { setVaultLockedHandler } from "./api";
+import { api, isApiError, setVaultLockedHandler, subscribeToProductAnalytics } from "./api";
 import { severityRank, topSeverity } from "./utils";
 import type { VaultStatus } from "./types";
 import { VaultSetup } from "./components/VaultSetup";
@@ -333,6 +332,28 @@ function analyticsScreenFor(view: View["name"]): AnalyticsScreen {
   return screens[view];
 }
 
+/**
+ * Read only record counts from the unlocked vault, then hand GA a finite
+ * numeric event. Names and records never cross the analytics boundary.
+ */
+async function reportInventoryAnalytics(reason: "session_start" | "inventory_changed") {
+  if (getAnalyticsConsent() !== "granted") return;
+  try {
+    const [projects, credentials] = await Promise.all([
+      api.projectList(true),
+      api.credentialList(),
+    ]);
+    trackAnalytics({
+      name: "inventory_snapshot",
+      project_count: projects.length,
+      credential_count: credentials.length,
+      snapshot_reason: reason,
+    });
+  } catch {
+    // A locked/busy vault must not turn optional telemetry into a product error.
+  }
+}
+
 /** Native notification for freshly created alerts of medium+ severity. */
 async function notifyNewAlerts(severities: string[]) {
   const notable = severities.filter((s) => severityRank(s) >= severityRank("medium"));
@@ -371,6 +392,15 @@ export default function App() {
     return subscribeToAnalyticsConsent(setAnalyticsConsentState);
   }, []);
 
+  useEffect(
+    () =>
+      subscribeToProductAnalytics((signal) => {
+        trackAnalytics(signal.event);
+        if (signal.inventoryChanged) void reportInventoryAnalytics("inventory_changed");
+      }),
+    [],
+  );
+
   useEffect(() => {
     if (analyticsConsent !== "granted") return;
     trackAnalytics({ name: "app_session_start" });
@@ -382,6 +412,12 @@ export default function App() {
       trackAnalytics({ name: "screen_view", screen_name: analyticsScreenFor(view.name) });
     }
   }, [analyticsConsent, vaultState, view.name]);
+
+  useEffect(() => {
+    if (analyticsConsent === "granted" && vaultState === "unlocked") {
+      void reportInventoryAnalytics("session_start");
+    }
+  }, [analyticsConsent, vaultState]);
 
   // The sidebar collapses itself when the window gets narrow and expands again
   // when there is room. Crossing the breakpoint re-syncs, but between

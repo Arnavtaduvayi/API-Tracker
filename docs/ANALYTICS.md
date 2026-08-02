@@ -59,12 +59,43 @@ Website locations are normalized to `https://usetethra.com/`, `/privacy`,
 | `settings_saved` | Vault settings save succeeds | `app_surface` |
 | `legal_document_opened` | An in-app privacy or terms link is opened | `app_surface`, `document` |
 | `analytics_consent_granted` | The user enables analytics | `app_surface` |
+| `inventory_snapshot` | The unlocked app initializes or a count-changing action succeeds | `app_surface`, integer `project_count`, `credential_count`, their locally reconciled deltas, and fixed snapshot reason/mode |
+| `project_created`, `project_updated`, `project_archived`, `project_restored` | The corresponding project action succeeds | `app_surface` |
+| `credential_tracked` | A secret, reference, or provider-created test key is successfully added | `app_surface`, fixed `tracking_method` |
+| `credential_updated`, `credential_deleted`, `credential_validated`, `credential_copied`, `credential_revealed`, `credential_value_replaced`, `credential_provider_revoked` | The corresponding credential action succeeds | `app_surface` |
+| `project_tracking_configured`, `project_tracking_enabled`, `project_tracking_disabled`, `project_tracking_unlinked`, `tracking_setup_completed` | The corresponding tracking action succeeds | `app_surface` |
+| `credentials_imported`, `template_applied`, `backup_created`, `backup_restored`, `credential_rotation_planned`, `credential_rotation_completed` | The corresponding workflow milestone succeeds | `app_surface` |
 
 Screen names are static categories such as `dashboard`, `projects`,
 `project_detail`, `credential_form`, `repository_scan`, `usage`, `gateway`, and
 `settings`. Dynamic route identifiers never enter the event. The desktop page
 location is fixed to `https://usetethra.com/app` and its referrer is suppressed,
 so local development origins and navigation state are not reported.
+
+### Inventory totals
+
+`inventory_snapshot` counts all projects in the unlocked local vault, including
+archived projects, and all managed credential records. It sends integer counts
+only. It never sends a project/credential ID or name, provider, environment,
+path, secret, or any record contents.
+
+The app remembers only the last reported pair of counts in local storage. The
+first snapshot establishes a `baseline`; later snapshots send the difference as
+`project_count_delta` and `credential_count_delta`. Summing those delta metrics
+across inventory events produces a best-effort global running total. Absolute
+counts support latest-snapshot analysis in a GA export.
+
+This estimate is not an authoritative ledger: analytics opt-outs and blockers,
+failed network delivery, local-storage resets, reinstalls, and the same vault
+opened through multiple app data stores can cause under- or over-counting. Do
+not use it for billing, security, or compliance decisions.
+
+In the GA4 property, register these event-scoped custom metrics using the exact
+event parameter names: `project_count`, `credential_count`,
+`project_count_delta`, and `credential_count_delta`. Register `snapshot_reason`,
+`snapshot_mode`, and `tracking_method` as event-scoped custom dimensions when
+they are needed in reports. Registration affects reporting from that point
+forward; it does not change what the shipped client sends.
 
 ## Data that must never enter analytics
 
@@ -74,7 +105,7 @@ than a generic event API. Do not add a free-form parameter escape hatch.
 
 Prohibited data includes:
 
-- credentials, fingerprints, master passwords, auth material, and vault data;
+- credential values, fingerprints, master passwords, auth material, and vault contents (numeric project and credential-record counts are the sole inventory-metadata exception);
 - project, credential, provider, model, route, process, and destination names;
 - file/repository paths, env names or values, user-entered URLs, and notes;
 - prompts, headers, request/response bodies, endpoints, query values, or logs;

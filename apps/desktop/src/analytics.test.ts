@@ -112,4 +112,90 @@ describe("region-aware desktop analytics", () => {
     );
     expect(window.dataLayer).toHaveLength(queuedAtWithdrawal ?? 0);
   });
+
+  it("reports exact inventory counts with a locally reconciled global delta", async () => {
+    const analytics = await import("./analytics");
+    analytics.setAnalyticsConsent("granted");
+
+    analytics.trackAnalytics({
+      name: "inventory_snapshot",
+      project_count: 2,
+      credential_count: 5,
+      snapshot_reason: "session_start",
+    });
+    // An unchanged count in the same app session is deliberately deduplicated.
+    analytics.trackAnalytics({
+      name: "inventory_snapshot",
+      project_count: 2,
+      credential_count: 5,
+      snapshot_reason: "inventory_changed",
+    });
+    analytics.trackAnalytics({
+      name: "inventory_snapshot",
+      project_count: 3,
+      credential_count: 4,
+      snapshot_reason: "inventory_changed",
+    });
+
+    const snapshots = window.dataLayer?.filter((entry) => entry[1] === "inventory_snapshot");
+    expect(snapshots).toEqual([
+      [
+        "event",
+        "inventory_snapshot",
+        {
+          app_surface: "desktop",
+          project_count: 2,
+          credential_count: 5,
+          snapshot_reason: "session_start",
+          snapshot_mode: "baseline",
+          project_count_delta: 2,
+          credential_count_delta: 5,
+        },
+      ],
+      [
+        "event",
+        "inventory_snapshot",
+        {
+          app_surface: "desktop",
+          project_count: 3,
+          credential_count: 4,
+          snapshot_reason: "inventory_changed",
+          snapshot_mode: "reconciled",
+          project_count_delta: 1,
+          credential_count_delta: -1,
+        },
+      ],
+    ]);
+  });
+
+  it("drops invalid inventory counts and keeps lifecycle payloads finite", async () => {
+    const analytics = await import("./analytics");
+    analytics.setAnalyticsConsent("granted");
+
+    analytics.trackAnalytics({
+      name: "inventory_snapshot",
+      project_count: -1,
+      credential_count: 5,
+      snapshot_reason: "session_start",
+    });
+    analytics.trackAnalytics({ name: "project_created" });
+    analytics.trackAnalytics({
+      name: "credential_tracked",
+      tracking_method: "stored_secret",
+    });
+
+    expect(window.dataLayer).not.toEqual(
+      expect.arrayContaining([expect.arrayContaining(["event", "inventory_snapshot"])]),
+    );
+    expect(window.dataLayer).toEqual(
+      expect.arrayContaining([
+        ["event", "project_created", { app_surface: "desktop" }],
+        [
+          "event",
+          "credential_tracked",
+          { app_surface: "desktop", tracking_method: "stored_secret" },
+        ],
+      ]),
+    );
+  });
 });

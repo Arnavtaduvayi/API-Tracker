@@ -38,22 +38,22 @@
       },
       {
         "source": "/downloads/cli/tethra-aarch64-apple-darwin.tar.gz",
-        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/tethra-aarch64-apple-darwin.tar.gz",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/tethra-aarch64-apple-darwin.tar.gz",
         "type": 302
       },
       {
         "source": "/downloads/cli/tethra-aarch64-apple-darwin.tar.gz.sha256",
-        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/tethra-aarch64-apple-darwin.tar.gz.sha256",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/tethra-aarch64-apple-darwin.tar.gz.sha256",
         "type": 302
       },
       {
         "source": "/downloads/cli/tethra-x86_64-unknown-linux-gnu.tar.gz",
-        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/tethra-x86_64-unknown-linux-gnu.tar.gz",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/tethra-x86_64-unknown-linux-gnu.tar.gz",
         "type": 302
       },
       {
         "source": "/downloads/cli/tethra-x86_64-pc-windows-msvc.zip",
-        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/tethra-x86_64-pc-windows-msvc.zip",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/tethra-x86_64-pc-windows-msvc.zip",
         "type": 302
       }
     ],
