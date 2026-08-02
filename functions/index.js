@@ -17,8 +17,15 @@ const {
 initializeApp();
 
 const database = getFirestore();
+database.settings({ preferRest: true });
 const waitlistHashSecret = defineSecret("WAITLIST_HASH_SECRET");
 const FUNCTION_REGION = "us-east1";
+// Domain Restricted Sharing blocks Firebase's implicit allUsers binding. The
+// production Cloud Run service has its Invoker IAM check disabled explicitly;
+// this dedicated fallback keeps Firebase deploys compatible and fails closed
+// if that service setting is ever re-enabled.
+const FUNCTION_SERVICE_ACCOUNT =
+  "tethra-waitlist-runtime@usetethra.iam.gserviceaccount.com";
 const MAX_REQUEST_BYTES = 8_192;
 const RATE_LIMIT = 5;
 const RATE_WINDOW_MS = 60 * 60 * 1_000;
@@ -42,12 +49,26 @@ function safeResponseHeaders(response) {
   });
 }
 
+function safeErrorMetadata(error) {
+  if (!error || typeof error !== "object") {
+    return { errorName: "UnknownError", errorCode: "unknown" };
+  }
+  const errorName =
+    typeof error.name === "string" ? error.name.slice(0, 80) : "Error";
+  const rawCode = "code" in error ? error.code : "unknown";
+  const errorCode = ["string", "number"].includes(typeof rawCode)
+    ? String(rawCode).slice(0, 80)
+    : "unknown";
+  return { errorName, errorCode };
+}
+
 exports.joinTeamsWaitlist = onRequest(
   {
     region: FUNCTION_REGION,
     secrets: [waitlistHashSecret],
     cors: false,
-    invoker: "public",
+    invoker: FUNCTION_SERVICE_ACCOUNT,
+    serviceAccount: FUNCTION_SERVICE_ACCOUNT,
     maxInstances: 10,
     concurrency: 40,
     timeoutSeconds: 10,
@@ -102,10 +123,10 @@ exports.joinTeamsWaitlist = onRequest(
       const waitlistRef = database.collection("waitlist").doc(waitlistId);
 
       await database.runTransaction(async (transaction) => {
-        const [rateSnapshot, existingSubmission] = await Promise.all([
-          transaction.get(rateRef),
-          transaction.get(waitlistRef),
-        ]);
+        const [rateSnapshot, existingSubmission] = await transaction.getAll(
+          rateRef,
+          waitlistRef,
+        );
         const rate = rateSnapshot.data();
         const windowStartedAt = rate?.windowStartedAt?.toMillis?.() ?? 0;
         const withinWindow = nowMs - windowStartedAt < RATE_WINDOW_MS;
@@ -143,7 +164,10 @@ exports.joinTeamsWaitlist = onRequest(
           .send(JSON.stringify({ ok: false, code: error.code }));
         return;
       }
-      logger.error("Teams waitlist request failed", { code: "internal" });
+      logger.error("Teams waitlist request failed", {
+        code: "internal",
+        ...safeErrorMetadata(error),
+      });
       response.status(500).send(JSON.stringify({ ok: false }));
     }
   },
@@ -170,6 +194,7 @@ async function deleteExpired(collectionName) {
 exports.cleanupTeamsWaitlist = onSchedule(
   {
     region: FUNCTION_REGION,
+    serviceAccount: FUNCTION_SERVICE_ACCOUNT,
     schedule: "17 * * * *",
     timeZone: "Etc/UTC",
     maxInstances: 1,
