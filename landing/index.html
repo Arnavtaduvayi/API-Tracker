@@ -21,6 +21,7 @@
     <link rel="stylesheet" href="./styles.css" />
     <script src="./ambient.js" defer></script>
     <script src="./analytics.js" defer></script>
+    <script src="./docs.js" defer></script>
   </head>
   <body data-page="home">
     <a class="skip-link" href="#main">Skip to content</a>
@@ -34,11 +35,13 @@
         <nav aria-label="Primary navigation">
           <a href="#intelligence" data-nav="intelligence">Intelligence</a>
           <a href="#security" data-nav="security">Security</a>
+          <a href="./docs.html" data-nav="docs">Docs</a>
+          <a href="./teams.html" data-nav="teams">Teams</a>
           <a href="#download" data-nav="download">Download</a>
         </nav>
         <a
           class="nav-download"
-          href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg"
+          href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_aarch64.dmg"
           data-download="nav"
           data-platform="macos"
         >
@@ -65,7 +68,7 @@
           <div class="hero-actions">
             <a
               class="button primary"
-              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_aarch64.dmg"
               data-download="hero"
               data-platform="macos"
             >
@@ -73,7 +76,7 @@
             </a>
             <a
               class="button quiet"
-              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_x64-setup.exe"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_x64-setup.exe"
               data-download="hero"
               data-platform="windows"
             >
@@ -119,7 +122,7 @@
             <div class="window-titlebar">
               <div class="window-controls" aria-hidden="true"><i></i><i></i><i></i></div>
               <span>Activity</span>
-              <span class="window-local"><i></i> Local vault</span>
+              <span class="window-local">Local vault</span>
             </div>
             <div class="window-body">
               <aside class="demo-sidebar" aria-hidden="true">
@@ -127,12 +130,13 @@
                 <small>Activity</small>
                 <b class="selected">Activity</b>
                 <b>Projects</b>
-                <small>Exposure</small>
-                <b>Scan</b>
-                <b>Env files</b>
+                <small>Vault</small>
+                <b>Providers</b>
                 <small>Monitoring</small>
                 <b>Alerts</b>
                 <b>Usage</b>
+                <small>System</small>
+                <b>Settings</b>
               </aside>
               <div class="demo-content">
                 <div class="demo-heading">
@@ -234,7 +238,7 @@
             <p class="section-lede">
               Tethra has no account system and no hosted credential backend. Secret values are
               encrypted in your local vault. Network access happens only for actions you configure,
-              plus optional product analytics when you explicitly allow it.
+              plus limited measurement analytics under the regional choice described in our policy.
             </p>
             <a class="inline-link" href="./privacy.html" data-legal="privacy">Read the privacy policy</a>
           </div>
@@ -242,7 +246,7 @@
             <div><dt>Credential values</dt><dd>Encrypted locally</dd></div>
             <div><dt>Master password</dt><dd>Never sent to Tethra</dd></div>
             <div><dt>Tethra account</dt><dd>Not required</dd></div>
-            <div><dt>Product analytics</dt><dd>Off until you opt in</dd></div>
+            <div><dt>Product analytics</dt><dd>Regional default with opt-out</dd></div>
             <div><dt>Analytics payload</dt><dd>No vault or project data</dd></div>
             <div><dt>Source license</dt><dd>Apache 2.0</dd></div>
           </dl>
@@ -267,6 +271,64 @@
         </div>
       </section>
 
+      <section id="cli" class="cli-band" data-section="cli">
+        <div class="band-inner cli-layout">
+          <div class="section-copy reveal">
+            <p class="eyebrow">Standalone CLI</p>
+            <h2>Install from the terminal.</h2>
+            <p class="section-lede">
+              Use the same encrypted local vault from scripts and shells. Download a release
+              archive directly—there is no remote installer script and no Tethra account.
+            </p>
+            <a class="inline-link" href="./docs.html" data-nav="cli_docs">Read the complete CLI docs</a>
+          </div>
+          <div class="cli-snippets reveal">
+            <div>
+              <p>macOS Apple Silicon</p>
+              <div class="code-box">
+                <button class="copy-button" type="button" data-copy-target="home-mac-cli">Copy</button>
+                <pre><code id="home-mac-cli">TETHRA_TMP="$(mktemp -d)"
+curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o "$TETHRA_TMP/tethra.tar.gz"
+tar -xzf "$TETHRA_TMP/tethra.tar.gz" -C "$TETHRA_TMP" tethra
+sudo install -m 0755 "$TETHRA_TMP/tethra" /usr/local/bin/tethra
+tethra --version</code></pre>
+              </div>
+            </div>
+            <div>
+              <p>Windows x64 PowerShell</p>
+              <div class="code-box">
+                <button class="copy-button" type="button" data-copy-target="home-windows-cli">Copy</button>
+                <pre><code id="home-windows-cli">$Dir = Join-Path $env:LOCALAPPDATA "Tethra\bin"
+$Zip = Join-Path $env:TEMP "tethra-cli.zip"
+Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile $Zip
+New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+Expand-Archive $Zip -DestinationPath $Dir -Force
+$env:Path = "$Dir;$env:Path"
+tethra --version</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="teams-band" data-section="teams">
+        <div class="band-inner teams-band-inner reveal">
+          <div>
+            <p class="eyebrow">Tethra for Teams</p>
+            <h2>Team-scale credential intelligence is coming soon.</h2>
+          </div>
+          <div class="teams-band-copy">
+            <p>
+              Join the waitlist for the next chapter of Tethra: shared operational visibility,
+              designed around the same local-first security boundary.
+            </p>
+            <a class="button quiet" href="./teams.html" data-nav="teams_waitlist">
+              Explore Tethra for Teams
+            </a>
+          </div>
+        </div>
+      </section>
+
       <section id="download" class="download-band" data-section="download">
         <div class="band-inner download-inner reveal">
           <p class="eyebrow">Available for macOS and Windows</p>
@@ -278,7 +340,7 @@
           <div class="download-actions">
             <a
               class="button primary large"
-              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_aarch64.dmg"
               data-download="final"
               data-platform="macos"
             >
@@ -286,7 +348,7 @@
             </a>
             <a
               class="button quiet large"
-              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_x64-setup.exe"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_x64-setup.exe"
               data-download="final"
               data-platform="windows"
             >
@@ -309,8 +371,9 @@
         <nav aria-label="Legal and privacy">
           <a href="./privacy.html" data-legal="privacy">Privacy</a>
           <a href="./terms.html" data-legal="terms">Terms</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./teams.html">Teams</a>
           <button type="button" data-privacy-choices>Privacy choices</button>
-          <a href="https://github.com/Arnavtaduvayi/API-Tracker" rel="noreferrer">Open source</a>
         </nav>
         <small>&copy; 2026 tethra. All rights reserved.</small>
       </div>
@@ -319,16 +382,16 @@
     <aside class="consent-banner" data-consent-banner hidden aria-labelledby="consent-title">
       <div>
         <p class="consent-kicker">Your choice</p>
-        <h2 id="consent-title">Optional product analytics</h2>
-        <p>
+        <h2 id="consent-title">Product analytics</h2>
+        <p data-consent-copy>
           Allow pseudonymous Google Analytics for broad page, session, download, and feature-use
           measurement. No credentials, project names, file paths, provider names, request content,
-          or vault data are included. Analytics stays off unless you allow it.
+          or vault data are included.
         </p>
         <a href="./privacy.html" data-legal="privacy">Privacy policy</a>
       </div>
       <div class="consent-actions">
-        <button type="button" class="button quiet" data-consent="denied">Keep off</button>
+        <button type="button" class="button quiet" data-consent="denied">Turn off</button>
         <button type="button" class="button primary" data-consent="granted">Allow analytics</button>
       </div>
     </aside>

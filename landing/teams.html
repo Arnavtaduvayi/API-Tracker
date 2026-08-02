@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tethra for Teams | Coming Soon</title>
+    <meta
+      name="description"
+      content="Tethra for Teams is coming soon. Join the optional waitlist for launch updates and team-product follow-up."
+    />
+    <meta property="og:title" content="Tethra for Teams | Coming Soon" />
+    <meta
+      property="og:description"
+      content="Local-first credential intelligence for teams is coming soon."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://usetethra.com/teams" />
+    <meta name="theme-color" content="#000000" />
+    <link rel="canonical" href="https://usetethra.com/teams" />
+    <link rel="icon" type="image/png" href="./assets/tethra-key.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./teams.css" />
+    <script src="./ambient.js" defer></script>
+    <script src="./analytics.js" defer></script>
+    <script src="./teams.js" defer></script>
+  </head>
+  <body class="teams-page" data-page="teams">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="global-nav">
+      <div class="nav-inner">
+        <a
+          class="brand"
+          href="./index.html"
+          aria-label="Tethra home"
+          data-nav="home"
+        >
+          <img
+            class="brand-logo"
+            src="./assets/tethra-key.png"
+            alt=""
+            aria-hidden="true"
+          />
+          <span>tethra.</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="./index.html#intelligence" data-nav="intelligence"
+            >Intelligence</a
+          >
+          <a href="./docs.html" data-nav="docs">Docs</a>
+          <a href="./teams.html" aria-current="page" data-nav="teams">Teams</a>
+          <a href="./index.html#download" data-nav="download">Download</a>
+        </nav>
+        <button
+          class="nav-download teams-nav-cta"
+          type="button"
+          data-open-waitlist
+        >
+          Join waitlist
+        </button>
+      </div>
+    </header>
+
+    <main id="main">
+      <section
+        class="teams-hero"
+        data-section="teams_hero"
+        aria-labelledby="teams-title"
+      >
+        <canvas id="ambient-network" aria-hidden="true"></canvas>
+        <div class="teams-scrim" aria-hidden="true"></div>
+        <div class="teams-hero-content">
+          <p class="eyebrow">Tethra for Teams</p>
+          <h1 id="teams-title">Coming Soon</h1>
+          <p class="teams-statement">
+            Local-first credential intelligence, built for teams that need
+            shared visibility without turning every secret into another cloud
+            dependency.
+          </p>
+          <button class="button primary large" type="button" data-open-waitlist>
+            Join the waitlist
+          </button>
+          <p class="teams-optional">
+            Every field is optional. No account or commitment required.
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer teams-footer">
+      <div class="footer-inner">
+        <div>
+          <img
+            class="brand-logo"
+            src="./assets/tethra-key.png"
+            alt=""
+            aria-hidden="true"
+          />
+          <b>tethra.</b>
+        </div>
+        <p>Local-first API credential intelligence.</p>
+        <nav aria-label="Legal and privacy">
+          <a href="./index.html">Home</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./privacy.html" data-legal="privacy">Privacy</a>
+          <a href="./terms.html" data-legal="terms">Terms</a>
+          <button type="button" data-privacy-choices>Privacy choices</button>
+        </nav>
+        <small>&copy; 2026 tethra. All rights reserved.</small>
+      </div>
+    </footer>
+
+    <dialog
+      class="waitlist-dialog"
+      data-waitlist-dialog
+      aria-labelledby="waitlist-title"
+    >
+      <div class="waitlist-panel">
+        <button
+          class="waitlist-close"
+          type="button"
+          data-close-waitlist
+          aria-label="Close waitlist form"
+        >
+          <span aria-hidden="true">&times;</span>
+        </button>
+        <div data-waitlist-form-view>
+          <p class="eyebrow">Tethra for Teams</p>
+          <h2 id="waitlist-title">Join the waitlist</h2>
+          <p class="waitlist-intro">
+            Tell us as much or as little as you like. All four fields are
+            optional.
+          </p>
+          <form data-waitlist-form novalidate>
+            <div class="waitlist-fields">
+              <label>
+                <span>Name <small>Optional</small></span>
+                <input
+                  name="name"
+                  type="text"
+                  autocomplete="name"
+                  maxlength="120"
+                />
+              </label>
+              <label>
+                <span>Email <small>Optional</small></span>
+                <input
+                  name="email"
+                  type="email"
+                  autocomplete="email"
+                  inputmode="email"
+                  maxlength="254"
+                />
+              </label>
+              <label>
+                <span>Phone number <small>Optional</small></span>
+                <input
+                  name="phone"
+                  type="tel"
+                  autocomplete="tel"
+                  inputmode="tel"
+                  maxlength="40"
+                />
+              </label>
+              <label>
+                <span>Company <small>Optional</small></span>
+                <input
+                  name="company"
+                  type="text"
+                  autocomplete="organization"
+                  maxlength="160"
+                />
+              </label>
+            </div>
+            <label class="waitlist-honeypot" aria-hidden="true">
+              Website
+              <input
+                name="website"
+                type="text"
+                tabindex="-1"
+                autocomplete="off"
+                maxlength="200"
+              />
+            </label>
+            <p class="waitlist-notice">
+              Submitting asks Tethra to record these details. If you provide an
+              email address or phone number, you are asking for personal
+              follow-up about Tethra for Teams. This form does not authorize
+              automated marketing calls or texts. See our
+              <a href="./privacy.html" data-legal="privacy">Privacy Policy</a>
+              and <a href="./terms.html" data-legal="terms">Terms</a>.
+            </p>
+            <p
+              class="waitlist-status"
+              data-waitlist-status
+              role="status"
+              aria-live="polite"
+            ></p>
+            <button class="button primary large waitlist-submit" type="submit">
+              Join waitlist
+            </button>
+          </form>
+        </div>
+        <div class="waitlist-success" data-waitlist-success hidden>
+          <p class="eyebrow">You’re on the list</p>
+          <h2>Interest recorded.</h2>
+          <p>
+            Thanks for helping shape Tethra for Teams. If you left contact
+            information, we may follow up personally as described in the notice.
+          </p>
+          <button class="button quiet" type="button" data-close-waitlist>
+            Close
+          </button>
+        </div>
+      </div>
+    </dialog>
+
+    <aside
+      class="consent-banner"
+      data-consent-banner
+      hidden
+      aria-labelledby="consent-title"
+    >
+      <div>
+        <p class="consent-kicker">Your choice</p>
+        <h2 id="consent-title">Product analytics</h2>
+        <p data-consent-copy>
+          Allow pseudonymous measurement of broad page and session activity.
+          Waitlist field values are never included in analytics.
+        </p>
+        <a href="./privacy.html" data-legal="privacy">Privacy policy</a>
+      </div>
+      <div class="consent-actions">
+        <button type="button" class="button quiet" data-consent="denied">
+          Turn off
+        </button>
+        <button type="button" class="button primary" data-consent="granted">
+          Allow analytics
+        </button>
+      </div>
+    </aside>
+  </body>
+</html>

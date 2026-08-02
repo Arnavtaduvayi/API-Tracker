@@ -19,8 +19,8 @@
         <a class="brand" href="./index.html" aria-label="Tethra home" data-nav="home">
           <img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" /><span>tethra.</span>
         </a>
-        <nav aria-label="Primary navigation"><a href="./index.html#security">Security</a><a href="./terms.html" data-legal="terms">Terms</a></nav>
-        <a class="nav-download" href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.1/Tethra_0.1.0_aarch64.dmg" data-download="legal" data-platform="macos">Get Tethra</a>
+        <nav aria-label="Primary navigation"><a href="./index.html#security">Security</a><a href="./docs.html">Docs</a><a href="./teams.html">Teams</a><a href="./terms.html" data-legal="terms">Terms</a></nav>
+        <a class="nav-download" href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.2/Tethra_0.1.0_aarch64.dmg" data-download="legal" data-platform="macos">Get Tethra</a>
       </div>
     </header>
 
@@ -34,14 +34,14 @@
             This policy explains what Tethra processes locally, the limited information we receive,
             the network actions the product can perform, and the choices available to you.
           </p>
-          <div class="legal-meta"><span>Last updated: July 31, 2026</span><span>Effective: July 31, 2026</span></div>
+          <div class="legal-meta"><span>Last updated: August 1, 2026</span><span>Effective: August 1, 2026</span></div>
         </header>
 
         <nav class="legal-toc" aria-label="Privacy policy contents">
           <strong>Contents</strong>
           <div>
             <a href="#introduction">1. Introduction</a><a href="#architecture">2. Local-first architecture</a><a href="#local-data">3. Data stored locally</a>
-            <a href="#analytics">4. Optional analytics</a><a href="#website">5. Website and hosting</a><a href="#network">6. User-directed network activity</a>
+            <a href="#analytics">4. Product analytics</a><a href="#website">5. Website and hosting</a><a href="#network">6. User-directed network activity</a>
             <a href="#not-collected">7. Information we do not collect</a><a href="#uses">8. How information is used</a><a href="#legal-bases">9. Legal bases</a>
             <a href="#sharing">10. Sharing and processors</a><a href="#tracking">11. Cookies and controls</a><a href="#retention">12. Retention</a>
             <a href="#transfers">13. International transfers</a><a href="#security">14. Security</a><a href="#rights">15. Your rights</a>
@@ -59,15 +59,16 @@
             Atlanta, Georgia, United States.
           </p>
           <p>
-            This Privacy Policy applies to information processed when you visit the website, opt in
-            to product analytics, contact us, download Tethra, or use the desktop app and CLI. The
+            This Privacy Policy applies to information processed when you visit the website, join
+            the Tethra for Teams waitlist, use product analytics, contact us, download Tethra, or
+            use the desktop app and CLI. The
             desktop app is designed to operate without a Tethra account or a Tethra-hosted credential
             service. This distinction matters: most information handled by the app remains on your
             computer and is not information that we receive or control.
           </p>
           <p>
             By using the Service, you acknowledge this policy. Where consent is required, we ask for
-            it separately. Declining optional analytics does not prevent use of the website, app, or CLI.
+            it separately. Turning off analytics does not prevent use of the website, app, or CLI.
           </p>
         </section>
 
@@ -77,6 +78,8 @@
             Tethra has no hosted user account database, cloud vault, subscription system, payment
             processor, advertising system, or Firebase Authentication integration. You do not provide
             a name, email address, company, billing information, or login credential to use the app.
+            The separate Tethra for Teams waitlist accepts optional contact information as described in
+            Section 5; that information is not part of your local vault or required to use the app.
           </p>
           <div class="legal-callout">
             <strong>Important:</strong> "local-first" does not mean "no network access." Tethra keeps
@@ -108,14 +111,23 @@
         </section>
 
         <section id="analytics" class="legal-section">
-          <h2>4. Optional pseudonymous analytics</h2>
+          <h2>4. Pseudonymous product analytics</h2>
           <p>
-            Analytics is <strong>off by default</strong> on both the website and in the desktop app. We
-            load Google Analytics 4 only after you affirmatively select "Allow analytics." Declining
-            does not reduce product functionality. You can change the website choice through "Privacy
-            choices" in the footer and the app choice in Settings.
+            For visitors and app users whose connection is resolved to the United States, limited
+            measurement analytics is <strong>on by default without an initial consent banner</strong>.
+            Outside the United States, analytics remains off until you choose to allow it. A prior
+            opt-out and a browser Global Privacy Control signal take priority over the regional default.
+            You can turn analytics off through "Privacy choices" in the website footer or the Analytics
+            control in app Settings without losing product functionality.
           </p>
-          <h3>4.1 What analytics can collect after consent</h3>
+          <p>
+            Tethra requests a small <code>region.json</code> file from Firebase Hosting to apply this
+            regional behavior. Firebase Hosting determines country from the request IP address. The
+            desktop app makes the same request at startup; the response contains only a broad country
+            classification and analytics-default flag. Tethra does not receive precise location from it.
+            If the region cannot be resolved, analytics stays off and the consent choice is shown.
+          </p>
+          <h3>4.1 What analytics can collect when enabled</h3>
           <p>
             Google Analytics may process a pseudonymous browser or app-client identifier, session and
             event timestamps, broad pages or finite app screen names, download interactions, a small set
@@ -128,8 +140,8 @@
           <p>
             The identifier is <strong>pseudonymous, not guaranteed anonymous under every privacy law</strong>.
             Tethra does not use Firebase Authentication and does not create an analytics login. Google
-            Analytics generates a client identifier only after consent to distinguish returning browsers
-            or app webviews and measure retention.
+            Analytics generates a client identifier only when analytics is enabled—by regional default
+            or affirmative choice—to distinguish returning browsers or app webviews and measure retention.
           </p>
           <h3>4.2 Events we collect</h3>
           <table class="legal-table">
@@ -145,7 +157,8 @@
             credential values or fingerprints, master passwords, project or credential names, provider
             names, file or repository paths, env variable names or values, URLs entered by users, API
             origins or endpoints, models, prompts, request or response content, headers, webhook payloads,
-            alert text, notes, errors, exact usage, cost values, or other vault records.
+            alert text, notes, errors, exact usage, cost values, Teams waitlist field values, or
+            other vault records.
           </p>
           <p>
             We disable Google Signals, advertising storage, ad-user-data processing, and ad-personalization
@@ -154,7 +167,8 @@
         </section>
 
         <section id="website" class="legal-section">
-          <h2>5. Website downloads and hosting data</h2>
+          <h2>5. Website, downloads, hosting, and Teams waitlist</h2>
+          <h3>5.1 Website delivery</h3>
           <p>
             The website is hosted using Firebase Hosting, a Google Cloud service. The macOS DMG and Windows installer are
             delivered from GitHub Releases. When your browser requests a page or download, those providers necessarily process delivery and security data
@@ -167,6 +181,33 @@
             investigate abuse, prevent fraud, and maintain availability. We do not use website hosting
             logs to build advertising profiles.
           </p>
+          <h3>5.2 Tethra for Teams waitlist</h3>
+          <p>
+            The Teams waitlist lets you optionally provide a name, email address, phone number,
+            and company. <strong>None of those fields is required.</strong> A submission also records a
+            server-generated identifier, its source, the version of the notice shown with the form,
+            whether contact information was supplied, and creation and scheduled-expiration times.
+            We use this information to measure interest, plan Tethra for Teams, and—only when
+            you provide an email address or phone number—personally follow up about Tethra for Teams.
+          </p>
+          <p>
+            Submitting the form does not authorize automated marketing calls or texts. If we later
+            want to send automated or recurring promotional messages that require separate consent,
+            we will ask for it separately. You can ask us to stop contacting you or delete your
+            waitlist entry at any time using the address in Section 21.
+          </p>
+          <p>
+            The form is processed by a server-side Firebase Function and stored in a private Google
+            Cloud Firestore collection. Browser clients cannot read or write that collection directly.
+            To limit abuse, the server validates a small fixed field set, rejects oversized or invalid
+            values, uses a hidden spam field, and rate-limits submissions. The database is configured
+            in Google's North America multi-region. The server necessarily
+            receives the network IP address for delivery, but does not write the raw IP address into
+            the waitlist. It stores a keyed one-way IP hash in a separate rate-limit record with a
+            two-hour expiration; automated cleanup can occur after that expiration. Google may
+            separately process network and security logs under its
+            service terms as described above.
+          </p>
         </section>
 
         <section id="network" class="legal-section">
@@ -177,7 +218,8 @@
             <li><strong>Documentation monitoring:</strong> requests to provider documentation, changelog, pricing, or other URLs you choose to watch.</li>
             <li><strong>Destinations and notifications:</strong> test and delivery requests to configured webhook endpoints, external secret destinations, or other channels.</li>
             <li><strong>Local gateway and process runner:</strong> API requests forwarded from your local software to the provider or origin you configured. Credentials may be attached to those provider requests when required for the request to work.</li>
-            <li><strong>Optional analytics:</strong> requests to Google Analytics after consent, as described above.</li>
+            <li><strong>Product analytics:</strong> the regional classification request and, when enabled, requests to Google Analytics as described above.</li>
+            <li><strong>Teams waitlist:</strong> an HTTPS submission to our Firebase Function when you choose to join the waitlist.</li>
           </ul>
           <p>
             Provider and destination communications go directly between your device and the relevant
@@ -189,7 +231,7 @@
 
         <section id="not-collected" class="legal-section">
           <h2>7. Information we do not collect as the product operator</h2>
-          <p>Unless you voluntarily include it in a support email or public open-source interaction, we do not collect:</p>
+          <p>Except for information you voluntarily include in the Teams waitlist, a support email, or a public open-source interaction, we do not collect:</p>
           <ul>
             <li>Account registration details, because Tethra has no user accounts;</li>
             <li>Payment cards, bank information, subscriptions, or purchase histories;</li>
@@ -204,9 +246,10 @@
           <h2>8. How we use information we receive</h2>
           <p>We use the limited information described in Sections 4 and 5 to:</p>
           <ul>
-            <li>Measure website visits, download interest, app adoption, broad feature use, and retention after consent;</li>
+            <li>Measure website visits, download interest, app adoption, broad feature use, and retention when analytics is enabled;</li>
             <li>Identify usability problems and prioritize product improvements using aggregate trends;</li>
             <li>Deliver and secure the website and downloads;</li>
+            <li>Measure interest in Tethra for Teams, plan that offering, prevent form abuse, and respond to a follow-up request when contact information is supplied;</li>
             <li>Respond to support, privacy, security, and legal inquiries you send us;</li>
             <li>Detect abuse, investigate incidents, enforce our Terms, and comply with law.</li>
           </ul>
@@ -217,9 +260,9 @@
           <h2>9. Legal bases for processing</h2>
           <p>If the GDPR, UK GDPR, or similar law applies, our legal bases are:</p>
           <ul>
-            <li><strong>Consent:</strong> optional Google Analytics and any optional communication for which we ask permission. You may withdraw consent at any time.</li>
-            <li><strong>Legitimate interests:</strong> securing and operating the website, preventing abuse, responding to inquiries, and protecting legal rights, balanced against your rights.</li>
-            <li><strong>Contract:</strong> steps necessary to provide a download or respond to a request you make under the Terms.</li>
+            <li><strong>Consent:</strong> Google Analytics where applicable law requires prior permission, and any optional communication for which we ask permission. You may withdraw consent at any time.</li>
+            <li><strong>Legitimate interests:</strong> limited product measurement where legally permitted, securing and operating the website, preventing abuse, evaluating demand for Tethra for Teams, responding to inquiries, and protecting legal rights, balanced against your rights.</li>
+            <li><strong>Request or pre-contract steps:</strong> providing a download or responding when you submit contact information and ask for Teams follow-up.</li>
             <li><strong>Legal obligation:</strong> records or disclosures required by applicable law, court order, or lawful process.</li>
           </ul>
           <p>Local processing performed solely on your device under your control is generally not processing performed by Tethra as a controller.</p>
@@ -229,8 +272,8 @@
           <h2>10. Sharing, disclosure, and service providers</h2>
           <p>We disclose information only as follows:</p>
           <ul>
-            <li><strong>Google Firebase Hosting:</strong> website and download delivery, availability, and security.</li>
-            <li><strong>Google Analytics:</strong> pseudonymous analytics only after consent. Google acts under its applicable data-processing and service terms.</li>
+            <li><strong>Google Firebase Hosting, Cloud Functions, and Firestore:</strong> website and download delivery, Teams waitlist processing and storage, availability, and security.</li>
+            <li><strong>Google Analytics:</strong> pseudonymous measurement when enabled by the applicable regional default or your affirmative choice. Google acts under its applicable data-processing and service terms.</li>
             <li><strong>Third parties you direct:</strong> providers, API origins, destinations, webhook services, and storage services you configure. These are recipients you select, not Tethra subprocessors for a hosted vault.</li>
             <li><strong>Legal and safety disclosures:</strong> when reasonably necessary to comply with law, respond to valid process, prevent harm or abuse, or protect rights and security.</li>
             <li><strong>Business transfers:</strong> in a merger, financing, acquisition, reorganization, bankruptcy, or asset transfer, subject to applicable notice and protection requirements.</li>
@@ -241,21 +284,23 @@
         <section id="tracking" class="legal-section">
           <h2>11. Cookies, local storage, and tracking controls</h2>
           <p>
-            Tethra stores your analytics choice in browser or webview local storage under a Tethra-specific
-            key. If you opt in, Google Analytics may set <code>_ga</code> and related first-party cookies or
-            equivalent local identifiers. The website has no authentication or payment cookies.
+            Tethra stores an affirmative choice or opt-out in browser or webview local storage under a
+            Tethra-specific key. A regional U.S. default is not stored as affirmative consent. When
+            analytics is enabled, Google Analytics may set <code>_ga</code> and related first-party cookies
+            or equivalent local identifiers. The website has no authentication or payment cookies.
           </p>
           <p>
-            You may withdraw consent through "Privacy choices" on the website or the Analytics control in
-            app Settings. Withdrawal disables future Analytics events and attempts to clear Analytics cookies
+            You may opt out or withdraw consent through "Privacy choices" on the website or the Analytics control in
+            app Settings. Turning it off disables future Analytics events and attempts to clear Analytics cookies
             accessible to Tethra. You can also clear site or app-webview data using system controls. Clearing
-            storage resets the choice and may cause the consent request to reappear.
+            storage resets the choice and may cause the analytics choice to reappear outside the United States.
           </p>
           <h3>11.1 Global Privacy Control and Do Not Track</h3>
           <p>
-            Because Analytics is off by default, a browser Global Privacy Control signal leaves it off unless
-            you later make an affirmative choice. There is no uniform legal or technical standard for browser
-            Do Not Track signals; we do not rely on DNT as a substitute for the consent control.
+            A browser Global Privacy Control signal disables analytics and overrides a saved grant or U.S.
+            regional default. We also check for this signal in the desktop webview when it is exposed there.
+            There is no uniform legal or technical standard for browser Do Not Track signals; we do not rely
+            on DNT as a substitute for the analytics control.
           </p>
         </section>
 
@@ -263,8 +308,9 @@
           <h2>12. Data retention</h2>
           <ul>
             <li><strong>Analytics:</strong> user-level and event-level Google Analytics data is retained for no longer than 14 months, subject to shorter settings or deletion. Aggregated reports without user-level identifiers may remain longer.</li>
-            <li><strong>Consent choice:</strong> stored locally until you change it, clear storage, or uninstall/remove related application data.</li>
+            <li><strong>Analytics choice:</strong> an affirmative choice or opt-out is stored locally until you change it, clear storage, or uninstall/remove related application data.</li>
             <li><strong>Hosting and security records:</strong> retained by Google and us only as needed for delivery, security, dispute resolution, and legal obligations under applicable service settings.</li>
+            <li><strong>Teams waitlist:</strong> scheduled to expire 12 months after submission unless you ask us to delete it sooner, we choose a shorter period, or law requires a narrowly limited longer record. Automated deletion can occur after the expiration time. Keyed rate-limit records have a two-hour expiration and are removed by automated cleanup after expiration.</li>
             <li><strong>Support correspondence:</strong> retained while needed to answer the request, maintain security records, resolve disputes, and comply with law.</li>
             <li><strong>Local vault data:</strong> retained on your device until you delete it. Removing the app may not automatically remove its data directory or backups.</li>
           </ul>
@@ -307,8 +353,10 @@
             protection authority. These rights may be subject to legal exceptions and identity verification.
           </p>
           <p>
-            Because we do not have accounts and avoid direct identifiers, we may be unable to identify a
-            particular Analytics record from an email address alone. We will not collect unnecessary identity
+            Because we do not have accounts and avoid direct identifiers in Analytics, we may be unable to identify a
+            particular Analytics record from an email address alone. If you supplied contact information to the
+            Teams waitlist, we can use that information to locate a matching entry after proportionate verification.
+            We will not collect unnecessary identity
             documents merely to link you to pseudonymous data. Where feasible, we may ask for a Google Analytics
             client identifier or other limited verification information. You may use an authorized agent where law permits.
           </p>
@@ -318,10 +366,11 @@
           <h2>16. Deletion, withdrawal, and local controls</h2>
           <ul>
             <li>Turn off app Analytics in Tethra Settings.</li>
-            <li>Use "Privacy choices" in the website footer and select "Keep off."</li>
+            <li>Use "Privacy choices" in the website footer and select "Turn off."</li>
             <li>Clear Tethra website or webview storage and cookies through your browser or operating system.</li>
             <li>Delete records using Tethra's product controls, and remove the local Tethra data directory and any backups if you want to erase the entire local vault.</li>
             <li>Contact us to request deletion of information we control. We will honor verified requests as required by law and may retain narrowly limited records for security, legal compliance, or dispute resolution.</li>
+            <li>Ask us to remove a Teams waitlist entry or stop follow-up by emailing the address in Section 21.</li>
           </ul>
           <p class="legal-callout warning">
             Tethra cannot delete copies held by providers, webhook recipients, backup locations, source-control
@@ -339,8 +388,9 @@
             against you for exercising them.
           </p>
           <p>
-            In the preceding 12 months, the categories we may have collected after consent are identifiers
-            (pseudonymous Analytics identifiers and network identifiers), internet or electronic activity,
+            In the preceding 12 months, the categories we may have collected are identifiers and contact information
+            (optional waitlist name, email address, phone number, pseudonymous Analytics identifiers, and network
+            identifiers), professional information (optional company), internet or electronic activity,
             approximate geolocation derived from IP, and device/browser information. Sources, purposes, and
             recipients are described above. We do not knowingly collect sensitive personal information through
             Analytics, sell personal information, or share it for cross-context behavioral advertising.
@@ -401,14 +451,14 @@
       <div class="footer-inner">
         <div><img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" /><b>tethra.</b></div>
         <p>Local-first API credential intelligence.</p>
-        <nav aria-label="Legal and privacy"><a href="./index.html">Home</a><a href="./terms.html" data-legal="terms">Terms</a><button type="button" data-privacy-choices>Privacy choices</button></nav>
+        <nav aria-label="Legal and privacy"><a href="./index.html">Home</a><a href="./docs.html">Docs</a><a href="./teams.html">Teams</a><a href="./terms.html" data-legal="terms">Terms</a><button type="button" data-privacy-choices>Privacy choices</button></nav>
         <small>&copy; 2026 tethra. All rights reserved.</small>
       </div>
     </footer>
 
     <aside class="consent-banner" data-consent-banner hidden aria-labelledby="consent-title">
-      <div><p class="consent-kicker">Your choice</p><h2 id="consent-title">Optional product analytics</h2><p>Allow pseudonymous Google Analytics for broad page, session, download, and feature-use measurement. No vault, credential, project, path, provider, or request data is included.</p></div>
-      <div class="consent-actions"><button type="button" class="button quiet" data-consent="denied">Keep off</button><button type="button" class="button primary" data-consent="granted">Allow analytics</button></div>
+      <div><p class="consent-kicker">Your choice</p><h2 id="consent-title">Product analytics</h2><p data-consent-copy>Allow pseudonymous Google Analytics for broad page, session, download, and feature-use measurement. No vault, credential, project, path, provider, or request data is included.</p></div>
+      <div class="consent-actions"><button type="button" class="button quiet" data-consent="denied">Turn off</button><button type="button" class="button primary" data-consent="granted">Allow analytics</button></div>
     </aside>
   </body>
 </html>

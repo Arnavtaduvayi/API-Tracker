@@ -1,13 +1,9 @@
-// Two-column shell for the vault gate screens (create / unlock).
-//
-// It wraps the existing VaultSetup and VaultUnlock components without
-// modifying them: they render into the left column exactly as before, while
-// the right column carries the decorative wireframe globe.
+// Vault gate shell (create / unlock). The ambient particle field is masked
+// away from the form so the left side remains calm and readable.
 
 import type { ReactNode } from "react";
 import { BrandLockup } from "./BrandLockup";
 import { ParticleField } from "./ParticleField";
-import { WireGlobe } from "./WireGlobe";
 
 export function Gate({ eyebrow, children }: { eyebrow: string; children: ReactNode }) {
   return (
@@ -17,9 +13,6 @@ export function Gate({ eyebrow, children }: { eyebrow: string; children: ReactNo
         <BrandLockup className="gate-brand" />
         <p className="gate-eyebrow">{eyebrow}</p>
         {children}
-      </div>
-      <div className="gate-art">
-        <WireGlobe className="globe-wrap" />
       </div>
     </div>
   );

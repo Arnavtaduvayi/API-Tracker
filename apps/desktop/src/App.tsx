@@ -50,7 +50,6 @@ import { AnalyticsConsentBanner } from "./components/AnalyticsConsent";
 import { Gate } from "./components/visuals/Gate";
 import { BrandLockup } from "./components/visuals/BrandLockup";
 import { ParticleField, type ParticleMode } from "./components/visuals/ParticleField";
-import { WireGlobe } from "./components/visuals/WireGlobe";
 import { NavIcon } from "./components/visuals/NavIcons";
 import {
   getAnalyticsConsent,
@@ -91,10 +90,7 @@ export type View =
 
 type VaultState = "loading" | "missing" | "locked" | "unlocked";
 
-/**
- * Sidebar navigation. These are the same 16 destinations the old top bar had,
- * with identical labels — only grouped for scanability.
- */
+/** Primary destinations. Operational configuration lives inside Settings. */
 const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
   {
     label: "Activity",
@@ -106,6 +102,60 @@ const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
   {
     label: "Vault",
     items: [["providers", "Providers"]],
+  },
+  {
+    label: "Monitoring",
+    items: [
+      ["alerts", "Alerts"],
+      ["notify", "Notifications"],
+      ["usage", "Usage"],
+      ["api-activity", "API activity"],
+      ["pricing", "Pricing"],
+    ],
+  },
+  {
+    label: "System",
+    items: [["settings", "Settings"]],
+  },
+];
+
+type SettingsDestination =
+  | "settings"
+  | "templates"
+  | "backup"
+  | "track"
+  | "gateway"
+  | "scan"
+  | "env"
+  | "destinations"
+  | "sync"
+  | "rotation"
+  | "access";
+
+const SETTINGS_DESTINATIONS = new Set<View["name"]>([
+  "settings",
+  "templates",
+  "backup",
+  "track",
+  "gateway",
+  "scan",
+  "env",
+  "destinations",
+  "sync",
+  "rotation",
+  "access",
+]);
+
+const ADVANCED_SETTINGS: {
+  label: string;
+  items: [SettingsDestination, string][];
+}[] = [
+  {
+    label: "Tracking",
+    items: [
+      ["track", "Tracking setup"],
+      ["gateway", "Gateway internals"],
+    ],
   },
   {
     label: "Exposure",
@@ -123,37 +173,82 @@ const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
       ["access", "Temporary access"],
     ],
   },
-  {
-    label: "Monitoring",
-    items: [
-      ["alerts", "Alerts"],
-      ["notify", "Notifications"],
-      ["usage", "Usage"],
-      ["api-activity", "API activity"],
-      ["pricing", "Pricing"],
-    ],
-  },
-  {
-    label: "Advanced",
-    items: [
-      ["track", "Tracking setup"],
-      ["gateway", "Gateway internals"],
-    ],
-  },
-  {
-    label: "System",
-    items: [
-      ["templates", "Templates"],
-      ["backup", "Backup"],
-      ["settings", "Settings"],
-    ],
-  },
 ];
+
+const ADVANCED_DESTINATIONS = new Set<View["name"]>(
+  ADVANCED_SETTINGS.flatMap((group) => group.items.map(([name]) => name)),
+);
+
+function isSettingsDestination(name: View["name"]): name is SettingsDestination {
+  return SETTINGS_DESTINATIONS.has(name);
+}
+
+function SettingsNavigation({
+  current,
+  onNavigate,
+}: {
+  current: SettingsDestination;
+  onNavigate: (name: SettingsDestination) => void;
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(() => ADVANCED_DESTINATIONS.has(current));
+
+  useEffect(() => {
+    if (ADVANCED_DESTINATIONS.has(current)) setAdvancedOpen(true);
+  }, [current]);
+
+  const item = (name: SettingsDestination, label: string) => (
+    <button
+      key={name}
+      type="button"
+      className={current === name ? "settings-menu-item active" : "settings-menu-item"}
+      aria-current={current === name ? "page" : undefined}
+      onClick={() => onNavigate(name)}
+    >
+      <NavIcon name={name} />
+      <span>{label}</span>
+    </button>
+  );
+
+  return (
+    <nav className="settings-menu" aria-label="Settings">
+      <p className="settings-menu-title">Settings</p>
+      {item("settings", "General")}
+      {item("templates", "Templates")}
+      {item("backup", "Backup")}
+      <button
+        type="button"
+        className={
+          ADVANCED_DESTINATIONS.has(current)
+            ? "settings-menu-item settings-menu-toggle active"
+            : "settings-menu-item settings-menu-toggle"
+        }
+        aria-expanded={advancedOpen}
+        onClick={() => setAdvancedOpen((open) => !open)}
+      >
+        <NavIcon name="gateway" />
+        <span>Advanced</span>
+        <svg viewBox="0 0 12 12" aria-hidden="true">
+          <path d="m3.5 4.5 2.5 2.5 2.5-2.5" />
+        </svg>
+      </button>
+      {advancedOpen && (
+        <div className="settings-submenu" aria-label="Advanced settings">
+          {ADVANCED_SETTINGS.map((group) => (
+            <div className="settings-submenu-group" key={group.label}>
+              <p>{group.label}</p>
+              {group.items.map(([name, label]) => item(name, label))}
+            </div>
+          ))}
+        </div>
+      )}
+    </nav>
+  );
+}
 
 /** Nested views highlight (and breadcrumb to) their owning nav destination. */
 const SECTION_OF: Record<View["name"], View["name"]> = {
   dashboard: "dashboard",
-  track: "track",
+  track: "settings",
   projects: "projects",
   project: "projects",
   "project-new": "projects",
@@ -163,20 +258,20 @@ const SECTION_OF: Record<View["name"], View["name"]> = {
   "credential-edit": "projects",
   providers: "providers",
   provider: "providers",
-  scan: "scan",
-  env: "env",
-  destinations: "destinations",
-  sync: "sync",
-  rotation: "rotation",
-  access: "access",
+  scan: "settings",
+  env: "settings",
+  destinations: "settings",
+  sync: "settings",
+  rotation: "settings",
+  access: "settings",
   alerts: "alerts",
   notify: "notify",
   usage: "usage",
   "api-activity": "api-activity",
-  gateway: "gateway",
+  gateway: "settings",
   pricing: "pricing",
-  templates: "templates",
-  backup: "backup",
+  templates: "settings",
+  backup: "settings",
   settings: "settings",
 };
 
@@ -499,18 +594,13 @@ export default function App() {
               </div>
             ))}
           </nav>
-          <div className="sidebar-foot">
-            <WireGlobe className="globe-mini" />
-          </div>
         </aside>
 
         <div className="main">
           <header className="topbar">
             <span className="crumb">{activeLabel}</span>
             <span className="spacer" />
-            <span className="local-status">
-              <i aria-hidden="true" /> Local vault
-            </span>
+            <span className="local-status">Local vault</span>
             <button className="lock-button" onClick={() => void lockNow()}>
               Lock vault
             </button>
@@ -527,15 +617,6 @@ export default function App() {
                   trackAnalytics({ name: "tracking_setup_started" });
                   setView({ name: "track" });
                 }}
-              />
-            )}
-            {view.name === "track" && (
-              // The manual route form lives in Advanced → Gateway internals. A
-              // desktop-only user must be able to REACH it, not be told to run a
-              // CLI command they do not have (ZFT-009).
-              <TrackFlow
-                onDone={() => setView({ name: "dashboard" })}
-                onOpenAdvanced={() => setView({ name: "gateway" })}
               />
             )}
             {view.name === "projects" && (
@@ -604,23 +685,44 @@ export default function App() {
             {view.name === "provider" && (
               <ProviderDetail id={view.id} onBack={() => setView({ name: "providers" })} />
             )}
-            {view.name === "scan" && <ScanView />}
-            {view.name === "env" && <EnvView />}
-            {view.name === "destinations" && <DestinationsView />}
-            {view.name === "sync" && <SyncView />}
-            {view.name === "rotation" && <RotationView />}
-            {view.name === "access" && <AccessView />}
             {view.name === "alerts" && <AlertsView />}
             {view.name === "notify" && <NotifyView />}
             {view.name === "usage" && <UsageView />}
             {view.name === "api-activity" && <ApiActivityView />}
-            {view.name === "gateway" && <GatewayView />}
             {view.name === "pricing" && <PricingView />}
-            {view.name === "templates" && <TemplatesView />}
-            {view.name === "settings" && (
-              <SettingsView dataDir={dataDir} onSaved={() => void reloadMonitorInterval()} />
+            {isSettingsDestination(view.name) && (
+              <div className="settings-workspace">
+                <SettingsNavigation
+                  current={view.name}
+                  onNavigate={(name) => setView({ name } as View)}
+                />
+                <div className="settings-workspace-content">
+                  {view.name === "settings" && (
+                    <SettingsView
+                      dataDir={dataDir}
+                      onSaved={() => void reloadMonitorInterval()}
+                    />
+                  )}
+                  {view.name === "templates" && <TemplatesView />}
+                  {view.name === "backup" && (
+                    <BackupView onRestored={() => void refreshStatus()} />
+                  )}
+                  {view.name === "track" && (
+                    <TrackFlow
+                      onDone={() => setView({ name: "dashboard" })}
+                      onOpenAdvanced={() => setView({ name: "gateway" })}
+                    />
+                  )}
+                  {view.name === "gateway" && <GatewayView />}
+                  {view.name === "scan" && <ScanView />}
+                  {view.name === "env" && <EnvView />}
+                  {view.name === "destinations" && <DestinationsView />}
+                  {view.name === "sync" && <SyncView />}
+                  {view.name === "rotation" && <RotationView />}
+                  {view.name === "access" && <AccessView />}
+                </div>
+              </div>
             )}
-            {view.name === "backup" && <BackupView onRestored={() => void refreshStatus()} />}
           </main>
         </div>
       </div>

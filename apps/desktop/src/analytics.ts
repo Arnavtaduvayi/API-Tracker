@@ -1,8 +1,10 @@
 const MEASUREMENT_ID = "G-MJQHJ6JT5Z";
 const CONSENT_KEY = "tethra.analytics-consent.v1";
 const CONSENT_EVENT = "tethra:analytics-consent";
+const REGION_URL = "https://usetethra.com/region.json";
+const REGION_TIMEOUT_MS = 4_000;
 
-export type AnalyticsConsent = "granted" | "denied" | "unset";
+export type AnalyticsConsent = "granted" | "denied" | "unset" | "resolving";
 
 export type AnalyticsScreen =
   | "vault_setup"
@@ -53,6 +55,7 @@ let configured = false;
 let scriptRequested = false;
 let sessionReported = false;
 let lastScreen: AnalyticsScreen | null = null;
+let initialization: Promise<AnalyticsConsent> | null = null;
 
 function storageAvailable() {
   try {
@@ -65,10 +68,22 @@ function storageAvailable() {
   }
 }
 
-export function getAnalyticsConsent(): AnalyticsConsent {
+function readStoredConsent(): Exclude<AnalyticsConsent, "resolving"> {
   if (!storageAvailable()) return "unset";
   const saved = localStorage.getItem(CONSENT_KEY);
   return saved === "granted" || saved === "denied" ? saved : "unset";
+}
+
+const initialStoredConsent = readStoredConsent();
+let effectiveConsent: AnalyticsConsent =
+  initialStoredConsent === "unset" ? "resolving" : initialStoredConsent;
+
+export function getAnalyticsConsent(): AnalyticsConsent {
+  return effectiveConsent;
+}
+
+function broadcastConsent(consent: AnalyticsConsent) {
+  window.dispatchEvent(new CustomEvent(CONSENT_EVENT, { detail: consent }));
 }
 
 function disableGoogleAnalytics(disabled: boolean) {
@@ -129,11 +144,70 @@ function configureAnalytics() {
   }
 }
 
-export function initializeAnalytics() {
-  if (getAnalyticsConsent() === "granted") configureAnalytics();
+/**
+ * Resolve the user's explicit choice first, then the hosting-provided country
+ * default. A regional default is intentionally kept in memory rather than
+ * stored as consent: moving outside the US on a later launch must not turn a
+ * regional default into a durable affirmative choice.
+ */
+export function initializeAnalytics(): Promise<AnalyticsConsent> {
+  if (initialization) return initialization;
+
+  initialization = (async () => {
+    const stored = readStoredConsent();
+    const globalPrivacyControl = (navigator as Navigator & { globalPrivacyControl?: boolean })
+      .globalPrivacyControl;
+
+    if (globalPrivacyControl === true) {
+      if (storageAvailable()) localStorage.setItem(CONSENT_KEY, "denied");
+      effectiveConsent = "denied";
+      disableGoogleAnalytics(true);
+      deleteAnalyticsCookies();
+      broadcastConsent(effectiveConsent);
+      return effectiveConsent;
+    }
+
+    if (stored !== "unset") {
+      effectiveConsent = stored;
+      if (effectiveConsent === "granted") configureAnalytics();
+      broadcastConsent(effectiveConsent);
+      return effectiveConsent;
+    }
+
+    let useUsDefault = false;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), REGION_TIMEOUT_MS);
+    try {
+      const response = await fetch(REGION_URL, {
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        signal: controller.signal,
+      });
+      if (response.ok) {
+        const region = (await response.json()) as {
+          country?: unknown;
+          analyticsDefault?: unknown;
+        };
+        useUsDefault = region.country === "US" && region.analyticsDefault === true;
+      }
+    } catch {
+      // If region cannot be established, fall back to the consent request.
+    } finally {
+      window.clearTimeout(timeout);
+    }
+
+    effectiveConsent = useUsDefault ? "granted" : "unset";
+    if (effectiveConsent === "granted") configureAnalytics();
+    broadcastConsent(effectiveConsent);
+    return effectiveConsent;
+  })();
+
+  return initialization;
 }
 
-export function setAnalyticsConsent(consent: Exclude<AnalyticsConsent, "unset">) {
+export function setAnalyticsConsent(consent: Exclude<AnalyticsConsent, "unset" | "resolving">) {
+  effectiveConsent = consent;
   if (storageAvailable()) localStorage.setItem(CONSENT_KEY, consent);
 
   if (consent === "granted") {
@@ -151,7 +225,7 @@ export function setAnalyticsConsent(consent: Exclude<AnalyticsConsent, "unset">)
     lastScreen = null;
   }
 
-  window.dispatchEvent(new CustomEvent(CONSENT_EVENT, { detail: consent }));
+  broadcastConsent(consent);
 }
 
 export function subscribeToAnalyticsConsent(listener: (consent: AnalyticsConsent) => void) {

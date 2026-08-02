@@ -9,9 +9,9 @@ state each key is in — expired, expiring soon, unused, stale, reused across
 projects — with the reason and evidence for every claim.
 
 The vault stays on your computer. There is **no account**, hosted vault, or
-Tethra credential server. Product analytics is disabled by default and loads
-only after explicit consent; its small event allowlist excludes credentials,
-vault records, project/provider names, paths, URLs, and request content. Other
+Tethra credential server. Measurement analytics uses a U.S. regional default
+with opt-out and remains opt-in elsewhere; its small event allowlist excludes
+credentials, vault records, project/provider names, paths, URLs, and request content. Other
 network traffic goes directly from your machine to providers, destinations,
 webhooks, or documentation pages you configure. See [Analytics](docs/ANALYTICS.md)
 and the [Privacy Policy](landing/privacy.html).

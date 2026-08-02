@@ -217,9 +217,7 @@ export function DashboardView({ onTrack }: { onTrack: () => void }) {
             </button>
           ))}
         </div>
-        <span className="dashboard-signal">
-          <i aria-hidden="true" /> Observing locally
-        </span>
+        <span className="dashboard-signal">Observing locally</span>
       </div>
 
       {foreground?.active && (

@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+functions/.secret.local
 # Atomic-write temp files (crates/core/src/envgov.rs). These hold the COMPLETE
 # new file — real credential values included — if a crash lands between the
 # write and the rename. For `.env` the name is `..env.api-tracker-tmp-<uuid>`,

@@ -4,10 +4,8 @@ import "@testing-library/jest-dom/vitest";
 import { afterEach, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 
-// jsdom ships no ResizeObserver, which the decorative react-three-fiber
-// canvas measures itself with. Stub it so component trees containing the
-// visual chrome still render; the 3D scene itself is not under test.
-// jsdom has no matchMedia either; the sidebar uses it to auto-collapse.
+// jsdom has no matchMedia; the sidebar and ambient renderer use it for
+// responsive layout and reduced-motion preferences.
 // Reports "does not match", i.e. the expanded desktop layout.
 if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
   window.matchMedia = ((query: string) => ({

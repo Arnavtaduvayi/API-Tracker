@@ -3,6 +3,14 @@
 // paired with the destination's exact label as a tooltip in App.tsx.
 
 const PATHS: Record<string, JSX.Element> = {
+  // Activity
+  dashboard: (
+    <>
+      <path d="M2.3 12.8h11.4" />
+      <path d="m3 10.7 3.1-3.2 2.3 1.8 4.3-5" />
+      <path d="M10.5 4.3h2.2v2.2" />
+    </>
+  ),
   // Vault
   projects: (
     <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.2 1.6h4.8A1.5 1.5 0 0 1 14 6.1v6.4A1.5 1.5 0 0 1 12.5 14h-9A1.5 1.5 0 0 1 2 12.5Z" />

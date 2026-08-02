@@ -1,27 +1,35 @@
-# Consent-first product analytics
+# Region-aware product analytics
 
 Tethra uses the GA4 web stream `G-MJQHJ6JT5Z` in Firebase project
-`usetethra`. Analytics is **off by default** on the landing site and desktop
-app. Google code is not requested until a user affirmatively allows analytics.
-Core product behavior never depends on consent.
+`usetethra`. Measurement analytics is on by default for users resolved to the
+United States and remains opt-in elsewhere. A stored opt-out and Global Privacy
+Control always override the regional default. Core product behavior never
+depends on analytics.
 
 This is pseudonymous measurement, not authentication and not guaranteed
 anonymous under every privacy law. Tethra has no Firebase Authentication user
 and sends no GA `user_id`. GA's first-party client identifier is the only
-returning-user mechanism after opt-in.
+returning-user mechanism while analytics is enabled.
 
-## Consent behavior
+## Regional choice behavior
 
 - Landing choice: local storage key `tethra.analytics-consent.v1`; change it
   with **Privacy choices** in the footer.
 - Desktop choice: the same key in the Tauri webview's separate local storage;
   change it under **Settings -> Pseudonymous product analytics**.
-- Before grant: no `gtag.js`, no GA request, no Analytics cookie.
-- After grant: `analytics_storage=granted`; `ad_storage`, `ad_user_data`, and
+- Firebase Hosting serves `/region.json` using its IP-derived country routing.
+  U.S. responses enable measurement without an unsolicited banner; other or
+  unresolved regions remain opt-in.
+- The U.S. default is kept in memory rather than stored as affirmative consent,
+  so a later session outside the U.S. returns to opt-in behavior.
+- Before enablement: no `gtag.js`, no GA request, no Analytics cookie.
+- When enabled: `analytics_storage=granted`; `ad_storage`, `ad_user_data`, and
   `ad_personalization` remain denied.
 - Google Signals and ad personalization signals are disabled.
 - On withdrawal: events stop, GA is disabled, consent is updated to denied,
   and accessible `_ga` cookies are cleared.
+- A Global Privacy Control signal disables analytics even if a prior grant was
+  stored. The desktop honors it when the webview exposes the signal.
 - Landing collection runs only on the HTTPS production hosts, never from
   `file://`, localhost, or a developer preview.
 
@@ -29,21 +37,21 @@ returning-user mechanism after opt-in.
 
 | Event | When it fires | Parameters |
 | --- | --- | --- |
-| `landing_session_start` | A consented page initializes | `page_type` |
+| `landing_session_start` | An analytics-enabled page initializes | `page_type` |
 | `landing_section_view` | A home-page section reaches 45% visibility, once per page | `page_type`, `section` |
 | `installer_download_clicked` | A macOS or Windows installer CTA is clicked | `page_type`, `source` (`nav`, `hero`, `final`, `legal`), `platform` (`macos`, `windows`) |
 | `navigation_clicked` | An instrumented navigation link is clicked | `page_type`, `destination` |
 | `legal_document_opened` | Privacy or Terms link is clicked | `page_type`, `document` |
 | `analytics_consent_granted` | The user selects Allow | `page_type`, fixed consent-banner source |
 
-Website locations are normalized to `https://usetethra.com/`, `/privacy`, or
-`/terms`, and referrers are suppressed in Tethra's GA configuration.
+Website locations are normalized to `https://usetethra.com/`, `/privacy`,
+`/terms`, or `/docs`, and referrers are suppressed in Tethra's GA configuration.
 
 ## Desktop events
 
 | Event | When it fires | Parameters |
 | --- | --- | --- |
-| `app_session_start` | A consented app webview session initializes | `app_surface=desktop` |
+| `app_session_start` | An analytics-enabled app webview session initializes | `app_surface=desktop` |
 | `screen_view` | A finite app screen or vault gate becomes active | `app_surface`, allowlisted `screen_name` |
 | `vault_unlocked` | Setup or unlock succeeds | `app_surface` |
 | `vault_locked` | Manual or backend-driven lock succeeds | `app_surface` |

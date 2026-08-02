@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getAnalyticsConsent,
+  initializeAnalytics,
   setAnalyticsConsent,
   subscribeToAnalyticsConsent,
   trackAnalytics,
@@ -30,7 +31,11 @@ function LegalLink(props: { document: keyof typeof LEGAL_URLS; children: string 
 
 function useConsent() {
   const [consent, setConsent] = useState<Consent>(() => getAnalyticsConsent());
-  useEffect(() => subscribeToAnalyticsConsent(setConsent), []);
+  useEffect(() => {
+    const unsubscribe = subscribeToAnalyticsConsent(setConsent);
+    void initializeAnalytics().then(setConsent);
+    return unsubscribe;
+  }, []);
   return consent;
 }
 
@@ -78,6 +83,7 @@ export function AnalyticsConsentBanner() {
 export function AnalyticsPreferences() {
   const consent = useConsent();
   const enabled = consent === "granted";
+  const resolving = consent === "resolving";
 
   return (
     <section
@@ -93,6 +99,7 @@ export function AnalyticsPreferences() {
           <input
             type="checkbox"
             checked={enabled}
+            disabled={resolving}
             onChange={(event) => {
               const next = event.target.checked ? "granted" : "denied";
               setAnalyticsConsent(next);
@@ -100,14 +107,14 @@ export function AnalyticsPreferences() {
             }}
           />
           <span aria-hidden="true" />
-          <b>{enabled ? "Allowed" : "Off"}</b>
+          <b>{resolving ? "Checking" : enabled ? "Allowed" : "Off"}</b>
         </label>
       </div>
       <p className="muted">
-        Off by default. When allowed, Tethra sends a small allowlisted set of screen, session,
-        and product-action events to Google Analytics. It does not send vault contents or
-        free-form values. Turning this off stops future collection and clears accessible
-        Analytics cookies.
+        Measurement analytics is on by default for users in the United States unless Global
+        Privacy Control or a prior opt-out applies; elsewhere Tethra asks before enabling it.
+        The allowlisted events exclude vault contents and free-form values. Turning this off
+        stops future collection and clears accessible Analytics cookies.
       </p>
       <p className="consent-links">
         <LegalLink document="privacy">Read privacy policy</LegalLink>
