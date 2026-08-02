@@ -1,1 +1,1 @@
-a952387d6cad8d9bae0a474b942a33b8e476f5de67b9fab0707ac8c238ea5dca  Tethra_0.1.0_x64-setup.exe
+2c9a99bec6a9e9b7a87252d352f98a18609a4e6f5ed9ad0ef184e87ab5211712  Tethra_0.1.0_x64-setup.exe
