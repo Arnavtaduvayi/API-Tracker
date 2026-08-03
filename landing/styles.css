@@ -394,6 +394,44 @@ h2 {
   line-height: 1.6;
 }
 
+/*
+  `p { margin-top: 0 }` plus `.section-lede { margin-bottom: 0 }` means stacked
+  lede blocks sit flush. Space only the stacked case so single-lede sections
+  keep their existing rhythm.
+*/
+.section-lede + .section-lede,
+.section-lede + .overview-questions,
+.overview-questions + .section-lede {
+  margin-top: 19px;
+}
+
+/* Same type as .section-lede; the marker is the only added treatment. */
+.overview-questions {
+  max-width: 760px;
+  margin: 0;
+  padding: 0;
+  color: #66666d;
+  font-size: 19px;
+  line-height: 1.6;
+  list-style: none;
+}
+
+.overview-questions > li {
+  position: relative;
+  padding-left: 20px;
+}
+
+.overview-questions > li::before {
+  content: "";
+  position: absolute;
+  top: 0.62em;
+  left: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+
 .app-window {
   margin-top: 72px;
   color: var(--white);
