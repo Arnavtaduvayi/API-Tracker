@@ -43,19 +43,23 @@ ACTUAL_SHA=$(shasum -a 256 "$DMG" | awk '{print $1}')
   exit 1
 }
 
-rg -Fq "href=\"$MACOS_RELEASE_URL\"" landing/index.html || {
+# POSIX grep, not ripgrep. This gate runs as firebase.json's `predeploy` hook
+# under /bin/sh, where a tool that happens to be installed for interactive use
+# may not exist at all — and a deploy gate that cannot run is not a gate.
+# `-I` skips the DMG, which is a 12 MB binary sitting in the searched tree.
+grep -Fq "href=\"$MACOS_RELEASE_URL\"" landing/index.html || {
   echo "error: landing page does not link directly to the published DMG" >&2
   exit 1
 }
-rg -Fq "href=\"$WINDOWS_RELEASE_URL\"" landing/index.html || {
+grep -Fq "href=\"$WINDOWS_RELEASE_URL\"" landing/index.html || {
   echo "error: landing page does not link directly to the current Windows installer" >&2
   exit 1
 }
-if rg -q 'href="\./downloads/Tethra\.dmg"' landing; then
+if grep -rqI 'href="\./downloads/Tethra\.dmg"' landing; then
   echo "error: landing page still points at Firebase for the forbidden DMG" >&2
   exit 1
 fi
-if rg -q 'Tethra\.dmg\.zip' landing firebase.json; then
+if grep -rqI 'Tethra\.dmg\.zip' landing firebase.json; then
   echo "error: obsolete DMG ZIP reference remains in hosting content" >&2
   exit 1
 fi
