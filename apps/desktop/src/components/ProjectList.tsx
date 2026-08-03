@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, isApiError } from "../api";
 import type { Project, ProjectActivity } from "../types";
+import { relativeTime } from "../useLiveRefresh";
 import { Sparkline } from "./Sparkline";
 
 /** Locally observed volume for one project, if it could be read. */
@@ -176,7 +177,7 @@ function ProjectCard(props: { project: Project; volume: Volume | null; onOpen: (
 
       <p className="entity-foot">
         {project.environments.length > 0 ? project.environments.join(" · ") : "No environments"}
-        {volume?.lastEventAt ? ` · last request ${volume.lastEventAt}` : ""}
+        {volume?.lastEventAt ? ` · last request ${relativeTime(volume.lastEventAt)}` : ""}
       </p>
     </button>
   );

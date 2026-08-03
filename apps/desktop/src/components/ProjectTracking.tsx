@@ -17,6 +17,7 @@
 import { useCallback, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
+import { relativeTime } from "../useLiveRefresh";
 import type { DetectedCredential, FolderLinkPreview, ProjectOverview } from "../types";
 
 function errText(e: unknown): string {
@@ -177,7 +178,7 @@ export function ProjectTracking(props: {
               {tracking?.label ?? "unknown"}
             </dd>
             <dt>Last scanned</dt>
-            <dd>{link.last_scan_at ?? "never"}</dd>
+            <dd>{relativeTime(link.last_scan_at)}</dd>
           </dl>
 
           {/*

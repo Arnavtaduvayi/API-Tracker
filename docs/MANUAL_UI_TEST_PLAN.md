@@ -2842,3 +2842,74 @@ cover the primary workflow. Use fake credentials only.
 | T15 | Re-run is idempotent | Run T1 again on the same folder | "already tracked" note; no duplicate rows; no second file change. |
 | T16 | Load failure is visible | Simulate a backend failure for the activity fetch | Error text plus Retry — never an empty chart presented as no data. |
 | T17 | Advanced still reachable | Advanced → Gateway internals | The previous Gateway view, unchanged. |
+
+---
+
+## U — Card-based interface and first run (ADR 0030)
+
+Supersedes earlier cases wherever labels differ. Run against a scratch vault
+(`TETHRA_DATA_DIR` pointed somewhere disposable), never a real one.
+
+### U1 — First run, from nothing
+
+| # | Step | Expected |
+|---|---|---|
+| U1.1 | Delete the scratch vault, launch Tethra | "Create encrypted vault" gate |
+| U1.2 | Create the vault | Lands on **Welcome**, not an empty dashboard |
+| U1.3 | Read before clicking | The scope paragraph — reads variable *names*, never values, never runs your code, nothing uploaded — is on screen **before** the picker opens (ZFT-009) |
+| U1.4 | Click **Choose a project folder**, pick a repo with an `OPENAI_API_KEY` in `.env` | Native picker; then "Here is what is in `<folder>`" with a card per detected provider |
+| U1.5 | Check the disclosure | **What Tethra will change** is expanded already, and its lines are the backend's, not a summary |
+| U1.6 | Click **Start tracking** | Lands on the project page with the folder linked and live activity mounted |
+| U1.7 | Count it | ≤5 clicks from vault creation, zero terminal commands, no separate "create project" step |
+
+### U2 — First run, declining
+
+| # | Step | Expected |
+|---|---|---|
+| U2.1 | On Welcome, click **I'll do this later** | Dashboard, with an empty state offering **Choose a project folder** |
+| U2.2 | Reach the review screen, then click **Not now** | The project that was created is kept and opened; its page offers the same picker. Nothing is orphaned |
+| U2.3 | Relaunch with at least one project | Opens on Activity, not Welcome |
+
+### U3 — Dashboard
+
+| # | Step | Expected |
+|---|---|---|
+| U3.1 | With traffic recorded, open Activity | Four tiles: Requests, Tracked projects, Open alerts, Observed cost — each with its sub-line |
+| U3.2 | Check the chart | Request volume renders; hovering a point shows its bucket and value |
+| U3.3 | Stop the gateway, force an activity failure | Error text plus Retry. Never an empty chart presented as no data |
+| U3.4 | Run traffic through a provider with no usage shape (Cohere, Gemini, LangSmith, Replicate, Supabase) | Cost tile says "locally observed only" and shows **no** `$0.0000`; the "lower bound" caveat is absent |
+| U3.5 | Leave a gap in traffic, then resume | The line breaks across the gap for token/latency/cost metrics on the project page; requests may legitimately show zero |
+| U3.6 | Lock the vault so alerts cannot be read | Open alerts tile says "could not be read", not `0` |
+| U3.7 | Click a project card | Opens that project |
+| U3.8 | Check the feed | Attribution rows read as sentences; no raw token (`matched_fingerprint`, `unavailable`) appears anywhere |
+
+### U4 — Card grids
+
+| # | Step | Expected |
+|---|---|---|
+| U4.1 | Projects | One card per project with sparkline, credential count, requests, errors, last request as relative time — not a raw ISO timestamp |
+| U4.2 | A project with no traffic | Card reads "No traffic observed in this window"; its dot is **not** coloured as a fault |
+| U4.3 | A password-locked project | "Password-locked", amber dot |
+| U4.4 | Providers | All 21 manifests as cards with brand-coloured marks |
+| U4.5 | Search "STRIPE_SECRET" | Filters to Stripe; the "N of M providers" count updates |
+| U4.6 | A provider with no documented expiry | Says so explicitly; no card implies a capability its manifest does not declare |
+| U4.7 | Project → Credentials | Cards with provider mark, status badge, masked value. **No unmasked secret anywhere** |
+
+### U5 — Detected credentials are not a dead end
+
+| # | Step | Expected |
+|---|---|---|
+| U5.1 | On a linked project, find a pending detected credential | Row offers **Store this key** · Ignore · Managed elsewhere |
+| U5.2 | Click **Store this key** | Credential form opens with provider, name and environment pre-filled and the value field **empty** |
+| U5.3 | Paste a fake value and save | Credential stored; the detection row becomes "completed" without a second manual step |
+
+### U6 — Accessibility and layout
+
+| # | Step | Expected |
+|---|---|---|
+| U6.1 | Tab through a card grid | Every card is reachable and shows a visible focus ring |
+| U6.2 | VoiceOver on the dashboard chart | Announces the metric, the bucket count and the peak; the visually-hidden data table is readable |
+| U6.3 | VoiceOver on a project sparkline | Announces range, total and peak |
+| U6.4 | System → Reduce motion on | No card lift, no button transform, no chart animation |
+| U6.5 | Resize the window to ~700px, then ~560px | Grids collapse; the content pane never scrolls sideways |
+| U6.6 | Check every status dot | Each sits beside a word — colour never carries the meaning alone |

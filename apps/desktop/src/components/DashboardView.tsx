@@ -36,6 +36,7 @@ import {
   gatewayTokenAvailability,
   hasValue,
 } from "../usage";
+import { relativeTime } from "../useLiveRefresh";
 import { ReauthDialog } from "./ReauthDialog";
 import { ActivityChart } from "./ActivityChart";
 
@@ -538,7 +539,11 @@ export function DashboardView({
           <div className="metric-wide">
             <dt>Observation window</dt>
             <dd>
-              {summary.first_event_at ?? "—"} / {summary.last_event_at ?? "—"}
+              {summary.first_event_at
+                ? `First ${relativeTime(summary.first_event_at)}, most recent ${relativeTime(
+                    summary.last_event_at,
+                  )}`
+                : "Nothing observed in this window"}
             </dd>
           </div>
         </dl>
@@ -590,7 +595,9 @@ export function DashboardView({
                   )}
                 </p>
                 <p className="entity-foot">
-                  {p.last_event_at ? `Last request ${p.last_event_at}` : "No requests recorded"}
+                  {p.last_event_at
+                    ? `Last request ${relativeTime(p.last_event_at)}`
+                    : "No requests recorded"}
                 </p>
               </>
             );
@@ -706,7 +713,7 @@ export function DashboardView({
               : s.providers
                   .map((p) =>
                     p.last_observed_at
-                      ? `${p.provider_id}: last seen ${p.last_observed_at}`
+                      ? `${p.provider_id}: last seen ${relativeTime(p.last_observed_at)}`
                       : `${p.provider_id}: no traffic yet`,
                   )
                   .join(" · ")}
