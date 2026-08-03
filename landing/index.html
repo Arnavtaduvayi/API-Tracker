@@ -134,20 +134,28 @@
                 <b>Providers</b>
                 <small>Monitoring</small>
                 <b>Alerts</b>
+                <b>Notifications</b>
                 <b>Usage</b>
+                <b>API activity</b>
                 <small>System</small>
                 <b>Settings</b>
               </aside>
               <div class="demo-content">
                 <div class="demo-heading">
                   <div><small>Local request telemetry</small><h3>API activity</h3></div>
-                  <span>Track a project</span>
+                  <span>Track API activity</span>
                 </div>
+                <!--
+                  These four tiles are the four the app renders, with the
+                  sub-lines it actually writes. Keep them in step with
+                  DashboardView.tsx: an illustration that promises a figure the
+                  product does not show is the gap this redesign closed.
+                -->
                 <div class="demo-metrics">
-                  <div><small>Requests</small><strong>18,492</strong><em>+12.4%</em></div>
-                  <div><small>Tracked projects</small><strong>12</strong><em>3 active now</em></div>
-                  <div><small>Open alerts</small><strong>3</strong><em>1 rotation due</em></div>
-                  <div><small>Observed cost</small><strong>$418</strong><em>This month</em></div>
+                  <div><small>Requests</small><strong>18,492</strong><em>99% succeeded</em></div>
+                  <div><small>Tracked projects</small><strong>12</strong><em>3 active in this window</em></div>
+                  <div><small>Open alerts</small><strong>3</strong><em>top severity: medium</em></div>
+                  <div><small>Observed cost</small><strong>$418</strong><em>lower bound</em></div>
                 </div>
                 <div class="demo-chart" aria-hidden="true">
                   <div class="chart-label"><span>Request volume</span><small>30 days</small></div>
@@ -285,27 +293,70 @@
           <div class="cli-snippets reveal">
             <div>
               <p>macOS Apple Silicon</p>
-              <div class="code-box">
-                <button class="copy-button" type="button" data-copy-target="home-mac-cli">Copy</button>
-                <pre><code id="home-mac-cli">TETHRA_TMP="$(mktemp -d)"
-curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o "$TETHRA_TMP/tethra.tar.gz"
-tar -xzf "$TETHRA_TMP/tethra.tar.gz" -C "$TETHRA_TMP" tethra
-sudo install -m 0755 "$TETHRA_TMP/tethra" /usr/local/bin/tethra
-tethra --version</code></pre>
-              </div>
+              <ol class="install-steps">
+                <li>
+                  <div class="step-head">
+                    <div><h4>Download</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-mac-1">Copy</button>
+                    <pre><code id="home-mac-1">curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o ~/Downloads/tethra.tar.gz</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Unpack</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-mac-2">Copy</button>
+                    <pre><code id="home-mac-2">tar -xzf ~/Downloads/tethra.tar.gz -C ~/Downloads tethra</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Install and check</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-mac-3">Copy</button>
+                    <pre><code id="home-mac-3">sudo install -m 0755 ~/Downloads/tethra /usr/local/bin/tethra &amp;&amp; tethra --version</code></pre>
+                  </div>
+                </li>
+              </ol>
             </div>
             <div>
               <p>Windows x64 PowerShell</p>
-              <div class="code-box">
-                <button class="copy-button" type="button" data-copy-target="home-windows-cli">Copy</button>
-                <pre><code id="home-windows-cli">$Dir = Join-Path $env:LOCALAPPDATA "Tethra\bin"
-$Zip = Join-Path $env:TEMP "tethra-cli.zip"
-Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile $Zip
-New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-Expand-Archive $Zip -DestinationPath $Dir -Force
-$env:Path = "$Dir;$env:Path"
-tethra --version</code></pre>
-              </div>
+              <ol class="install-steps">
+                <li>
+                  <div class="step-head">
+                    <div><h4>Download</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-windows-1">Copy</button>
+                    <pre><code id="home-windows-1">Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\tethra.zip"</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Unpack</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-windows-2">Copy</button>
+                    <pre><code id="home-windows-2">Expand-Archive "$env:TEMP\tethra.zip" -DestinationPath "$env:LOCALAPPDATA\Tethra\bin" -Force</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Add to PATH and check</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-windows-3">Copy</button>
+                    <pre><code id="home-windows-3">$d = "$env:LOCALAPPDATA\Tethra\bin"; $env:Path = "$d;$env:Path"; tethra --version</code></pre>
+                  </div>
+                </li>
+              </ol>
+              <p style="text-transform: none; font-weight: 400; margin-top: 10px">
+                <a class="inline-link" href="./docs.html#install-windows">Make the PATH change permanent →</a>
+              </p>
             </div>
           </div>
         </div>

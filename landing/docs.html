@@ -100,56 +100,165 @@
             </div>
 
             <h3 id="install-macos">macOS — Apple Silicon</h3>
-            <div class="code-box">
-              <button
-                class="copy-button"
-                type="button"
-                data-copy-target="mac-install"
-              >
-                Copy
-              </button>
-              <pre><code id="mac-install">TETHRA_TMP="$(mktemp -d)"
-curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o "$TETHRA_TMP/tethra.tar.gz"
-tar -xzf "$TETHRA_TMP/tethra.tar.gz" -C "$TETHRA_TMP" tethra
-sudo install -m 0755 "$TETHRA_TMP/tethra" /usr/local/bin/tethra
-tethra --version</code></pre>
-            </div>
+            <p>Four commands. Copy one, run it, move to the next.</p>
+            <ol class="install-steps">
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Download the archive</h4>
+                    <p>Saves it to your Downloads folder.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-1">Copy</button>
+                  <pre><code id="mac-1">curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o ~/Downloads/tethra.tar.gz</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Unpack it</h4>
+                    <p>Extracts the single <code>tethra</code> binary.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-2">Copy</button>
+                  <pre><code id="mac-2">tar -xzf ~/Downloads/tethra.tar.gz -C ~/Downloads tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Put it on your PATH</h4>
+                    <p>Asks for your password, because <code>/usr/local/bin</code> is system-owned.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-3">Copy</button>
+                  <pre><code id="mac-3">sudo install -m 0755 ~/Downloads/tethra /usr/local/bin/tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Check it works</h4>
+                    <p>Prints the version number. That is the whole install.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-4">Copy</button>
+                  <pre><code id="mac-4">tethra --version</code></pre>
+                </div>
+              </li>
+            </ol>
 
             <h3 id="install-linux">Linux — x86-64</h3>
-            <div class="code-box">
-              <button
-                class="copy-button"
-                type="button"
-                data-copy-target="linux-install"
-              >
-                Copy
-              </button>
-              <pre><code id="linux-install">TETHRA_TMP="$(mktemp -d)"
-curl -fL "https://usetethra.com/downloads/cli/tethra-x86_64-unknown-linux-gnu.tar.gz" -o "$TETHRA_TMP/tethra.tar.gz"
-tar -xzf "$TETHRA_TMP/tethra.tar.gz" -C "$TETHRA_TMP" tethra
-sudo install -m 0755 "$TETHRA_TMP/tethra" /usr/local/bin/tethra
-tethra --version</code></pre>
-            </div>
+            <p>The same four commands, with the Linux build.</p>
+            <ol class="install-steps">
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Download the archive</h4>
+                    <p>Saves it to your home folder.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-1">Copy</button>
+                  <pre><code id="linux-1">curl -fL "https://usetethra.com/downloads/cli/tethra-x86_64-unknown-linux-gnu.tar.gz" -o ~/tethra.tar.gz</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Unpack it</h4>
+                    <p>Extracts the single <code>tethra</code> binary.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-2">Copy</button>
+                  <pre><code id="linux-2">tar -xzf ~/tethra.tar.gz -C ~ tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Put it on your PATH</h4>
+                    <p>Asks for your password, because <code>/usr/local/bin</code> is system-owned.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-3">Copy</button>
+                  <pre><code id="linux-3">sudo install -m 0755 ~/tethra /usr/local/bin/tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Check it works</h4>
+                    <p>Prints the version number. That is the whole install.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-4">Copy</button>
+                  <pre><code id="linux-4">tethra --version</code></pre>
+                </div>
+              </li>
+            </ol>
 
             <h3 id="install-windows">Windows — x64 PowerShell</h3>
-            <div class="code-box">
-              <button
-                class="copy-button"
-                type="button"
-                data-copy-target="windows-install"
-              >
-                Copy
-              </button>
-              <pre><code id="windows-install">$InstallDir = Join-Path $env:LOCALAPPDATA "Tethra\bin"
-$Archive = Join-Path $env:TEMP "tethra-cli.zip"
-Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile $Archive
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Expand-Archive -Path $Archive -DestinationPath $InstallDir -Force
-$UserPath = @([Environment]::GetEnvironmentVariable("Path", "User") -split ";" | Where-Object { $_ })
-if ($UserPath -notcontains $InstallDir) { [Environment]::SetEnvironmentVariable("Path", (@($UserPath) + $InstallDir) -join ";", "User") }
-$env:Path = "$InstallDir;$env:Path"
-tethra --version</code></pre>
-            </div>
+            <p>
+              Open PowerShell from the Start menu, then run these four in order.
+            </p>
+            <ol class="install-steps">
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Download the archive</h4>
+                    <p>Saves it to your temporary folder.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-1">Copy</button>
+                  <pre><code id="windows-1">Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\tethra.zip"</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Unpack it</h4>
+                    <p>Creates the folder if it does not exist yet.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-2">Copy</button>
+                  <pre><code id="windows-2">Expand-Archive "$env:TEMP\tethra.zip" -DestinationPath "$env:LOCALAPPDATA\Tethra\bin" -Force</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Put it on your PATH</h4>
+                    <p>Safe to run twice — it checks before adding.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-3">Copy</button>
+                  <pre><code id="windows-3">$d = "$env:LOCALAPPDATA\Tethra\bin"; $p = [Environment]::GetEnvironmentVariable("Path", "User"); if ($p -notlike "*$d*") { [Environment]::SetEnvironmentVariable("Path", "$d;$p", "User") }; $env:Path = "$d;$env:Path"</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Check it works</h4>
+                    <p>Prints the version number. Open a new terminal if it is not found.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-4">Copy</button>
+                  <pre><code id="windows-4">tethra --version</code></pre>
+                </div>
+              </li>
+            </ol>
             <p class="docs-note">
               <strong>Alpha signing note:</strong> the direct macOS desktop DMG
               is Apple-notarized. The standalone CLI archives and Windows

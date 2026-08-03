@@ -171,19 +171,25 @@
 .code-box {
   position: relative;
   margin: 14px 0 20px;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   background: #090b0d;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
 }
 
+/* Commands wrap rather than scroll — see the note on the same rule in
+   styles.css. `overflow-x: auto` stays as the backstop for a single
+   unbreakable token. */
 .code-box pre {
   margin: 0;
   padding: 18px 76px 18px 18px;
   overflow-x: auto;
   color: #d5e9fa;
   font: 11px/1.65 var(--mono);
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .copy-button {
@@ -240,8 +246,13 @@
 }
 
 @media (max-width: 800px) {
+  /* `minmax(0, 1fr)`, not a bare `1fr`. A bare `1fr` is `minmax(auto, 1fr)`,
+     so the track grew to the min-content width of the widest command — a
+     139-character PowerShell line, about 950px — and the page overflowed
+     inside a phone-width container. The desktop rule above always had the
+     `minmax(0, …)` floor; this one had lost it. */
   .docs-layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 36px;
   }
 
@@ -265,4 +276,71 @@
     padding-right: 18px;
     padding-top: 50px;
   }
+}
+
+/* The content column is a grid item, so it needs its own floor: without it the
+   widest `pre` sets the column's minimum and the page scrolls sideways. */
+.docs-content,
+.docs-content section {
+  min-width: 0;
+}
+
+/* --- Numbered install steps (shared look with the home page) --- */
+
+.install-steps {
+  display: grid;
+  gap: 16px;
+  margin: 16px 0 20px;
+  padding: 0;
+  list-style: none;
+  counter-reset: install-step;
+  min-width: 0;
+}
+
+.install-steps > li {
+  min-width: 0;
+  counter-increment: install-step;
+}
+
+.install-steps .code-box {
+  margin: 0;
+}
+
+.step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0 0 8px;
+  min-width: 0;
+}
+
+.step-head::before {
+  content: counter(install-step);
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: var(--blue);
+  background: rgba(41, 151, 255, 0.14);
+  border: 1px solid rgba(41, 151, 255, 0.32);
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font);
+  transform: translateY(3px);
+}
+
+.step-head h4 {
+  margin: 0;
+  color: #f5f5f7;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.step-head p {
+  margin: 3px 0 0;
+  color: #8c8e95;
+  font-size: 13px;
+  line-height: 1.5;
 }

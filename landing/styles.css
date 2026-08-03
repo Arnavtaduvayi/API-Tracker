@@ -708,9 +708,12 @@ h2 {
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
+/* The second track carries the code boxes. Its floor used to be a hard
+   `minmax(480px, …)`, which is only safe as long as the media query below
+   replaces it; `minmax(0, …)` makes the track able to shrink on its own. */
 .cli-layout {
   display: grid;
-  grid-template-columns: minmax(0, 0.72fr) minmax(480px, 1.28fr);
+  grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
   align-items: start;
   gap: 68px;
 }
@@ -718,11 +721,26 @@ h2 {
 .cli-layout .section-copy {
   position: sticky;
   top: 90px;
+  min-width: 0;
 }
 
+/* `min-width: 0` on the track AND on each item is what stops a long command
+   line from widening the page.
+   A grid item's automatic minimum size is its content's min-content width, so
+   a 118-character `curl` line made this column ~780px wide inside a ~360px
+   container on a phone. `body { overflow-x: hidden }` then clipped it, so the
+   end of the command was not just off-screen but unreachable — it could not
+   even be scrolled to. The `overflow-x: auto` on the `pre` never got a chance
+   to apply, because the `pre` was never narrower than its content. */
 .cli-snippets {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 19px;
+  min-width: 0;
+}
+
+.cli-snippets > div {
+  min-width: 0;
 }
 
 .cli-snippets > div > p {
@@ -735,19 +753,82 @@ h2 {
 
 .code-box {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   background: #090b0d;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 7px;
 }
 
+/* Commands wrap rather than scroll. A shell command is read left to right and
+   copied whole; hiding its tail behind a horizontal scrollbar on a phone is
+   how someone ends up pasting half a URL. `overflow-x: auto` stays as the
+   backstop for a single unbreakable token. */
 .code-box pre {
   margin: 0;
   padding: 18px 76px 18px 18px;
   overflow-x: auto;
   color: #d5e9fa;
   font: 10px/1.65 var(--mono);
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- Numbered install steps --- */
+
+.install-steps {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: install-step;
+  min-width: 0;
+}
+
+.install-steps > li {
+  min-width: 0;
+  counter-increment: install-step;
+}
+
+.step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 0 0 8px;
+  min-width: 0;
+}
+
+.step-head::before {
+  content: counter(install-step);
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: var(--blue);
+  background: rgba(41, 151, 255, 0.14);
+  border: 1px solid rgba(41, 151, 255, 0.32);
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 600;
+  font-family: var(--font);
+  transform: translateY(3px);
+}
+
+.step-head h4 {
+  margin: 0;
+  color: var(--white);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.step-head p {
+  margin: 2px 0 0;
+  color: #8c8e95;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .copy-button {
@@ -880,7 +961,7 @@ h2 {
   .route-rail { grid-template-columns: 1fr; gap: 18px; }
   .route-rail > div { width: 100%; }
   .route-rail > b { width: 1px; height: 36px; margin: -8px auto; background: linear-gradient(#2997ff, #65e6aa); }
-  .cli-layout { grid-template-columns: 1fr; gap: 45px; }
+  .cli-layout { grid-template-columns: minmax(0, 1fr); gap: 45px; }
   .cli-layout .section-copy { position: static; }
   .teams-band-inner { grid-template-columns: 1fr; gap: 32px; }
 }
