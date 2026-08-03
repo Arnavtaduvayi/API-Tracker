@@ -18,7 +18,8 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { api, isApiError, setVaultLockedHandler, subscribeToProductAnalytics } from "./api";
 import { severityRank, topSeverity } from "./utils";
-import type { VaultStatus } from "./types";
+import type { DetectedCredential, Environment, VaultStatus } from "./types";
+import { ENVIRONMENTS } from "./types";
 import { VaultSetup } from "./components/VaultSetup";
 import { VaultUnlock } from "./components/VaultUnlock";
 import { ProjectList } from "./components/ProjectList";
@@ -45,6 +46,7 @@ import { ApiActivityView } from "./components/ApiActivityView";
 import { GatewayView, GatewayLockStrip } from "./components/GatewayView";
 import { DashboardView } from "./components/DashboardView";
 import { TrackFlow } from "./components/TrackFlow";
+import { Welcome } from "./components/Welcome";
 import { AnalyticsConsentBanner } from "./components/AnalyticsConsent";
 import { Gate } from "./components/visuals/Gate";
 import { BrandLockup } from "./components/visuals/BrandLockup";
@@ -61,13 +63,20 @@ import {
 
 export type View =
   | { name: "dashboard" }
+  | { name: "welcome" }
   | { name: "track" }
   | { name: "projects" }
   | { name: "project"; ident: string }
   | { name: "project-new" }
   | { name: "project-edit"; ident: string }
   | { name: "credential"; id: string }
-  | { name: "credential-new"; project: string }
+  | {
+      name: "credential-new";
+      project: string;
+      /** Seeded when the form was opened from a detected credential. */
+      prefill?: { name?: string; provider?: string; environment?: Environment };
+      detectionId?: string;
+    }
   | { name: "credential-edit"; id: string }
   | { name: "providers" }
   | { name: "provider"; id: string }
@@ -247,6 +256,7 @@ function SettingsNavigation({
 /** Nested views highlight (and breadcrumb to) their owning nav destination. */
 const SECTION_OF: Record<View["name"], View["name"]> = {
   dashboard: "dashboard",
+  welcome: "dashboard",
   track: "settings",
   projects: "projects",
   project: "projects",
@@ -276,7 +286,9 @@ const SECTION_OF: Record<View["name"], View["name"]> = {
 
 /** Ambient topology follows the current workspace without reading its data. */
 function particleModeFor(view: View["name"]): ParticleMode {
-  if (["dashboard", "usage", "api-activity", "pricing"].includes(view)) return "routes";
+  if (["dashboard", "welcome", "usage", "api-activity", "pricing"].includes(view)) {
+    return "routes";
+  }
   if (
     [
       "projects",
@@ -299,10 +311,33 @@ function particleModeFor(view: View["name"]): ParticleMode {
   return "flow";
 }
 
+/**
+ * Seed the credential form from a detection row.
+ *
+ * Detection reads variable NAMES only, so there is no value to carry here and
+ * never will be. `suggested_environment` is a free string on the wire; it is
+ * only accepted when it is one of the four real environments, so a value this
+ * build does not know falls back to the form's own default rather than being
+ * forced into the union with a cast.
+ */
+function prefillFor(row: DetectedCredential): {
+  name?: string;
+  provider?: string;
+  environment?: Environment;
+} {
+  const suggested = ENVIRONMENTS.find((e) => e === row.suggested_environment);
+  return {
+    name: row.suggested_name ?? row.env_var,
+    provider: row.suggested_provider ?? undefined,
+    environment: suggested,
+  };
+}
+
 /** Finite screen names keep project identifiers and other user data out of Analytics. */
 function analyticsScreenFor(view: View["name"]): AnalyticsScreen {
   const screens: Record<View["name"], AnalyticsScreen> = {
     dashboard: "dashboard",
+    welcome: "welcome",
     track: "tracking_setup",
     projects: "projects",
     project: "project_detail",
@@ -418,6 +453,26 @@ export default function App() {
       void reportInventoryAnalytics("session_start");
     }
   }, [analyticsConsent, vaultState]);
+
+  // First run. With no projects the dashboard has nothing to show and its
+  // empty state is the only thing on screen, so the app opens on the guided
+  // folder picker instead. Only the default landing view is redirected: a user
+  // who has already navigated somewhere keeps their place, and a failure here
+  // is silent because the dashboard's own empty state offers the same action.
+  useEffect(() => {
+    if (vaultState !== "unlocked") return;
+    let cancelled = false;
+    api
+      .projectList(true)
+      .then((projects) => {
+        if (cancelled || projects.length > 0) return;
+        setView((v) => (v.name === "dashboard" ? { name: "welcome" } : v));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultState]);
 
   // The sidebar collapses itself when the window gets narrow and expands again
   // when there is room. Crossing the breakpoint re-syncs, but between
@@ -651,8 +706,15 @@ export default function App() {
               <DashboardView
                 onTrack={() => {
                   trackAnalytics({ name: "tracking_setup_started" });
-                  setView({ name: "track" });
+                  setView({ name: "welcome" });
                 }}
+                onOpenProject={(ident) => setView({ name: "project", ident })}
+              />
+            )}
+            {view.name === "welcome" && (
+              <Welcome
+                onOpenProject={(ident) => setView({ name: "project", ident })}
+                onSkip={() => setView({ name: "dashboard" })}
               />
             )}
             {view.name === "projects" && (
@@ -684,11 +746,21 @@ export default function App() {
                 onOpenCredential={(id) => setView({ name: "credential", id })}
                 onAddCredential={() => setView({ name: "credential-new", project: view.ident })}
                 onOpenAdvanced={() => setView({ name: "track" })}
+                onStoreDetected={(row) =>
+                  setView({
+                    name: "credential-new",
+                    project: view.ident,
+                    prefill: prefillFor(row),
+                    detectionId: row.id,
+                  })
+                }
               />
             )}
             {view.name === "credential-new" && (
               <CredentialForm
                 project={view.project}
+                prefill={view.prefill}
+                detectionId={view.detectionId}
                 onDone={(id) =>
                   setView(
                     id ? { name: "credential", id } : { name: "project", ident: view.project },

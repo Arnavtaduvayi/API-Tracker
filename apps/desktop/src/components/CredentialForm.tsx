@@ -15,13 +15,28 @@ import { emptyToNull, toDateInput } from "../utils";
 export function CredentialForm(props: {
   project?: string;
   editId?: string;
+  /**
+   * Seeds the form from a credential Tethra detected in the project's files.
+   * Only the metadata it actually saw — never a value, which detection does
+   * not read.
+   */
+  prefill?: { name?: string; provider?: string; environment?: Environment };
+  /**
+   * The detection row this credential completes. On a successful add the row
+   * is resolved to `completed` and pointed at the new credential, which is
+   * what turns "Tethra found this key" into "Tethra has this key" instead of
+   * leaving the user to re-find it themselves.
+   */
+  detectionId?: string;
   onDone: (id: string | null) => void;
 }) {
   const editing = props.editId !== undefined;
   const [providers, setProviders] = useState<ProviderManifest[]>([]);
-  const [name, setName] = useState("");
-  const [provider, setProvider] = useState("other");
-  const [environment, setEnvironment] = useState<Environment>("development");
+  const [name, setName] = useState(props.prefill?.name ?? "");
+  const [provider, setProvider] = useState(props.prefill?.provider ?? "other");
+  const [environment, setEnvironment] = useState<Environment>(
+    props.prefill?.environment ?? "development",
+  );
   const [value, setValue] = useState("");
   const [keyCreated, setKeyCreated] = useState("");
   const [expires, setExpires] = useState("");
@@ -92,7 +107,22 @@ export function CredentialForm(props: {
       notes,
     });
     setValue("");
+    await resolveDetection(created.id);
     props.onDone(created.id);
+  };
+
+  /**
+   * Close the loop on the detection row, if this form was opened from one. A
+   * failure here must not lose the credential the user just stored — it is
+   * saved either way, and the row simply stays pending.
+   */
+  const resolveDetection = async (credentialId: string) => {
+    if (!props.detectionId) return;
+    try {
+      await api.projectResolveDetection(props.detectionId, "completed", credentialId);
+    } catch {
+      /* the credential is stored; the detection row can be resolved by hand */
+    }
   };
 
   const storeReference = async (source: string) => {
@@ -105,6 +135,7 @@ export function CredentialForm(props: {
       notes,
     });
     setValue("");
+    await resolveDetection(created.id);
     props.onDone(created.id);
   };
 

@@ -14,7 +14,7 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { DashboardView } from "./DashboardView";
+import { DashboardView, aggregateSeries } from "./DashboardView";
 import { api } from "../api";
 import type { GatewayActivitySummary, TrackingHealth, TrackingStatus } from "../types";
 
@@ -31,6 +31,8 @@ vi.mock("../api", async () => {
       trackingDiagnose: vi.fn(),
       trackingUndo: vi.fn(),
       trackingResumeAttribution: vi.fn(),
+      projectActivity: vi.fn(),
+      alertsList: vi.fn(),
     },
   };
 });
@@ -44,6 +46,8 @@ const mockApi = api as unknown as {
   trackingDiagnose: ReturnType<typeof vi.fn>;
   trackingUndo: ReturnType<typeof vi.fn>;
   trackingResumeAttribution: ReturnType<typeof vi.fn>;
+  projectActivity: ReturnType<typeof vi.fn>;
+  alertsList: ReturnType<typeof vi.fn>;
 };
 
 function emptySummary(over: Partial<GatewayActivitySummary> = {}): GatewayActivitySummary {
@@ -123,15 +127,30 @@ beforeEach(() => {
     stopped: false,
     detail: null,
   });
+  mockApi.alertsList.mockResolvedValue([]);
+  mockApi.projectActivity.mockResolvedValue({ granularity: "hour", series: [] });
 });
+
+function seriesPoint(bucket: string, requests: number, errors = 0) {
+  return {
+    bucket_start: bucket,
+    requests,
+    errors,
+    avg_latency_ms: null,
+    input_tokens: null,
+    output_tokens: null,
+    estimated_micros: null,
+    cost_complete: true,
+  };
+}
 
 describe("DashboardView", () => {
   it("offers tracking from an empty state instead of a bare zero", async () => {
     render(<DashboardView onTrack={() => {}} />);
-    expect(await screen.findByText("No activity observed yet.")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Select a project folder and turn on tracking/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("No activity observed yet")).toBeInTheDocument();
+    expect(screen.getByText(/Point Tethra at a project folder/)).toBeInTheDocument();
+    // The empty state's whole job is to offer the next action.
+    expect(screen.getByRole("button", { name: "Choose a project folder" })).toBeInTheDocument();
   });
 
   it("renders an activity load failure with a retry, not an empty panel", async () => {
@@ -182,7 +201,7 @@ describe("DashboardView", () => {
     );
     render(<DashboardView onTrack={() => {}} />);
     expect(await screen.findByText(/lower bound; cache reads excluded/)).toBeInTheDocument();
-    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("100% succeeded")).toBeInTheDocument();
   });
 
   it("says provider-reported usage is never added to observed numbers", async () => {
@@ -246,7 +265,7 @@ describe("DashboardView never fabricates a zero (NEW-37)", () => {
     // Anti-vacuity: the panel rendered, it was not blanked. The real numbers
     // are still there.
     expect(screen.getByText("42")).toBeInTheDocument();
-    expect(screen.getByText("100%")).toBeInTheDocument();
+    expect(screen.getByText("100% succeeded")).toBeInTheDocument();
   });
 
   it("still shows a measured zero, because hiding a measurement is a different lie", async () => {
@@ -434,17 +453,18 @@ describe("DashboardView renders sentences, not enum tokens (ZFT-030)", () => {
       }),
     );
     render(<DashboardView onTrack={() => {}} />);
-    expect(
-      await screen.findByText("Matched a stored credential by its fingerprint — 12 request(s)"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "Attribution was not running when these requests were recorded — 4 request(s)",
-      ),
-    ).toBeInTheDocument();
+    // The sentence and its count are separate cells of the same feed row.
+    const matched = await screen.findByText("Matched a stored credential by its fingerprint");
+    expect(matched).toBeInTheDocument();
+    expect(matched.closest(".feed-row")).toHaveTextContent("12");
+    const unavailable = screen.getByText(
+      "Attribution was not running when these requests were recorded",
+    );
+    expect(unavailable).toBeInTheDocument();
+    expect(unavailable.closest(".feed-row")).toHaveTextContent("4");
     // The negative control: the raw tokens must not appear anywhere.
     expect(document.body.textContent).not.toMatch(/matched_fingerprint/);
-    expect(document.body.textContent).not.toMatch(/— 12\b(?!.*request)/);
+    expect(document.body.textContent).not.toMatch(/unavailable/);
   });
 
   it("labels a value it does not recognise as unknown rather than showing it bare", async () => {
@@ -548,10 +568,15 @@ describe("DashboardView per-project attribution (ZFT-029)", () => {
     render(<DashboardView onTrack={() => {}} />);
     const heading = await screen.findByRole("heading", { name: "By project" });
     expect(heading).toBeInTheDocument();
-    expect(screen.getByText("my-app")).toBeInTheDocument();
-    expect(screen.getByText(/20 request\(s\), 0 error\(s\)/)).toBeInTheDocument();
-    expect(screen.getByText("side-project")).toBeInTheDocument();
-    expect(screen.getByText(/10 request\(s\), 2 error\(s\)/)).toBeInTheDocument();
+    // Each project is its own card carrying its own counts.
+    const mine = screen.getByText("my-app").closest(".entity-card");
+    expect(mine).toHaveTextContent("20");
+    expect(mine).toHaveTextContent("requests");
+    expect(mine).toHaveTextContent("0");
+    expect(mine).toHaveTextContent("errors");
+    const side = screen.getByText("side-project").closest(".entity-card");
+    expect(side).toHaveTextContent("10");
+    expect(side).toHaveTextContent("2");
     // The totals stay honestly labelled as global.
     expect(
       screen.getByText(
@@ -592,5 +617,131 @@ describe("DashboardView per-project attribution (ZFT-029)", () => {
     expect(
       await screen.findByText("A project that has since been removed"),
     ).toBeInTheDocument();
+  });
+});
+
+// --- The card / chart layer (card-based UI overhaul) --------------------
+
+describe("DashboardView headline tiles", () => {
+  it("shows the four headline figures without inventing any of them", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(
+      emptySummary({ total_requests: 18_492, success_count: 18_492, usage_event_count: 0 }),
+    );
+    mockApi.trackingList.mockResolvedValue([setup()]);
+    mockApi.alertsList.mockResolvedValue([]);
+    render(<DashboardView onTrack={() => {}} />);
+
+    const tiles = await screen.findByTestId("dashboard-tiles");
+    expect(within(tiles).getByText("18,492")).toBeInTheDocument();
+    expect(within(tiles).getByText("Tracked projects")).toBeInTheDocument();
+    expect(within(tiles).getByText("nothing needs attention")).toBeInTheDocument();
+    // No usage was reported, so the cost tile must not print a dollar figure
+    // and must not carry the lower-bound caveat that only fits a real one.
+    expect(within(tiles).queryByText(/lower bound/)).not.toBeInTheDocument();
+    expect(tiles.textContent).not.toMatch(/\$0\.0000/);
+  });
+
+  it("says a figure could not be read rather than showing it as zero", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(emptySummary({ total_requests: 4 }));
+    mockApi.trackingList.mockRejectedValue({ code: "unknown", message: "boom" });
+    mockApi.alertsList.mockRejectedValue({ code: "unknown", message: "boom" });
+    render(<DashboardView onTrack={() => {}} />);
+
+    const tiles = await screen.findByTestId("dashboard-tiles");
+    expect(within(tiles).getAllByText("could not be read")).toHaveLength(2);
+    // The negative control: an unreadable count is never rendered as 0.
+    expect(within(tiles).queryByText("0")).not.toBeInTheDocument();
+  });
+
+  it("reports the top open-alert severity", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(emptySummary({ total_requests: 4 }));
+    mockApi.alertsList.mockResolvedValue([
+      { id: "a1", severity: "high", title: "Rotation due" },
+      { id: "a2", severity: "low", title: "Docs changed" },
+    ]);
+    render(<DashboardView onTrack={() => {}} />);
+
+    const tiles = await screen.findByTestId("dashboard-tiles");
+    expect(within(tiles).getByText("2")).toBeInTheDocument();
+    expect(within(tiles).getByText("top severity: high")).toBeInTheDocument();
+  });
+});
+
+describe("DashboardView request-volume chart", () => {
+  it("sums per-project request counts into one series", () => {
+    const merged = aggregateSeries([
+      [seriesPoint("2026-08-01T00:00:00Z", 3), seriesPoint("2026-08-01T01:00:00Z", 5)],
+      [seriesPoint("2026-08-01T01:00:00Z", 7, 2)],
+    ]);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toMatchObject({ bucket_start: "2026-08-01T00:00:00Z", requests: 3 });
+    expect(merged[1]).toMatchObject({
+      bucket_start: "2026-08-01T01:00:00Z",
+      requests: 12,
+      errors: 2,
+    });
+  });
+
+  it("never sums tokens, latency or cost across projects", () => {
+    const merged = aggregateSeries([
+      [{ ...seriesPoint("2026-08-01T00:00:00Z", 1), input_tokens: 100, estimated_micros: 50 }],
+      [{ ...seriesPoint("2026-08-01T00:00:00Z", 1), input_tokens: null }],
+    ]);
+    // Coverage differs per project, so a summed figure would present a partial
+    // total as a complete one. These stay unknown, and the point is marked
+    // incomplete so nothing downstream reads it as a costed series.
+    expect(merged[0].input_tokens).toBeNull();
+    expect(merged[0].output_tokens).toBeNull();
+    expect(merged[0].avg_latency_ms).toBeNull();
+    expect(merged[0].estimated_micros).toBeNull();
+    expect(merged[0].cost_complete).toBe(false);
+  });
+
+  it("draws the chart from the per-project series", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(emptySummary({ total_requests: 8 }));
+    mockApi.gatewayActivityByProject.mockResolvedValue([
+      {
+        project_id: "p1",
+        project_name: "my-app",
+        total_requests: 8,
+        success_count: 8,
+        error_count: 0,
+        transport_error_count: 0,
+        first_event_at: "2026-08-01T00:00:00Z",
+        last_event_at: "2026-08-01T01:00:00Z",
+      },
+    ]);
+    mockApi.projectActivity.mockResolvedValue({
+      granularity: "hour",
+      series: [seriesPoint("2026-08-01T00:00:00Z", 3), seriesPoint("2026-08-01T01:00:00Z", 5)],
+    });
+    render(<DashboardView onTrack={() => {}} />);
+
+    expect(await screen.findByRole("img", { name: /Requests/ })).toBeInTheDocument();
+  });
+
+  it("keeps the per-project split when the chart cannot be read", async () => {
+    mockApi.gatewayActivity.mockResolvedValue(emptySummary({ total_requests: 8 }));
+    mockApi.gatewayActivityByProject.mockResolvedValue([
+      {
+        project_id: "p1",
+        project_name: "my-app",
+        total_requests: 8,
+        success_count: 8,
+        error_count: 0,
+        transport_error_count: 0,
+        first_event_at: null,
+        last_event_at: null,
+      },
+    ]);
+    mockApi.projectActivity.mockRejectedValue({ code: "db_error", message: "locked" });
+    render(<DashboardView onTrack={() => {}} />);
+
+    // The chart says it is missing; the split it decorates is untouched.
+    expect(
+      await screen.findByText(/request-volume chart could not be read/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("my-app")).toBeInTheDocument();
+    expect(screen.queryByText(/per-project split could not be loaded/)).not.toBeInTheDocument();
   });
 });

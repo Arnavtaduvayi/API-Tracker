@@ -12,6 +12,7 @@ export type AnalyticsScreen =
   | "vault_setup"
   | "vault_unlock"
   | "dashboard"
+  | "welcome"
   | "tracking_setup"
   | "projects"
   | "project_detail"

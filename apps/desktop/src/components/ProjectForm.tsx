@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
 import { ENVIRONMENTS, type Environment } from "../types";
 
@@ -32,6 +33,24 @@ export function ProjectForm(props: {
         .catch((e) => setError(isApiError(e) ? e.message : String(e)));
     }
   }, [props.editIdent]);
+
+  // A repository path used to be hand-typed into a text field, while a working
+  // native picker sat two screens away in the folder-linking flow. A mistyped
+  // path is silently accepted and then matches nothing.
+  const browseForRepo = useCallback(async () => {
+    setError(null);
+    try {
+      const picked = await open({
+        directory: true,
+        multiple: false,
+        title: "Select a repository folder",
+      });
+      if (typeof picked !== "string") return; // cancelled
+      setRepoPaths((r) => (r.includes(picked) ? r : [...r, picked]));
+    } catch (e) {
+      setError(isApiError(e) ? e.message : String(e));
+    }
+  }, []);
 
   const toggleEnv = (env: Environment) => {
     setEnvironments((current) =>
@@ -97,26 +116,35 @@ export function ProjectForm(props: {
               </button>
             </div>
           ))}
-          <div style={{ display: "flex", gap: "0.4rem", marginTop: "0.3rem" }}>
-            <input
-              placeholder="/path/to/repository"
-              value={newRepo}
-              onChange={(e) => setNewRepo(e.target.value)}
-              style={{ flex: 1 }}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                const trimmed = newRepo.trim();
-                if (trimmed && !repoPaths.includes(trimmed)) {
-                  setRepoPaths((r) => [...r, trimmed]);
-                }
-                setNewRepo("");
-              }}
-            >
-              Add path
+          <div className="inlineform">
+            <button type="button" className="primary" onClick={() => void browseForRepo()}>
+              Choose folder…
             </button>
           </div>
+          <details>
+            <summary className="muted">Or type a path</summary>
+            <div className="inlineform">
+              <input
+                placeholder="/path/to/repository"
+                aria-label="Repository path"
+                value={newRepo}
+                onChange={(e) => setNewRepo(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const trimmed = newRepo.trim();
+                  if (trimmed && !repoPaths.includes(trimmed)) {
+                    setRepoPaths((r) => [...r, trimmed]);
+                  }
+                  setNewRepo("");
+                }}
+              >
+                Add path
+              </button>
+            </div>
+          </details>
         </fieldset>
         <label className="field">
           Notes (never encrypted; do not put secrets here)

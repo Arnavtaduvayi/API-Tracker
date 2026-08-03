@@ -208,8 +208,8 @@ export function ActivityChart(props: {
         <desc id={descId}>{label}</desc>
         <defs>
           <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#2997ff" stopOpacity="0.24" />
-            <stop offset="100%" stopColor="#2997ff" stopOpacity="0" />
+            <stop offset="0%" stopColor="var(--accent)" stopOpacity="0.24" />
+            <stop offset="100%" stopColor="var(--accent)" stopOpacity="0" />
           </linearGradient>
         </defs>
 

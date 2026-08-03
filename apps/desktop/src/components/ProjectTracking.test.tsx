@@ -111,6 +111,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     const cta = screen.getByTestId("select-folder-cta");
@@ -134,6 +135,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -168,6 +170,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={onChanged}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -195,6 +198,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -220,6 +224,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -253,6 +258,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -286,6 +292,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -306,6 +313,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -343,6 +351,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     expect(screen.getByText("/work/app")).toBeTruthy();
@@ -385,6 +394,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Ignore"));
@@ -406,6 +416,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     const stale = screen.getByTestId("scan-stale");
@@ -422,6 +433,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Rescan project"));
@@ -438,6 +450,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Disable tracking"));
@@ -456,6 +469,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Unlink folder"));
@@ -492,6 +506,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
@@ -531,6 +546,7 @@ describe("ProjectTracking", () => {
         reloading={false}
         onChanged={noop}
         onOpenAdvanced={noop}
+        onStoreDetected={noop}
       />,
     );
     fireEvent.click(screen.getByText("Select project folder"));
