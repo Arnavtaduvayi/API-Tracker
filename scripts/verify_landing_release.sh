@@ -9,8 +9,8 @@ SOURCE_RECORD="$REPO_ROOT/landing/downloads/MACOS_SOURCE_COMMIT.txt"
 WINDOWS_SOURCE_RECORD="$REPO_ROOT/landing/downloads/WINDOWS_SOURCE_COMMIT.txt"
 WINDOWS_CHECKSUM="$REPO_ROOT/landing/downloads/WINDOWS_SHA256.txt"
 CHECKSUMS="$REPO_ROOT/landing/downloads/SHA256SUMS.txt"
-MACOS_RELEASE_URL=${MACOS_RELEASE_URL:-https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/Tethra_0.1.0_aarch64.dmg}
-WINDOWS_RELEASE_URL=${WINDOWS_RELEASE_URL:-https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.0-alpha-ui.3/Tethra_0.1.0_x64-setup.exe}
+MACOS_RELEASE_URL=${MACOS_RELEASE_URL:-https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_aarch64.dmg}
+WINDOWS_RELEASE_URL=${WINDOWS_RELEASE_URL:-https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_x64-setup.exe}
 cd "$REPO_ROOT"
 
 [ -f "$DMG" ] || { echo "error: direct macOS artifact is missing: $DMG" >&2; exit 1; }
