@@ -2,7 +2,7 @@
 
 Status: accepted (2026-07-18)
 
-This milestone makes API Tracker govern the place most developer secrets
+This milestone makes Tethra govern the place most developer secrets
 actually live — `.env` files — and adds a second adapter system for the
 places secrets are *deployed*. Database migration v5 adds
 `credential_versions`, `env_exports`, `destinations`,

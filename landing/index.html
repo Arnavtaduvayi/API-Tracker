@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tethra | Local-first API credential intelligence</title>
+    <meta
+      name="description"
+      content="Tethra maps API routes, credentials, project activity, exposure, usage, alerts, and rotation from a local-first desktop vault."
+    />
+    <meta property="og:title" content="Tethra | Local-first API credential intelligence" />
+    <meta
+      property="og:description"
+      content="Know which credentials power every project without moving your vault to someone else's server."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://usetethra.com/" />
+    <meta name="theme-color" content="#000000" />
+    <link rel="canonical" href="https://usetethra.com/" />
+    <link rel="icon" type="image/png" href="./assets/tethra-key.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./ambient.js" defer></script>
+    <script src="./analytics.js" defer></script>
+    <script src="./docs.js" defer></script>
+  </head>
+  <body data-page="home">
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="global-nav">
+      <div class="nav-inner">
+        <a class="brand" href="./index.html" aria-label="Tethra home" data-nav="home">
+          <img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" />
+          <span>tethra.</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="#intelligence" data-nav="intelligence">Intelligence</a>
+          <a href="#security" data-nav="security">Security</a>
+          <a href="./docs.html" data-nav="docs">Docs</a>
+          <a href="./teams.html" data-nav="teams">Teams</a>
+          <a href="#download" data-nav="download">Download</a>
+        </nav>
+        <a
+          class="nav-download"
+          href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_aarch64.dmg"
+          data-download="nav"
+          data-platform="macos"
+        >
+          Get Tethra
+        </a>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero dark-band" data-section="hero" aria-labelledby="hero-title">
+        <canvas id="ambient-network" aria-hidden="true"></canvas>
+        <div class="hero-scrim" aria-hidden="true"></div>
+        <div class="hero-content reveal">
+          <p class="eyebrow">Local-first credential intelligence</p>
+          <h1 id="hero-title" class="hero-lockup">
+            <img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" />
+            <span>tethra.</span>
+          </h1>
+          <p class="hero-statement">Every API route. Every key. One private map.</p>
+          <p class="lede">
+            See where credentials live, which projects depend on them, how APIs are used, and
+            what needs attention. Your encrypted vault stays on your device.
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button primary"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_aarch64.dmg"
+              data-download="hero"
+              data-platform="macos"
+            >
+              Download for macOS
+            </a>
+            <a
+              class="button quiet"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_x64-setup.exe"
+              data-download="hero"
+              data-platform="windows"
+            >
+              Download for Windows
+            </a>
+            <a class="button quiet" href="#intelligence" data-nav="hero_explore">
+              Explore Tethra
+            </a>
+          </div>
+          <div class="platform-line" aria-label="Product attributes">
+            <span>macOS and Windows desktop + CLI</span>
+            <span>Apache 2.0</span>
+            <span>No Tethra account</span>
+          </div>
+        </div>
+        <a class="scroll-cue" href="#overview" aria-label="Continue to product overview">
+          <span></span>
+        </a>
+      </section>
+
+      <section id="overview" class="signal-strip" data-section="overview">
+        <div class="band-inner signal-grid reveal">
+          <p>Credential exposure scanning</p>
+          <p>Project-level API activity</p>
+          <p>Encrypted local vault</p>
+          <p>Guided key rotation</p>
+        </div>
+      </section>
+
+      <section id="intelligence" class="light-band product-intro" data-section="intelligence">
+        <div class="band-inner">
+          <div class="section-copy reveal">
+            <p class="eyebrow">Operational clarity</p>
+            <h2>See the credential graph your code already depends on.</h2>
+            <p class="section-lede">
+              Tethra turns scattered env files, provider accounts, gateway traffic, and local
+              project context into one inspectable system. It tracks relationships without
+              uploading your vault to a Tethra service.
+            </p>
+          </div>
+
+          <div class="app-window reveal" aria-label="Illustration of the Tethra desktop activity view">
+            <div class="window-titlebar">
+              <div class="window-controls" aria-hidden="true"><i></i><i></i><i></i></div>
+              <span>Activity</span>
+              <span class="window-local">Local vault</span>
+            </div>
+            <div class="window-body">
+              <aside class="demo-sidebar" aria-hidden="true">
+                <strong><img class="demo-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" />tethra.</strong>
+                <small>Activity</small>
+                <b class="selected">Activity</b>
+                <b>Projects</b>
+                <small>Vault</small>
+                <b>Providers</b>
+                <small>Monitoring</small>
+                <b>Alerts</b>
+                <b>Notifications</b>
+                <b>Usage</b>
+                <b>API activity</b>
+                <small>System</small>
+                <b>Settings</b>
+              </aside>
+              <div class="demo-content">
+                <div class="demo-heading">
+                  <div><small>Local request telemetry</small><h3>API activity</h3></div>
+                  <span>Track API activity</span>
+                </div>
+                <!--
+                  These four tiles are the four the app renders, with the
+                  sub-lines it actually writes. Keep them in step with
+                  DashboardView.tsx: an illustration that promises a figure the
+                  product does not show is the gap this redesign closed.
+                -->
+                <div class="demo-metrics">
+                  <div><small>Requests</small><strong>18,492</strong><em>99% succeeded</em></div>
+                  <div><small>Tracked projects</small><strong>12</strong><em>3 active in this window</em></div>
+                  <div><small>Open alerts</small><strong>3</strong><em>top severity: medium</em></div>
+                  <div><small>Observed cost</small><strong>$418</strong><em>lower bound</em></div>
+                </div>
+                <div class="demo-chart" aria-hidden="true">
+                  <div class="chart-label"><span>Request volume</span><small>30 days</small></div>
+                  <svg viewBox="0 0 760 190" role="img" aria-label="Thirty day request activity trend">
+                    <defs>
+                      <linearGradient id="activity-fill" x1="0" x2="0" y1="0" y2="1">
+                        <stop offset="0" stop-color="#2997ff" stop-opacity=".32" />
+                        <stop offset="1" stop-color="#2997ff" stop-opacity="0" />
+                      </linearGradient>
+                    </defs>
+                    <path class="grid-line" d="M0 38H760M0 91H760M0 144H760" />
+                    <path class="area-line" d="M0 160L0 134 34 141 68 120 102 127 136 96 170 106 204 83 238 94 272 67 306 78 340 54 374 70 408 57 442 85 476 65 510 47 544 57 578 31 612 43 646 25 680 51 714 35 760 18V190H0Z" />
+                    <path class="trend-line" d="M0 134 34 141 68 120 102 127 136 96 170 106 204 83 238 94 272 67 306 78 340 54 374 70 408 57 442 85 476 65 510 47 544 57 578 31 612 43 646 25 680 51 714 35 760 18" />
+                    <circle cx="760" cy="18" r="4" />
+                  </svg>
+                </div>
+                <div class="demo-events">
+                  <p><i class="green"></i><span><b>Gateway route healthy</b><small>OpenAI traffic observed moments ago</small></span><time>Now</time></p>
+                  <p><i class="blue"></i><span><b>Credential relationship confirmed</b><small>Project activity mapped locally</small></span><time>8m</time></p>
+                  <p><i class="amber"></i><span><b>Rotation window approaching</b><small>Review provider steps before expiry</small></span><time>1h</time></p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="dark-band capability-band" data-section="capabilities">
+        <div class="band-inner">
+          <div class="section-copy narrow reveal">
+            <p class="eyebrow">A living system map</p>
+            <h2>From route to rotation.</h2>
+          </div>
+          <div class="capability-list">
+            <article class="reveal">
+              <span>01</span>
+              <div>
+                <h3>Find exposure before it ships.</h3>
+                <p>
+                  Scan selected repositories, env files, configuration, and git history for
+                  credential-shaped material. Review findings locally and resolve them with context.
+                </p>
+              </div>
+              <strong>Exposure</strong>
+            </article>
+            <article class="reveal">
+              <span>02</span>
+              <div>
+                <h3>Connect keys to real project activity.</h3>
+                <p>
+                  Map providers and credentials to projects, then observe sanitized request metadata
+                  through Tethra's loopback gateway and process runner.
+                </p>
+              </div>
+              <strong>Activity</strong>
+            </article>
+            <article class="reveal">
+              <span>03</span>
+              <div>
+                <h3>Understand usage and cost.</h3>
+                <p>
+                  Combine local request observations with supported provider account sync to see
+                  attribution, budgets, price models, and changes over time.
+                </p>
+              </div>
+              <strong>Usage</strong>
+            </article>
+            <article class="reveal">
+              <span>04</span>
+              <div>
+                <h3>Act with a recoverable plan.</h3>
+                <p>
+                  Prepare destination sync, temporary access, alerts, backups, and provider-aware
+                  rotation steps before changing a live credential.
+                </p>
+              </div>
+              <strong>Control</strong>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="security" class="light-band security-band" data-section="security">
+        <div class="band-inner security-layout">
+          <div class="section-copy reveal">
+            <p class="eyebrow">Local-first by architecture</p>
+            <h2>Your vault is not our database.</h2>
+            <p class="section-lede">
+              Tethra has no account system and no hosted credential backend. Secret values are
+              encrypted in your local vault. Network access happens only for actions you configure,
+              plus limited measurement analytics under the regional choice described in our policy.
+            </p>
+            <a class="inline-link" href="./privacy.html" data-legal="privacy">Read the privacy policy</a>
+          </div>
+          <dl class="security-facts reveal">
+            <div><dt>Credential values</dt><dd>Encrypted locally</dd></div>
+            <div><dt>Master password</dt><dd>Never sent to Tethra</dd></div>
+            <div><dt>Tethra account</dt><dd>Not required</dd></div>
+            <div><dt>Product analytics</dt><dd>Regional default with opt-out</dd></div>
+            <div><dt>Analytics payload</dt><dd>Counts only; no names or secrets</dd></div>
+            <div><dt>Source license</dt><dd>Apache 2.0</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="dark-band workflow-band" data-section="workflow">
+        <div class="band-inner">
+          <div class="workflow-copy reveal">
+            <p class="eyebrow">One local control plane</p>
+            <h2>Vault intelligence without a secret sink.</h2>
+          </div>
+          <div class="route-rail reveal" aria-label="Tethra workflow">
+            <div><i></i><span>Projects</span><small>Selected folders and manifests</small></div>
+            <b aria-hidden="true"></b>
+            <div><i></i><span>Tethra vault</span><small>Encrypted values and local context</small></div>
+            <b aria-hidden="true"></b>
+            <div><i></i><span>Gateway</span><small>Sanitized request activity</small></div>
+            <b aria-hidden="true"></b>
+            <div><i></i><span>Providers</span><small>User-directed API operations</small></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="cli" class="cli-band" data-section="cli">
+        <div class="band-inner cli-layout">
+          <div class="section-copy reveal">
+            <p class="eyebrow">Standalone CLI</p>
+            <h2>Install from the terminal.</h2>
+            <p class="section-lede">
+              Use the same encrypted local vault from scripts and shells. Download a release
+              archive directly—there is no remote installer script and no Tethra account.
+            </p>
+            <a class="inline-link" href="./docs.html" data-nav="cli_docs">Read the complete CLI docs</a>
+          </div>
+          <div class="cli-snippets reveal">
+            <div>
+              <p>macOS Apple Silicon</p>
+              <ol class="install-steps">
+                <li>
+                  <div class="step-head">
+                    <div><h4>Download</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-mac-1">Copy</button>
+                    <pre><code id="home-mac-1">curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o ~/Downloads/tethra.tar.gz</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Unpack</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-mac-2">Copy</button>
+                    <pre><code id="home-mac-2">tar -xzf ~/Downloads/tethra.tar.gz -C ~/Downloads tethra</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Install and check</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-mac-3">Copy</button>
+                    <pre><code id="home-mac-3">sudo install -m 0755 ~/Downloads/tethra /usr/local/bin/tethra &amp;&amp; tethra --version</code></pre>
+                  </div>
+                </li>
+              </ol>
+            </div>
+            <div>
+              <p>Windows x64 PowerShell</p>
+              <ol class="install-steps">
+                <li>
+                  <div class="step-head">
+                    <div><h4>Download</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-windows-1">Copy</button>
+                    <pre><code id="home-windows-1">Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\tethra.zip"</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Unpack</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-windows-2">Copy</button>
+                    <pre><code id="home-windows-2">Expand-Archive "$env:TEMP\tethra.zip" -DestinationPath "$env:LOCALAPPDATA\Tethra\bin" -Force</code></pre>
+                  </div>
+                </li>
+                <li>
+                  <div class="step-head">
+                    <div><h4>Add to PATH and check</h4></div>
+                  </div>
+                  <div class="code-box">
+                    <button class="copy-button" type="button" data-copy-target="home-windows-3">Copy</button>
+                    <pre><code id="home-windows-3">$d = "$env:LOCALAPPDATA\Tethra\bin"; $env:Path = "$d;$env:Path"; tethra --version</code></pre>
+                  </div>
+                </li>
+              </ol>
+              <p style="text-transform: none; font-weight: 400; margin-top: 10px">
+                <a class="inline-link" href="./docs.html#install-windows">Make the PATH change permanent →</a>
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="teams-band" data-section="teams">
+        <div class="band-inner teams-band-inner reveal">
+          <div>
+            <p class="eyebrow">Tethra for Teams</p>
+            <h2>Team-scale credential intelligence is coming soon.</h2>
+          </div>
+          <div class="teams-band-copy">
+            <p>
+              Join the waitlist for the next chapter of Tethra: shared operational visibility,
+              designed around the same local-first security boundary.
+            </p>
+            <a class="button quiet" href="./teams.html" data-nav="teams_waitlist">
+              Explore Tethra for Teams
+            </a>
+          </div>
+        </div>
+      </section>
+
+      <section id="download" class="download-band" data-section="download">
+        <div class="band-inner download-inner reveal">
+          <p class="eyebrow">Available for macOS and Windows</p>
+          <h2>Bring every API credential into view.</h2>
+          <p>
+            Install the Tethra desktop app and bundled CLI. No Tethra account, subscription, or
+            hosted vault required.
+          </p>
+          <div class="download-actions">
+            <a
+              class="button primary large"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_aarch64.dmg"
+              data-download="final"
+              data-platform="macos"
+            >
+              Download macOS DMG
+            </a>
+            <a
+              class="button quiet large"
+              href="https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/Tethra_0.1.1_x64-setup.exe"
+              data-download="final"
+              data-platform="windows"
+            >
+              Download Windows EXE
+            </a>
+          </div>
+          <small>
+            macOS: Apple Silicon, Developer ID signed, and Apple-notarized. Windows: x64 alpha;
+            the installer is currently unsigned and may trigger Microsoft SmartScreen.
+            <a href="./downloads/SHA256SUMS.txt">SHA-256 checksums</a>.
+          </small>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div><img class="brand-logo" src="./assets/tethra-key.png" alt="" aria-hidden="true" /><b>tethra.</b></div>
+        <p>Local-first API credential intelligence.</p>
+        <nav aria-label="Legal and privacy">
+          <a href="./privacy.html" data-legal="privacy">Privacy</a>
+          <a href="./terms.html" data-legal="terms">Terms</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./teams.html">Teams</a>
+          <button type="button" data-privacy-choices>Privacy choices</button>
+        </nav>
+        <small>&copy; 2026 tethra. All rights reserved.</small>
+      </div>
+    </footer>
+
+    <aside class="consent-banner" data-consent-banner hidden aria-labelledby="consent-title">
+      <div>
+        <p class="consent-kicker">Your choice</p>
+        <h2 id="consent-title">Product analytics</h2>
+        <p data-consent-copy>
+          Allow pseudonymous Google Analytics for broad page, session, download, feature-use, and
+          numeric desktop inventory measurement. No credential values, project or credential names,
+          file paths, provider names, request content, or other vault contents are included.
+        </p>
+        <a href="./privacy.html" data-legal="privacy">Privacy policy</a>
+      </div>
+      <div class="consent-actions">
+        <button type="button" class="button quiet" data-consent="denied">Turn off</button>
+        <button type="button" class="button primary" data-consent="granted">Allow analytics</button>
+      </div>
+    </aside>
+  </body>
+</html>

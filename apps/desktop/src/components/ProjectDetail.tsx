@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, isApiError } from "../api";
-import type { Credential, Project, ProjectOverview } from "../types";
+import type { Credential, DetectedCredential, Project, ProjectOverview } from "../types";
 import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
 import { ProjectActivity } from "./ProjectActivity";
 import { ProjectTracking } from "./ProjectTracking";
+import { ProviderMark } from "./visuals/ProviderMarks";
 
 export function ProjectDetail(props: {
   ident: string;
@@ -12,6 +13,8 @@ export function ProjectDetail(props: {
   onOpenCredential: (id: string) => void;
   onAddCredential: () => void;
   onOpenAdvanced: () => void;
+  /** Open the credential form seeded from a detection row. */
+  onStoreDetected: (row: DetectedCredential) => void;
 }) {
   const [project, setProject] = useState<Project | null>(null);
   const [credentials, setCredentials] = useState<Credential[]>([]);
@@ -263,6 +266,7 @@ export function ProjectDetail(props: {
           void reload();
         }}
         onOpenAdvanced={props.onOpenAdvanced}
+        onStoreDetected={props.onStoreDetected}
       />
 
       {overview?.link && overview.link.tracking_enabled && (
@@ -285,42 +289,55 @@ export function ProjectDetail(props: {
         {project.archived && <span className="muted"> (restore the project first)</span>}
       </p>
       {credentials.length === 0 ? (
-        <p>No credentials in this project yet.</p>
+        <div className="empty-state">
+          <h2>No credentials in this project yet</h2>
+          <p>
+            Add the keys this project uses and Tethra can tell you which requests each one made,
+            when it was last used, and when it needs rotating.
+          </p>
+          <button
+            className="primary"
+            onClick={props.onAddCredential}
+            disabled={project.archived}
+          >
+            Add credential
+          </button>
+        </div>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Provider</th>
-              <th>Environment</th>
-              <th>Value</th>
-              <th>Status</th>
-              <th>Marked used</th>
-            </tr>
-          </thead>
-          <tbody>
-            {credentials.map((c) => (
-              <tr key={c.id}>
-                <td>
-                  <button className="link" onClick={() => props.onOpenCredential(c.id)}>
-                    {c.name}
-                  </button>
-                </td>
-                <td>{c.provider}</td>
-                <td>{c.environment}</td>
-                <td className="mono">
-                  {c.is_reference ? `→ ${c.linked_target ?? "?"}` : c.masked_value}
-                </td>
-                <td>
-                  <span className={`badge ${statusSeverity(c.status.primary)}`}>
-                    {statusLabel(c.status.primary)}
-                  </span>
-                </td>
-                <td>{formatTimestamp(c.last_used_at)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="entity-grid" data-testid="credential-cards">
+          {credentials.map((c) => (
+            <button
+              className="entity-card"
+              key={c.id}
+              onClick={() => props.onOpenCredential(c.id)}
+            >
+              <div className="entity-head">
+                <ProviderMark id={c.provider} name={c.provider} />
+                <div style={{ minWidth: 0 }}>
+                  <p className="entity-title">{c.name}</p>
+                  <p className="entity-sub">
+                    {c.provider} · {c.environment}
+                  </p>
+                </div>
+              </div>
+
+              <p className="entity-meta">
+                {/* The status label and its tone are both resolved by the
+                    shared helpers, so this card and the credential page
+                    cannot disagree about what a status means. */}
+                <span className={`badge ${statusSeverity(c.status.primary)}`}>
+                  {statusLabel(c.status.primary)}
+                </span>
+              </p>
+
+              <p className="entity-meta mono">
+                {c.is_reference ? `→ ${c.linked_target ?? "?"}` : c.masked_value}
+              </p>
+
+              <p className="entity-foot">Marked used {formatTimestamp(c.last_used_at)}</p>
+            </button>
+          ))}
+        </div>
       )}
     </div>
   );

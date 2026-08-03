@@ -3,9 +3,10 @@
 Tethra is a **local-first** desktop app + CLI for individual developers to
 organize, secure, monitor, and manage the API credentials scattered across
 their projects. There is no account, no cloud service, and no Tethra
-server: the only network traffic is direct, from your device to endpoints you
+server. Operational network traffic is direct from your device to endpoints you
 explicitly configure (provider APIs, deployment destinations, watched docs
-pages, and webhook URLs).
+pages, gateway origins, and webhook URLs). Optional Google Analytics is off by
+default and limited to fixed nonsensitive product events after consent.
 
 The CLI command is `tethra`; the legacy `api-tracker` command remains
 available as a compatibility alias for the same program (see
@@ -56,10 +57,12 @@ SQLite vault.
   to the encrypted values — treat the data directory as sensitive. Local-first
   cannot defend against malware running as you or an unlocked machine. See the
   threat model for the full list, including documented residuals.
-- **Packaging/signing**: installers are **unsigned and un-notarized**; you will
-  see OS warnings on first launch (see [INSTALL.md](INSTALL.md)). Only macOS
-  arm64 artifacts were built locally at release time; the other platforms come
-  from CI and should be smoke-tested from the draft release before publishing.
+- **Packaging/signing**: the Apple Silicon DMG served from `usetethra.com` is
+  Developer ID signed and Apple-notarized. Automated GitHub Release artifacts
+  remain unsigned and may show OS warnings (see [INSTALL.md](INSTALL.md)). Only
+  macOS arm64 artifacts were built locally at release time; the other platforms
+  come from CI and should be smoke-tested from the draft release before
+  publishing.
 
 ## Verify your download
 

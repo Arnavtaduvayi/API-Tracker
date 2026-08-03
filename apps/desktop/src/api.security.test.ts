@@ -6,7 +6,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({ invoke: (...a: unknown[]) => invoke(...a) }));
 
-import { api, isApiError, setVaultLockedHandler } from "./api";
+import {
+  api,
+  isApiError,
+  setVaultLockedHandler,
+  subscribeToProductAnalytics,
+  type ProductAnalyticsSignal,
+} from "./api";
 
 beforeEach(() => {
   invoke.mockReset();
@@ -106,5 +112,74 @@ describe("vault-locked propagation", () => {
     });
     expect(onLocked).toHaveBeenCalledTimes(1);
     setVaultLockedHandler(() => {});
+  });
+});
+
+describe("privacy-bounded product analytics signals", () => {
+  it("emits only a fixed project lifecycle event after a successful create", async () => {
+    const signals: ProductAnalyticsSignal[] = [];
+    const unsubscribe = subscribeToProductAnalytics((signal) => signals.push(signal));
+    invoke.mockResolvedValueOnce({ id: "private-project-id" });
+
+    await api.projectCreate({
+      name: "Private project name",
+      description: "Private description",
+      notes: "Private notes",
+      environments: ["production"],
+      repoPaths: ["/private/repository/path"],
+    });
+    unsubscribe();
+
+    expect(signals).toEqual([{ event: { name: "project_created" }, inventoryChanged: true }]);
+    expect(JSON.stringify(signals)).not.toContain("Private");
+    expect(JSON.stringify(signals)).not.toContain("repository");
+  });
+
+  it("classifies credential tracking without forwarding credential metadata", async () => {
+    const signals: ProductAnalyticsSignal[] = [];
+    const unsubscribe = subscribeToProductAnalytics((signal) => signals.push(signal));
+    invoke.mockResolvedValueOnce({ id: "private-credential-id" });
+
+    await api.credentialAdd({
+      project: "private-project",
+      provider: "private-provider",
+      name: "private-key-name",
+      environment: "production",
+      value: "SECRET-VALUE",
+      keyCreatedAt: null,
+      expiresAt: null,
+      docsUrl: "https://private.example/docs",
+      notes: "private notes",
+    });
+    unsubscribe();
+
+    expect(signals).toEqual([
+      {
+        event: { name: "credential_tracked", tracking_method: "stored_secret" },
+        inventoryChanged: true,
+      },
+    ]);
+    expect(JSON.stringify(signals)).toBe(
+      '[{"event":{"name":"credential_tracked","tracking_method":"stored_secret"},"inventoryChanged":true}]',
+    );
+  });
+
+  it("does not emit a lifecycle signal when the backend action fails", async () => {
+    const signals: ProductAnalyticsSignal[] = [];
+    const unsubscribe = subscribeToProductAnalytics((signal) => signals.push(signal));
+    invoke.mockRejectedValueOnce({ code: "invalid", message: "rejected" });
+
+    await expect(
+      api.projectCreate({
+        name: "not-created",
+        description: "",
+        notes: "",
+        environments: [],
+        repoPaths: [],
+      }),
+    ).rejects.toMatchObject({ code: "invalid" });
+    unsubscribe();
+
+    expect(signals).toEqual([]);
   });
 });

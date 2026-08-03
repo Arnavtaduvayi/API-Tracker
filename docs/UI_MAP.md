@@ -1162,3 +1162,71 @@ empty, and error.
 
 Start tracking is disabled — with the reason stated — when nothing is
 selected or the diff could not be prepared.
+
+## Card-based interface and first run (ADR 0030, 2026-08-02)
+
+This addendum supersedes the descriptions above wherever they conflict.
+Sections 1–4 of this document remain the frozen pre-rename baseline; the
+addenda from "Projects-first live activity" onward are the live record.
+
+### First run (`Welcome.tsx`) — new
+
+Shown after `vault_create`, and on any later launch where `project_list`
+returns nothing and the user has not navigated away from the default view.
+Replaces the previous sequence (create project → type a repository path →
+open project → choose the folder → add credentials by hand).
+
+| Phase | What is on screen |
+|---|---|
+| idle | Scope paragraph (what Tethra reads, and that it reads names not values), **Choose a project folder**, **I'll do this later** |
+| scanning | the same screen with the button reading "Scanning…" |
+| review | "Here is what is in `<folder>`", a card per detected provider, the credential-record count, **What Tethra will change** (`<details open>`, the backend's `preview.disclosure` verbatim), optional master-password field, **Start tracking** · **Not now** |
+| applying | "Setting up…" |
+
+The project is created from the folder's basename (de-duplicated against
+existing names), or an existing project already bound to that folder is
+reused. Cancelling keeps the project and opens its page, where the same
+picker is offered. A refused digest re-previews rather than retrying blind.
+
+### Activity (`DashboardView.tsx`) — rebuilt
+
+| Element | Content |
+|---|---|
+| Heading | kicker "Local request telemetry", `<h1>` "API activity", **Track API activity** (→ first-run flow) |
+| Toolbar | Today / 7 days / 30 days, "Observing locally" |
+| Tiles (`.tile-grid`) | Requests (+ "N% succeeded"), Tracked projects (+ "N active in this window"), Open alerts (+ "top severity: X" / "nothing needs attention"), Observed cost (+ "lower bound; cache reads excluded" or "locally observed only") |
+| Chart | `ActivityChart`, metric `requests`, summed from the per-project series |
+| Detail grid | Errors, Latency p50/p95/p99, Tokens in/out, Observation window |
+| By project | one `.entity-card` per project — status dot, request and error counts, last request as relative time; clicking opens the project |
+| What the traffic was | `.feed` of endpoints, models and attribution states with counts |
+| Tracked projects | unchanged: "Right now" / "Previously" per setup (ADR 0025) |
+
+An unreadable count renders "could not be read", never `0`. The chart failing
+does not disturb the per-project split.
+
+### Projects (`ProjectList.tsx`) — cards
+
+`.entity-card` per project: status dot, name, description or lock state,
+requests sparkline (7-day), credential count, request and error counts, last
+request as relative time, environments. Toggle for archived. Activity is
+additive — a failed read leaves the cards without figures.
+
+### Providers (`ProviderCatalog.tsx`) — cards
+
+`.entity-card` per manifest with a brand-coloured mark
+(`visuals/ProviderMarks.tsx`), the count of credentials held for that
+provider, secret-variable and detection-pattern counts, and the expiry
+statement. Search filters by name, id or environment variable, with an
+"N of M providers" count. All 21 embedded manifests are listed.
+
+### Credentials (`ProjectDetail.tsx`) — cards
+
+`.entity-card` per credential: provider mark, name, provider · environment,
+status badge, masked value or reference target, "Marked used …".
+
+### Detected credentials (`ProjectTracking.tsx`)
+
+Row actions are now **Store this key** · Ignore · Managed elsewhere. "Store
+this key" opens the credential form seeded with the suggested provider, name
+and environment, and on success resolves the detection to `completed` against
+the new credential.

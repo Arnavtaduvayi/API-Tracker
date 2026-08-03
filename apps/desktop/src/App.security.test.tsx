@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { act } from "react";
 import type { VaultStatus } from "./types";
 
@@ -44,6 +44,13 @@ function status(unlocked: boolean): VaultStatus {
 beforeEach(() => {
   mockApi.vaultStatus.mockReset();
   lockedHandler = null;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ country: "OTHER", analyticsDefault: false }),
+    }),
+  );
 });
 
 describe("App locked-vault gating (secret UI is not reachable while locked)", () => {
@@ -58,7 +65,7 @@ describe("App locked-vault gating (secret UI is not reachable while locked)", ()
     mockApi.vaultStatus.mockResolvedValue(status(true));
     render(<App />);
     // Authenticated nav is present while unlocked.
-    await screen.findByRole("button", { name: "Destinations" });
+    await screen.findByRole("button", { name: "Settings" });
     expect(lockedHandler).not.toBeNull();
 
     // Fire the vault-locked handler (what api.call does on a vault_locked
@@ -70,5 +77,19 @@ describe("App locked-vault gating (secret UI is not reachable while locked)", ()
       expect(screen.getByRole("heading", { name: /unlock vault/i })).toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: "Destinations" })).not.toBeInTheDocument();
+  });
+
+  it("keeps delivery controls inside Settings → Advanced", async () => {
+    mockApi.vaultStatus.mockResolvedValue(status(true));
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Settings" }));
+    await screen.findByRole("heading", { name: "Settings" });
+    expect(screen.queryByRole("button", { name: "Destinations" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+    expect(screen.getByRole("button", { name: "Destinations" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Templates" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Backup" })).toBeInTheDocument();
   });
 });

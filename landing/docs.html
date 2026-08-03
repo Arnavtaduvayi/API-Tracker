@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tethra Docs | Install and use the CLI</title>
+    <meta
+      name="description"
+      content="Install the Tethra CLI and learn its local vault, tracking, credential, environment, observability, delivery, monitoring, and backup workflows."
+    />
+    <link rel="canonical" href="https://usetethra.com/docs" />
+    <link rel="icon" type="image/png" href="./assets/tethra-key.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./docs.css" />
+    <script src="./analytics.js" defer></script>
+    <script src="./docs.js" defer></script>
+  </head>
+  <body class="docs-page" data-page="docs">
+    <a class="skip-link" href="#docs-content">Skip to docs</a>
+    <header class="global-nav">
+      <div class="nav-inner">
+        <a
+          class="brand"
+          href="./index.html"
+          aria-label="Tethra home"
+          data-nav="home"
+        >
+          <img
+            class="brand-logo"
+            src="./assets/tethra-key.png"
+            alt=""
+            aria-hidden="true"
+          />
+          <span>tethra.</span>
+        </a>
+        <nav aria-label="Primary navigation">
+          <a href="./index.html#intelligence" data-nav="intelligence"
+            >Product</a
+          >
+          <a href="./docs.html" data-nav="docs">Docs</a>
+          <a href="./teams.html" data-nav="teams">Teams</a>
+          <a href="./index.html#download" data-nav="download">Download</a>
+        </nav>
+        <a class="nav-download" href="#install">Install CLI</a>
+      </div>
+    </header>
+
+    <main>
+      <section class="docs-hero">
+        <div class="band-inner">
+          <p class="eyebrow">Tethra documentation</p>
+          <h1>One local vault. Desktop or terminal.</h1>
+          <p>
+            Install the standalone CLI, create a vault, track a project, and
+            manage the same encrypted data used by the desktop app.
+          </p>
+        </div>
+      </section>
+
+      <nav class="docs-tabs" aria-label="Documentation topics">
+        <a href="#install">Get started</a>
+        <a href="#tracking">Activity</a>
+        <a href="#projects">Vault</a>
+        <a href="#delivery">Delivery</a>
+        <a href="#operations">Operations</a>
+        <a href="#commands">CLI reference</a>
+        <a href="#support">Support</a>
+      </nav>
+
+      <div class="docs-layout">
+        <aside class="docs-sidebar" aria-label="Documentation sections">
+          <p>Get started</p>
+          <a href="#install">Install</a>
+          <a href="#first-run">First run</a>
+          <a href="#tracking">Track API activity</a>
+          <p>Workflows</p>
+          <a href="#projects">Projects and keys</a>
+          <a href="#environment">Environment files</a>
+          <a href="#observability">Observability</a>
+          <a href="#delivery">Delivery and rotation</a>
+          <a href="#operations">Monitoring and backup</a>
+          <p>Reference</p>
+          <a href="#commands">Command index</a>
+          <a href="#support">Paths, safety, and help</a>
+        </aside>
+
+        <article id="docs-content" class="docs-content">
+          <section id="install">
+            <p class="eyebrow">Install</p>
+            <h2>Install the standalone CLI</h2>
+            <p>
+              The desktop app already bundles the helper it needs. Install this
+              standalone binary when you want to use
+              <code>tethra</code> directly in a terminal or script.
+            </p>
+            <div class="platform-tabs" aria-label="Platform installer links">
+              <a href="#install-macos">macOS Apple Silicon</a>
+              <a href="#install-linux">Linux x64</a>
+              <a href="#install-windows">Windows x64</a>
+            </div>
+
+            <h3 id="install-macos">macOS — Apple Silicon</h3>
+            <p>Four commands. Copy one, run it, move to the next.</p>
+            <ol class="install-steps">
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Download the archive</h4>
+                    <p>Saves it to your Downloads folder.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-1">Copy</button>
+                  <pre><code id="mac-1">curl -fL "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz" -o ~/Downloads/tethra.tar.gz</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Unpack it</h4>
+                    <p>Extracts the single <code>tethra</code> binary.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-2">Copy</button>
+                  <pre><code id="mac-2">tar -xzf ~/Downloads/tethra.tar.gz -C ~/Downloads tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Put it on your PATH</h4>
+                    <p>Asks for your password, because <code>/usr/local/bin</code> is system-owned.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-3">Copy</button>
+                  <pre><code id="mac-3">sudo install -m 0755 ~/Downloads/tethra /usr/local/bin/tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Check it works</h4>
+                    <p>Prints the version number. That is the whole install.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="mac-4">Copy</button>
+                  <pre><code id="mac-4">tethra --version</code></pre>
+                </div>
+              </li>
+            </ol>
+
+            <h3 id="install-linux">Linux — x86-64</h3>
+            <p>The same four commands, with the Linux build.</p>
+            <ol class="install-steps">
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Download the archive</h4>
+                    <p>Saves it to your home folder.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-1">Copy</button>
+                  <pre><code id="linux-1">curl -fL "https://usetethra.com/downloads/cli/tethra-x86_64-unknown-linux-gnu.tar.gz" -o ~/tethra.tar.gz</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Unpack it</h4>
+                    <p>Extracts the single <code>tethra</code> binary.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-2">Copy</button>
+                  <pre><code id="linux-2">tar -xzf ~/tethra.tar.gz -C ~ tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Put it on your PATH</h4>
+                    <p>Asks for your password, because <code>/usr/local/bin</code> is system-owned.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-3">Copy</button>
+                  <pre><code id="linux-3">sudo install -m 0755 ~/tethra /usr/local/bin/tethra</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Check it works</h4>
+                    <p>Prints the version number. That is the whole install.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="linux-4">Copy</button>
+                  <pre><code id="linux-4">tethra --version</code></pre>
+                </div>
+              </li>
+            </ol>
+
+            <h3 id="install-windows">Windows — x64 PowerShell</h3>
+            <p>
+              Open PowerShell from the Start menu, then run these four in order.
+            </p>
+            <ol class="install-steps">
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Download the archive</h4>
+                    <p>Saves it to your temporary folder.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-1">Copy</button>
+                  <pre><code id="windows-1">Invoke-WebRequest "https://usetethra.com/downloads/cli/tethra-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\tethra.zip"</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Unpack it</h4>
+                    <p>Creates the folder if it does not exist yet.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-2">Copy</button>
+                  <pre><code id="windows-2">Expand-Archive "$env:TEMP\tethra.zip" -DestinationPath "$env:LOCALAPPDATA\Tethra\bin" -Force</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Put it on your PATH</h4>
+                    <p>Safe to run twice — it checks before adding.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-3">Copy</button>
+                  <pre><code id="windows-3">$d = "$env:LOCALAPPDATA\Tethra\bin"; $p = [Environment]::GetEnvironmentVariable("Path", "User"); if ($p -notlike "*$d*") { [Environment]::SetEnvironmentVariable("Path", "$d;$p", "User") }; $env:Path = "$d;$env:Path"</code></pre>
+                </div>
+              </li>
+              <li>
+                <div class="step-head">
+                  <div>
+                    <h4>Check it works</h4>
+                    <p>Prints the version number. Open a new terminal if it is not found.</p>
+                  </div>
+                </div>
+                <div class="code-box">
+                  <button class="copy-button" type="button" data-copy-target="windows-4">Copy</button>
+                  <pre><code id="windows-4">tethra --version</code></pre>
+                </div>
+              </li>
+            </ol>
+            <p class="docs-note">
+              <strong>Alpha signing note:</strong> the direct macOS desktop DMG
+              is Apple-notarized. The standalone CLI archives and Windows
+              installer are currently unsigned, so macOS Gatekeeper or Windows
+              SmartScreen may ask you to confirm the download.
+            </p>
+          </section>
+
+          <section id="first-run">
+            <p class="eyebrow">First run</p>
+            <h2>Create and unlock your vault</h2>
+            <p>
+              The CLI and desktop app use the same platform data directory and
+              encrypted vault. Your master password is not recoverable, so
+              create an encrypted backup after setup.
+            </p>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="first-run-code"
+              >
+                Copy
+              </button>
+              <pre><code id="first-run-code">tethra init
+eval "$(tethra unlock --print-export)"
+tethra doctor
+tethra backup create ~/tethra-backup.json</code></pre>
+            </div>
+            <p>
+              PowerShell users can run <code>tethra unlock</code> and follow the
+              shell-specific export instructions it prints. Use
+              <code>tethra lock</code> to end the CLI session.
+            </p>
+          </section>
+
+          <section id="tracking">
+            <p class="eyebrow">Primary workflow</p>
+            <h2>Track a project's API activity</h2>
+            <p>
+              <code>track</code> detects supported APIs in a selected folder,
+              presents the exact changes it proposes, and verifies the local
+              activity path. Start with a dry run when you want to inspect
+              without changing files.
+            </p>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="track-code"
+              >
+                Copy
+              </button>
+              <pre><code id="track-code">cd /path/to/your/project
+tethra track . --dry-run
+tethra track .
+tethra track status
+tethra track doctor
+# Restore managed changes later:
+tethra track undo</code></pre>
+            </div>
+          </section>
+
+          <section id="projects">
+            <p class="eyebrow">Vault organization</p>
+            <h2>Projects and credentials</h2>
+            <p>
+              Projects group credentials by codebase and environment. Secret
+              values are prompted without echoing and remain encrypted locally.
+            </p>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="project-code"
+              >
+                Copy
+              </button>
+              <pre><code id="project-code">tethra project create my-app --env production
+tethra project list
+tethra key add --project my-app --name openai --provider openai --environment production
+tethra key list --project my-app
+tethra key status
+tethra key validate &lt;credential-id&gt;</code></pre>
+            </div>
+            <p>
+              Run <code>tethra project --help</code> and
+              <code>tethra key --help</code> for edit, archive, project-lock,
+              metadata, permissions, version-history, reveal, replacement,
+              removal, and provider-revocation operations.
+            </p>
+          </section>
+
+          <section id="environment">
+            <p class="eyebrow">Secret hygiene</p>
+            <h2>Scan code and govern environment files</h2>
+            <p>
+              Repository scans and environment-file inspection happen locally.
+              Review every result before importing, migrating, exporting,
+              suppressing, or installing a Git hook.
+            </p>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="env-code"
+              >
+                Copy
+              </button>
+              <pre><code id="env-code">tethra scan /path/to/repository
+tethra hooks install /path/to/repository
+tethra env discover --project my-app
+tethra env drift --project my-app
+tethra mapping --help
+tethra run --project my-app -- your-command</code></pre>
+            </div>
+          </section>
+
+          <section id="observability">
+            <p class="eyebrow">Local telemetry</p>
+            <h2>Inspect metadata-only API activity</h2>
+            <p>
+              Tethra's opt-in loopback observer records sanitized host,
+              templated path, method, status, latency, and byte counts. It does
+              not store bodies, header values, credentials, cookies, or query
+              strings.
+            </p>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="observe-code"
+              >
+                Copy
+              </button>
+              <pre><code id="observe-code">tethra run --project my-app --observe -- your-command
+tethra observe overview
+tethra observe apis
+tethra observe sessions
+tethra activity
+tethra usage report --help</code></pre>
+            </div>
+          </section>
+
+          <section id="delivery">
+            <p class="eyebrow">Controlled delivery</p>
+            <h2>Destinations, sync, rotation, and access</h2>
+            <p>
+              Delivery actions are explicit and reviewable. Use dry-run and
+              status commands before executing a sync or rotation against a
+              provider or destination.
+            </p>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="delivery-code"
+              >
+                Copy
+              </button>
+              <pre><code id="delivery-code">tethra destination --help
+tethra sync --help
+tethra rotation --help
+tethra access --help
+tethra notify --help</code></pre>
+            </div>
+          </section>
+
+          <section id="operations">
+            <p class="eyebrow">Operations</p>
+            <h2>Monitor, alert, budget, and recover</h2>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="ops-code"
+              >
+                Copy
+              </button>
+              <pre><code id="ops-code">tethra monitor
+tethra alerts list
+tethra usage --help
+tethra budget --help
+tethra pricing --help
+tethra backup create ~/tethra-backup.json
+tethra backup verify ~/tethra-backup.json
+tethra backup restore --help</code></pre>
+            </div>
+          </section>
+
+          <section id="commands">
+            <p class="eyebrow">Reference</p>
+            <h2>Complete top-level command index</h2>
+            <p>
+              Use <code>tethra &lt;command&gt; --help</code> for every
+              subcommand and flag. Add global <code>--json</code> when you need
+              machine-readable output from supported operations, and
+              <code>--data-dir</code> to select another vault directory.
+            </p>
+            <div class="command-grid">
+              <div><code>init</code><span>Create an encrypted vault</span></div>
+              <div>
+                <code>unlock / lock</code
+                ><span>Start or end a CLI session</span>
+              </div>
+              <div>
+                <code>change-password</code><span>Re-wrap the vault key</span>
+              </div>
+              <div>
+                <code>doctor / settings</code
+                ><span>Check health and configure thresholds</span>
+              </div>
+              <div>
+                <code>provider</code
+                ><span>Catalog, capabilities, and doc watches</span>
+              </div>
+              <div>
+                <code>project / template</code
+                ><span>Organize projects and detect stacks</span>
+              </div>
+              <div>
+                <code>key</code
+                ><span>Manage credential lifecycle and evidence</span>
+              </div>
+              <div>
+                <code>scan / hooks / suppress</code
+                ><span>Find and prevent committed secrets</span>
+              </div>
+              <div>
+                <code>monitor / alerts</code
+                ><span>Run checks and manage findings</span>
+              </div>
+              <div>
+                <code>usage / budget / pricing</code
+                ><span>Measure usage and cost</span>
+              </div>
+              <div>
+                <code>activity</code><span>Inspect local activity events</span>
+              </div>
+              <div>
+                <code>mapping / run</code
+                ><span>Inject selected secrets into a process</span>
+              </div>
+              <div>
+                <code>observe / track</code
+                ><span>Inspect and configure API activity</span>
+              </div>
+              <div>
+                <code>gateway</code
+                ><span>Configure the optional loopback gateway</span>
+              </div>
+              <div>
+                <code>env</code
+                ><span>Discover, import, drift, export, and clean up</span>
+              </div>
+              <div>
+                <code>destination / sync</code
+                ><span>Plan controlled secret delivery</span>
+              </div>
+              <div>
+                <code>rotation / access</code
+                ><span>Rotate keys and issue bounded local grants</span>
+              </div>
+              <div>
+                <code>backup / notify</code
+                ><span>Recover the vault and send configured notices</span>
+              </div>
+            </div>
+          </section>
+
+          <section id="support">
+            <p class="eyebrow">Support and safety</p>
+            <h2>Paths, verification, and troubleshooting</h2>
+
+            <h3>Default vault locations</h3>
+            <p>
+              The historical <code>api-tracker</code> directory name is retained
+              so existing vaults continue to work. Override it with global
+              <code>--data-dir &lt;DIR&gt;</code> or the
+              <code>TETHRA_DIR</code> environment variable.
+            </p>
+            <div class="command-grid path-grid">
+              <div>
+                <code>macOS</code
+                ><span>~/Library/Application Support/api-tracker/</span>
+              </div>
+              <div>
+                <code>Linux</code
+                ><span>~/.local/share/api-tracker/ (or XDG_DATA_HOME)</span>
+              </div>
+              <div><code>Windows</code><span>%APPDATA%\api-tracker\</span></div>
+              <div>
+                <code>Shared vault</code
+                ><span>The desktop app and CLI use the same directory.</span>
+              </div>
+            </div>
+
+            <h3>Verify the macOS CLI archive</h3>
+            <div class="code-box">
+              <button
+                class="copy-button"
+                type="button"
+                data-copy-target="verify-code"
+              >
+                Copy
+              </button>
+              <pre><code id="verify-code">curl -fLO "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz"
+curl -fLO "https://usetethra.com/downloads/cli/tethra-aarch64-apple-darwin.tar.gz.sha256"
+shasum -a 256 tethra-aarch64-apple-darwin.tar.gz
+cat tethra-aarch64-apple-darwin.tar.gz.sha256</code></pre>
+            </div>
+
+            <h3>Common fixes</h3>
+            <ul>
+              <li>
+                <strong>Command not found:</strong> open a new terminal after
+                installation, or add the chosen install directory to
+                <code>PATH</code>.
+              </li>
+              <li>
+                <strong>CLI says the vault is locked:</strong> unlock in the
+                current shell and apply the export instructions it prints.
+                Sessions intentionally do not unlock every terminal globally.
+              </li>
+              <li>
+                <strong>Desktop and CLI see different vaults:</strong> run
+                <code>tethra doctor</code> and compare its data directory with
+                the location shown in app Settings.
+              </li>
+              <li>
+                <strong>Tracking has no traffic:</strong> run
+                <code>tethra track status</code>, then
+                <code>tethra track doctor</code>. Use
+                <code>tethra track undo</code> to restore files changed by the
+                managed setup.
+              </li>
+              <li>
+                <strong>Need a flag or subcommand:</strong> run
+                <code>tethra &lt;command&gt; --help</code>. The complete
+                top-level index is above.
+              </li>
+            </ul>
+
+            <h3>Security boundary</h3>
+            <p>
+              Credential values are encrypted locally, but names, notes, paths,
+              and other operational metadata can exist unencrypted in the local
+              database. Protect the OS account and disk, use a strong master
+              password, and keep encrypted backups off-device. The master
+              password is never stored and cannot be recovered.
+            </p>
+            <p class="docs-note">
+              Tethra is public-alpha software. Test provider, sync, rotation,
+              and observability workflows with non-production credentials before
+              relying on them for sensitive systems.
+            </p>
+            <p>
+              Read the onsite <a href="./privacy.html">Privacy Policy</a> and
+              <a href="./terms.html">Terms</a> for analytics,
+              network-processing, local-data, and service limitations.
+            </p>
+          </section>
+        </article>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="footer-inner">
+        <div>
+          <img
+            class="brand-logo"
+            src="./assets/tethra-key.png"
+            alt=""
+            aria-hidden="true"
+          /><b>tethra.</b>
+        </div>
+        <p>Local-first API credential intelligence.</p>
+        <nav aria-label="Legal and privacy">
+          <a href="./index.html">Home</a>
+          <a href="./teams.html">Teams</a>
+          <a href="./privacy.html" data-legal="privacy">Privacy</a>
+          <a href="./terms.html" data-legal="terms">Terms</a>
+          <button type="button" data-privacy-choices>Privacy choices</button>
+        </nav>
+        <small>&copy; 2026 tethra. All rights reserved.</small>
+      </div>
+    </footer>
+
+    <aside
+      class="consent-banner"
+      data-consent-banner
+      hidden
+      aria-labelledby="consent-title"
+    >
+      <div>
+        <p class="consent-kicker">Your choice</p>
+        <h2 id="consent-title">Product analytics</h2>
+        <p data-consent-copy>
+          Allow pseudonymous measurement of broad page, session, download,
+          feature use, and numeric desktop inventory totals. Names, secrets,
+          paths, providers, request data, and other vault contents are excluded.
+        </p>
+        <a href="./privacy.html" data-legal="privacy">Privacy policy</a>
+      </div>
+      <div class="consent-actions">
+        <button type="button" class="button quiet" data-consent="denied">
+          Turn off
+        </button>
+        <button type="button" class="button primary" data-consent="granted">
+          Allow analytics
+        </button>
+      </div>
+    </aside>
+  </body>
+</html>

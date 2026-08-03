@@ -73,7 +73,7 @@ unsupported; the user-entered org label is labeled "user-entered, not
 provider-verified" everywhere. Manifests gained official console-login and
 billing-portal URLs. Provider account passwords, recovery codes, MFA
 material, and browser session data remain **intentionally excluded**
-(FEATURE_MATRIX #16): API Tracker is not a password manager.
+(FEATURE_MATRIX #16): Tethra is not a password manager.
 
 ## Destination completion
 

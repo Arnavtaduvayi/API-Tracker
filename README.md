@@ -8,11 +8,13 @@ Think of it as a folder system for API keys: a **project** is a folder, each
 state each key is in — expired, expiring soon, unused, stale, reused across
 projects — with the reason and evidence for every claim.
 
-Everything stays on your computer. There is **no account**, no cloud service, no
-telemetry, and no Tethra server. The only network traffic Tethra ever
-produces is direct traffic between your machine and API providers (or
-documentation pages) you explicitly configure — your secrets are never uploaded
-to a Tethra server.
+The vault stays on your computer. There is **no account**, hosted vault, or
+Tethra credential server. Measurement analytics uses a U.S. regional default
+with opt-out and remains opt-in elsewhere; its small event allowlist excludes
+credentials, vault records, project/provider names, paths, URLs, and request content. Other
+network traffic goes directly from your machine to providers, destinations,
+webhooks, or documentation pages you configure. See [Analytics](docs/ANALYTICS.md)
+and the [Privacy Policy](landing/privacy.html).
 
 > **Public alpha.** Tethra is usable and well-tested, but it is alpha
 > software: evaluate it carefully before storing highly sensitive production
@@ -192,7 +194,8 @@ usage endpoints — total *spend* is still complete via the costs API); more
 than one OpenAI organization per vault; live-account exercise of the
 AWS/GitHub Actions/Vercel destination paths (fixture-tested; opt-in scripts
 provided); and **signed/notarized** installers (the alpha artifacts are
-unsigned — see [docs/PACKAGING.md](docs/PACKAGING.md)).
+unsigned except for the manually signed and notarized macOS DMG served from
+the Tethra landing site — see [docs/PACKAGING.md](docs/PACKAGING.md)).
 
 ## Install and build
 
@@ -215,7 +218,7 @@ cargo build --release -p api-tracker-cli
 # Desktop app
 cd apps/desktop
 npm install
-npx tauri build          # bundles the app (unsigned)
+npx tauri build          # bundles the app (unsigned unless signing is configured)
 npx tauri dev            # or run it in development mode
 ```
 

@@ -8,12 +8,13 @@ Thanks for helping build a trustworthy local-first credential manager.
   values. All secrets go through `SecretString`/`SecretBytes` (they redact
   and zeroize). Any new code path that touches secrets needs a test proving
   it does not leak them.
-- **Local-first.** No telemetry, no analytics, no calls to any
-  Tethra-operated service. All network I/O (provider connectors,
-  destination adapters, the documentation watcher, webhook channels) goes
-  directly from the user's device to endpoints the user explicitly
-  configured, and is mockable in tests (`HttpClient`) — tests never make
-  real network requests.
+- **Local-first.** No Tethra account or hosted credential service. Product
+  analytics must remain off by default, consent-gated, and constrained to the
+  fixed nonsensitive schema in `docs/ANALYTICS.md`; never add free-form event
+  parameters. All operational network I/O (provider connectors, destination
+  adapters, the documentation watcher, webhook channels) goes directly from
+  the user's device to endpoints the user explicitly configured and is
+  mockable in tests (`HttpClient`) — tests never make real network requests.
 - **Shared core.** Business logic lives in `crates/core` only. The CLI and
   desktop app are thin frontends; do not duplicate logic in TypeScript.
 - **Honesty about capabilities.** Never present a provider feature, status,

@@ -16,10 +16,10 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { api, isApiError } from "./api";
-import { setVaultLockedHandler } from "./api";
+import { api, isApiError, setVaultLockedHandler, subscribeToProductAnalytics } from "./api";
 import { severityRank, topSeverity } from "./utils";
-import type { VaultStatus } from "./types";
+import type { DetectedCredential, Environment, VaultStatus } from "./types";
+import { ENVIRONMENTS } from "./types";
 import { VaultSetup } from "./components/VaultSetup";
 import { VaultUnlock } from "./components/VaultUnlock";
 import { ProjectList } from "./components/ProjectList";
@@ -46,16 +46,37 @@ import { ApiActivityView } from "./components/ApiActivityView";
 import { GatewayView, GatewayLockStrip } from "./components/GatewayView";
 import { DashboardView } from "./components/DashboardView";
 import { TrackFlow } from "./components/TrackFlow";
+import { Welcome } from "./components/Welcome";
+import { AnalyticsConsentBanner } from "./components/AnalyticsConsent";
+import { Gate } from "./components/visuals/Gate";
+import { BrandLockup } from "./components/visuals/BrandLockup";
+import { ParticleField, type ParticleMode } from "./components/visuals/ParticleField";
+import { NavIcon } from "./components/visuals/NavIcons";
+import {
+  getAnalyticsConsent,
+  initializeAnalytics,
+  subscribeToAnalyticsConsent,
+  trackAnalytics,
+  type AnalyticsConsent,
+  type AnalyticsScreen,
+} from "./analytics";
 
 export type View =
   | { name: "dashboard" }
+  | { name: "welcome" }
   | { name: "track" }
   | { name: "projects" }
   | { name: "project"; ident: string }
   | { name: "project-new" }
   | { name: "project-edit"; ident: string }
   | { name: "credential"; id: string }
-  | { name: "credential-new"; project: string }
+  | {
+      name: "credential-new";
+      project: string;
+      /** Seeded when the form was opened from a detected credential. */
+      prefill?: { name?: string; provider?: string; environment?: Environment };
+      detectionId?: string;
+    }
   | { name: "credential-edit"; id: string }
   | { name: "providers" }
   | { name: "provider"; id: string }
@@ -76,6 +97,297 @@ export type View =
   | { name: "backup" };
 
 type VaultState = "loading" | "missing" | "locked" | "unlocked";
+
+/** Primary destinations. Operational configuration lives inside Settings. */
+const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
+  {
+    label: "Activity",
+    items: [
+      ["dashboard", "Activity"],
+      ["projects", "Projects"],
+    ],
+  },
+  {
+    label: "Vault",
+    items: [["providers", "Providers"]],
+  },
+  {
+    label: "Monitoring",
+    items: [
+      ["alerts", "Alerts"],
+      ["notify", "Notifications"],
+      ["usage", "Usage"],
+      ["api-activity", "API activity"],
+      ["pricing", "Pricing"],
+    ],
+  },
+  {
+    label: "System",
+    items: [["settings", "Settings"]],
+  },
+];
+
+type SettingsDestination =
+  | "settings"
+  | "templates"
+  | "backup"
+  | "track"
+  | "gateway"
+  | "scan"
+  | "env"
+  | "destinations"
+  | "sync"
+  | "rotation"
+  | "access";
+
+const SETTINGS_DESTINATIONS = new Set<View["name"]>([
+  "settings",
+  "templates",
+  "backup",
+  "track",
+  "gateway",
+  "scan",
+  "env",
+  "destinations",
+  "sync",
+  "rotation",
+  "access",
+]);
+
+const ADVANCED_SETTINGS: {
+  label: string;
+  items: [SettingsDestination, string][];
+}[] = [
+  {
+    label: "Tracking",
+    items: [
+      ["track", "Tracking setup"],
+      ["gateway", "Gateway internals"],
+    ],
+  },
+  {
+    label: "Exposure",
+    items: [
+      ["scan", "Scan"],
+      ["env", "Env files"],
+    ],
+  },
+  {
+    label: "Delivery",
+    items: [
+      ["destinations", "Destinations"],
+      ["sync", "Sync plans"],
+      ["rotation", "Rotation"],
+      ["access", "Temporary access"],
+    ],
+  },
+];
+
+const ADVANCED_DESTINATIONS = new Set<View["name"]>(
+  ADVANCED_SETTINGS.flatMap((group) => group.items.map(([name]) => name)),
+);
+
+function isSettingsDestination(name: View["name"]): name is SettingsDestination {
+  return SETTINGS_DESTINATIONS.has(name);
+}
+
+function SettingsNavigation({
+  current,
+  onNavigate,
+}: {
+  current: SettingsDestination;
+  onNavigate: (name: SettingsDestination) => void;
+}) {
+  const [advancedOpen, setAdvancedOpen] = useState(() => ADVANCED_DESTINATIONS.has(current));
+
+  useEffect(() => {
+    if (ADVANCED_DESTINATIONS.has(current)) setAdvancedOpen(true);
+  }, [current]);
+
+  const item = (name: SettingsDestination, label: string) => (
+    <button
+      key={name}
+      type="button"
+      className={current === name ? "settings-menu-item active" : "settings-menu-item"}
+      aria-current={current === name ? "page" : undefined}
+      onClick={() => onNavigate(name)}
+    >
+      <NavIcon name={name} />
+      <span>{label}</span>
+    </button>
+  );
+
+  return (
+    <nav className="settings-menu" aria-label="Settings">
+      <p className="settings-menu-title">Settings</p>
+      {item("settings", "General")}
+      {item("templates", "Templates")}
+      {item("backup", "Backup")}
+      <button
+        type="button"
+        className={
+          ADVANCED_DESTINATIONS.has(current)
+            ? "settings-menu-item settings-menu-toggle active"
+            : "settings-menu-item settings-menu-toggle"
+        }
+        aria-expanded={advancedOpen}
+        onClick={() => setAdvancedOpen((open) => !open)}
+      >
+        <NavIcon name="gateway" />
+        <span>Advanced</span>
+        <svg viewBox="0 0 12 12" aria-hidden="true">
+          <path d="m3.5 4.5 2.5 2.5 2.5-2.5" />
+        </svg>
+      </button>
+      {advancedOpen && (
+        <div className="settings-submenu" aria-label="Advanced settings">
+          {ADVANCED_SETTINGS.map((group) => (
+            <div className="settings-submenu-group" key={group.label}>
+              <p>{group.label}</p>
+              {group.items.map(([name, label]) => item(name, label))}
+            </div>
+          ))}
+        </div>
+      )}
+    </nav>
+  );
+}
+
+/** Nested views highlight (and breadcrumb to) their owning nav destination. */
+const SECTION_OF: Record<View["name"], View["name"]> = {
+  dashboard: "dashboard",
+  welcome: "dashboard",
+  track: "settings",
+  projects: "projects",
+  project: "projects",
+  "project-new": "projects",
+  "project-edit": "projects",
+  credential: "projects",
+  "credential-new": "projects",
+  "credential-edit": "projects",
+  providers: "providers",
+  provider: "providers",
+  scan: "settings",
+  env: "settings",
+  destinations: "settings",
+  sync: "settings",
+  rotation: "settings",
+  access: "settings",
+  alerts: "alerts",
+  notify: "notify",
+  usage: "usage",
+  "api-activity": "api-activity",
+  gateway: "settings",
+  pricing: "pricing",
+  templates: "settings",
+  backup: "settings",
+  settings: "settings",
+};
+
+/** Ambient topology follows the current workspace without reading its data. */
+function particleModeFor(view: View["name"]): ParticleMode {
+  if (["dashboard", "welcome", "usage", "api-activity", "pricing"].includes(view)) {
+    return "routes";
+  }
+  if (
+    [
+      "projects",
+      "project",
+      "project-new",
+      "project-edit",
+      "credential",
+      "credential-new",
+      "credential-edit",
+      "providers",
+      "provider",
+      "templates",
+    ].includes(view)
+  ) {
+    return "graph";
+  }
+  if (["scan", "env", "alerts", "notify", "backup", "settings"].includes(view)) {
+    return "vault";
+  }
+  return "flow";
+}
+
+/**
+ * Seed the credential form from a detection row.
+ *
+ * Detection reads variable NAMES only, so there is no value to carry here and
+ * never will be. `suggested_environment` is a free string on the wire; it is
+ * only accepted when it is one of the four real environments, so a value this
+ * build does not know falls back to the form's own default rather than being
+ * forced into the union with a cast.
+ */
+function prefillFor(row: DetectedCredential): {
+  name?: string;
+  provider?: string;
+  environment?: Environment;
+} {
+  const suggested = ENVIRONMENTS.find((e) => e === row.suggested_environment);
+  return {
+    name: row.suggested_name ?? row.env_var,
+    provider: row.suggested_provider ?? undefined,
+    environment: suggested,
+  };
+}
+
+/** Finite screen names keep project identifiers and other user data out of Analytics. */
+function analyticsScreenFor(view: View["name"]): AnalyticsScreen {
+  const screens: Record<View["name"], AnalyticsScreen> = {
+    dashboard: "dashboard",
+    welcome: "welcome",
+    track: "tracking_setup",
+    projects: "projects",
+    project: "project_detail",
+    "project-new": "project_form",
+    "project-edit": "project_form",
+    credential: "credential_detail",
+    "credential-new": "credential_form",
+    "credential-edit": "credential_form",
+    providers: "providers",
+    provider: "provider_detail",
+    scan: "repository_scan",
+    env: "env_files",
+    destinations: "destinations",
+    sync: "sync_plans",
+    rotation: "rotation",
+    access: "temporary_access",
+    alerts: "alerts",
+    notify: "notifications",
+    usage: "usage",
+    "api-activity": "api_activity",
+    gateway: "gateway",
+    pricing: "pricing",
+    templates: "templates",
+    settings: "settings",
+    backup: "backup",
+  };
+  return screens[view];
+}
+
+/**
+ * Read only record counts from the unlocked vault, then hand GA a finite
+ * numeric event. Names and records never cross the analytics boundary.
+ */
+async function reportInventoryAnalytics(reason: "session_start" | "inventory_changed") {
+  if (getAnalyticsConsent() !== "granted") return;
+  try {
+    const [projects, credentials] = await Promise.all([
+      api.projectList(true),
+      api.credentialList(),
+    ]);
+    trackAnalytics({
+      name: "inventory_snapshot",
+      project_count: projects.length,
+      credential_count: credentials.length,
+      snapshot_reason: reason,
+    });
+  } catch {
+    // A locked/busy vault must not turn optional telemetry into a product error.
+  }
+}
 
 /** Native notification for freshly created alerts of medium+ severity. */
 async function notifyNewAlerts(severities: string[]) {
@@ -105,6 +417,78 @@ export default function App() {
   const [view, setView] = useState<View>({ name: "dashboard" });
   const [fatal, setFatal] = useState<string | null>(null);
   const [monitorMinutes, setMonitorMinutes] = useState(0);
+  const [navCollapsed, setNavCollapsed] = useState(false);
+  const [analyticsConsent, setAnalyticsConsentState] = useState<AnalyticsConsent>(() =>
+    getAnalyticsConsent(),
+  );
+
+  useEffect(() => {
+    initializeAnalytics();
+    return subscribeToAnalyticsConsent(setAnalyticsConsentState);
+  }, []);
+
+  useEffect(
+    () =>
+      subscribeToProductAnalytics((signal) => {
+        trackAnalytics(signal.event);
+        if (signal.inventoryChanged) void reportInventoryAnalytics("inventory_changed");
+      }),
+    [],
+  );
+
+  useEffect(() => {
+    if (analyticsConsent !== "granted") return;
+    trackAnalytics({ name: "app_session_start" });
+    if (vaultState === "missing") {
+      trackAnalytics({ name: "screen_view", screen_name: "vault_setup" });
+    } else if (vaultState === "locked") {
+      trackAnalytics({ name: "screen_view", screen_name: "vault_unlock" });
+    } else if (vaultState === "unlocked") {
+      trackAnalytics({ name: "screen_view", screen_name: analyticsScreenFor(view.name) });
+    }
+  }, [analyticsConsent, vaultState, view.name]);
+
+  useEffect(() => {
+    if (analyticsConsent === "granted" && vaultState === "unlocked") {
+      void reportInventoryAnalytics("session_start");
+    }
+  }, [analyticsConsent, vaultState]);
+
+  // First run. With no projects the dashboard has nothing to show and its
+  // empty state is the only thing on screen, so the app opens on the guided
+  // folder picker instead. Only the default landing view is redirected: a user
+  // who has already navigated somewhere keeps their place, and a failure here
+  // is silent because the dashboard's own empty state offers the same action.
+  useEffect(() => {
+    if (vaultState !== "unlocked") return;
+    let cancelled = false;
+    api
+      .projectList(true)
+      .then((projects) => {
+        if (cancelled || projects.length > 0) return;
+        setView((v) => (v.name === "dashboard" ? { name: "welcome" } : v));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [vaultState]);
+
+  // The sidebar collapses itself when the window gets narrow and expands again
+  // when there is room. Crossing the breakpoint re-syncs, but between
+  // crossings the user's manual toggle wins.
+  useEffect(() => {
+    // Guarded: a webview without matchMedia must not take down the whole app
+    // over a piece of navigation chrome. It just stays expanded.
+    if (typeof window.matchMedia !== "function") return;
+    // The shipped window is 1050px wide; keep the branded navigation visible
+    // there and reserve the icon-only rail for genuinely compact windows.
+    const mq = window.matchMedia("(max-width: 900px)");
+    setNavCollapsed(mq.matches);
+    const onChange = (e: MediaQueryListEvent) => setNavCollapsed(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -118,6 +502,7 @@ export default function App() {
 
   useEffect(() => {
     setVaultLockedHandler(() => {
+      trackAnalytics({ name: "vault_locked" });
       setVaultState("locked");
       setView({ name: "projects" });
     });
@@ -187,204 +572,269 @@ export default function App() {
     }
     setView({ name: "projects" });
     setVaultState("locked");
+    trackAnalytics({ name: "vault_locked" });
   };
 
   if (fatal) {
     return (
-      <div>
-        <h1>Tethra</h1>
-        <p className="error">Startup error: {fatal}</p>
+      <div className="center-page">
+        <div>
+          <BrandLockup className="fatal-brand" />
+          <p className="error">Startup error: {fatal}</p>
+        </div>
       </div>
     );
   }
   if (vaultState === "loading") {
-    return <p>Loading…</p>;
+    return (
+      <div className="center-page">
+        <p className="muted">Loading…</p>
+      </div>
+    );
   }
   if (vaultState === "missing") {
-    return <VaultSetup dataDir={dataDir} onCreated={() => void refreshStatus()} />;
+    return (
+      <>
+        <Gate eyebrow="Local-first credential vault">
+          <VaultSetup
+            dataDir={dataDir}
+            onCreated={() => {
+              trackAnalytics({ name: "vault_unlocked" });
+              void refreshStatus();
+            }}
+          />
+        </Gate>
+        <AnalyticsConsentBanner />
+      </>
+    );
   }
   if (vaultState === "locked") {
     // The gateway keeps forwarding while the vault is locked; the strip
     // keeps that visible (its backend commands are lock-free).
     return (
-      <div>
-        <VaultUnlock dataDir={dataDir} onUnlocked={() => void refreshStatus()} />
-        <GatewayLockStrip />
-      </div>
+      <>
+        <Gate eyebrow="Vault locked">
+          <VaultUnlock
+            dataDir={dataDir}
+            onUnlocked={() => {
+              trackAnalytics({ name: "vault_unlocked" });
+              void refreshStatus();
+            }}
+          />
+          <GatewayLockStrip />
+        </Gate>
+        <AnalyticsConsentBanner />
+      </>
     );
   }
 
+  const navItem = (name: View["name"], label: string, active: boolean) => (
+    <button
+      key={name}
+      className={active ? "nav-item active" : "nav-item"}
+      aria-current={active ? "page" : undefined}
+      // The tooltip is what makes the collapsed rail usable.
+      title={navCollapsed ? label : undefined}
+      onClick={() => setView({ name } as View)}
+    >
+      <NavIcon name={name} />
+      <span className="nav-text">{label}</span>
+    </button>
+  );
+
+  const current = SECTION_OF[view.name];
+  const activeLabel =
+    NAV_GROUPS.flatMap((g) => g.items).find(([n]) => n === current)?.[1] ?? "";
+
   return (
-    <div>
-      <nav className="topbar">
-        <strong>Tethra</strong>
-        <button
-          className={view.name === "dashboard" ? undefined : "link"}
-          onClick={() => setView({ name: "dashboard" })}
-        >
-          Activity
-        </button>
-        {/* Projects is the primary surface: folder selection, detection,
-            tracking setup and live activity all live on a project page. The
-            standalone "Track API activity" flow is NOT deleted — its
-            diagnostics, destination approvals and undo are still the only place
-            some of those decisions can be made — but it moves under Advanced so
-            the normal path never needs it (ADR 0029). */}
-        <button
-          className={view.name === "projects" ? undefined : "link"}
-          onClick={() => setView({ name: "projects" })}
-        >
-          Projects
-        </button>
-        <span className="navgroup">Vault</span>
-        <button className="link" onClick={() => setView({ name: "providers" })}>
-          Providers
-        </button>
-        <button className="link" onClick={() => setView({ name: "scan" })}>
-          Scan
-        </button>
-        <button className="link" onClick={() => setView({ name: "env" })}>
-          Env files
-        </button>
-        <button className="link" onClick={() => setView({ name: "destinations" })}>
-          Destinations
-        </button>
-        <button className="link" onClick={() => setView({ name: "sync" })}>
-          Sync plans
-        </button>
-        <button className="link" onClick={() => setView({ name: "rotation" })}>
-          Rotation
-        </button>
-        <button className="link" onClick={() => setView({ name: "access" })}>
-          Temporary access
-        </button>
-        <span className="navgroup">Security</span>
-        <button className="link" onClick={() => setView({ name: "alerts" })}>
-          Alerts
-        </button>
-        <button className="link" onClick={() => setView({ name: "notify" })}>
-          Notifications
-        </button>
-        <span className="navgroup">Advanced</span>
-        <button className="link" onClick={() => setView({ name: "usage" })}>
-          Usage
-        </button>
-        <button className="link" onClick={() => setView({ name: "track" })}>
-          Tracking setup (advanced)
-        </button>
-        <button className="link" onClick={() => setView({ name: "api-activity" })}>
-          Observation runs
-        </button>
-        <button className="link" onClick={() => setView({ name: "gateway" })}>
-          Gateway internals
-        </button>
-        <button className="link" onClick={() => setView({ name: "pricing" })}>
-          Pricing
-        </button>
-        <button className="link" onClick={() => setView({ name: "templates" })}>
-          Templates
-        </button>
-        <button className="link" onClick={() => setView({ name: "backup" })}>
-          Backup
-        </button>
-        <button className="link" onClick={() => setView({ name: "settings" })}>
-          Settings
-        </button>
-        <span className="spacer" />
-        <button onClick={() => void lockNow()}>Lock vault</button>
-      </nav>
-      {lockError && (
-        <p className="error" role="alert">
-          {lockError}
-        </p>
-      )}
-      {view.name === "dashboard" && (
-        <DashboardView onTrack={() => setView({ name: "track" })} />
-      )}
-      {view.name === "track" && (
-        // The manual route form lives in Advanced → Gateway internals. A
-        // desktop-only user must be able to REACH it, not be told to run a
-        // CLI command they do not have (ZFT-009).
-        <TrackFlow
-          onDone={() => setView({ name: "dashboard" })}
-          onOpenAdvanced={() => setView({ name: "gateway" })}
-        />
-      )}
-      {view.name === "projects" && (
-        <ProjectList
-          onOpen={(ident) => setView({ name: "project", ident })}
-          onNew={() => setView({ name: "project-new" })}
-        />
-      )}
-      {view.name === "project-new" && (
-        <ProjectForm
-          onDone={(ident) => setView(ident ? { name: "project", ident } : { name: "projects" })}
-        />
-      )}
-      {view.name === "project-edit" && (
-        <ProjectForm
-          editIdent={view.ident}
-          onDone={(ident) => setView(ident ? { name: "project", ident } : { name: "projects" })}
-        />
-      )}
-      {view.name === "project" && (
-        <ProjectDetail
-          ident={view.ident}
-          onBack={() => setView({ name: "projects" })}
-          onEdit={() => setView({ name: "project-edit", ident: view.ident })}
-          onOpenCredential={(id) => setView({ name: "credential", id })}
-          onAddCredential={() => setView({ name: "credential-new", project: view.ident })}
-          onOpenAdvanced={() => setView({ name: "track" })}
-        />
-      )}
-      {view.name === "credential-new" && (
-        <CredentialForm
-          project={view.project}
-          onDone={(id) =>
-            setView(id ? { name: "credential", id } : { name: "project", ident: view.project })
-          }
-        />
-      )}
-      {view.name === "credential-edit" && (
-        <CredentialForm
-          editId={view.id}
-          onDone={(id) => setView(id ? { name: "credential", id } : { name: "projects" })}
-        />
-      )}
-      {view.name === "credential" && (
-        <CredentialDetail
-          id={view.id}
-          onBack={(projectIdent) =>
-            setView(
-              projectIdent ? { name: "project", ident: projectIdent } : { name: "projects" },
-            )
-          }
-          onEdit={() => setView({ name: "credential-edit", id: view.id })}
-        />
-      )}
-      {view.name === "providers" && (
-        <ProviderCatalog onOpen={(id) => setView({ name: "provider", id })} />
-      )}
-      {view.name === "provider" && (
-        <ProviderDetail id={view.id} onBack={() => setView({ name: "providers" })} />
-      )}
-      {view.name === "scan" && <ScanView />}
-      {view.name === "env" && <EnvView />}
-      {view.name === "destinations" && <DestinationsView />}
-      {view.name === "sync" && <SyncView />}
-      {view.name === "rotation" && <RotationView />}
-      {view.name === "access" && <AccessView />}
-      {view.name === "alerts" && <AlertsView />}
-      {view.name === "notify" && <NotifyView />}
-      {view.name === "usage" && <UsageView />}
-      {view.name === "api-activity" && <ApiActivityView />}
-      {view.name === "gateway" && <GatewayView />}
-      {view.name === "pricing" && <PricingView />}
-      {view.name === "templates" && <TemplatesView />}
-      {view.name === "settings" && (
-        <SettingsView dataDir={dataDir} onSaved={() => void reloadMonitorInterval()} />
-      )}
-      {view.name === "backup" && <BackupView onRestored={() => void refreshStatus()} />}
-    </div>
+    <>
+      <div className={navCollapsed ? "shell nav-collapsed" : "shell"}>
+        <ParticleField mode={particleModeFor(view.name)} />
+        <aside className={navCollapsed ? "sidebar collapsed" : "sidebar"}>
+          <div className="brand">
+            <BrandLockup />
+            <span className="spacer" />
+            <button
+              className="nav-toggle"
+              aria-label={navCollapsed ? "Expand navigation" : "Collapse navigation"}
+              aria-expanded={!navCollapsed}
+              title={navCollapsed ? "Expand navigation" : "Collapse navigation"}
+              onClick={() => setNavCollapsed((c) => !c)}
+            >
+              <svg
+                viewBox="0 0 16 16"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.4"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="2" y="2.6" width="12" height="10.8" rx="1.4" />
+                <path d="M6.4 2.6v10.8" />
+              </svg>
+            </button>
+          </div>
+          <nav className="nav" aria-label="Main">
+            {NAV_GROUPS.map((group) => (
+              <div className="nav-group" key={group.label}>
+                <div className="nav-label">{group.label}</div>
+                {group.items.map(([name, label]) => navItem(name, label, current === name))}
+              </div>
+            ))}
+          </nav>
+        </aside>
+
+        <div className="main">
+          <header className="topbar">
+            <span className="crumb">{activeLabel}</span>
+            <span className="spacer" />
+            <span className="local-status">Local vault</span>
+            <button className="lock-button" onClick={() => void lockNow()}>
+              Lock vault
+            </button>
+          </header>
+          <main className="content">
+            {lockError && (
+              <p className="error" role="alert">
+                {lockError}
+              </p>
+            )}
+            {view.name === "dashboard" && (
+              <DashboardView
+                onTrack={() => {
+                  trackAnalytics({ name: "tracking_setup_started" });
+                  setView({ name: "welcome" });
+                }}
+                onOpenProject={(ident) => setView({ name: "project", ident })}
+              />
+            )}
+            {view.name === "welcome" && (
+              <Welcome
+                onOpenProject={(ident) => setView({ name: "project", ident })}
+                onSkip={() => setView({ name: "dashboard" })}
+              />
+            )}
+            {view.name === "projects" && (
+              <ProjectList
+                onOpen={(ident) => setView({ name: "project", ident })}
+                onNew={() => setView({ name: "project-new" })}
+              />
+            )}
+            {view.name === "project-new" && (
+              <ProjectForm
+                onDone={(ident) =>
+                  setView(ident ? { name: "project", ident } : { name: "projects" })
+                }
+              />
+            )}
+            {view.name === "project-edit" && (
+              <ProjectForm
+                editIdent={view.ident}
+                onDone={(ident) =>
+                  setView(ident ? { name: "project", ident } : { name: "projects" })
+                }
+              />
+            )}
+            {view.name === "project" && (
+              <ProjectDetail
+                ident={view.ident}
+                onBack={() => setView({ name: "projects" })}
+                onEdit={() => setView({ name: "project-edit", ident: view.ident })}
+                onOpenCredential={(id) => setView({ name: "credential", id })}
+                onAddCredential={() => setView({ name: "credential-new", project: view.ident })}
+                onOpenAdvanced={() => setView({ name: "track" })}
+                onStoreDetected={(row) =>
+                  setView({
+                    name: "credential-new",
+                    project: view.ident,
+                    prefill: prefillFor(row),
+                    detectionId: row.id,
+                  })
+                }
+              />
+            )}
+            {view.name === "credential-new" && (
+              <CredentialForm
+                project={view.project}
+                prefill={view.prefill}
+                detectionId={view.detectionId}
+                onDone={(id) =>
+                  setView(
+                    id ? { name: "credential", id } : { name: "project", ident: view.project },
+                  )
+                }
+              />
+            )}
+            {view.name === "credential-edit" && (
+              <CredentialForm
+                editId={view.id}
+                onDone={(id) => setView(id ? { name: "credential", id } : { name: "projects" })}
+              />
+            )}
+            {view.name === "credential" && (
+              <CredentialDetail
+                id={view.id}
+                onBack={(projectIdent) =>
+                  setView(
+                    projectIdent
+                      ? { name: "project", ident: projectIdent }
+                      : { name: "projects" },
+                  )
+                }
+                onEdit={() => setView({ name: "credential-edit", id: view.id })}
+              />
+            )}
+            {view.name === "providers" && (
+              <ProviderCatalog onOpen={(id) => setView({ name: "provider", id })} />
+            )}
+            {view.name === "provider" && (
+              <ProviderDetail id={view.id} onBack={() => setView({ name: "providers" })} />
+            )}
+            {view.name === "alerts" && <AlertsView />}
+            {view.name === "notify" && <NotifyView />}
+            {view.name === "usage" && <UsageView />}
+            {view.name === "api-activity" && <ApiActivityView />}
+            {view.name === "pricing" && <PricingView />}
+            {isSettingsDestination(view.name) && (
+              <div className="settings-workspace">
+                <SettingsNavigation
+                  current={view.name}
+                  onNavigate={(name) => setView({ name } as View)}
+                />
+                <div className="settings-workspace-content">
+                  {view.name === "settings" && (
+                    <SettingsView
+                      dataDir={dataDir}
+                      onSaved={() => void reloadMonitorInterval()}
+                    />
+                  )}
+                  {view.name === "templates" && <TemplatesView />}
+                  {view.name === "backup" && (
+                    <BackupView onRestored={() => void refreshStatus()} />
+                  )}
+                  {view.name === "track" && (
+                    <TrackFlow
+                      onDone={() => setView({ name: "dashboard" })}
+                      onOpenAdvanced={() => setView({ name: "gateway" })}
+                    />
+                  )}
+                  {view.name === "gateway" && <GatewayView />}
+                  {view.name === "scan" && <ScanView />}
+                  {view.name === "env" && <EnvView />}
+                  {view.name === "destinations" && <DestinationsView />}
+                  {view.name === "sync" && <SyncView />}
+                  {view.name === "rotation" && <RotationView />}
+                  {view.name === "access" && <AccessView />}
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      </div>
+      <AnalyticsConsentBanner />
+    </>
   );
 }

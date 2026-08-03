@@ -1,0 +1,246 @@
+.teams-page {
+  min-height: 100vh;
+  background: #000;
+}
+
+.teams-nav-cta {
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.teams-hero {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: calc(100svh - 49px);
+  padding: 126px 22px 100px;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.teams-hero #ambient-network {
+  position: absolute;
+  inset: 0;
+  z-index: -3;
+  width: 100%;
+  height: 100%;
+  opacity: 0.84;
+}
+
+.teams-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  background:
+    radial-gradient(
+      circle at 50% 42%,
+      rgba(0, 0, 0, 0.08),
+      rgba(0, 0, 0, 0.63) 63%
+    ),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.18), #000 100%);
+}
+
+.teams-hero-content {
+  width: min(960px, 100%);
+  text-align: center;
+}
+
+.teams-hero h1 {
+  margin: 0 0 26px;
+  font-size: clamp(76px, 13vw, 164px);
+  font-weight: 200;
+  letter-spacing: -0.065em;
+  line-height: 0.9;
+}
+
+.teams-statement {
+  max-width: 710px;
+  margin: 0 auto 34px;
+  color: rgba(245, 245, 247, 0.68);
+  font-size: clamp(18px, 2.4vw, 25px);
+  font-weight: 330;
+  line-height: 1.5;
+}
+
+.teams-optional {
+  margin: 15px 0 0;
+  color: rgba(245, 245, 247, 0.43);
+  font-size: 10px;
+}
+
+.teams-footer {
+  padding-top: 34px;
+}
+
+.waitlist-dialog {
+  width: min(620px, calc(100% - 30px));
+  max-height: calc(100svh - 30px);
+  padding: 0;
+  overflow: auto;
+  color: #f5f5f7;
+  background: #0a0c0f;
+  border: 1px solid rgba(255, 255, 255, 0.17);
+  border-radius: 12px;
+  box-shadow: 0 36px 120px rgba(0, 0, 0, 0.85);
+}
+
+.waitlist-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.76);
+  backdrop-filter: blur(12px);
+}
+
+.waitlist-panel {
+  position: relative;
+  padding: 38px;
+}
+
+.waitlist-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  color: #a1a3aa;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.waitlist-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.waitlist-panel h2 {
+  margin: 0 0 10px;
+  font-size: clamp(35px, 7vw, 52px);
+  font-weight: 300;
+  letter-spacing: -0.045em;
+}
+
+.waitlist-intro,
+.waitlist-success > p:not(.eyebrow) {
+  margin: 0 0 27px;
+  color: #96989f;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.waitlist-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 17px;
+}
+
+.waitlist-fields label {
+  display: grid;
+  gap: 7px;
+}
+
+.waitlist-fields label > span {
+  color: #d8d9dd;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.waitlist-fields small {
+  margin-left: 4px;
+  color: #666970;
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.waitlist-fields input {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 12px;
+  color: #fff;
+  caret-color: #5ab3ff;
+  background: #030405;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  outline: none;
+}
+
+.waitlist-fields input:focus {
+  border-color: #2997ff;
+  box-shadow: 0 0 0 3px rgba(41, 151, 255, 0.17);
+}
+
+.waitlist-honeypot {
+  position: absolute;
+  left: -10000px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+.waitlist-notice {
+  margin: 24px 0 12px;
+  color: #777a81;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.waitlist-notice a {
+  color: #5ab3ff;
+}
+
+.waitlist-status {
+  min-height: 17px;
+  margin: 0 0 9px;
+  color: #ff9b8f;
+  font-size: 11px;
+}
+
+.waitlist-submit {
+  width: 100%;
+}
+
+.waitlist-submit:disabled {
+  cursor: wait;
+  opacity: 0.6;
+  transform: none;
+}
+
+.waitlist-success {
+  padding: 34px 0 12px;
+  text-align: center;
+}
+
+.waitlist-success[hidden] {
+  display: none;
+}
+
+@media (max-width: 600px) {
+  .teams-hero {
+    min-height: calc(100svh - 49px);
+    padding: 106px 15px 80px;
+  }
+
+  .teams-hero h1 {
+    font-size: clamp(66px, 24vw, 108px);
+  }
+
+  .waitlist-panel {
+    padding: 32px 20px 24px;
+  }
+
+  .waitlist-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .waitlist-dialog::backdrop {
+    backdrop-filter: none;
+  }
+}

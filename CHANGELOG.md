@@ -6,6 +6,55 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Changed — A card-based interface and a one-folder first run
+
+**First run.** Opening Tethra for the first time now asks for one thing: a
+project folder. Tethra names the project after the folder, scans it, shows what
+it found, and turns tracking on — one screen. Previously you had to create a
+project, type a filesystem path into a plain text box, open the project, choose
+the folder again, and then re-enter by hand the API keys Tethra had already
+found and listed for you. The **New project** form now offers a folder picker
+too, and a detected credential can be stored directly from where it is shown.
+
+**Activity.** The dashboard leads with four figures — requests, tracked
+projects, open alerts, observed cost — a request-volume chart, and an activity
+feed. This is the screen the website has been illustrating; until now the app
+rendered a list of numbers and no chart at all.
+
+**Projects, providers and credentials are cards.** Each project card carries
+its request volume as a sparkline with its error count and last request;
+provider cards carry a brand-coloured mark, how many credentials you hold for
+that provider, and its honest capability statement; credential cards carry the
+status badge and masked value. Genuinely tabular screens — usage records,
+pricing, rotation and delivery history — remain tables.
+
+Nothing about how figures are reported changed. An unknown cost still renders
+as a sentence rather than `$0.00`, a gap in the data still breaks the chart
+line rather than being drawn as a quiet period, provider-reported usage is
+still never added to locally observed traffic, and the setup disclosure is
+still the backend's own text, shown in full before anything is applied. The
+dashboard chart sums only request and error counts across projects, because
+those are the only figures where a missing bucket is a real zero. See
+[ADR 0030](docs/decisions/0030-card-based-ui-and-first-run-onboarding.md).
+
+Two long-standing defects surfaced during the work and are fixed: a failed
+chart read used to blank the per-project activity list and report it as a
+failed split, and destructive text links hovered blue rather than red.
+
+### Fixed — CLI install commands no longer run off the screen
+
+On a phone, the install commands on usetethra.com were unreadable. The page
+scrolled to 725px wide inside a 375px viewport, and because horizontal
+overflow was hidden rather than scrollable, the end of every command could not
+be reached at all. The cause was a grid track that could never shrink below the
+width of its longest line, not the code block itself. Page width now matches
+the viewport at every size tested from 320px to 1440px, and commands wrap
+instead of scrolling, so a copied line is never half a URL.
+
+The install guide is now a numbered list — one command per step, each with its
+own copy button and a line saying what it does. There is still no remote
+installer script and no account.
+
 ### Added — Projects are the surface; selecting a folder is the tracking action
 The normal path is now one place. Open a project, click **Select project folder**,
 confirm one disclosure, and Tethra scans the folder, configures the APIs it

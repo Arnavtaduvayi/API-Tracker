@@ -1591,7 +1591,7 @@ impl UnlockedVault {
         // otherwise break every listing, alert pass, and detail view
         // vault-wide (OBS-004). Parse leniently: a bad value contributes no
         // date (no fabrication) and is flagged so the UI can show "invalid".
-        // `created_at` stays strict: it is always API-Tracker-generated, so a
+        // `created_at` stays strict: it is always Tethra-generated, so a
         // bad value is genuine vault corruption, not untrusted provider input.
         let (expires_at_ts, expires_at_invalid) =
             parse_optional_ts_lenient(row.expires_at.as_deref());

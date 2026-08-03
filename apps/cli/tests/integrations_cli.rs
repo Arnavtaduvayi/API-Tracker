@@ -115,7 +115,7 @@ fn run_does_not_leak_vault_password_to_child() {
     let v = TestVault::new();
     v.add_key("web", "openai", "openai", FAKE_OPENAI);
 
-    // The child records whether it can see API Tracker's own master password
+    // The child records whether it can see Tethra's own master password
     // in its environment. It must not — env_remove strips it before spawn.
     let out_file = v._dir.path().join("child-pw.txt");
     let script = format!(

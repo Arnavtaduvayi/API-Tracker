@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# API Tracker demo: builds a fully isolated demonstration vault with fake
+# Tethra demo: builds a fully isolated demonstration vault with fake
 # credentials, then shows how to explore it from the CLI and the desktop app.
 #
 #   bash scripts/demo.sh          # build, tour, then delete the demo vault

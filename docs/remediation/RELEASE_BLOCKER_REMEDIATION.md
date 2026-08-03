@@ -7,7 +7,7 @@
 (`audit/deep-pressure-test`).
 
 This phase fixes the confirmed release blockers from the deep audit while
-preserving API Tracker's local-first architecture and existing product
+preserving Tethra's local-first architecture and existing product
 behavior. Every fix ships with a regression test that fails at baseline (each
 demonstrated by running the test against the vulnerable behavior — via a
 temporary in-place shim where a live baseline run is unsafe — and captured
@@ -140,7 +140,7 @@ records the baseline absence of the guard.
   (`_PROVIDER_ADMIN_KEY`, `_DESTINATION_AUTH`) are all removed; only the two
   secretless metadata vars survive.
 - **Files changed:** `crates/core/src/inject.rs`, `apps/cli/src/run_cmd.rs`.
-- **Security invariant:** no API Tracker authentication/password/session/
+- **Security invariant:** no Tethra authentication/password/session/
   internal-control variable reaches an injected child; explicitly mapped
   credential variables still arrive.
 - **Regression test:** `apps/cli/tests/run_env_scrub.rs` — spawns the real
@@ -151,7 +151,7 @@ records the baseline absence of the guard.
   `API_TRACKER_NEW_PASSWORD` present in the child at baseline.
 - **Corrected result:** passes. **Deviation:** strengthened the audit's
   "strip the known auth vars" to deny-by-default so future vars are safe.
-  **Residual risk:** the child still inherits the non-API-Tracker parent
+  **Residual risk:** the child still inherits the non-Tethra parent
   environment by design. **Manual tests still required:** none.
 
 ## IPC-01 (+FS-09) — Arbitrary file overwrite via `env_example_write`
@@ -277,7 +277,7 @@ records the baseline absence of the guard.
 - **Root cause:** `inject::terminate_pid` spawned `kill`/`taskkill` on any
   `i64`. On Unix `kill 0` signals the caller's whole process group and a
   negative PID signals a process group, so a corrupted/edited/zero recorded
-  PID could terminate API Tracker itself or an unrelated group.
+  PID could terminate Tethra itself or an unrelated group.
 - **Final design:** refuse any `pid <= 0` before spawning anything. A real
   child PID is always > 0.
 - **Files changed:** `crates/core/src/inject.rs`.

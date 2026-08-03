@@ -17,6 +17,7 @@
 import { useCallback, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, isApiError } from "../api";
+import { relativeTime } from "../useLiveRefresh";
 import type { DetectedCredential, FolderLinkPreview, ProjectOverview } from "../types";
 
 function errText(e: unknown): string {
@@ -29,6 +30,8 @@ export function ProjectTracking(props: {
   reloading: boolean;
   onChanged: () => void;
   onOpenAdvanced: () => void;
+  /** Open the credential form seeded from a detection row. */
+  onStoreDetected: (row: DetectedCredential) => void;
 }) {
   const { overview } = props;
   const [preview, setPreview] = useState<FolderLinkPreview | null>(null);
@@ -175,7 +178,7 @@ export function ProjectTracking(props: {
               {tracking?.label ?? "unknown"}
             </dd>
             <dt>Last scanned</dt>
-            <dd>{link.last_scan_at ?? "never"}</dd>
+            <dd>{relativeTime(link.last_scan_at)}</dd>
           </dl>
 
           {/*
@@ -406,6 +409,7 @@ export function ProjectTracking(props: {
         <DetectedCredentials
           rows={overview.detected_credentials}
           onChanged={props.onChanged}
+          onStore={props.onStoreDetected}
           needing={overview.credentials_needing_details}
         />
       )}
@@ -417,6 +421,7 @@ function DetectedCredentials(props: {
   rows: DetectedCredential[];
   needing: number;
   onChanged: () => void;
+  onStore: (row: DetectedCredential) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -467,6 +472,15 @@ function DetectedCredentials(props: {
               <td>
                 {r.status === "pending" ? (
                   <>
+                    {/* Tethra found the key; storing it should not mean going
+                        away and re-entering it from memory somewhere else. */}
+                    <button
+                      className="link"
+                      disabled={busy === r.id}
+                      onClick={() => props.onStore(r)}
+                    >
+                      Store this key
+                    </button>{" "}
                     <button
                       className="link"
                       disabled={busy === r.id}
@@ -497,8 +511,9 @@ function DetectedCredentials(props: {
         </tbody>
       </table>
       <p className="muted">
-        Tethra never saved a value for these. To store one, add the credential to this project
-        and paste the value there — the same secure path every other credential uses.
+        Tethra never saved a value for these. <strong>Store this key</strong> opens the normal
+        credential form with the provider and name filled in — you paste the value there, the
+        same secure path every other credential uses.
       </p>
     </>
   );

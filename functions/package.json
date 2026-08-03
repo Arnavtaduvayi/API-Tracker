@@ -1,0 +1,23 @@
+{
+  "name": "tethra-functions",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Server-only Firebase functions for the Tethra website",
+  "main": "index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check waitlist.js"
+  },
+  "dependencies": {
+    "@firebase/app": "0.16.0",
+    "@firebase/app-compat": "0.5.16",
+    "firebase-admin": "14.2.0",
+    "firebase-functions": "7.3.2"
+  },
+  "overrides": {
+    "uuid": "11.1.1"
+  }
+}

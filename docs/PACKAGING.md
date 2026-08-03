@@ -40,10 +40,12 @@ builds `aarch64-apple-darwin` only. This table previously listed
 "macOS (arm64 + x64)" for the desktop, which the matrix never produced
 (audit finding `ZFT-043`).
 
-## Signing & notarization — NOT configured (alpha)
+## Signing & notarization
 
-**These builds are UNSIGNED.** Do not represent them as signed or notarized.
-Users will see OS warnings on first launch (documented in `docs/INSTALL.md`).
+Automated release-workflow builds are currently unsigned. Do not represent
+those CI artifacts as signed or notarized. The Apple Silicon DMG served from
+`usetethra.com` is a separately prepared artifact signed with Developer ID
+Application `Eesh Majithia (ZT56M637KS)`, notarized by Apple, and stapled.
 
 To sign for a real release, configure the following and add the corresponding
 steps/secrets to `release.yml`:
@@ -86,5 +88,5 @@ steps/secrets to `release.yml`:
 5. Tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
 6. The workflow produces a **draft** release. Download the artifacts, verify
    checksums, and smoke-test each platform you can.
-7. Confirm the release notes state clearly that builds are **unsigned alpha**.
+7. State the signing/notarization status of each published artifact precisely.
 8. Publish the release.

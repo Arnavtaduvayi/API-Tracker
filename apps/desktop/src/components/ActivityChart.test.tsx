@@ -25,9 +25,11 @@ function point(
   };
 }
 
-/** Every `<path>` the chart drew, as its `d` attribute. */
+/** Every semantic trend-line segment, excluding the decorative area fill. */
 function paths(container: HTMLElement): string[] {
-  return Array.from(container.querySelectorAll("path")).map((p) => p.getAttribute("d") ?? "");
+  return Array.from(container.querySelectorAll("path.chartline")).map(
+    (p) => p.getAttribute("d") ?? "",
+  );
 }
 
 describe("ActivityChart", () => {

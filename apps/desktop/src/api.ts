@@ -3,6 +3,7 @@
 // the app when the vault has auto-locked.
 
 import { invoke } from "@tauri-apps/api/core";
+import type { DesktopProductEvent } from "./analytics";
 import type {
   AccountInfo,
   AccessGrant,
@@ -106,9 +107,112 @@ import type {
 } from "./types";
 
 let onVaultLocked: (() => void) | null = null;
+const PRODUCT_ANALYTICS_EVENT = "tethra:product-analytics";
+
+export interface ProductAnalyticsSignal {
+  event: DesktopProductEvent;
+  inventoryChanged: boolean;
+}
 
 export function setVaultLockedHandler(handler: () => void) {
   onVaultLocked = handler;
+}
+
+export function subscribeToProductAnalytics(
+  listener: (signal: ProductAnalyticsSignal) => void,
+) {
+  const handle = (event: Event) => {
+    listener((event as CustomEvent<ProductAnalyticsSignal>).detail);
+  };
+  window.addEventListener(PRODUCT_ANALYTICS_EVENT, handle);
+  return () => window.removeEventListener(PRODUCT_ANALYTICS_EVENT, handle);
+}
+
+function productAnalyticsSignal(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  result: unknown,
+): ProductAnalyticsSignal | null {
+  switch (command) {
+    case "project_create":
+      return { event: { name: "project_created" }, inventoryChanged: true };
+    case "project_update":
+      return { event: { name: "project_updated" }, inventoryChanged: false };
+    case "project_set_archived":
+      return {
+        event: { name: args?.archived === true ? "project_archived" : "project_restored" },
+        inventoryChanged: false,
+      };
+    case "credential_add":
+      return {
+        event: { name: "credential_tracked", tracking_method: "stored_secret" },
+        inventoryChanged: true,
+      };
+    case "credential_add_reference":
+      return {
+        event: { name: "credential_tracked", tracking_method: "reference" },
+        inventoryChanged: true,
+      };
+    case "test_key_create":
+      return {
+        event: { name: "credential_tracked", tracking_method: "provider_test_key" },
+        inventoryChanged: true,
+      };
+    case "credential_update":
+      return { event: { name: "credential_updated" }, inventoryChanged: false };
+    case "credential_delete":
+      return { event: { name: "credential_deleted" }, inventoryChanged: true };
+    case "credential_validate":
+      return { event: { name: "credential_validated" }, inventoryChanged: false };
+    case "credential_copy":
+      return { event: { name: "credential_copied" }, inventoryChanged: false };
+    case "credential_reveal":
+      return { event: { name: "credential_revealed" }, inventoryChanged: false };
+    case "credential_replace_value":
+      return { event: { name: "credential_value_replaced" }, inventoryChanged: false };
+    case "credential_provider_revoke":
+      return { event: { name: "credential_provider_revoked" }, inventoryChanged: false };
+    case "env_import":
+      return { event: { name: "credentials_imported" }, inventoryChanged: true };
+    case "project_folder_link":
+      return { event: { name: "project_tracking_configured" }, inventoryChanged: true };
+    case "project_set_tracking_enabled":
+      return {
+        event: {
+          name:
+            args?.enabled === true ? "project_tracking_enabled" : "project_tracking_disabled",
+        },
+        inventoryChanged: false,
+      };
+    case "project_unlink_folder":
+      return { event: { name: "project_tracking_unlinked" }, inventoryChanged: false };
+    case "tracking_apply":
+      return { event: { name: "tracking_setup_completed" }, inventoryChanged: true };
+    case "template_apply":
+      return { event: { name: "template_applied" }, inventoryChanged: true };
+    case "backup_create":
+      return { event: { name: "backup_created" }, inventoryChanged: false };
+    case "backup_restore":
+      return { event: { name: "backup_restored" }, inventoryChanged: true };
+    case "rotation_plan":
+      return { event: { name: "credential_rotation_planned" }, inventoryChanged: false };
+    case "rotation_complete_manual":
+      return { event: { name: "credential_rotation_completed" }, inventoryChanged: false };
+    case "rotation_advance":
+      return typeof result === "object" &&
+        result !== null &&
+        "state" in result &&
+        result.state === "completed"
+        ? { event: { name: "credential_rotation_completed" }, inventoryChanged: false }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function publishProductAnalytics(signal: ProductAnalyticsSignal | null) {
+  if (!signal || typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(PRODUCT_ANALYTICS_EVENT, { detail: signal }));
 }
 
 export function isApiError(e: unknown): e is ApiError {
@@ -117,7 +221,9 @@ export function isApiError(e: unknown): e is ApiError {
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
-    return await invoke<T>(command, args);
+    const result = await invoke<T>(command, args);
+    publishProductAnalytics(productAnalyticsSignal(command, args, result));
+    return result;
   } catch (raw) {
     const err: ApiError = isApiError(raw) ? raw : { code: "unknown", message: String(raw) };
     if (err.code === "vault_locked" && onVaultLocked) {

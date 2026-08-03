@@ -1,7 +1,7 @@
 //! User-configured notification channels (webhooks).
 //!
 //! Optional remote delivery for alerts the user explicitly configures — no
-//! API-Tracker-hosted service is involved and none is ever required.
+//! Tethra-hosted service is involved and none is ever required.
 //! Payloads carry alert METADATA only (kind, severity, title, detail,
 //! timestamps); alerts are secret-free by construction, and nothing else is
 //! included. The webhook URL may embed a user-chosen token, so it is stored

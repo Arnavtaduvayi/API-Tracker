@@ -38,6 +38,7 @@ function renderWith(overview: ProjectOverview) {
       reloading={false}
       onChanged={noop}
       onOpenAdvanced={noop}
+      onStoreDetected={noop}
     />,
   );
 }

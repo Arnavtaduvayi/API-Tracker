@@ -1,0 +1,99 @@
+{
+  "functions": {
+    "source": "functions",
+    "runtime": "nodejs22"
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "emulators": {
+    "functions": { "host": "127.0.0.1", "port": 5003 },
+    "firestore": { "host": "127.0.0.1", "port": 8082, "websocketPort": 9152 },
+    "hosting": { "host": "127.0.0.1", "port": 5002 },
+    "hub": { "host": "127.0.0.1", "port": 4402 },
+    "logging": { "host": "127.0.0.1", "port": 4502 },
+    "ui": { "enabled": false }
+  },
+  "hosting": {
+    "predeploy": "bash scripts/verify_landing_release.sh",
+    "public": "landing",
+    "ignore": ["firebase.json", "**/.*", "**/node_modules/**", "**/*.dmg"],
+    "i18n": { "root": "/localized" },
+    "rewrites": [
+      {
+        "source": "/api/waitlist",
+        "function": {
+          "functionId": "joinTeamsWaitlist",
+          "region": "us-east1",
+          "pinTag": true
+        }
+      }
+    ],
+    "redirects": [
+      {
+        "source": "/enterprise",
+        "destination": "/teams",
+        "type": 301
+      },
+      {
+        "source": "/downloads/cli/tethra-aarch64-apple-darwin.tar.gz",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/tethra-aarch64-apple-darwin.tar.gz",
+        "type": 302
+      },
+      {
+        "source": "/downloads/cli/tethra-aarch64-apple-darwin.tar.gz.sha256",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/tethra-aarch64-apple-darwin.tar.gz.sha256",
+        "type": 302
+      },
+      {
+        "source": "/downloads/cli/tethra-x86_64-unknown-linux-gnu.tar.gz",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/tethra-x86_64-unknown-linux-gnu.tar.gz",
+        "type": 302
+      },
+      {
+        "source": "/downloads/cli/tethra-x86_64-pc-windows-msvc.zip",
+        "destination": "https://github.com/Arnavtaduvayi/API-Tracker/releases/download/v0.1.1-alpha-ui.1/tethra-x86_64-pc-windows-msvc.zip",
+        "type": 302
+      }
+    ],
+    "cleanUrls": true,
+    "trailingSlash": false,
+    "headers": [
+      {
+        "source": "**",
+        "headers": [
+          { "key": "Cache-Control", "value": "public,max-age=0,must-revalidate" },
+          { "key": "X-Content-Type-Options", "value": "nosniff" },
+          { "key": "Referrer-Policy", "value": "no-referrer" },
+          { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" },
+          { "key": "X-Frame-Options", "value": "DENY" },
+          { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://www.googletagmanager.com; connect-src 'self' https://www.google-analytics.com https://analytics.google.com https://region1.google-analytics.com https://www.googletagmanager.com; img-src 'self' data: https://www.google-analytics.com https://www.googletagmanager.com; style-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" }
+        ]
+      },
+      {
+        "source": "**/*.html",
+        "headers": [{ "key": "Cache-Control", "value": "public,max-age=0,must-revalidate" }]
+      },
+      {
+        "source": "/region.json",
+        "headers": [
+          { "key": "Cache-Control", "value": "private,no-store" },
+          { "key": "Access-Control-Allow-Origin", "value": "*" }
+        ]
+      },
+      {
+        "source": "/api/**",
+        "headers": [
+          { "key": "Cache-Control", "value": "private,no-store" },
+          { "key": "X-Content-Type-Options", "value": "nosniff" },
+          { "key": "Referrer-Policy", "value": "no-referrer" }
+        ]
+      },
+      {
+        "source": "**/*.{css,js,png}",
+        "headers": [{ "key": "Cache-Control", "value": "public,max-age=3600" }]
+      }
+    ]
+  }
+}

@@ -83,7 +83,7 @@ delivery the user can configure **webhook channels**: https-only URLs
 everywhere), per-channel severity floors, delivery of alert METADATA only
 (alerts are secret-free by construction), per-channel failure recording,
 and a stop-on-first-failure rule per run so a dead endpoint is not
-hammered. No API-Tracker-hosted relay exists or is required. Webhooks are
+hammered. No Tethra-hosted relay exists or is required. Webhooks are
 outbound requests made on the user's explicit configuration — the same
 egress posture as provider syncs.
 

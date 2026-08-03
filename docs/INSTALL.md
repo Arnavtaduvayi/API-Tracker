@@ -23,11 +23,13 @@ shasum -a 256 -c SHA256SUMS.txt      # or: sha256sum -c SHA256SUMS.txt
 certutil -hashfile tethra-x86_64-pc-windows-msvc.zip SHA256
 ```
 
-**These builds are unsigned (alpha).** You will see OS warnings:
+The Apple Silicon DMG served by `usetethra.com` is Developer ID signed and
+Apple-notarized. Automated GitHub Release artifacts remain unsigned alpha
+builds, so those artifacts may show OS warnings:
 
-- **macOS**: right-click the app → *Open* → *Open* (bypasses Gatekeeper once),
-  or `xattr -dr com.apple.quarantine "Tethra.app"`. Gatekeeper flags it
-  because it is not notarized.
+- **macOS unsigned GitHub artifact**: right-click the app → *Open* →
+  *Open* (bypasses Gatekeeper once), or
+  `xattr -dr com.apple.quarantine "Tethra.app"`.
 - **Windows**: SmartScreen → *More info* → *Run anyway*.
 - **Linux (AppImage)**: `chmod +x Tethra*.AppImage && ./Tethra*.AppImage`.
 

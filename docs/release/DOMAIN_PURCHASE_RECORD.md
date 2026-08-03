@@ -20,11 +20,25 @@
   registrant "REDACTED FOR PRIVACY")
 - **Order number:** not recorded (not available to the user at the time of
   writing; the receipt lives in the user's Squarespace account email)
-- **DNS / website:** configured with the user's authorization on
+- **Current DNS / website (verified 2026-08-01):** the apex resolves to
+  Firebase Hosting at `199.36.158.100`; `https://usetethra.com`, `/privacy`,
+  and `/terms` return the deployed Tethra site over HTTPS. The Firebase project
+  and Hosting site are both `usetethra`.
+- **Current analytics (verified 2026-08-01):** consent-first GA4 web stream
+  `G-MJQHJ6JT5Z`. No Google request occurs before opt-in; advertising consent
+  remains denied. See `docs/ANALYTICS.md` for the finite event inventory.
+- **Current downloads (verified 2026-08-01):** the Firebase-hosted landing page
+  links directly to `.dmg` and `.exe` assets on GitHub Releases because the
+  Spark plan rejects installer binaries during upload. There is no ZIP wrapper.
+  The macOS app is signed by Developer ID
+  Application `Eesh Majithia (ZT56M637KS)`, notarized by Apple, and distributed
+  with a stapled notarization ticket. Public checksums are in
+  `downloads/SHA256SUMS.txt`.
+- **Previous DNS / website (2026-07-24):** configured with the user's authorization on
   2026-07-24 — four apex A records to GitHub Pages (185.199.108–111.153)
   and `www` CNAME to `arnavtaduvayi.github.io`, added by the user in
-  Squarespace; the landing site is served from the repository's `gh-pages`
-  branch. Email / analytics: not configured.
+  Squarespace; at that time the landing site was served from the repository's
+  `gh-pages` branch and email / analytics were not configured.
 
 ---
 

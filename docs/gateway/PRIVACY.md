@@ -41,10 +41,12 @@ honestly stated: swap files and core dumps are outside its control).
 ## Where data lives
 
 Everything is in your local vault database (`vault.db` in your data
-directory). There is no telemetry, no analytics, no Tethra server, and the
-gateway makes no network connection except to the provider origins you
-registered. The service's log file (`<data-dir>/logs/gateway.log`) contains
-lifecycle events only — never traffic contents or secrets.
+directory). The gateway itself performs no telemetry or analytics and makes
+no network connection except to provider origins you registered. Optional
+desktop product analytics is a separate, consent-gated UI path with no access
+to gateway events or vault data (`docs/ANALYTICS.md`). The service's log file
+(`<data-dir>/logs/gateway.log`) contains lifecycle events only — never traffic
+contents or secrets.
 
 ## Retention
 

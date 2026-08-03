@@ -1,0 +1,12 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // The waitlist is server-only. The Admin SDK in the validated HTTPS
+    // function writes through IAM; no browser or unauthenticated client can
+    // read, enumerate, create, update, or delete Firestore documents.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
