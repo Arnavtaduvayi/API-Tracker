@@ -181,6 +181,12 @@ bash scripts/smoke.sh          # builds the release CLI; ~140+ checks against a 
   security claims about the mesh ("unhackable", "zero-knowledge", "cannot be
   bypassed"). Describe mechanisms and limits instead.
 - The fast KDF works only in debug builds.
+- CI's `stable` can be newer than this machine's: on 2026-10-26, CI ran rustc 1.99.1 and
+  the local default was 1.96.1. A lint or deprecation that is new in CI's version fails
+  its `clippy -D warnings`. Toolchain 1.99.1 is installed alongside the default, so also
+  run `CARGO_TARGET_DIR=<scratch>/target199 cargo +1.99.1 clippy …` with the same `-p`
+  list before pushing (STATUS.md, Increment 01 handoff). Keep the 1.85 MSRV in mind:
+  don't fix a deprecation with an API newer than 1.85.
 - macOS has no `timeout(1)`.
 - `~/.npm` may be root-owned, which is why the commands above pass `--cache "$(mktemp -d)"`.
 - The validation manifest (`scripts/validation_manifest.json`) is generated and covers
