@@ -45,6 +45,7 @@ pub mod gitseal;
 pub mod hooks;
 pub mod http;
 pub mod inject;
+pub mod mesh;
 pub mod model;
 pub mod monitor;
 pub mod notify;

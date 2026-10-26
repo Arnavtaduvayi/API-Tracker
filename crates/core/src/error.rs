@@ -116,6 +116,9 @@ pub enum CoreError {
 
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
+
+    #[error("{0}")]
+    Mesh(#[from] crate::mesh::MeshError),
 }
 
 impl CoreError {
@@ -153,6 +156,7 @@ impl CoreError {
             CoreError::Db(_) => "db_error",
             CoreError::Io(_) => "io_error",
             CoreError::Serde(_) => "serde_error",
+            CoreError::Mesh(e) => e.code(),
         }
     }
 }

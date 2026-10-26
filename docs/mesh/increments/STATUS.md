@@ -10,7 +10,7 @@ Every session reads this file first and updates it at the end (README §1).
 
 | # | Increment | Mode | Size | State | Started | Finished | Commits | CI run (result) |
 |---|---|---|---|---|---|---|---|---|
-| 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | pending | | | | |
+| 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | in-progress | 2026-10-26 | | | |
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | pending | | | | |
 | 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | pending | | | | |
 | 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | pending | | | | |
