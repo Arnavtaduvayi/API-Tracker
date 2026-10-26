@@ -11,11 +11,11 @@
 //! deterministically leaves it out of its views.
 
 use super::codec::ItemBody;
-use super::crdt::bounded::Recipient;
 use super::dot::{CapId, CredentialRef, DeviceId, MeshId, MeshProjectId, ShareId};
 use super::error::MeshError;
 use super::hlc::Hlc;
-use super::sign::PublicKeyBytes;
+use super::item::ItemHash;
+use super::sign::{derive_device_id, PublicKeyBytes};
 use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -36,10 +36,11 @@ pub mod names {
     pub const CAP_USED: &str = "cap.used";
     pub const SHARE_SEALED: &str = "share.sealed";
     pub const SHARE_REVOKE: &str = "share.revoke";
+    pub const FORK_REPORT: &str = "fork.report";
 }
 
 /// Every kind this version materializes.
-pub const KNOWN_KINDS: [&str; 12] = [
+pub const KNOWN_KINDS: [&str; 13] = [
     names::ROSTER_ADD,
     names::ROSTER_REMOVE,
     names::DEVICE_INFO,
@@ -52,6 +53,7 @@ pub const KNOWN_KINDS: [&str; 12] = [
     names::CAP_USED,
     names::SHARE_SEALED,
     names::SHARE_REVOKE,
+    names::FORK_REPORT,
 ];
 
 pub fn is_known_kind(kind: &str) -> bool {
@@ -262,6 +264,36 @@ impl fmt::Display for Month {
     }
 }
 
+/// Where a `cap.rights` amount goes. `Burn` sorts first, which is the order
+/// the view honours outgoing amounts in.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Recipient {
+    Burn,
+    Device(DeviceId),
+}
+
+impl Recipient {
+    /// The reserved key segment for the burn sink.
+    pub const BURN: &'static str = "burn";
+
+    pub fn parse(s: &str) -> Option<Self> {
+        if s == Self::BURN {
+            Some(Self::Burn)
+        } else {
+            DeviceId::parse(s).ok().map(Self::Device)
+        }
+    }
+}
+
+impl fmt::Display for Recipient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Burn => f.write_str(Self::BURN),
+            Self::Device(d) => write!(f, "{d}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- roster.add
 
 /// `roster.add`, key = the added device's id. Minted by an existing member
@@ -319,6 +351,9 @@ impl ItemKind for RosterAdd {
         p.sign_pub
             .to_verifying_key()
             .map_err(|_| invalid(k, "sign_pub is not a usable Ed25519 key"))?;
+        if derive_device_id(&p.sign_pub, &p.noise_pub, &p.seal_pub) != device {
+            return Err(invalid(k, "device id is not derived from these keys"));
+        }
         Ok(Self {
             device,
             name: p.name,
@@ -961,6 +996,61 @@ impl ItemKind for ShareRevoke {
     }
 }
 
+// -------------------------------------------------------------- fork.report
+
+/// `fork.report`, key = the forked device's id. Minted by a device that found
+/// two different item hashes for one dot of that device (PROTOCOL.md §7): the
+/// forked device's items at or above `seq` stop counting everywhere.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForkReport {
+    pub device: DeviceId,
+    /// The lowest seq at which the two hashes differ.
+    pub seq: u64,
+    pub hash_a: ItemHash,
+    pub hash_b: ItemHash,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ForkReportPayload {
+    hash_a: ItemHash,
+    hash_b: ItemHash,
+    seq: u64,
+}
+
+impl ItemKind for ForkReport {
+    const KIND: &'static str = names::FORK_REPORT;
+
+    fn item_key(&self) -> String {
+        self.device.to_hex()
+    }
+
+    fn payload(&self) -> Value {
+        to_value(&ForkReportPayload {
+            hash_a: self.hash_a,
+            hash_b: self.hash_b,
+            seq: self.seq,
+        })
+    }
+
+    fn parse(_origin: &DeviceId, key: &str, payload: &Value) -> Result<Self, MeshError> {
+        let k = Self::KIND;
+        let device = DeviceId::parse(key).map_err(|_| invalid(k, "key is not a device id"))?;
+        let p: ForkReportPayload = from_payload(k, payload)?;
+        if p.seq == 0 || p.hash_a == p.hash_b {
+            return Err(invalid(
+                k,
+                "a fork needs a seq of at least 1 and two different hashes",
+            ));
+        }
+        Ok(Self {
+            device,
+            seq: p.seq,
+            hash_a: p.hash_a,
+            hash_b: p.hash_b,
+        })
+    }
+}
+
 item_kind_try_from!(
     RosterAdd,
     RosterRemove,
@@ -974,6 +1064,7 @@ item_kind_try_from!(
     CapUsed,
     ShareSealed,
     ShareRevoke,
+    ForkReport,
 );
 
 /// Any item, typed by its kind.
@@ -991,6 +1082,7 @@ pub enum TypedItem {
     CapUsed(CapUsed),
     ShareSealed(ShareSealed),
     ShareRevoke(ShareRevoke),
+    ForkReport(ForkReport),
     /// A kind this version does not understand: stored and relayed opaquely.
     Unknown,
 }
@@ -1012,6 +1104,7 @@ impl TypedItem {
             names::CAP_USED => Self::CapUsed(body.try_into()?),
             names::SHARE_SEALED => Self::ShareSealed(body.try_into()?),
             names::SHARE_REVOKE => Self::ShareRevoke(body.try_into()?),
+            names::FORK_REPORT => Self::ForkReport(body.try_into()?),
             _ => Self::Unknown,
         })
     }
@@ -1044,13 +1137,16 @@ mod tests {
         typed
     }
 
-    fn sample_add(origin: DeviceId, device: DeviceId) -> RosterAdd {
+    /// A valid add: the device id is derived from its keys.
+    fn sample_add(origin: DeviceId) -> RosterAdd {
+        let sign_pub = SigningKeyPair::from_secret_bytes(&[7; 32]).public_key();
+        let (noise_pub, seal_pub) = (PublicKeyBytes([8; 32]), PublicKeyBytes([9; 32]));
         RosterAdd {
-            device,
+            device: derive_device_id(&sign_pub, &noise_pub, &seal_pub),
             name: "work laptop".into(),
-            sign_pub: SigningKeyPair::from_secret_bytes(&[7; 32]).public_key(),
-            noise_pub: PublicKeyBytes([8; 32]),
-            seal_pub: PublicKeyBytes([9; 32]),
+            sign_pub,
+            noise_pub,
+            seal_pub,
             added_by: origin,
         }
     }
@@ -1058,7 +1154,7 @@ mod tests {
     #[test]
     fn every_kind_round_trips() {
         let o = dev(1);
-        let add = sample_add(o, dev(2));
+        let add = sample_add(o);
         assert_eq!(round_trip(&add, o), add);
         let rm = RosterRemove {
             device: dev(2),
@@ -1164,11 +1260,18 @@ mod tests {
             share_id: ShareId::from_bytes([7; 16]),
         };
         assert_eq!(round_trip(&revoke, o), revoke);
+        let fork = ForkReport {
+            device: dev(2),
+            seq: 11,
+            hash_a: ItemHash([1; 32]),
+            hash_b: ItemHash([2; 32]),
+        };
+        assert_eq!(round_trip(&fork, o), fork);
     }
 
     #[test]
     fn origin_bindings_are_enforced() {
-        let add = sample_add(dev(1), dev(2));
+        let add = sample_add(dev(1));
         let body = add.to_body(mesh(), dev(9), 1, Hlc::ZERO);
         assert!(matches!(
             RosterAdd::try_from(&body),
@@ -1202,8 +1305,29 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_add_whose_id_is_not_derived_from_its_keys_is_refused() {
+        let mut add = sample_add(dev(1));
+        add.device = dev(2);
+        assert!(RosterAdd::try_from(&add.to_body(mesh(), dev(1), 1, Hlc::ZERO)).is_err());
+        let mut add = sample_add(dev(1));
+        add.seal_pub = PublicKeyBytes([10; 32]); // same id, other keys: a hijack attempt
+        assert!(RosterAdd::try_from(&add.to_body(mesh(), dev(1), 1, Hlc::ZERO)).is_err());
+    }
+
+    #[test]
+    fn a_fork_report_needs_two_different_hashes() {
+        let same = ForkReport {
+            device: dev(2),
+            seq: 3,
+            hash_a: ItemHash([1; 32]),
+            hash_b: ItemHash([1; 32]),
+        };
+        assert!(ForkReport::try_from(&same.to_body(mesh(), dev(1), 1, Hlc::ZERO)).is_err());
+    }
+
+    #[test]
     fn weak_signing_key_in_roster_add_is_refused() {
-        let mut add = sample_add(dev(1), dev(2));
+        let mut add = sample_add(dev(1));
         let mut identity = [0u8; 32];
         identity[0] = 1;
         add.sign_pub = PublicKeyBytes(identity);

@@ -21,3 +21,19 @@ api-tracker-core = { path = "crates/core" }
 
 [profile.release]
 strip = true
+
+# Tethra Mesh's simulator signs and verifies hundreds of thousands of items per
+# test run; unoptimised curve arithmetic makes that take minutes. Optimising
+# only these crypto crates in dev/test builds keeps `cargo test` fast without
+# changing release builds or the rest of the debug build.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.blake3]
+opt-level = 3

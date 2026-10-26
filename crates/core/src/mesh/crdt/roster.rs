@@ -1,36 +1,38 @@
-//! The device roster (PROTOCOL.md §5.4): a two-phase set with removal
+//! The device roster (PROTOCOL.md §6): a two-phase set with removal
 //! cutoffs, fork cutoffs and a single genesis.
 //!
 //! **State** (joined entry-wise, like every replicated value):
 //! * `adds[(target, origin)]` — `origin`'s latest `roster.add` of `target`;
 //! * `removes[(target, origin)]` — `origin`'s latest `roster.remove` of
 //!   `target`, carrying a `cutoff_seq`;
-//! * `forks[origin]` — the lowest seq at which `origin` is known to have
-//!   signed two different items (joined by minimum).
+//! * `forks[(target, origin)]` — `origin`'s latest `fork.report` about
+//!   `target`, carrying the lowest seq at which `target` signed two different
+//!   items.
 //!
-//! **Resolution**, a pure function of that state, evaluated in a fixed order
-//! so it has no circular dependencies:
-//! 1. *Reachable:* starting from the genesis device, a `roster.add` brings
-//!    its target in when its origin is already in and the add is below the
-//!    origin's fork point. The genesis device's keys come only from its own
-//!    self-add; adds of the genesis by anyone else are ignored.
-//! 2. *Conflicts:* a target that reachable origins added with different keys
-//!    is excluded entirely — a member re-adding an existing device id with
-//!    other keys cannot take over that identity, only lock it out.
-//! 3. *Known* (ingest's "origin is in the roster"): step 1 again without the
-//!    conflicted targets. A known device's keys verify its items.
-//! 4. *Cutoffs:* a `roster.remove` counts when its origin is known and the
-//!    remove is below the origin's fork point; a device's cutoff is the
-//!    **maximum** over the removes that count. Removers are checked against
-//!    the cutoff-free known set, so two devices that remove each other
-//!    concurrently are both removed.
-//! 5. *Members:* step 1 again, now also requiring each add to be at or below
-//!    its origin's cutoff — a removed device's later adds bring no one in.
+//! A device id is derived from the device's keys (`sign::derive_device_id`)
+//! and `roster.add` parsing enforces it, so every valid add of one target
+//! carries the same keys: there are no key conflicts to resolve.
+//!
+//! **Resolution**, a pure function of that state, in a fixed order so nothing
+//! is circular:
+//! 1. *Known*: starting from the genesis device (only once its self-add is
+//!    present), a `roster.add` brings its target in when its origin is
+//!    already in. The genesis device's keys come only from its own self-add;
+//!    adds of the genesis by anyone else are ignored. Known devices' items
+//!    verify (ingest check 4) and are stored and relayed — including removed
+//!    and forked devices' items. *Known* only ever grows.
+//! 2. *Forks*: a `fork.report` counts when its origin is known; a device's
+//!    fork seq is the **minimum** over the reports that count.
+//! 3. *Cutoffs*: a `roster.remove` counts when its origin is known; a device's
+//!    cutoff is the **maximum** over the removes that count. Removers are
+//!    judged against *known*, so two devices that remove each other
+//!    concurrently are both removed, and removal is forever.
+//! 4. *Members*: step 1 again, now requiring each add to be admitted at its
+//!    seq (below its origin's fork seq, at or below its origin's cutoff). A
+//!    removed or forked device's later adds bring no one in.
 //!
 //! An origin's item at `seq` is **admitted** when the origin is a member,
-//! `seq` ≤ its cutoff (if removed) and `seq` < its fork point (if forked).
-//! Removal is forever: cutoffs never disappear, and a removed id stays
-//! removed whatever is added later.
+//! `seq` ≤ its cutoff (if removed) and `seq` < its fork seq (if forked).
 
 use super::{join_map, map_dominates, Admit, SwEntry};
 use crate::mesh::dot::DeviceId;
@@ -71,9 +73,9 @@ impl From<&RosterAdd> for AddRecord {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Resolved {
     known: BTreeMap<DeviceId, DeviceKeys>,
-    members: BTreeSet<DeviceId>,
+    forks: BTreeMap<DeviceId, u64>,
     cutoffs: BTreeMap<DeviceId, u64>,
-    conflicted: BTreeSet<DeviceId>,
+    members: BTreeSet<DeviceId>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,7 +83,7 @@ pub struct Roster {
     genesis: DeviceId,
     adds: BTreeMap<(DeviceId, DeviceId), SwEntry<AddRecord>>,
     removes: BTreeMap<(DeviceId, DeviceId), SwEntry<u64>>,
-    forks: BTreeMap<DeviceId, u64>,
+    forks: BTreeMap<(DeviceId, DeviceId), SwEntry<u64>>,
     resolved: Resolved,
 }
 
@@ -142,15 +144,15 @@ impl Roster {
         changed
     }
 
-    /// Record proof that `origin` signed two different items at `seq`.
-    pub fn record_fork(&mut self, origin: DeviceId, seq: u64) -> bool {
-        let changed = match self.forks.get(&origin) {
-            Some(&s) if s <= seq => false,
-            _ => {
-                self.forks.insert(origin, seq);
-                true
-            }
-        };
+    /// Record `origin`'s `fork.report` about `target` (`entry.value` is the
+    /// lowest forked seq).
+    pub fn apply_fork_report(
+        &mut self,
+        origin: DeviceId,
+        target: DeviceId,
+        entry: SwEntry<u64>,
+    ) -> bool {
+        let changed = super::join_entry(&mut self.forks, (target, origin), entry);
         if changed {
             self.resolve();
         }
@@ -163,19 +165,7 @@ impl Roster {
         }
         let mut changed = join_map(&mut self.adds, &other.adds);
         changed |= join_map(&mut self.removes, &other.removes);
-        for (o, s) in &other.forks {
-            match self.forks.get_mut(o) {
-                Some(mine) if *mine <= *s => {}
-                Some(mine) => {
-                    *mine = *s;
-                    changed = true;
-                }
-                None => {
-                    self.forks.insert(*o, *s);
-                    changed = true;
-                }
-            }
-        }
+        changed |= join_map(&mut self.forks, &other.forks);
         if changed {
             self.resolve();
         }
@@ -187,17 +177,14 @@ impl Roster {
         self.genesis == other.genesis
             && map_dominates(&self.adds, &other.adds)
             && map_dominates(&self.removes, &other.removes)
-            && other
-                .forks
-                .iter()
-                .all(|(o, s)| self.forks.get(o).is_some_and(|mine| mine <= s))
+            && map_dominates(&self.forks, &other.forks)
     }
 
     // ------------------------------------------------------------ queries
 
     /// Ingest check 4: the origin was brought in by a chain of adds from the
-    /// genesis (whatever has been removed since). Its items are stored and
-    /// relayed; whether they *count* is [`Roster::is_admitted`].
+    /// genesis (whatever has been removed or forked since). Its items are
+    /// stored and relayed; whether they *count* is [`Roster::is_admitted`].
     pub fn is_known(&self, device: &DeviceId) -> bool {
         self.resolved.known.contains_key(device)
     }
@@ -220,23 +207,17 @@ impl Roster {
     }
 
     pub fn fork_seq(&self, device: &DeviceId) -> Option<u64> {
-        self.forks.get(device).copied()
+        self.resolved.forks.get(device).copied()
     }
 
-    pub fn is_conflicted(&self, device: &DeviceId) -> bool {
-        self.resolved.conflicted.contains(device)
-    }
-
-    /// A member that has been neither removed nor caught forking: the only
+    /// A member that has been neither removed nor reported forked: the only
     /// devices a session may authenticate as (MESH-SI-2).
     pub fn is_active(&self, device: &DeviceId) -> bool {
-        self.is_member(device) && !self.is_removed(device) && !self.forks.contains_key(device)
+        self.is_member(device) && !self.is_removed(device) && self.fork_seq(device).is_none()
     }
 
     pub fn is_admitted(&self, origin: &DeviceId, seq: u64) -> bool {
-        self.is_member(origin)
-            && self.cutoff(origin).is_none_or(|c| seq <= c)
-            && self.fork_seq(origin).is_none_or(|f| seq < f)
+        self.is_member(origin) && self.within_cutoffs(origin, seq)
     }
 
     pub fn members(&self) -> impl Iterator<Item = &DeviceId> {
@@ -247,61 +228,63 @@ impl Roster {
         self.resolved.known.iter()
     }
 
-    /// The display name from the device's admitting add (the add from the
-    /// smallest origin id when several agree). `device.info` carries renames.
+    /// Every device with a recorded fork, and its fork seq.
+    pub fn forks(&self) -> impl Iterator<Item = (&DeviceId, &u64)> {
+        self.resolved.forks.iter()
+    }
+
+    /// Every removed device, and its cutoff.
+    pub fn cutoffs(&self) -> impl Iterator<Item = (&DeviceId, &u64)> {
+        self.resolved.cutoffs.iter()
+    }
+
+    /// The display name from the device's first add (in `(target, origin)`
+    /// order; the genesis's from its self-add). `device.info` carries renames.
     pub fn added_name(&self, device: &DeviceId) -> Option<&str> {
-        self.known_adds_of(*device)
-            .next()
+        if !self.is_known(device) {
+            return None;
+        }
+        self.adds_of(*device)
+            .find(|(o, _)| *device != self.genesis || **o == self.genesis)
             .map(|(_, e)| e.value.name.as_str())
     }
 
     // --------------------------------------------------------- resolution
 
-    fn fork_ok(&self, origin: &DeviceId, seq: u64) -> bool {
-        self.fork_seq(origin).is_none_or(|f| seq < f)
+    /// `seq ≤ cutoff` (if removed) and `seq < fork seq` (if forked).
+    fn within_cutoffs(&self, origin: &DeviceId, seq: u64) -> bool {
+        self.cutoff(origin).is_none_or(|c| seq <= c)
+            && self.fork_seq(origin).is_none_or(|f| seq < f)
     }
 
-    fn genesis_add(&self) -> Option<&SwEntry<AddRecord>> {
-        self.adds.get(&(self.genesis, self.genesis))
-    }
-
-    /// Adds of `target` whose origin is known and below its fork point.
-    fn known_adds_of(
+    fn adds_of(
         &self,
         target: DeviceId,
     ) -> impl Iterator<Item = (&DeviceId, &SwEntry<AddRecord>)> + '_ {
         self.adds
             .range((target, DeviceId::MIN)..=(target, DeviceId::MAX))
-            .filter(move |((_, o), e)| {
-                self.resolved.known.contains_key(o) && self.fork_ok(o, e.seq)
-            })
             .map(|((_, o), e)| (o, e))
     }
 
-    /// Closure from the genesis over adds that pass `ok`, skipping `banned`.
-    fn reach(
-        &self,
-        ok: impl Fn(&DeviceId, u64) -> bool,
-        banned: &BTreeSet<DeviceId>,
-    ) -> BTreeSet<DeviceId> {
+    /// Closure from the genesis over adds whose origin is in and that pass
+    /// `ok(origin, seq)`.
+    fn reach(&self, ok: impl Fn(&DeviceId, u64) -> bool) -> BTreeSet<DeviceId> {
         let mut set = BTreeSet::new();
-        if self.genesis_add().is_none() {
+        if !self.adds.contains_key(&(self.genesis, self.genesis)) {
             return set;
         }
         set.insert(self.genesis);
         loop {
             let mut grew = false;
             for ((target, origin), e) in &self.adds {
-                if *target == self.genesis
-                    || banned.contains(target)
-                    || set.contains(target)
-                    || !set.contains(origin)
-                    || !ok(origin, e.seq)
+                if *target != self.genesis
+                    && !set.contains(target)
+                    && set.contains(origin)
+                    && ok(origin, e.seq)
                 {
-                    continue;
+                    set.insert(*target);
+                    grew = true;
                 }
-                set.insert(*target);
-                grew = true;
             }
             if !grew {
                 return set;
@@ -311,55 +294,40 @@ impl Roster {
 
     fn resolve(&mut self) {
         let mut r = Resolved::default();
-        let Some(genesis_add) = self.genesis_add() else {
-            self.resolved = r;
-            return;
-        };
-        let genesis_keys = genesis_add.value.keys;
-        let fork_ok = |o: &DeviceId, s: u64| self.fork_ok(o, s);
 
-        // 1-2. Reachability ignoring cutoffs, then key conflicts.
-        let reach0 = self.reach(fork_ok, &BTreeSet::new());
-        let mut keys_seen: BTreeMap<DeviceId, DeviceKeys> = BTreeMap::new();
-        for ((target, origin), e) in &self.adds {
-            if *target == self.genesis || !reach0.contains(origin) || !fork_ok(origin, e.seq) {
-                continue;
-            }
-            match keys_seen.get(target) {
-                Some(k) if *k != e.value.keys => {
-                    r.conflicted.insert(*target);
-                }
-                Some(_) => {}
-                None => {
-                    keys_seen.insert(*target, e.value.keys);
-                }
-            }
-        }
-
-        // 3. Known devices and their keys.
-        for d in self.reach(fork_ok, &r.conflicted) {
+        // 1. Known devices and their keys. A non-genesis device reached the
+        //    set through an add by a known origin; all its adds carry the same
+        //    keys (ids are derived from keys), so the first one is as good as
+        //    any.
+        for d in self.reach(|_, _| true) {
             let keys = if d == self.genesis {
-                genesis_keys
+                self.adds[&(d, d)].value.keys
             } else {
-                keys_seen[&d]
+                self.adds_of(d)
+                    .next()
+                    .map(|(_, e)| e.value.keys)
+                    .expect("a reached device has an add")
             };
             r.known.insert(d, keys);
         }
-
-        // 4. Cutoffs from removes whose origin is known.
+        // 2. Forks and 3. cutoffs, from reports and removes by known origins.
+        for ((target, origin), e) in &self.forks {
+            if r.known.contains_key(origin) {
+                let f = r.forks.entry(*target).or_insert(e.value);
+                *f = (*f).min(e.value);
+            }
+        }
         for ((target, origin), e) in &self.removes {
-            if r.known.contains_key(origin) && fork_ok(origin, e.seq) {
+            if r.known.contains_key(origin) {
                 let c = r.cutoffs.entry(*target).or_insert(e.value);
                 *c = (*c).max(e.value);
             }
         }
-
-        // 5. Members: reachability that also honours cutoffs.
-        let cutoffs = r.cutoffs.clone();
-        r.members = self.reach(
-            |o, s| fork_ok(o, s) && cutoffs.get(o).is_none_or(|c| s <= *c),
-            &r.conflicted,
-        );
+        // 4. Members: adds that are admitted at their own seq.
+        let (forks, cutoffs) = (r.forks.clone(), r.cutoffs.clone());
+        r.members = self.reach(|o, s| {
+            cutoffs.get(o).is_none_or(|c| s <= *c) && forks.get(o).is_none_or(|f| s < *f)
+        });
         self.resolved = r;
     }
 }
@@ -391,7 +359,7 @@ mod tests {
         }
     }
 
-    /// A tiny harness that mints adds/removes with per-origin seqs.
+    /// A tiny harness that mints adds/removes/reports with per-origin seqs.
     struct Mesh {
         roster: Roster,
         next: BTreeMap<DeviceId, u64>,
@@ -431,22 +399,22 @@ mod tests {
             seq
         }
 
-        fn add_with_keys(&mut self, origin: u64, target: u64, k: u8) -> u64 {
-            let seq = self.seq(origin);
-            self.roster.apply_add(
-                dev(origin),
-                dev(target),
-                SwEntry::new(seq, hash_of(origin, target, seq, k as u64), rec(k)),
-            );
-            seq
-        }
-
         fn remove(&mut self, origin: u64, target: u64, cutoff: u64) -> u64 {
             let seq = self.seq(origin);
             self.roster.apply_remove(
                 dev(origin),
                 dev(target),
                 SwEntry::new(seq, hash_of(origin, 1000 + target, seq, 0), cutoff),
+            );
+            seq
+        }
+
+        fn report_fork(&mut self, origin: u64, target: u64, fork_seq: u64) -> u64 {
+            let seq = self.seq(origin);
+            self.roster.apply_fork_report(
+                dev(origin),
+                dev(target),
+                SwEntry::new(seq, hash_of(origin, 2000 + target, seq, fork_seq), fork_seq),
             );
             seq
         }
@@ -469,6 +437,20 @@ mod tests {
         );
         // An empty roster admits nobody.
         assert!(!Roster::new(dev(1)).is_admitted(&dev(1), 1));
+    }
+
+    #[test]
+    fn adds_of_the_genesis_by_others_are_ignored() {
+        let mut m = Mesh::genesis(1);
+        m.add(1, 2);
+        let seq = m.seq(2);
+        m.roster.apply_add(
+            dev(2),
+            dev(1),
+            SwEntry::new(seq, hash_of(2, 1, seq, 0), rec(77)),
+        );
+        assert_eq!(m.roster.keys(&dev(1)), Some(&keys(1)));
+        assert_eq!(m.roster.added_name(&dev(1)), Some("device 1"));
     }
 
     #[test]
@@ -511,6 +493,7 @@ mod tests {
         );
         assert!(m.roster.is_admitted(&dev(2), 3));
         assert!(!m.roster.is_admitted(&dev(2), 4));
+        assert_eq!(m.roster.cutoffs().count(), 1);
     }
 
     #[test]
@@ -524,6 +507,9 @@ mod tests {
         assert!(!m.roster.is_admitted(&dev(2), 1));
         // A later, smaller remove cannot un-remove either.
         m.remove(1, 2, 0);
+        assert!(m.roster.is_removed(&dev(2)));
+        // Nor can a fork report against the remover.
+        m.report_fork(2, 1, 1);
         assert!(m.roster.is_removed(&dev(2)));
     }
 
@@ -545,8 +531,6 @@ mod tests {
         let mut m = Mesh::genesis(1);
         m.add(1, 2);
         m.add(1, 3);
-        // Concurrent: each removes the other with a cutoff below the other's
-        // remove item.
         m.remove(2, 3, 0);
         m.remove(3, 2, 0);
         assert!(m.roster.is_removed(&dev(2)) && m.roster.is_removed(&dev(3)));
@@ -582,43 +566,46 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_keys_lock_the_device_out_instead_of_hijacking_it() {
+    fn a_fork_report_cuts_the_forked_origin_off_at_the_fork_point() {
         let mut m = Mesh::genesis(1);
         m.add(1, 2);
         m.add(1, 3);
-        m.add_with_keys(3, 2, 77); // dev(3) re-adds dev(2) with its own keys
-        assert!(m.roster.is_conflicted(&dev(2)));
-        assert!(!m.roster.is_known(&dev(2)) && !m.roster.is_member(&dev(2)));
-        // Re-adding the genesis with other keys is ignored entirely.
-        m.add_with_keys(3, 1, 66);
-        assert_eq!(m.roster.keys(&dev(1)), Some(&keys(1)));
-        assert!(m.roster.is_active(&dev(1)));
-        // Two adds that agree on keys are no conflict.
+        m.mint_other(2, 3);
+        let add_late = m.add(2, 5); // dev(2) seq 4
+        m.report_fork(3, 2, 4);
+        assert!(!m.roster.is_active(&dev(2)));
+        assert!(m.roster.is_member(&dev(2)));
+        assert!(m.roster.is_admitted(&dev(2), 3));
+        assert!(!m.roster.is_admitted(&dev(2), add_late));
+        assert!(
+            m.roster.is_known(&dev(5)),
+            "its items still verify and relay"
+        );
+        assert!(
+            !m.roster.is_member(&dev(5)),
+            "an add at the fork point brings no one in"
+        );
+        // A lower report wins; a higher one changes nothing.
+        m.report_fork(1, 2, 2);
+        m.report_fork(3, 2, 3);
+        assert_eq!(m.roster.fork_seq(&dev(2)), Some(2));
+        assert_eq!(m.roster.forks().count(), 1);
+    }
+
+    #[test]
+    fn a_report_by_an_unknown_device_does_not_count() {
         let mut m = Mesh::genesis(1);
         m.add(1, 2);
-        m.add(1, 3);
-        m.add(3, 2);
+        m.report_fork(7, 2, 1);
+        assert!(m.roster.fork_seq(&dev(2)).is_none());
         assert!(m.roster.is_active(&dev(2)));
     }
 
     #[test]
-    fn a_fork_cuts_the_forked_origin_off_at_the_fork_point() {
-        let mut m = Mesh::genesis(1);
-        m.add(1, 2);
-        m.mint_other(2, 3);
-        let add_late = m.add(2, 5); // dev(2) seq 4
-        m.roster.record_fork(dev(2), 4);
-        assert!(!m.roster.is_active(&dev(2)));
-        assert!(m.roster.is_admitted(&dev(2), 3));
-        assert!(!m.roster.is_admitted(&dev(2), add_late));
-        assert!(
-            !m.roster.is_known(&dev(5)),
-            "an add at the fork point does not count"
-        );
-        // A lower fork point wins; a higher one changes nothing.
-        assert!(m.roster.record_fork(dev(2), 2));
-        assert!(!m.roster.record_fork(dev(2), 3));
-        assert_eq!(m.roster.fork_seq(&dev(2)), Some(2));
+    fn join_refuses_a_different_genesis() {
+        let mut a = Roster::new(dev(1));
+        let b = Roster::new(dev(2));
+        assert_eq!(a.join(&b), Err(MeshError::GenesisMismatch));
     }
 
     #[test]
@@ -659,22 +646,11 @@ mod tests {
         assert!(m.roster.is_removed(&dev(2)) && m.roster.is_removed(&dev(3)));
         // 6.
         let mut m = chain();
-        m.add_with_keys(3, 2, 99);
-        assert!(m.roster.is_conflicted(&dev(2)) && !m.roster.is_known(&dev(2)));
-        // 7.
-        let mut m = chain();
-        m.roster.record_fork(dev(3), 2);
+        m.report_fork(2, 3, 2); // A reports B forked at seq 2
         m.add(3, 5); // B 2: add D, at the fork point
         assert!(!m.roster.is_active(&dev(3)));
-        assert!(!m.roster.is_admitted(&dev(3), 2));
-        assert!(!m.roster.is_known(&dev(5)));
-    }
-
-    #[test]
-    fn join_refuses_a_different_genesis() {
-        let mut a = Roster::new(dev(1));
-        let b = Roster::new(dev(2));
-        assert_eq!(a.join(&b), Err(MeshError::GenesisMismatch));
+        assert!(m.roster.is_admitted(&dev(3), 1) && !m.roster.is_admitted(&dev(3), 2));
+        assert!(m.roster.is_member(&dev(4)) && !m.roster.is_member(&dev(5)));
     }
 
     fn random_roster(rng: &mut SplitMix64) -> Roster {
@@ -687,12 +663,10 @@ mod tests {
             let c = content(rng);
             match rng.below(5) {
                 0..=2 => {
-                    // Mostly each device's own keys; content 1/2 forges others.
-                    let k = if c == 0 { target as u8 } else { 50 + c as u8 };
                     r.apply_add(
                         dev(origin),
                         dev(target),
-                        SwEntry::new(seq, hash_of(origin, target, seq, c), rec(k)),
+                        SwEntry::new(seq, hash_of(origin, target, seq, c), rec(target as u8)),
                     );
                 }
                 3 => {
@@ -707,7 +681,15 @@ mod tests {
                     );
                 }
                 _ => {
-                    r.record_fork(dev(origin), seq);
+                    r.apply_fork_report(
+                        dev(origin),
+                        dev(target),
+                        SwEntry::new(
+                            seq,
+                            hash_of(origin, 200 + target, seq, c),
+                            1 + (seq + c) % 6,
+                        ),
+                    );
                 }
             }
         }
@@ -740,6 +722,21 @@ mod tests {
             let mut ba = b.clone();
             ba.join(&a).unwrap();
             assert_eq!(ab.resolved, ba.resolved, "MESH_SIM_SEED=0x0506 case {case}");
+        }
+    }
+
+    #[test]
+    fn known_only_grows_10k() {
+        // Ingest acceptance is monotone: joining more state never forgets a
+        // known device, so an item accepted once is accepted everywhere later.
+        let mut rng = SplitMix64::new(0x0507);
+        for case in 0..LAW_CASES {
+            let (a, b) = (random_roster(&mut rng), random_roster(&mut rng));
+            let mut ab = a.clone();
+            ab.join(&b).unwrap();
+            for (d, _) in a.known() {
+                assert!(ab.is_known(d), "MESH_SIM_SEED=0x0507 case {case}");
+            }
         }
     }
 }

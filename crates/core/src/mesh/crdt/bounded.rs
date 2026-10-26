@@ -33,38 +33,8 @@
 use super::{join_map, map_dominates, Admit, SwEntry};
 use crate::mesh::dot::DeviceId;
 use crate::mesh::error::MeshError;
+pub use crate::mesh::kinds::Recipient;
 use std::collections::BTreeMap;
-use std::fmt;
-
-/// Where a `cap.rights` amount goes. `Burn` sorts first, which is the order
-/// the view honours outgoing amounts in.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum Recipient {
-    Burn,
-    Device(DeviceId),
-}
-
-impl Recipient {
-    /// The reserved key segment for the burn sink.
-    pub const BURN: &'static str = "burn";
-
-    pub fn parse(s: &str) -> Option<Self> {
-        if s == Self::BURN {
-            Some(Self::Burn)
-        } else {
-            DeviceId::parse(s).ok().map(Self::Device)
-        }
-    }
-}
-
-impl fmt::Display for Recipient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Burn => f.write_str(Self::BURN),
-            Self::Device(d) => write!(f, "{d}"),
-        }
-    }
-}
 
 /// One device's position in the view. Amounts are micro-USD.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

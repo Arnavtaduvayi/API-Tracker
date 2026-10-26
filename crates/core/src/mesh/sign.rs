@@ -92,6 +92,30 @@ pub fn verify_body_signature(
         .map_err(|_| MeshError::BadSignature)
 }
 
+/// BLAKE3 key-derivation context for device ids.
+pub const DEVICE_ID_CONTEXT: &str = "tethra-mesh v1 device id";
+
+/// A device's id is the first 16 bytes of
+/// `BLAKE3-derive_key("tethra-mesh v1 device id", sign_pub || noise_pub || seal_pub)`.
+///
+/// Binding the id to the keys means two different key sets can never claim
+/// one id: a member that re-adds an existing device id with other keys
+/// produces an invalid `roster.add`, not a conflict to resolve. The keys are
+/// random, so the id is too; nothing identifying goes into it.
+pub fn derive_device_id(
+    sign_pub: &PublicKeyBytes,
+    noise_pub: &PublicKeyBytes,
+    seal_pub: &PublicKeyBytes,
+) -> super::dot::DeviceId {
+    let mut h = blake3::Hasher::new_derive_key(DEVICE_ID_CONTEXT);
+    h.update(&sign_pub.0);
+    h.update(&noise_pub.0);
+    h.update(&seal_pub.0);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&h.finalize().as_bytes()[..16]);
+    super::dot::DeviceId::from_bytes(id)
+}
+
 /// A 32-byte public key (Ed25519 signing, X25519 Noise or X25519 sealing),
 /// written as 64 lowercase hex characters. Public keys are not secret.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -192,6 +216,20 @@ mod tests {
             verify_body_signature(&vk, body, &raw),
             Err(MeshError::BadSignature)
         );
+    }
+
+    #[test]
+    fn device_ids_are_bound_to_all_three_keys() {
+        let (a, b, c) = (
+            PublicKeyBytes([1; 32]),
+            PublicKeyBytes([2; 32]),
+            PublicKeyBytes([3; 32]),
+        );
+        let id = derive_device_id(&a, &b, &c);
+        assert_eq!(id, derive_device_id(&a, &b, &c));
+        assert_ne!(id, derive_device_id(&b, &a, &c));
+        assert_ne!(id, derive_device_id(&a, &b, &PublicKeyBytes([4; 32])));
+        assert_ne!(id, derive_device_id(&a, &PublicKeyBytes([4; 32]), &c));
     }
 
     #[test]

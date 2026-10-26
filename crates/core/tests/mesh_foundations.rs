@@ -19,7 +19,7 @@ use api_tracker_core::mesh::item::{ItemHash, SignedItem};
 use api_tracker_core::mesh::kinds::{
     names, DeviceInfo, ItemKind, ProjectMeta, RosterAdd, RosterRemove, TypedItem,
 };
-use api_tracker_core::mesh::sign::{PublicKeyBytes, SigningKeyPair};
+use api_tracker_core::mesh::sign::{derive_device_id, PublicKeyBytes, SigningKeyPair};
 use api_tracker_core::mesh::{clock::ManualClock, MeshError};
 use api_tracker_core::CoreError;
 use serde_json::json;
@@ -27,6 +27,9 @@ use std::sync::Arc;
 
 /// Unmistakably fake secret key material.
 const FAKE_SECRET: [u8; 32] = [0x5A; 32];
+/// Fake X25519 public keys (only the signing key matters in these tests).
+const NOISE_PUB: PublicKeyBytes = PublicKeyBytes([0x01; 32]);
+const SEAL_PUB: PublicKeyBytes = PublicKeyBytes([0x02; 32]);
 
 /// One device: identity, keys, its own seq counter and HLC.
 struct Device {
@@ -38,9 +41,10 @@ struct Device {
 
 impl Device {
     fn new(clock: &Arc<ManualClock>) -> Self {
+        let key = SigningKeyPair::generate();
         Self {
-            id: DeviceId::random(),
-            key: SigningKeyPair::generate(),
+            id: derive_device_id(&key.public_key(), &NOISE_PUB, &SEAL_PUB),
+            key,
             next_seq: 0,
             hlc: HlcClock::new(clock.clone()),
         }
@@ -57,8 +61,8 @@ impl Device {
             device: target.id,
             name: "test device".into(),
             sign_pub: target.key.public_key(),
-            noise_pub: PublicKeyBytes([0x01; 32]),
-            seal_pub: PublicKeyBytes([0x02; 32]),
+            noise_pub: NOISE_PUB,
+            seal_pub: SEAL_PUB,
             added_by: self.id,
         }
     }
