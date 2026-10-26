@@ -156,7 +156,10 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
   `mesh join` on every other device creates its identity *inside* the existing mesh_id.
 - **Device identity** (row `mesh_self`, local-only):
-  - `device_id`: 16 random bytes, hex. Never derived from anything.
+  - `device_id`: 16 bytes, hex. **[Amended 02, R8]** Derived from the device's three
+    public keys: `BLAKE3-derive_key("tethra-mesh v1 device id", sign_pub || noise_pub ||
+    seal_pub)[..16]` (PROTOCOL.md §6.1). Random-looking, never derived from anything
+    identifying; a re-add with other keys is invalid instead of a conflict.
   - `device_name`: user-chosen, defaulting to the hostname. It is shown to other devices;
     warn the user that it replicates.
   - Ed25519 **signing key**, for items.
@@ -198,7 +201,11 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
       The node refuses to run and `mesh doctor` explains how to recover
       (`mesh leave` and re-pair).
   - **Fork detection on the wire.** This covers the cases the marker can't, such as a
-    clone together with its marker.
+    clone together with its marker. **[Amended 02, R9]** Detection uses per-origin dot
+    logs and hash chains compared at `Hello` and bisected with `ChainQuery`/`ChainReply`;
+    the detector mints a replicated `fork.report` item; the forked origin's items keep
+    relaying and are repaired in full (PROTOCOL.md §7). The bullets below are the
+    original brief.
     - Hello carries the sender's own `next_seq`. A peer that holds items from that
       origin *above* it tells the sender, and the sender enters `rollback-recovery`: it
       fetches its own items first and sets `next_seq` above them before minting.
@@ -236,7 +243,8 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
   5. Signature verifies with the origin's signing key.
   6. Seq is not above the per-origin rate cap (D12).
   7. Kind is known, *or* unknown. Unknown kinds are **stored opaquely and relayed**,
-     but not materialized.
+     but not materialized. **[Amended 02, R10]** A known kind whose payload fails
+     validation is rejected; the receiver keeps that origin's valid prefix.
 - **Unknown kinds** keep a newer Tethra's data intact while it passes through an older
   one. After an upgrade, `views::rematerialize` runs over the stored items of the
   newly understood kinds.
@@ -256,6 +264,7 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
   | `cap.used` | `cap_id/month` | cumulative used_micros by origin |
   | `share.sealed` | `credential_ref/recipient` | Increment 11 |
   | `share.revoke` | `credential_ref/recipient` | Increment 11 |
+  | `fork.report` | forked `device_id` | seq, hash_a, hash_b **[Added 02, R9]** |
 
 ## D7. Hybrid logical clock
 
@@ -364,7 +373,12 @@ law.
 plus store operations. `crates/mesh::session` runs it over Noise. The simulator runs it
 over a simulated network.
 
-**Frames** (JSON inside Noise transport messages; each ≤ 1 MiB; field `t` is the tag):
+**Frames** (JSON inside Noise transport messages; each ≤ 1 MiB; field `t` is the tag).
+**[Amended 02, R9/R11/R12]** PROTOCOL.md §8 is now authoritative: every frame carries a
+per-direction `n`; `Hello` adds `chains` and per-origin `digests` (replacing
+`digest_root`); `Items` adds `dots` (hashes of superseded dots) and `repair`;
+`ChainQuery`/`ChainReply` are added; `Want`, `RepairDigest` and `RepairWant` are not
+used. The list below is the original brief:
 - `Hello { proto_min, proto_max, mesh_id, device_id, kinds: [..], vv, own_next_seq, digest_root }`
 - `Want { since: vv }`
   - Normally the Hello VV is enough. `Want` is used after repair narrows the range.
@@ -790,6 +804,9 @@ over a simulated network.
   - `mesh_cap_escrow(id PK, cap_id, month, to_device, amount_micros, state ∈ {pending,acked,published,cancelled}, acked_generation, created_at, updated_at)`.
   - `mesh_exchange_log(id INTEGER PK, peer_device, at, direction, items_in, items_out, result, error)`: bounded to the last 1 000 rows; drives "last exchanged".
   - `mesh_fork_evidence(origin, seq, hash_a, hash_b, seen_at, PK(origin, seq))`.
+  - **[Added 02, R9]** `mesh_dots(origin, seq, hash, chain, PK(origin, seq))`: the dot
+    log and chain (PROTOCOL.md §7.1). One row per accepted dot, written in the same
+    transaction as the commit or mint that covers it; never pruned below the VV.
   - `mesh_share_imports(share_id PK, credential_id REFERENCES credentials ON DELETE CASCADE, imported_at)`.
     Created in v21 and populated from Increment 11, which records which shares this
     device imported.

@@ -133,7 +133,8 @@ not converge. Each is resolved below and in `docs/mesh/increments/DESIGN.md`.
 * **R5 — Roster resolution is stratified.** Adds, removes and cutoffs were
   mutually recursive. Resolution now runs in a fixed order (reach from the
   genesis → key conflicts → known → cutoffs from known removers → members with
-  cutoffs). Consequences: two devices removing each other are both removed (as
+  cutoffs). Amended by R8/R9 in Increment 02: key conflicts are gone (ids are
+  derived from keys), and fork reports by known devices feed the cutoffs. Consequences: two devices removing each other are both removed (as
   the brief wanted); a removed device's later adds admit no one; a member that
   re-adds an existing id with other keys locks it out rather than hijacking it.
 * **R6 — The genesis is a mesh parameter.** A self-add proves nothing by itself
@@ -141,6 +142,33 @@ not converge. Each is resolved below and in `docs/mesh/increments/DESIGN.md`.
   in `PairAccept` (Increment 04 adds the field).
 * **R7 — `local_write_ts` does not move the clock.** Lifting one write above a
   skewed value must not pull the device's clock into the future.
+
+### Decisions resolved while specifying sessions (Increment 02)
+
+* **R8 — Device ids are derived from the device's keys** (first 16 bytes of a
+  BLAKE3 derive-key over the three public keys). With random ids, a member could
+  re-add an existing id with other keys; resolving such "key conflicts" by
+  banning the id cannot converge, because whether a conflicted device's own adds
+  were stored depends on timing. With derived ids, such an add is simply
+  invalid. Ids stay random-looking and carry nothing identifying.
+* **R9 — Forks are detected with per-origin dot logs and hash chains, and
+  recorded as `fork.report` items.** Every device keeps the hash it accepted at
+  every dot (commits now carry the hashes of superseded dots), and `Hello`
+  carries each origin's chain head. Two devices whose logs diverge find the
+  first differing seq by bisection; the brief's dot-collision-only detection
+  misses forks whose items were superseded before they met. Reports make the
+  fork part of the replicated roster, so every device converges on it; a forked
+  origin's items keep relaying and are repaired in full so every device ends
+  with the same entries (PROTOCOL §7).
+* **R10 — A known kind with an invalid payload is rejected at ingest**, keeping
+  the valid prefix of that origin's batch. Storing it but leaving it out of views
+  would let it supersede a valid entry on some devices and not others.
+* **R11 — Repair compares per-origin digests carried in `Hello`** instead of
+  `(kind, scope)` buckets in `RepairDigest`/`RepairWant`; `Want` is unused.
+  With ≤ 10 devices the digests are a few hundred bytes, and per-origin
+  granularity is exactly what fork repair needs.
+* **R12 — Frames carry a per-direction sequence number**, so any reordered,
+  duplicated or dropped frame ends the session instead of being misapplied.
 
 ### Dependencies
 

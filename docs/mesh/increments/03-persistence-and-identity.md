@@ -32,6 +32,8 @@ Append it to `MIGRATIONS` in `crates/core/src/db.rs`. It creates **every** table
 DESIGN §D17 except the v22 columns, which come in 06:
 - the local-only tables;
 - `mesh_items` and `mesh_vv`;
+- `mesh_dots(origin, seq, hash, chain)` — the dot log and chain added in 02
+  (PROTOCOL.md §7.1; DESIGN §D17 [Added 02]); `MeshStore::chain_at`/`dot_hash` read it;
 - the materialized view tables;
 - `ALTER TABLE gateway_config ADD COLUMN cap_enforcement INTEGER NOT NULL DEFAULT 0`.
 

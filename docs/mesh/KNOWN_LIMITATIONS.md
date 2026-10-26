@@ -26,7 +26,7 @@ permanent design choice or something a later increment changes.
 - **A compromised member is powerful.** It is your own device: it can remove all
   your other devices (recovery is re-pairing), publish false usage about itself,
   and raise its own spend cap with a labelled override. Item signatures stop it
-  impersonating another device, the roster's key-conflict rule stops it taking
+  impersonating another device, key-derived device ids stop it taking
   over another device's identity, and the spend-cap clamp stops it creating
   rights in other devices' views beyond what it held.
 - **Mutual removal removes both.** If two devices remove each other at the same

@@ -122,9 +122,11 @@ while it passes through an older one.
 
 Payload decoders MUST ignore payload members they do not know (forward
 compatibility); the envelope stays strict. A known kind whose key or payload
-fails the rules below is still a validly signed item: it is stored and relayed,
-and every device leaves it out of its views (deterministically, so views still
-converge).
+fails the rules below is **rejected at ingest** like a bad signature (§3.3).
+Honest devices never mint one (minting parses first), and rejecting it — rather
+than storing it and leaving it out of views — keeps every device's stored
+"latest item per key" identical: an invalid item can never silently supersede a
+valid one on some devices and not others. (Amended in 02.)
 
 Common value rules: a *name* is 1-128 bytes, not only whitespace, with no
 control characters. A *slug* is 1-64 bytes of `[a-z0-9._-]`. A *public key* is
@@ -134,7 +136,7 @@ month).
 
 | Kind | Key | Payload members | Extra rules |
 |---|---|---|---|
-| `roster.add` | added `device_id` | `added_by`, `name`, `noise_pub`, `seal_pub`, `sign_pub` | `added_by` MUST equal `origin`. `sign_pub` MUST be a valid, non-small-order Ed25519 point. |
+| `roster.add` | added `device_id` | `added_by`, `name`, `noise_pub`, `seal_pub`, `sign_pub` | `added_by` MUST equal `origin`. `sign_pub` MUST be a valid, non-small-order Ed25519 point. The key MUST equal `derive_device_id(sign_pub, noise_pub, seal_pub)` (§6.1). |
 | `roster.remove` | removed `device_id` | `cutoff_seq` (u64) | |
 | `device.info` | `device_id` | `listen_addrs` (≤ 16 strings of 1-255 bytes, no whitespace or controls), `name` | key MUST equal `origin`. |
 | `mesh.setting` | setting name (slug) | `value` (any canonical JSON) | |
@@ -146,6 +148,7 @@ month).
 | `cap.used` | `<cap_id>/<month>` | `epoch` (u32), `used_micros` (u64, cumulative) | |
 | `share.sealed` | `<credential_ref>/<recipient>` | `credential_name`, `mesh_project_id`, `provider` (slug), `recipient`, `sealed` (standard base64 with padding, 1-16384 bytes decoded), `share_id`, `value_version` (u64) | payload `recipient` MUST equal the key's. Used from Increment 11. |
 | `share.revoke` | `<credential_ref>/<recipient>` | `share_id` | Used from Increment 11. |
+| `fork.report` | forked `device_id` | `hash_a`, `hash_b` (item hashes, 64 lowercase hex), `seq` (u64 ≥ 1) | `hash_a ≠ hash_b`. Minted by a device that detected the fork (§7). Added in 02. |
 
 `usage.counter` totals: `requests`, `priced_requests`, `unpriced_requests`,
 `unextracted_requests`, `input_tokens`, `output_tokens`, `cached_input_tokens`,
@@ -193,21 +196,36 @@ VV MUST NOT advance past it.
 1. **Size**: at most 65 536 bytes, and longer than the 64-byte signature.
 2. **Parse**: §2 (canonical, v = 1, envelope rules).
 3. **Mesh**: `mesh` equals the receiver's `mesh_id`.
-4. **Origin known**: the origin is *known* in the receiver's roster (§6.4,
-   step 3), evaluated over its stored items **plus every item staged earlier in
-   the same session**. The one exception is the **genesis self-add**: a
-   `roster.add` whose `origin` and `key` both equal the genesis `device_id`; it
-   is verified with the `sign_pub` it carries.
-   A receiver MUST NOT finally reject an item only because its origin's
-   `roster.add` arrives later in the same session; it re-checks such pending
-   items after each batch and at `Commit` (Increment 02).
+4. **Origin known**: the origin is *known* in the receiver's roster (§6.3,
+   step 1), evaluated over its stored items **plus every roster item staged
+   earlier in the same session**. The one exception is the **genesis
+   self-add**: a `roster.add` whose `origin` and `key` both equal the genesis
+   `device_id`; it is verified with the `sign_pub` it carries. An item whose
+   origin is not yet known is held *pending* and re-checked after every
+   `Items` frame and at `Commit`; it is rejected only if its origin is still
+   unknown at `Commit`.
 5. **Signature**: §3.1 with the origin's `sign_pub` from the roster.
 6. **Rate**: the origin has not exceeded 10 000 items per hour as seen by this
-   receiver (§11).
-7. **Kind**: known kinds are parsed (§2.4); unknown kinds are kept opaque (§2.3).
+   receiver's clock (§11). An item over the rate is deferred to a later session
+   like a rejected one.
+7. **Gap**: on the main path (§8), `seq ≤ vv[origin] + 50 000`. (A validly
+   signed item far beyond the receiver's VV can never be committed anyway —
+   commits need every dot in between — so it is refused early.)
+8. **Kind**: a known kind MUST parse (§2.4); an unknown kind is kept opaque
+   (§2.3).
 
-Items from a removed origin still pass check 4 (removed devices stay *known*),
-so they keep replicating; whether they count is decided by admission (§6.4).
+**Rejection is per origin, per session, and keeps the valid prefix.** When one
+of an origin's main-path items is rejected at seq `s`, the receiver commits
+that origin's staged items and dots **below `s` only**, advances `vv[origin]`
+to at most `s − 1`, and drops the rest of that origin's batch. A later session
+retries from there. Consequently an origin that signs an invalid item at seq
+`s` (only a misbehaving origin can) never has anything at `s` or above
+committed anywhere; a forged item (bad signature) blocks nothing, because the
+origin's genuine item at that seq arrives from honest peers.
+
+Items from a removed or forked origin still pass check 4 (such devices stay
+*known*), so they keep replicating; whether they count is decided by admission
+(§6.4).
 
 ## 4. Hybrid logical clock
 
@@ -398,11 +416,52 @@ sent 10 by O (`R[O][M] = 10`, budget 10), A receives 10 and 999 990 is clamped.
 And if M wrote `R[M][burn] = 40`, `R[M][Z] = 50`, `R[M][A] = 50` with a budget of
 100: burn 40, A 50 (A < Z), Z 10, clamped 40.
 
+### 5.6 Views: the comparable state
+
+**Status: specified, lands in 02** — `mesh::views`, `mesh::sim::oracle_api::ExpectedState`
+
+What a device shows — and what every device converges to — is a pure function
+of the **valid items** it holds. Start from all valid items; for every
+`(kind, key, origin)` keep the one with the greatest `(seq, hash)`: its
+*entry*. Resolve the roster over the roster entries (§6.3) and decide admission
+per §6.4. Then:
+
+| Field | Definition |
+|---|---|
+| `devices` | Every **known** device: its three public keys, whether it is a `member`, whether it is `active`, its `cutoff` (if removed) and its `fork_seq` (if forked). |
+| `device_info` | For each `device.info` key with an admitted entry (only the device itself writes its key): the LWW value's `name` and `listen_addrs`. |
+| `settings` | For each `mesh.setting` name with an admitted entry: the LWW value (§5.2). |
+| `projects` | For each `project.meta` key with an admitted entry: the LWW value. |
+| `usage` | For each `usage.counter` key with at least one admitted entry: each admitted origin's `(epoch, totals)`. |
+| `caps` | For each `cap.def` key with at least one admitted entry: `Conflicted` if admitted entries come from more than one origin; otherwise `Defined` with that entry's `mesh_project_id`, `owner_device`, `created_hlc`, and `frozen` = the owner device is removed. |
+| `cap_months` | For each `(cap_id, month)` that has an admitted `cap.rights` or `cap.used` entry, or an admitted `cap.target` entry: `target` = the LWW `target_micros` of `<cap_id>/<month>` (or none); `devices` and totals = the bounded-counter view (§5.5) over the admitted `cap.rights` entries (`from` = origin, `to` = the key's recipient, amount = `amount_micros`) and admitted `cap.used` entries (`U[origin] = used_micros`). `devices` lists every device that is the origin or device-recipient of an admitted rights entry or the origin of an admitted used entry. |
+| `shares` | For each `<credential_ref>/<recipient>` whose recipient is **not removed**: among the admitted `share.sealed` and `share.revoke` entries for that key, the one with the greatest `(hlc, origin, rank)` with rank 0 for sealed and 1 for revoke; `Sealed` (with the sharer = its origin and its payload fields) or `Revoked` (revoker = its origin, `share_id`). Keys with no admitted entry are absent. |
+
+**Valid items**, as a model with every item ever minted (the simulator's
+oracle) must judge them:
+
+1. The item decodes (§2) and its `mesh` is the mesh's id.
+2. Its origin is known in the roster resolved over all valid roster items, and
+   its signature verifies with that origin's `sign_pub` (the genesis self-add
+   with its own). Items that fail are ignored entirely: they occupy no entry
+   and block nothing.
+3. Its kind is unknown (opaque: valid, never materialized), or it parses
+   (§2.4).
+4. If an origin ever signed an item that passes 1-2 but fails 3, at seq `s`,
+   then none of that origin's items at seq `s` or above are valid (§3.3: no
+   honest device can commit past it).
+
+**Forks** in the converged state: an origin's fork seq is the minimum over
+(a) admitted-by-known `fork.report` entries about it (§6.3) and (b) the lowest
+seq at which two different valid items of that origin exist. The detection
+guarantee of §7 makes (a) reach (b) at quiescence; a model that sees every mint
+uses both.
+
 ## 6. Roster and admission
 
-**Status: implemented (01)** — `mesh::crdt::roster`
+**Status: implemented (01; forks from reports and key-derived ids in 02)** — `mesh::crdt::roster`
 
-### 6.1 Genesis
+### 6.1 Genesis and device ids
 
 Every mesh has exactly one genesis device: the one that ran `mesh init`. Its
 `device_id` is a parameter every member holds (it travels in `PairAccept`, §9)
@@ -411,57 +470,65 @@ and is the root of trust. Its keys are those in its **self-add**: the
 a genesis and admits nothing, and adds of the genesis by other origins are
 ignored.
 
+**Device ids are derived from keys** (added in 02):
+
+```text
+device_id = BLAKE3-derive_key("tethra-mesh v1 device id",
+                              sign_pub || noise_pub || seal_pub)[0..16]
+```
+
+A `roster.add` whose key is not derived from its own keys is invalid (§2.4).
+So every valid add of one device carries the same keys: a member that re-adds
+an existing device id with other keys produces an invalid item, not a conflict
+to resolve, and cannot take over that identity. The keys are random, so the id
+is too; nothing identifying goes into it.
+
 ### 6.2 State
 
 - `adds[(target, origin)]`: `origin`'s latest `roster.add` of `target`, with the
   target's three public keys and name.
 - `removes[(target, origin)]`: `origin`'s latest `roster.remove` of `target`,
   with its `cutoff_seq`.
-- `forks[origin]`: the lowest seq at which `origin` is known to have signed two
-  different items (§7). Joined by minimum.
+- `forks[(target, origin)]`: `origin`'s latest `fork.report` about `target`,
+  with its `seq`.
 
-The first two join entry-wise (§5.1).
+All three join entry-wise (§5.1).
 
 ### 6.3 Resolution
 
-A pure function of the state, in this fixed order (so nothing is circular). Let
-`fork_ok(o, s)` mean "`o` has no recorded fork, or `s` < its fork seq".
+A pure function of the state, in this fixed order (so nothing is circular):
 
-1. **Reachable**: start with `{genesis}` (only if its self-add is present;
+1. **Known**: start with `{genesis}` (only if its self-add is present;
    otherwise the roster is empty). Repeatedly add `target` for every add of
-   `target` (≠ genesis) whose `origin` is already in the set and
-   `fork_ok(origin, add.seq)`, until nothing changes.
-2. **Conflicts**: a target (≠ genesis) for which two adds — each from an origin
-   reachable in step 1 and each `fork_ok` — carry different keys is
-   **conflicted** and excluded from everything below. (A member that re-adds an
-   existing device id with other keys locks that device out; it cannot take
-   over its identity.)
-3. **Known**: step 1 again, skipping conflicted targets. A known device's keys
-   are the genesis self-add's keys (genesis) or the keys its adds agree on.
-   *Known* is ingest check 4: known devices' items verify and are stored and
-   relayed, **including removed devices'**.
-4. **Cutoffs**: a `roster.remove` counts when its origin is known and
-   `fork_ok(origin, remove.seq)`. A device's cutoff is the **maximum**
-   `cutoff_seq` over the removes that count for it. A device with a cutoff is
-   **removed**. Removers are judged against the cutoff-free *known* set, so two
-   devices that remove each other concurrently are both removed, and a removed
-   device's removes still count (a compromised member can remove others;
-   recovery is re-pairing).
-5. **Members**: step 1 again, skipping conflicted targets, and additionally
-   requiring each add's `seq ≤ cutoff(origin)` when its origin is removed. A
-   removed device's later adds bring no one in.
+   `target` (≠ genesis) whose `origin` is already in the set, until nothing
+   changes. A known device's keys come from its adds (all equal, §6.1); the
+   genesis's from its self-add. *Known* is ingest check 4: known devices' items
+   verify and are stored and relayed, **including removed and forked
+   devices'**. Known only ever grows as items arrive.
+2. **Forks**: a `fork.report` counts when its origin is known. A device's fork
+   seq is the **minimum** `seq` over the reports about it that count.
+3. **Cutoffs**: a `roster.remove` counts when its origin is known. A device's
+   cutoff is the **maximum** `cutoff_seq` over the removes that count. A device
+   with a cutoff is **removed**. Removers are judged against *known*, so two
+   devices that remove each other concurrently are both removed, a removed or
+   forked device's removes still count (a compromised member can remove others;
+   recovery is re-pairing), and removal is forever.
+4. **Members**: step 1 again, but an add counts only if it is admitted at its
+   own seq: below its origin's fork seq and at or below its origin's cutoff. A
+   removed or forked device's later adds bring no one in.
 
 ### 6.4 Admission
 
 An origin's item at `seq` is **admitted** (counts in views) iff the origin is a
-**member**, and `seq ≤ cutoff` if it is removed, and `fork_ok(origin, seq)`.
+**member**, and `seq ≤ cutoff` if it is removed, and `seq < fork seq` if it is
+forked.
 
 A device is **active** — the only kind a session may authenticate as
 (MESH-SI-2) — iff it is a member, not removed and not forked.
 
 **Removed is forever.** A cutoff, once present, never disappears: removes only
-accumulate, and re-adding a removed id changes nothing. Re-pairing mints a new
-`device_id`.
+accumulate, their origins only stay known, and re-adding a removed id changes
+nothing. Re-pairing mints a new `device_id`.
 
 ### 6.5 Worked examples
 
@@ -478,79 +545,145 @@ Genesis G. Each line is an item `origin seq: content`.
    cutoff is 7.
 5. `A 2: remove B, cutoff 0` and `B 2: remove A, cutoff 0` concurrently → both
    removed (each remove's origin is known).
-6. `B 2: add A` with keys different from G's add of A → A is conflicted: not
-   known, not a member, its items are rejected at ingest.
-7. A fork recorded for B at seq 2 → B's items with seq ≥ 2 are not admitted and
-   B is not active; an add B made at seq 2 or later brings no one in.
+6. `A 2: fork.report B, seq 2` and then `B 2: add D` → B is forked at 2: not
+   active; its seq 1 is admitted (C stays a member), its seq 2 is not (D is
+   known but not a member).
 
 ## 7. Forks and rollback
 
 **Status: specified, lands in 02 (detection) and 03 (marker)**
 
-- **Fork.** Two validly signed items with the same `(origin, seq)` and different
-  hashes prove the origin forked (for example a cloned data directory). A device
-  that sees this MUST store a `ForkEvidence` record (both items' bytes), MUST
-  record the fork in its roster (§6.2) with that seq, and MUST stop accepting new
-  items from that origin. The forked origin's items at or above the **lowest
-  known fork seq** are not admitted anywhere (§6.4).
-- Fork evidence is self-certifying (two signed items), so a device MAY forward
-  it to peers. Increment 02 MUST specify how evidence reaches every device:
-  because each device keeps only the latest item per `(kind, key, origin)`, two
-  devices can hold different branches of a fork with no single dot in common,
-  and a VV comparison alone cannot see the conflict. The repair path (§8.5) and
-  explicit evidence forwarding are the candidate mechanisms; 02 picks one and
-  proves invariant 5 of its simulator ("every device holds the evidence at
-  quiescence").
-- **Rollback.** Hello carries the sender's own `next_seq` (`own_next_seq`). A
-  peer that holds an item from that origin with `seq ≥ own_next_seq` MUST send
-  `Direct RollbackNotice`; the sender then enters `rollback_recovery`, fetches
-  its own items first, and sets `next_seq` above them before minting again.
-- **Clone marker** (Increment 03): `<data-dir>/mesh/identity.marker` holds
-  `device_id`, `marker_nonce` and a seq high-water mark, rewritten atomically in
-  blocks of 64 before any seq above the mark is used. A missing or mismatched
-  marker, or `next_seq` below the mark, stops the node.
+### 7.1 Dot logs and chains
+
+Every device keeps, for every origin `o` and every seq `s ≤ vv[o]`, the hash
+of the item it accepted at that dot — its **dot log**. Commits require every
+dot in the committed range (§8.2), so the dot log has no gaps even though only
+the latest item per key is stored. From it, each device derives the origin's
+**chain**:
+
+```text
+chain(o, 0) = 32 zero bytes
+chain(o, s) = BLAKE3-derive_key("tethra-mesh v1 dot chain", chain(o, s−1) || hash(o, s))
+```
+
+Two devices agree on `chain(o, s)` iff they accepted exactly the same items at
+every dot `1..=s` of `o`. Once two chains differ at some seq they differ at
+every later one, so the first difference can be found by bisection.
+
+### 7.2 Detection
+
+- `Hello` carries `chain(o, vv[o])` for every origin in the sender's VV.
+- On a peer's `Hello`, for every origin `o` with `0 < peer.vv[o] ≤ own.vv[o]`,
+  a device compares `own chain(o, peer.vv[o])` with the peer's chain. If they
+  differ, `o` has forked at some seq `≤ peer.vv[o]`.
+- The device then bisects with `ChainQuery { origin, seqs }` (at most 64 seqs)
+  and `ChainReply { origin, entries: [[seq, chain, hash]] }`, narrowing
+  `(lo, hi]` — chains equal at `lo`, different at `hi` — until `hi = lo + 1`.
+  The fork seq is `hi`; the two hashes at `hi` are its own and the peer's.
+- A direct collision also proves a fork: an item arriving with the same dot as
+  an entry in the dot log but a different hash.
+- On detection a device mints `fork.report { key: o, seq, hash_a, hash_b }`
+  unless its roster already records a fork of `o` at that seq or lower. The
+  report replicates like any item; every device applies it (§6.3).
+
+**Guarantee.** Before any device accepts items from a branch that differs from
+its own log, the exchange that would deliver them starts with a `Hello`
+comparison between two logs that are each still a single branch; the side with
+the longer log finds the first differing seq, which is exactly where the
+branches diverged. So whenever the two branches of a fork meet — and at
+quiescence every pair of devices has exchanged — the fork is reported at its
+true divergence point.
+
+### 7.3 After detection
+
+- Items of a forked origin keep being stored and relayed (as for removal,
+  §8.3); admission excludes those at or above the fork seq.
+- Different devices may hold different branches' items for the same key. So
+  that every device ends with the same entry per `(kind, key, origin)` — the
+  greatest `(seq, hash)` anywhere — a forked origin is **repaired** in full on
+  every exchange where its digests differ (§8.5).
+- The forked device itself must `mesh leave` and re-pair under a new id
+  (Increment 03 makes the node refuse to run when it is the forked one).
+
+### 7.4 Rollback
+
+`Hello` carries the sender's own `next_seq` (`own_next_seq = vv[self] + 1`). A
+peer whose dot log for that origin reaches `own_next_seq` or beyond — it holds
+the sender's history past what the sender remembers — MUST send
+`Direct RollbackNotice { held_seq }` (its `vv` for the sender). The sender MUST
+NOT mint again until its own `vv[self] ≥ held_seq`; it recovers its own items
+through ordinary exchanges (a device accepts its own origin's items like any
+other), and its next seq then follows them.
+
+### 7.5 Clone marker
+
+Increment 03: `<data-dir>/mesh/identity.marker` holds `device_id`,
+`marker_nonce` and a seq high-water mark, rewritten atomically in blocks of 64
+before any seq above the mark is used. A missing or mismatched marker, or
+`next_seq` below the mark, stops the node.
 
 ## 8. Replication sessions
 
-**Status: specified, lands in 02 (state machine) and 04 (transport)**
+**Status: specified, lands in 02 (state machine) and 04 (transport)** — `mesh::proto`
 
 ### 8.1 Frames
 
-JSON objects inside Noise transport messages, each frame at most 1 MiB, tagged
-by member `t`. Item bytes inside frames are standard base64.
+Each frame is a JSON object `{"n": <u64>, "t": "<Tag>", ...}` inside a Noise
+transport message, at most 1 MiB. `n` counts the frames one side sends in a
+session, from 0; a receiver MUST close the session on any frame whose `n` is
+not the next expected one (a reliable ordered transport never reorders,
+duplicates or drops; anything else means the connection is broken). Item bytes
+inside frames are standard base64; hashes and chains are 64 lowercase hex.
 
-| Frame | Members |
+| Tag | Members |
 |---|---|
-| `Hello` | `proto_min`, `proto_max`, `mesh_id`, `device_id`, `kinds` (known kinds), `vv`, `own_next_seq`, `digest_root` |
-| `Want` | `since` (a VV) |
-| `Items` | `batch` (≤ 512 items and ≤ 1 MiB), `more` (bool) |
-| `Commit` | `upto` (the sender's VV for exactly the origins it served), `count`, `batch_hash` |
-| `RepairDigest` | `scope`, `buckets` (`[bucket_id, hash]` pairs) |
-| `RepairWant` | `buckets` |
+| `Hello` | `proto_min`, `proto_max`, `mesh_id`, `device_id`, `kinds` (the kinds the sender materializes), `vv`, `own_next_seq`, `chains` (origin → `chain(o, vv[o])`), `digests` (origin → digest of held items, §8.5) |
+| `Items` | `batch` (≤ 512 items and ≤ 1 MiB of item bytes), `dots` (`[origin, seq, hash]` for dots in the served ranges not carried by an item in any batch), `repair` (bool: these items are repair items, §8.5) |
+| `Commit` | `upto` (the sender's VV for exactly the origins it served on the main path), `count` (items sent in all `Items` frames), `batch_hash` (BLAKE3 of the concatenated hashes of those items, in send order) |
+| `ChainQuery` | `origin`, `seqs` (≤ 64) |
+| `ChainReply` | `origin`, `entries` (`[seq, chain, hash]` for each queried seq the sender's dot log covers) |
 | `Direct` | `kind` ∈ {`AccessKeyUpdate`, `RightsRequest`, `RollbackNotice`}, `payload` — point to point, never stored or relayed as items |
 | `Bye` | `reason` |
 
 Protocol version 1. Peers negotiate the highest version in both
-`[proto_min, proto_max]` ranges; no overlap, or a different `mesh_id`, ends the
-session with `Bye`.
+`[proto_min, proto_max]`; no overlap, a different `mesh_id`, or a `device_id`
+that is not the authenticated peer ends the session with `Bye`.
+
+DESIGN §D9 also listed `Want`, `RepairDigest` and `RepairWant`. v1 does not use
+them: the `Hello` VV says what to stream, and per-origin digests in `Hello`
+replace bucket digests (§8.5).
 
 ### 8.2 Session (push-pull, symmetric)
 
 1. Both sides send `Hello`.
-2. Each side computes, for every origin `o` with `own.vv[o] > peer.vv[o]`, the
-   items it holds from `o` with `seq` in `(peer.vv[o], own.vv[o]]`, in seq
-   order (`VersionVector::missing_from`), streams them in `Items` batches, then
-   sends `Commit`.
-3. The receiver **stages** each batch in memory (bounded, §11), applying the
-   ingest checks of §3.3 to each item as it arrives (re-checking items whose
-   origin was unknown once more of the session's roster items have arrived).
-4. On `Commit` the receiver applies everything in **one transaction**: insert the
-   items (idempotent on `(origin, seq)`; the same dot with a different hash is
-   fork evidence), apply entries per §5.1, update the materialized views, and
-   set `vv[o] := max(vv[o], upto[o])`.
-5. **The VV never advances without that Commit** (MESH-SI-4). A sender that dies
-   mid-stream leaves nothing half-applied; the next session resends.
-6. Rollback check per §7.
+2. On the peer's `Hello`, each side:
+   - checks rollback (§7.4) and forks (§7.2), sending `ChainQuery` as needed;
+   - streams, for every origin `o` with `own.vv[o] > peer.vv[o]`, every held
+     item of `o` with seq in `(peer.vv[o], own.vv[o]]`, in seq order, plus
+     **the hash of every other dot in that range** (items it no longer holds
+     because a later item superseded them) in `dots` — at most 50 000 items and
+     dots per session, cutting the last origin's range short (and its `upto`
+     with it) when the limit is reached;
+   - streams repair items (§8.5);
+   - sends `Commit`.
+3. The receiver checks each item as it arrives (§3.3) and **stages** it,
+   together with the dots, bounded by §11.
+4. On `Commit` the receiver checks `count` and `batch_hash` against what it
+   received (a mismatch closes the session; nothing is applied), re-checks
+   pending items, and then, per origin `o` in `upto`, requires a hash for every
+   seq in `(own.vv[o], upto[o]]` — from an item or a dot. It commits **in one
+   transaction**:
+   - the items: an item becomes the stored entry for its
+     `(kind, key, origin)` iff its `(seq, hash)` is greater than the stored
+     one's;
+   - the dot log for the committed range, and the chain;
+   - `vv[o] := upto[o]` for each complete origin (reduced to `s − 1` for an
+     origin with a rejected item at `s`, §3.3);
+   - the materialized views.
+5. **The VV never advances without that transaction** (MESH-SI-4). A sender
+   that dies mid-stream leaves nothing half-applied; the next session resends.
+6. A side is done when it has sent its `Commit`, received the peer's, and has
+   no `ChainQuery` outstanding. It then closes.
 
 ### 8.3 Removal and relaying
 
@@ -560,35 +693,48 @@ admission (§6.4), not by withholding them. Withholding them would break
 convergence: a device that kept a removed origin's admitted (≤ cutoff) entry
 for a key would never learn that the origin's later, non-admitted entry
 superseded it, while a device that held the later entry would show nothing for
-that origin, and the two views would differ forever.
+that origin, and the two views would differ forever. The same holds for a
+forked origin's items (§7.3).
 
 ### 8.4 Why relaying only the latest item per key is safe
 
 An item is superseded only by a later item of the same origin and key (§5.1).
 So when a sender's `vv[o] = n`, it holds, for every key, either `o`'s item or a
 later `o` item with seq ≤ n that supersedes it. Sending all held `o` items with
-seq in `(peer.vv[o], n]` transfers everything the peer needs to reach the same
-per-origin state.
+seq in `(peer.vv[o], n]` — and the hashes of the superseded dots, so the
+receiver's dot log stays complete — transfers everything the peer needs to
+reach the same per-origin state.
 
 **Garbage collection.** A stored item MAY be deleted only when (a) a held item
 of the same `(kind, key, origin)` with a higher seq supersedes it, or (b) every
 item of its `(kind, key, origin)` is permanently excluded from views on every
 device for a reason that does not depend on seq (a share addressed to a removed
-recipient; a usage day beyond the retention horizon). An item of a removed
-origin above that origin's cutoff MUST NOT be deleted under (b): its exclusion
-depends on its seq, and it is what supersedes the origin's older entry for the
-same key. `roster.*` and `cap.def` items are never deleted.
+recipient; a usage day beyond the retention horizon). An item of a removed or
+forked origin above its cutoff or fork seq MUST NOT be deleted under (b): its
+exclusion depends on its seq, and it is what supersedes the origin's older entry
+for the same key. `roster.*`, `cap.def` and `fork.report` items are never
+deleted. The dot log is never pruned below the VV (Increment 03 may bound its
+age; a fork older than that bound is then detected only by direct collision).
 
 ### 8.5 Repair
 
-A safety net, not the main path. Each side keeps a BLAKE3 digest per bucket —
-bucket `(kind, scope)`, scope `<mesh_project_id>/<month>` for usage and caps and
-`-` otherwise — over the sorted item hashes in it; `digest_root` is the hash of
-all bucket hashes. When the VVs match but the roots differ (and at least every
-24 h), the sides exchange `RepairDigest`, request differing buckets with
-`RepairWant`, send every item in those buckets and commit as in §8.2 without
-changing the VV. A repair that changes state is a bug signal: count it and show
-it in `doctor`.
+`Hello.digests` maps every origin in the sender's VV to
+`BLAKE3-derive_key("tethra-mesh v1 origin digest", concatenation of the hashes
+of the sender's held items of that origin, sorted ascending)`. After the
+`Hello` exchange, a side streams **all** its held items of origin `o` as repair
+items (`Items.repair = true`) when its digest for `o` differs from the peer's
+and either
+
+- `own.vv[o] == peer.vv[o]` — the main path has nothing to send, yet the two
+  devices hold different items, which honest operation never produces; or
+- `o` is forked in its own roster (§7.3).
+
+A receiver checks repair items like any other (§3.3, without the gap check)
+and commits them with the main path, as entries only: repair never changes the
+VV, the dot log or the chain, and an item whose dot is in the dot log with a
+different hash is fork evidence (§7.2). A repair that changes the stored state
+of an origin that is not forked is a bug signal: count it
+(`mesh_meta.repairs_changed`) and show it in `doctor`.
 
 ## 9. Pairing, sessions, rotation, removal
 
@@ -678,9 +824,25 @@ Recorded here and in ADR 0031 "Decisions resolved while specifying".
 4. **Non-owner self-mints count as labelled overrides** in the bounded counter
    (§5.5), reconciling DESIGN §D8 ("only the owner may mint") with §D15 (local
    override).
-5. **Roster resolution** (§6.3): the genesis is a parameter, key conflicts lock a
+5. **Roster resolution** (§6.3; key conflicts superseded by item 8): the genesis is a parameter, key conflicts lock a
    device out, removers are judged against the cutoff-free known set. DESIGN
    §D8/§D10 left the recursion between adds, removes and cutoffs open.
 6. **`PairAccept` carries the genesis device id** (§9).
 7. **`local_write_ts` does not move the clock** (§4), so the simulator's clock
    invariant is "no observation moves the HLC past `now + MAX_DRIFT`".
+
+Increment 02 (ADR 0031 R8-R12):
+
+8. **Device ids are derived from the device's keys** (§6.1). DESIGN §D5 had
+   random ids; key-derived ids remove key conflicts — and with them a
+   membership rule that could not converge under adversarial re-adds.
+9. **Fork detection by per-origin dot logs and chains, and `fork.report`
+   items** (§7). With latest-only storage, a version-vector comparison or a
+   dot collision cannot guarantee detection; chains can, at the true
+   divergence point. Reports make forks replicated state (roster §6.3 step 2).
+10. **Invalid payloads of known kinds are rejected at ingest** (§2.4, §3.3),
+    with the valid prefix kept.
+11. **Repair compares per-origin digests carried in `Hello`** (§8.5) instead
+    of `(kind, scope)` buckets exchanged in `RepairDigest`/`RepairWant`;
+    `Want` is not used.
+12. **Frames carry a per-direction sequence number `n`** (§8.1).

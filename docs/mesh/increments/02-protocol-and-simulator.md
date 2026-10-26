@@ -107,8 +107,11 @@ Enable it in core tests through a self dev-dependency, following the
   3. **Incremental views = rebuild** on every node.
   4. **Removal exclusion.** Nothing above a removed origin's cutoff contributes to shared
      LWW values on any node at quiescence.
-  5. **Fork detection.** At quiescence every node holds `ForkEvidence` for a forked
-     origin and accepts no new items from it.
+  5. **Fork detection.** At quiescence every node's roster records every forked
+     origin at its true divergence seq (via a replicated `fork.report`, PROTOCOL.md §7),
+     and no item of it at or above that seq is admitted. Amended in 02's contract: a
+     forked origin's items keep relaying (like a removed origin's), because refusing
+     them breaks convergence.
   6. **No forgery accepted.** No item with a forged origin is ever stored, and a
      huge-seq forgery never advances any VV.
   7. **Cap safety.** For every `(cap, month)`: `Σ U ≤ Σ minted − Σ burned`, on every
