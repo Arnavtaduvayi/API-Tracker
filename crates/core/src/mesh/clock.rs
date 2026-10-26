@@ -43,11 +43,19 @@ impl ManualClock {
     }
 
     pub fn advance(&self, ms: u64) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |t| {
-                Some(t.saturating_add(ms))
-            });
+        // A plain CAS loop: `fetch_update` is deprecated on current stable
+        // and its replacement postdates the workspace MSRV (1.85).
+        let mut current = self.0.load(Ordering::SeqCst);
+        loop {
+            let next = current.saturating_add(ms);
+            match self
+                .0
+                .compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
     }
 }
 
