@@ -115,7 +115,11 @@ Enable it in core tests through a self dev-dependency, following the
      node's view and in the oracle. (Spend in the simulator checks `avail`, so overshoot
      is 0 here; 08 handles real overshoot.)
   8. **Bounds.** Staging never exceeds its limits.
-  9. **Clock safety.** No node's HLC exceeds its own `now + MAX_DRIFT`.
+  9. **Clock safety.** No observation moves a node's HLC past its own
+     `now + MAX_DRIFT` (`last ≤ max(previous last, now + MAX_DRIFT)`). Amended in 01:
+     after a node's physical clock steps back, `last` may already sit above the new
+     bound and must not climb further; `local_write_ts` lifts single writes without
+     moving `last` (PROTOCOL.md §4).
 - **Replay:** `MESH_SIM_SEED=<u64>` and `MESH_SIM_STEPS=<n>` run exactly one seed. Every
   failure message prints `MESH_SIM_SEED=… MESH_SIM_STEPS=…` and the minimized event
   index. Also add a shrinking helper that retries with fewer steps until the shortest
@@ -131,6 +135,11 @@ Enable it in core tests through a self dev-dependency, following the
 1. **Contract (you, the orchestrator). Commit it before spawning.**
    - Update `docs/mesh/PROTOCOL.md` so it fully specifies the frames, session, commit and
      repair (D9) and the view semantics for every kind. Fix any ambiguity now.
+     Increment 01 left two items explicitly for this step (STATUS.md handoff notes):
+     how fork evidence reaches every node (PROTOCOL.md §7 — with latest-only storage a VV
+     comparison cannot see a fork), and per-kind view rules beyond the CRDTs (which
+     `cap.def` wins if two origins publish one cap id; how `share.sealed` and
+     `share.revoke` order).
    - Write `crates/core/src/mesh/sim/oracle_api.rs`:
      - `pub trait OracleModel { fn new(genesis: &GenesisInfo) -> Self; fn observe_minted(&mut self, item: &SignedItem); fn expected(&self) -> ExpectedState; }`
      - `ExpectedState`: plain structs mirroring `views::State`'s comparable content,
@@ -142,8 +151,10 @@ Enable it in core tests through a self dev-dependency, following the
      obviously-correct model. It keeps every valid item ever minted (it is told about
      every mint, including forged and forked ones). `expected()` recomputes the state
      **from scratch** by brute force, straight from PROTOCOL.md's definitions: per-origin
-     latest, LWW max over admitted origins, epoch-lexicographic counters, the roster with
-     cutoffs and genesis, bounded-counter clamped views, fork handling (an origin with
+     latest **by seq** (PROTOCOL.md §5.1; the epoch-lexicographic lattice is the
+     honest-writer rule, not the per-origin join), LWW max over admitted origins, the
+     roster with its stratified resolution, cutoffs and genesis (§6), bounded-counter
+     one-hop clamped views (§5.5), fork handling (an origin with
      two hashes at one dot is forked; it excludes items after the fork point exactly as
      PROTOCOL.md says), and forged-origin rejection by signature check.
    - **Allowed reading:** `docs/mesh/PROTOCOL.md`, `docs/mesh/increments/DESIGN.md`

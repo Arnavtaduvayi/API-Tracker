@@ -153,6 +153,15 @@ integrations land.
   to a user-chosen URL is the same egress posture as provider syncs — the
   tool acts for its local user and never for a third party.
 
+- **Device mesh (in development, ADR 0031).** Tethra Mesh adds one trust
+  boundary: the LAN or user-run VPN between a user's own paired devices. Paired
+  devices exchange signed items directly over Noise-encrypted sessions; no
+  Tethra server, relay or rendezvous is involved, and nothing listens unless the
+  user starts the mesh node with an explicit listen address. What crosses the
+  boundary is fixed (`docs/mesh/ARCHITECTURE.md` "What replicates"); credential
+  values cross it only as opt-in sealed boxes (Increment 11). Full model:
+  [`docs/mesh/THREAT_MODEL.md`](docs/mesh/THREAT_MODEL.md).
+
 ## Adversaries and outcomes
 
 | Adversary | Outcome |
@@ -165,6 +174,19 @@ integrations land.
 | Malware running as the user | **Not defended.** It can keylog the master password, read process memory, read the session file plus environment, or capture the clipboard. Local encryption cannot beat an attacker inside your account. |
 | Compromised OS, debugger, cold-boot/memory dump | **Not defended.** Zeroization is best-effort; plaintext exists in memory during use. |
 | Malicious dependency in the user's own projects | Out of scope — once you paste a key into your app's environment, its safety is that app's problem. (Future scanning features reduce *accidental* exposure, not malicious exfiltration.) |
+
+### Device mesh adversaries (in development, ADR 0031)
+
+| Adversary | Outcome |
+| --- | --- |
+| Passive LAN observer | Sees only Noise ciphertext; opt-in mDNS publishes a daily-rotating HMAC, no names. |
+| Active LAN prober | Without the mesh access key the handshake fails at its first message, so it never learns a device's static key; handshakes are rate-limited and only the handshake is parsed before authentication. |
+| Holder of a stolen invite token | Can pair one device within the token's lifetime (10 minutes by default, single use, 5 attempts); the user sees and removes it. |
+| Removed or stolen paired device | Removal cuts its later items off and rotates the access key, eventually consistently. Credentials it already imported stay compromised: rotate them. |
+| Malicious paired device (your own, compromised) | Cannot impersonate another device or create spend-cap rights in others' views; can remove other devices, report false usage about itself and raise its own cap with a labelled override. Recovery is re-pairing. |
+| Cloned or rolled-back data directory | Restore wipes mesh identity; a marker file and on-the-wire fork evidence stop a clone from reusing an identity. |
+
+Details, residual risks and status: [`docs/mesh/THREAT_MODEL.md`](docs/mesh/THREAT_MODEL.md).
 
 ## Design decisions that follow from this model
 

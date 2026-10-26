@@ -10,6 +10,12 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 01 (2026-10-26).** Writing the normative protocol exposed
+> ambiguities and two non-convergent rules. They are resolved in ADR 0031
+> ("Decisions resolved while specifying", R1-R7) and `docs/mesh/PROTOCOL.md` §13, and
+> the affected passages below are marked **[Amended 01, Rn]**. PROTOCOL.md is now the
+> more specific source and wins.
+
 ---
 
 ## D1. Goals, non-goals, scope rules
@@ -270,6 +276,8 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
     drags the local clock forward by more than the drift.
 - **Local LWW writes** use `ts = max(hlc.now(), current_winner_ts + 1)`. A user's edit
   always beats the value they were looking at, even if a skewed device wrote that value.
+  **[Amended 01, R7]** This lifts only that write: it does not move the clock's `last`,
+  so no observation or write drags a device's clock past `now + MAX_DRIFT`.
 - **Persistence:** `mesh_meta.hlc_high_water` is written in the same transaction as every
   minted item, and `now()` never returns below it after a restart.
 - **The HLC orders only LWW registers.** Counters, rights and used totals never use it:
@@ -282,9 +290,13 @@ Every CRDT below has a `join` that is commutative, associative and idempotent.
 Increment 01 proves this with law tests over a seeded PRNG, at least 10 000 cases per
 law.
 
-- **`lww_map`.** A register is `map<origin, (hlc, value)>`.
-  - **Join:** per origin, keep the higher `(hlc)`. A same-origin, same-hlc conflict
-    can't happen honestly (the hash differs, so that is fork evidence).
+- **[Amended 01, R1] Per-origin order is `seq` for every kind.** Each item is one
+  origin's entry for one `(kind, key)`; an origin's higher `seq` supersedes its lower one
+  (ties at one dot, a fork, break by hash). This is what the store keeps and what makes
+  latest-only relaying safe. The HLC orders only *across* origins.
+- **`lww_map`.** A register is `map<origin, (seq, hash, hlc, value)>`.
+  - **Join:** per origin, keep the higher `(seq, hash)` **[Amended 01, R1]** (for an
+    honest origin that is also the higher hlc).
   - **Value:** the entry with the maximum `(hlc, origin)` over *admitted* origins. An
     origin is admitted if it is in the add-set and the entry's seq is within its removal
     cutoff (D10).
@@ -292,8 +304,12 @@ law.
     history: its entries are simply dropped from the max.
 - **`owner_counter`.** One map entry per `(origin, key)`, written only by that origin.
   - The value is `(epoch: u32, totals: struct of u64)`.
-  - **Join** is lexicographic: a higher epoch wins outright; with equal epochs, each field
-    takes its max.
+  - **Join** **[Amended 01, R1]:** per `(origin, key)`, the higher `seq`. The
+    lexicographic lattice — a higher epoch wins outright; with equal epochs, each field
+    takes its max — is the **honest-writer rule**: every new entry is ≥ its predecessor
+    in that order, so for an honest origin the latest entry equals the lattice join of
+    all its entries. A successor that breaks the rule is kept (seq decides) and counted
+    as a regression against the origin.
   - The origin bumps the epoch when its own totals legitimately *decrease*, for example
     when the user deletes local gateway data. A deletion then propagates; it doesn't get
     "resurrected" by max.
@@ -306,12 +322,21 @@ law.
     re-pairing mints a new id.
   - If two devices each remove the other at the same time, both are removed, and the
     docs say so.
+  - **[Amended 01, R5/R6] Resolution is stratified** (PROTOCOL.md §6.3), so adds,
+    removes and cutoffs are not mutually recursive: reach from the **genesis** (a mesh
+    parameter every member holds; its keys come only from its self-add) → targets added
+    with conflicting keys are excluded (a re-add cannot hijack an identity) → *known*
+    devices (ingest check 4; includes removed devices, whose items keep relaying) →
+    cutoffs from removes whose origin is known (max) → *members*, honouring cutoffs.
+    Forks cut an origin off at the lowest known fork seq.
 - **`bounded`, a bounded counter** (Balegas et al., SRDS 2015, "Extending eventually
   consistent cloud databases for enforcing numeric invariants"). One instance per
   `(cap_id, month)`.
   - **State:**
-    - `R[from][to]`: cumulative rights. `R[o][o]` is minted, and only the cap owner may
-      mint. `R[i][j]` with `i ≠ j` is a transfer, written only by `i`.
+    - `R[from][to]`: cumulative rights. `R[o][o]` is minted by the cap owner.
+      **[Amended 01, R4]** `R[i][i]` for a non-owner is the labelled local override of
+      D15: it counts like a mint and views label it. `R[i][j]` with `i ≠ j` is a
+      transfer, written only by `i`.
     - `U[i]`: cumulative used, written only by `i`.
     - Both are owner-written monotone entries, so they join by max.
   - **Available** to device `i`:
@@ -322,9 +347,14 @@ law.
     - `transfer(i, j, x)` requires `x ≤ avail(i)`.
     - `mint(owner, x)`.
     - `burn(i, x)` is a transfer to the reserved sink `"burn"`.
-  - **Views clamp** each device's outgoing transfers to what it has (minted plus received
-    minus used). A buggy or malicious row then can't create rights out of nothing in
-    *other* devices' views.
+  - **Views clamp** each device's outgoing transfers to what it has. A buggy or
+    malicious row then can't create rights out of nothing in *other* devices' views.
+    **[Amended 01, R3]** Precisely: outgoing amounts are honoured from a budget of
+    `minted + raw received` (not minus used), burn first, then recipients by ascending
+    device id; the rest is clamped. One hop, so it is a closed form (a transitive clamp
+    is a fixpoint hostile values can make run ~2^60 rounds); spend not in the budget, so
+    an overshooting device goes negative itself instead of clawing rights back from
+    devices it paid. Honest devices are never clamped.
   - **Invariant**, proved by the simulator: `Σ_i U[i] ≤ Σ minted − Σ burned + overshoot`,
     where overshoot is bounded per D15.
 
@@ -376,6 +406,10 @@ over a simulated network.
   everything needed.
 - Superseded rows may be garbage-collected after commit.
 - Exception: `roster.*` and `cap.def` items are never garbage-collected.
+- **[Amended 01, R2]** Otherwise an item may be deleted only when every item of its
+  `(kind, key, origin)` is permanently excluded for a reason that does not depend on
+  seq (a share to a removed recipient, a day beyond the retention horizon). A removed
+  origin's items above its cutoff must be kept and relayed (PROTOCOL.md §8.3-8.4).
 
 **Repair (a safety net, not the main path):**
 - Each side keeps a BLAKE3 digest per bucket: `(kind, scope)`, where scope is
@@ -422,7 +456,8 @@ over a simulated network.
 - **Inside the Noise channel:**
   - The joiner sends its public keys and name in a `PairRequest`.
   - The inviter mints a signed `roster.add` for the joiner, then sends a `PairAccept`
-    with mesh_id, the access key and its epoch, and the inviter's device_id.
+    with mesh_id, **the genesis device_id [Amended 01, R6]**, the access key and its
+    epoch, and the inviter's device_id.
   - After that, a normal anti-entropy session runs on the same connection.
 - **`roster.add` rule:** an add is admitted if its origin is an admitted member when the
   add's seq was minted (i.e. within the origin's cutoff), or if it is the genesis self-add
@@ -458,8 +493,11 @@ over a simulated network.
     rows) are **kept** up to the cutoff, so totals stay honest. Views label them
     "removed device".
   - **Its contributions to shared state** (`lww_map` entries, `roster.add`, `cap.target`,
-    `share.*`) with seq above the cutoff are excluded from views. Items above the cutoff
-    are never relayed again and may be garbage-collected.
+    `share.*`) with seq above the cutoff are excluded from views. **[Amended 01, R2]**
+    Items above the cutoff are still stored and relayed (and never garbage-collected);
+    withholding them breaks convergence, because only the latest item per
+    `(kind, key, origin)` is kept. Its own counters and rights count only where their
+    latest entry is within the cutoff.
 - **Self-removal** (`mesh leave`) requires confirmation and reauth. It mints a self-remove
   if any peer is reachable, then wipes local mesh state the same way restore does.
 - **Removal is eventually consistent:** a removed device can keep exchanging with devices

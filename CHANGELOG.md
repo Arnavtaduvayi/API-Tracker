@@ -6,6 +6,35 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh foundations (in development)
+
+Work has started on **Tethra Mesh**: replicating usage, shared projects and
+monthly spend caps between your own laptop, desktop and home server,
+peer-to-peer and end-to-end encrypted, with no server of any kind
+([ADR 0031](docs/decisions/0031-device-mesh.md)). Nothing is user-visible yet —
+this adds the tested foundation the feature is built on, inside the
+shared Rust core:
+
+- a normative protocol specification with worked examples
+  ([docs/mesh/PROTOCOL.md](docs/mesh/PROTOCOL.md)), plus the mesh architecture,
+  threat model, security invariants, known limitations and test plan in
+  [docs/mesh/](docs/mesh/ARCHITECTURE.md);
+- signed records: a canonical encoding with exactly one valid byte form, Ed25519
+  signatures over a domain-separated message (verified strictly), and
+  BLAKE3 record hashes — any flipped byte is rejected;
+- a hybrid logical clock that accepts a device with a wrong clock but flags it,
+  and never lets it drag your other devices' clocks into the future;
+- the four replicated data types the mesh is built from — last-writer-wins
+  values, per-device counters, the device roster (removal, fork and key-conflict
+  rules) and a bounded counter for spend-cap rights that refuses to let one
+  device create rights out of nothing — each proved commutative, associative
+  and idempotent over at least 10 000 seeded cases.
+
+The product rules now say how this fits local-first: replication between your
+own paired devices is governed by ADR 0031 and is not cloud synchronization.
+One small new dependency, `ed25519-dalek` 2.2.0, reuses cryptography crates
+Tethra already ships.
+
 ### Changed — A card-based interface and a one-folder first run
 
 **First run.** Opening Tethra for the first time now asks for one thing: a

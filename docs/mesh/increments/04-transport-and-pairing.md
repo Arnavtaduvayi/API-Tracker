@@ -71,7 +71,7 @@ At the end of this increment, `tethra mesh invite` / `join` / `serve --listen` /
 | Method | Behaviour |
 |---|---|
 | `mesh_invite_create(master_password, ttl_minutes) -> Invite` | Reauth. Stores a token hash. Clamps the TTL to ≤ 60 minutes (default 10). Returns the token **once**. |
-| `mesh_pair_accept(...)` | Inviter side, called by `pair.rs`. Checks the token (hash, unexpired, unused, attempts < 5; marks it used before replying), then mints `roster.add`. |
+| `mesh_pair_accept(...)` | Inviter side, called by `pair.rs`. Checks the token (hash, unexpired, unused, attempts < 5; marks it used before replying), then mints `roster.add`. `PairAccept` carries the **genesis device id** as well as mesh_id, access key, epoch and the inviter's id (PROTOCOL.md §9; amended in 01) — the joiner's roster cannot be resolved without it. |
 | `mesh_join(invite) -> MeshSelfInfo` | Creates the identity inside the received `mesh_id`. Refuses with `AlreadyInMesh` if one exists. |
 | `mesh_devices()` | The roster view: name, short id, added-by, removed flag and cutoff, last exchange. |
 | `mesh_device_rename(device, name)` | Self only, through `device.info`. Renaming another device isn't possible by design; say so in the error. |
