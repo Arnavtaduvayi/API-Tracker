@@ -6,11 +6,15 @@ cloud of any kind. Decision record: [ADR 0031](../decisions/0031-device-mesh.md)
 Normative protocol: [PROTOCOL.md](PROTOCOL.md).
 
 > **Status.** In development on `feat/device-mesh`, built in twelve increments
-> (`increments/STATUS.md`). As of Increment 02 `crates/core/src/mesh/` holds the
-> pure foundations (Increment 01) and the replication protocol as a sans-IO
-> state machine over an in-memory store, proven by a deterministic simulator
-> against an independently written oracle. There are no user-visible commands
-> yet. Each section below says what is implemented and what is specified.
+> (`increments/STATUS.md`). As of Increment 03, `crates/core/src/mesh/` holds the
+> pure foundations (01) and the replication protocol as a sans-IO state machine
+> (02). That protocol is proven by a deterministic simulator against an
+> independently written oracle, over in-memory stores and, since 03, over the
+> SQLite store. A device has a real identity (keys encrypted in the vault, a
+> clone/rollback marker), and two commands exist: `tethra mesh init` and
+> `tethra mesh status`. A single device is a working one-device mesh; pairing
+> and the network transport arrive in 04. Each section below says what is
+> implemented and what is specified.
 
 ## Vocabulary
 
@@ -80,7 +84,10 @@ Nothing outside this table ever replicates.
 | `mesh::chain` | implemented (02) | dot chains and per-origin digests |
 | `mesh::views` | implemented (02) | the CRDT containers every stored item feeds, `rebuild`, and the comparable state |
 | `mesh::sim::world`, `oracle`, `oracle_api` | implemented (02) | the deterministic simulator and the independent oracle (feature `mesh-sim`) |
-| `mesh::sqlite_store`, `identity` | specified, lands in 03 | SQLite store (migration v21), keys wrapped under the vault key |
+| `mesh::sqlite_store` | implemented (03) | the SQLite `MeshStore`: item store, VV and dot log on disk; views, counters and digests mirrored in memory; chunked crash-safe commits; durable mints |
+| `mesh::identity` | implemented (03) | `mesh init`, keys wrapped under the vault key, `MeshKeys` for the node, `status`, the restore/leave wipe, `preflight` |
+| `mesh::marker` | implemented (03) | the clone/rollback marker file and its classification |
+| `mesh::sim::sqlite` | implemented (03) | SQLite devices for the simulator (store conformance) |
 | `crates/mesh` | specified, lands in 04-05 | Noise transport, pairing, node runtime |
 | `mesh::publish`, `caps`, `share` | specified, lands in 06, 07-08, 11 | usage publisher, spend caps, credential shares |
 
@@ -90,6 +97,55 @@ randomness only from the OS RNG for keys and ids (or an injected seeded RNG in
 the simulator). The CLI and the desktop app share this one implementation.
 Reauth-gated operations are methods on `UnlockedVault` in core (from 03), so
 neither front end re-implements a check.
+
+## Storage
+
+**Status: implemented (03)** — migration v21 in `crates/core/src/db.rs`;
+`mesh::sqlite_store`, `mesh::identity`, `mesh::marker`. The mesh lives in the
+vault's own `vault.db`, beside everything else, with no separate database.
+
+| Table | Replicated? | Holds |
+|---|---|---|
+| `mesh_items` | **yes** (the only one) | The exact bytes of the latest item per `(kind, key, origin)`, unknown kinds included. Primary key `(origin, seq, hash)`: a fork can put two items at one dot |
+| `mesh_vv`, `mesh_dots` | proof of what was received | The VV, and the hash and chain at every dot up to it (PROTOCOL §7.1) |
+| `mesh_self`, `mesh_access_keys` | local | This device's identity: ids, name, public keys, and the signing, Noise and sealing private keys and access keys, all encrypted under the vault key |
+| `mesh_meta`, `mesh_fork_evidence` | local | HLC high-water mark, write generation, counters (rejected, skew, regressions, repairs, ingest rate), fork evidence |
+| `mesh_peers` (05), `mesh_invites` (04), `mesh_project_bindings` (06), `mesh_publish_cursor` (06), `mesh_cap_escrow` (07-08), `mesh_exchange_log` (04-05), `mesh_share_imports` (11) | local | Created by v21, filled by the increment named |
+| `gateway_config.cap_enforcement` | local | The opt-in enforcement switch (08); a peer can never change it |
+
+**Views are not tables.** The roster, projects, usage, caps and shares views
+are a `views::State` built in memory from `mesh_items` when the store opens,
+and kept equal to a rebuild after every commit (ADR 0031 R17). A reader that
+needs only some kinds can load those rows by the `(kind, item_key)` index and
+fold them with the same `State::apply`.
+
+**What is in memory.** The VV, the views, the counters, the HLC and the
+per-origin digests mirror the database. The dot log and the held items stay on
+disk, because the dot log grows with every item any device ever minted. A failed
+disk read ends the session; it never counts as an empty read (R18).
+
+**Writes.** A mint is one `BEGIN IMMEDIATE` transaction with `synchronous=FULL`.
+It allocates the seq (`vv[self] + 1`), advances the marker one block ahead if
+needed (written and fsynced first), signs, stores the item, appends the dot,
+advances the VV and records the HLC high-water mark. A commit runs in chunks of
+whole origins: a crash between chunks leaves only whole origins (PROTOCOL
+§8.6). Every write first checks `mesh_meta.write_gen` and reloads the mirror if
+another process wrote, so a CLI command and a running node never reuse a seq.
+
+**Identity** (DESIGN §D5). `UnlockedVault::mesh_init` generates the mesh id,
+the access key (epoch 1) and three key pairs. The device id is derived from
+the three public keys. The private keys are encrypted under the vault key with
+AAD naming the vault and the device. The genesis `roster.add` and `device.info`
+are minted in the same transaction that stores the identity.
+`UnlockedVault::mesh_keys` gives a node the signing key, the Noise key and the
+current access key, checking each against its public key. It never returns the
+sealing key (MESH-SI-7).
+
+**Copies and rollbacks.** `<data-dir>/mesh/identity.marker` ties the database to
+its directory (PROTOCOL §7.5). A missing or foreign marker, or a database more
+than one block behind it, refuses to mint. Restoring a backup wipes every mesh
+row and the matching marker (MESH-SI-5): a restored vault is a copy and must
+pair again.
 
 ## Data flow
 
@@ -119,7 +175,8 @@ reads its own cap view from its local database (Increment 08).
 
 ## Item lifecycle
 
-**Status: implemented (01)** for minting and verifying; storage lands in 02-03.
+**Status: implemented** — minting and verifying (01), the session (02), durable
+storage (03).
 
 1. **Mint.** The origin builds an `ItemBody` (`kinds::ItemKind::to_body`), with
    its next `seq` and an HLC timestamp, encodes it canonically

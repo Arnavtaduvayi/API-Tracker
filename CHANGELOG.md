@@ -6,6 +6,38 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh device identity and durable storage (in development)
+
+**Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md)) now stores
+its data in your vault and gives each device a real identity. Two commands
+exist: `tethra mesh init` starts a mesh with this device as its only member,
+and `tethra mesh status` shows the device, the roster and the health counters.
+`--json` works on both. Pairing other devices arrives next.
+
+- **Your device's mesh keys are stored encrypted.** `mesh init` creates a
+  signing key, a transport key and a separate sealing key, and encrypts them
+  under your vault key, bound to this vault and this device. Nothing the
+  commands print contains a key, public or private.
+- **Copies and restores of a vault are caught.** A small marker file in the
+  data directory ties the database to its directory. A
+  database copied without its marker, copied next to another device's marker,
+  or rolled back refuses to create mesh records until you leave and pair
+  again. Restoring a backup removes the mesh identity: a restored vault is a
+  copy, and it says so (`backup restore` tells you it must pair again). A full
+  copy of the data directory is caught when the two copies' histories meet.
+- **Crash-safe.** Received records are written in short transactions, one
+  device's records at a time. A crash part-way through keeps only whole
+  devices' records, never half of one, and the next exchange finishes the
+  rest. Every write is synced to disk before it counts.
+- **Tested against the same specification as before.** The simulator and the
+  independently written model from the previous step now run over the real
+  SQLite storage, with crashes between transactions and restarts from disk. A
+  600-run soak passed. Without crashes, a run over SQLite is step for step
+  identical to a run in memory.
+- **Upgrading.** This adds database schema v21. As with every schema change, an
+  already-installed background gateway built before it keeps forwarding but
+  stops recording until it is updated too.
+
 ### Added — Tethra Mesh replication protocol and simulator (in development)
 
 The next layer of **Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md))

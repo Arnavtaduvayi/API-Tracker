@@ -50,28 +50,64 @@ NN)** otherwise.
   `item::tests::wrong_mesh_and_wrong_key_are_refused`,
   `sign::tests::signatures_are_domain_separated`,
   `codec::tests::non_canonical_encodings_are_refused`,
-  `codec::tests::encoding_is_deterministic_over_10k_random_bodies`.
+  `codec::tests::encoding_is_deterministic_over_10k_random_bodies`,
+  `codec::tests::envelope_field_validation` (03: `seq` ≤ 2^63 − 1, so stored
+  seqs keep their order on disk, ADR 0031 R16).
 - **MESH-SI-4 Commit-only VV.** A version-vector entry advances only in the
   transaction that stores every item it covers. *Status:* implemented (02) in
   `MemStore::commit` (validate everything, then apply) and the session (one
   commit per session, only after a `Commit` whose count and batch hash match);
-  SQLite in 03. *Tests:* `proto::tests::a_dead_sender_leaves_nothing_half_applied`,
+  implemented (03) in `SqliteStore::commit`. That commit validates the whole
+  batch before writing, then writes in transactions of **whole origins**: each
+  origin's items, dots and VV entry commit together, so a crash between
+  transactions leaves no item outside its VV. A failed transaction rolls back
+  and reloads the in-memory mirror. A failed disk read ends the session instead
+  of serving an empty range (R18). *Tests:*
+  `proto::tests::a_dead_sender_leaves_nothing_half_applied`,
   `a_commit_that_does_not_match_the_items_aborts_and_applies_nothing`,
-  `mesh_sim::ci_200_seeds` (invariant 1, under crashes and dropped frames).
+  `mesh_sim::ci_200_seeds` (invariant 1, under crashes and dropped frames),
+  `proto::tests::a_failed_store_read_ends_the_session_and_sends_nothing_built_from_it`,
+  `sqlite_store::tests::a_failure_between_the_item_insert_and_the_vv_update_leaves_nothing`,
+  `sqlite_store::tests::a_crash_between_chunks_keeps_whole_origins_only`,
+  `mesh_store_conformance::thirty_seeds_with_crashes_between_chunks` (invariant
+  1 on SQLite devices that crash between commit chunks and reopen from disk),
+  `mesh_store_conformance::crashes_between_chunks_happen_and_are_survived`.
 - **MESH-SI-5 No identity reuse.** A restored backup wipes mesh identity; a
-  clone/rollback marker mismatch or a fork stops the node. *Status:* partial
-  (02): forks are detected by dot-log chains and reported at their true
-  divergence point; rollbacks get a `RollbackNotice`. Marker, restore wipe and
-  "a forked node refuses to run" land in 03/05. *Tests:*
-  `mesh_sim::ci_200_seeds` (invariant 5 with cloned data directories),
-  `proto::tests::a_device_behind_its_own_history_gets_a_rollback_notice`.
+  clone/rollback marker mismatch or a fork stops the node. *Status:* implemented
+  (03) for everything but the running node, which is 05:
+  - Forks are detected by dot-log chains and reported at their true divergence
+    point (02); rollbacks get a `RollbackNotice` (02).
+  - Restore deletes every `mesh_*` row and the marker that names the wiped
+    identity (`identity::on_restore`, called by `backup::restore_backup`).
+  - A store whose marker is missing, foreign or more than one block ahead of
+    its log refuses to mint, and does not trust the old mark.
+  - Two stores on one database never reuse a seq.
+  - `identity::preflight` fails on a bad marker or a fork report naming this
+    device. The node (05) runs it before starting.
+
+  *Tests:* `mesh_sim::ci_200_seeds` (invariant 5 with cloned data
+  directories), `proto::tests::a_device_behind_its_own_history_gets_a_rollback_notice`,
+  `mesh_schema::backup_then_restore_wipes_mesh_state_and_mints_nothing`,
+  `mesh_schema::restore_removes_the_marker_only_when_it_names_the_wiped_identity`,
+  `backup::tests::a_v1_backup_restore_is_a_mesh_no_op`,
+  `migration_safety::backup_captures_every_table_and_restore_preserves_all_rows`
+  (`mesh_` tables come back empty),
+  `sqlite_store::tests::copies_and_rollbacks_are_detected_and_refuse_to_mint`,
+  `sqlite_store::tests::the_marker_is_advanced_one_block_ahead_and_durably_before_its_first_seq`,
+  `sqlite_store::tests::two_stores_on_one_database_never_reuse_a_seq`,
+  `sqlite_store::tests::a_device_reported_forked_does_not_pass_preflight`,
+  `marker::tests::classification_covers_every_case`,
+  `mesh_cli::a_restored_backup_leaves_the_mesh_and_can_start_a_new_one`.
 - **MESH-SI-8 Bounds.** Every frame, batch, stage, session, rate and transaction
   is bounded (PROTOCOL §11). *Status:* partial (02): items, bodies, payload
   depth, `kind`/`key` (01); per session ≤ 50 000 staged items and dots,
   batches ≤ 512 items, frames ≤ 1 MiB, a 50 000-seq gap bound, 10 000 items per
-  origin per hour, `ChainQuery` ≤ 64 seqs (02, `proto::Limits`). Concurrency and
-  timeouts land in 04-05. *Tests:* `mesh_sim::ci_200_seeds` (invariant 8),
+  origin per hour, `ChainQuery` ≤ 64 seqs (02, `proto::Limits`); write
+  transactions chunked by whole origins (03, `SqliteStore`, ~2 000 rows a
+  chunk; one origin's range is one transaction). Concurrency and timeouts land
+  in 04-05. *Tests:* `mesh_sim::ci_200_seeds` (invariant 8),
   `proto::tests::frames_have_the_documented_json_shape`,
+  `mesh_store_conformance::commits_wait_for_a_busy_writer_and_stay_consistent`,
   `codec::tests::oversize_is_refused_both_ways`, `codec::tests::depth_limit`,
   `codec::tests::envelope_field_validation`,
   `item::tests::short_and_oversize_wire_items_are_refused`.
@@ -87,10 +123,20 @@ NN)** otherwise.
 - **MESH-SI-7 Key lifetime.** Mesh private keys are in memory only while the
   vault is unlocked or the CLI session lives; the sealing key is used only
   inside a reauth-gated import. Key types never print secret material.
-  *Status:* partial (01): `SigningKeyPair` wipes on drop (dalek `zeroize`) and
-  redacts in `Debug`/`Display`. Wrapping and lifetime land in 03-05. *Tests:*
+  *Status:* partial: `SigningKeyPair` wipes on drop (dalek `zeroize`) and
+  redacts in `Debug`/`Display` (01). The four private keys are encrypted under
+  the vault key with AAD naming the vault and the device (or mesh and epoch)
+  (03). `UnlockedVault::mesh_keys` returns only the signing key, the Noise key
+  and the current access key, in zeroizing buffers, each checked against its
+  stored public key. It never returns the sealing key. The CLI prints no key,
+  public or private. Holding the keys only while the vault is unlocked is the
+  node's job (05). *Tests:*
   `sign::tests::debug_and_display_never_print_the_secret`,
-  `mesh_foundations::no_key_signature_or_sealed_bytes_leak_through_debug_display_or_errors`.
+  `mesh_foundations::no_key_signature_or_sealed_bytes_leak_through_debug_display_or_errors`,
+  `identity::tests::keys_round_trip_and_never_include_the_sealing_key`,
+  `identity::tests::key_blobs_are_bound_to_their_vault_and_corruption_is_typed`,
+  `identity::tests::a_swapped_public_key_is_caught_when_the_keys_load`,
+  `mesh_cli::init_then_status_in_human_and_json_form_without_any_key_material`.
 
 ## Spend caps
 

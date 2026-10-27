@@ -60,7 +60,7 @@ order:
 | 1 | `v` | integer | Format version. MUST be `1`. |
 | 2 | `mesh` | string | `mesh_id`, 32 lowercase hex. |
 | 3 | `origin` | string | Origin `device_id`, 32 lowercase hex. |
-| 4 | `seq` | integer | 1 to 2^64−1. Dense per origin: the origin's n-th item has `seq = n`. |
+| 4 | `seq` | integer | 1 to 2^63−1 (ADR 0031 R16: every accepted seq fits a signed 64-bit integer). Dense per origin: the origin's n-th item has `seq = n`. |
 | 5 | `hlc` | integer | 0 to 2^64−1 (§4). |
 | 6 | `kind` | string | 1-64 bytes of `[a-z0-9._-]`. |
 | 7 | `key` | string | 1-1024 bytes, no control characters (U+0000-U+001F, U+007F-U+009F). |
@@ -585,7 +585,7 @@ Genesis G. Each line is an item `origin seq: content`.
 
 ## 7. Forks and rollback
 
-**Status: implemented (02) for §7.1-7.4 — `mesh::chain`, `mesh::proto`, `mesh::memstore`; the clone marker (§7.5) lands in 03**
+**Status: implemented (02) for §7.1-7.4 — `mesh::chain`, `mesh::proto`, `mesh::memstore`; implemented (03) for §7.5 — `mesh::marker`, `mesh::sqlite_store`. The node that refuses to run on a failed check lands in 05 (`mesh::identity::preflight` is the check)**
 
 ### 7.1 Dot logs and chains
 
@@ -663,14 +663,40 @@ other), and its next seq then follows them.
 
 ### 7.5 Clone marker
 
-Increment 03: `<data-dir>/mesh/identity.marker` holds `device_id`,
-`marker_nonce` and a seq high-water mark, rewritten atomically in blocks of 64
-before any seq above the mark is used. A missing or mismatched marker, or
-`next_seq` below the mark, stops the node.
+`<data-dir>/mesh/identity.marker` (a 0600 file in a 0700 directory) holds
+`{"v":1, "device_id", "marker_nonce", "seq_high_water"}`. `marker_nonce` is 16
+random bytes, also stored in `mesh_self`. Identity creation writes the marker
+before the identity's first seq is used.
+
+- Before a store mints a seq above the mark, it MUST re-read the marker,
+  require it to vouch for this database (below), and replace it with
+  `seq_high_water = seq + 63` — temp file, fsync, rename, fsync of the
+  directory — so one durable write covers a block of 64 seqs. Only then is
+  the seq used.
+- A database's identity `(device_id, marker_nonce)`, whose own log reaches
+  `vv[self]`, is classified against the marker:
+  - **missing** — no marker (the database was copied without it);
+  - **mismatch** — the marker names another device id or nonce (copied into a
+    directory with another identity's marker);
+  - **rolled back** — `seq_high_water > vv[self] + 64`: the database is older
+    than seqs it already reserved and may have used (a crash between the
+    marker write and the mint leaves exactly one block, so honest databases
+    never exceed this);
+  - **ok** otherwise.
+- Anything but **ok** means the store MUST NOT mint, and the node MUST NOT run
+  (05). `mesh status` and `doctor` show the reason; recovery is `mesh leave`
+  and pairing again. A store opened on a database that is not **ok** does not
+  trust the marker's mark, so even a seq inside the old block is refused.
+- A restore deletes the marker only when it names the identity the restore
+  wiped (§8.6); a marker naming another identity is left alone.
+
+The marker cannot see a rollback inside the current block, or a copy of the
+whole data directory (database and marker together). Those are forks, caught
+when the diverging histories meet (§7.2).
 
 ## 8. Replication sessions
 
-**Status: implemented (02) as a pure state machine — `mesh::proto` over the `mesh::store::MeshStore` trait (`mesh::memstore::MemStore`); the Noise transport lands in 04**
+**Status: implemented (02) as a pure state machine — `mesh::proto` over the `mesh::store::MeshStore` trait; stores: `mesh::memstore::MemStore` (02) and `mesh::sqlite_store::SqliteStore` (03, §8.6); the Noise transport lands in 04**
 
 ### 8.1 Frames
 
@@ -689,7 +715,7 @@ inside frames are standard base64; hashes and chains are 64 lowercase hex.
 | `ChainQuery` | `origin`, `seqs` (≤ 64) |
 | `ChainReply` | `origin`, `entries` (`[seq, chain, hash]` for each queried seq the sender's dot log covers) |
 | `Direct` | `kind` ∈ {`AccessKeyUpdate`, `RightsRequest`, `RollbackNotice`}, `payload` — point to point, never stored or relayed as items |
-| `Bye` | `reason` |
+| `Bye` | `reason`: `Done`, `MeshMismatch`, `NoCommonVersion`, `NotThePeer`, `Protocol`, `TooLarge`, or `Unavailable` (the sender could not read its own store; nothing it sent in the session may be relied on, §8.6) |
 
 Protocol version 1. Peers negotiate the highest version in both
 `[proto_min, proto_max]`; no overlap, a different `mesh_id`, or a `device_id`
@@ -759,8 +785,10 @@ recipient; a usage day beyond the retention horizon). An item of a removed or
 forked origin above its cutoff or fork seq MUST NOT be deleted under (b): its
 exclusion depends on its seq, and it is what supersedes the origin's older entry
 for the same key. `roster.*`, `cap.def` and `fork.report` items are never
-deleted. The dot log is never pruned below the VV (Increment 03 may bound its
-age; a fork older than that bound is then detected only by direct collision).
+deleted under (b). Rule (a) applies to every kind: the store holds exactly one
+item per `(kind, key, origin)`, so a device's digest (§8.5) covers the same set
+everywhere. The dot log is never pruned below the VV; Increment 03 keeps all of
+it (on disk), so forks of any age are found by chain comparison.
 
 ### 8.5 Repair
 
@@ -781,6 +809,39 @@ VV, the dot log or the chain, and an item whose dot is in the dot log with a
 different hash is fork evidence (§7.2). A repair that changes the stored state
 of an origin that is not forked is a bug signal: count it
 (`mesh_meta.repairs_changed`) and show it in `doctor`.
+
+### 8.6 Persistence and durability
+
+**Status: implemented (03)** — `mesh::sqlite_store` (migration v21)
+
+- **What is stored.** `mesh_items` holds the exact bytes of the latest held
+  item per `(kind, key, origin)` (a fork can put two items at one dot, so the
+  key is `(origin, seq, hash)`). `mesh_vv` holds the VV, and `mesh_dots` holds
+  the dot log with its chain (§7.1). Views are not tables. They are derived
+  from `mesh_items` in memory when the store opens (ADR 0031 R17).
+- **Reads may fail.** A store reads the dot log and held items from disk. If a
+  read fails, the session MUST end with `Bye(Unavailable)` and MUST NOT act on
+  the read: a failed read is never an empty one (ADR 0031 R18).
+- **Commits are chunked by origin.** A commit MAY span several transactions,
+  but every item, dot and VV entry of one origin lands in one of them, so a
+  crash between transactions leaves exactly the state a valid commit of the
+  origins already written would have produced. Repair items come after the
+  main path and MAY be split anywhere. The whole batch is validated before the
+  first transaction; each transaction re-validates its own origins against
+  the database as it is then.
+- **Durability.** The store's connection uses `synchronous=FULL` (with
+  `fullfsync` on macOS). `hlc_high_water` is written in every write
+  transaction, so the HLC never runs backwards across a restart, and the
+  per-origin ingest counts and the counters persist too.
+- **Several processes.** Every write transaction compares a generation counter
+  (`mesh_meta.write_gen`) with the one the store last saw. If another process
+  wrote, the store reloads its in-memory state inside the transaction before it
+  decides anything.
+- **Restore and leave.** Restoring a backup deletes every `mesh_*` row (identity,
+  keys, items, VV, dots, peers, invites, bindings, cursors, escrow, logs),
+  turns cap enforcement off, and removes the marker if it names the wiped
+  identity. The restored vault must pair again. `mesh leave` (04) performs the
+  same local wipe.
 
 ## 9. Pairing, sessions, rotation, removal
 
@@ -816,7 +877,7 @@ of an origin that is not forked is a bug signal: count it
 
 ## 10. Data that never replicates
 
-**Status: implemented (01) as a rule; enforced by construction from 03**
+**Status: implemented (01) as a rule; enforced by construction (03): only `mesh_items` replicates, and every other `mesh_*` table is local**
 
 Local project ids and bindings, peers and addresses typed by the user, invites,
 private keys, cursors, escrow rows, the cap-enforcement switch, gateway request
@@ -844,7 +905,7 @@ concurrency, timeouts and handshake rates land in 04-05.
 | Handshakes per source IP | ≤ 10 per minute |
 | Pairing attempts per token | ≤ 5 |
 | Items per origin | ≤ 10 000 per hour, enforced at ingest |
-| Write transactions | one `Commit` per transaction, chunked to stay under ~250 ms |
+| Write transactions | one `Commit` per transaction, chunked by whole origins (~2 000 rows per chunk) to stay near ~250 ms; one origin's range is never split (§8.6) |
 
 ## 12. Versioning
 
@@ -904,3 +965,15 @@ Increment 02 (ADR 0031 R8-R12):
     and dot hashes alike, and never extend a log that disagrees. Found by the
     release soak: two concurrent sessions, each compared at `Hello` against
     the same prefix, appended two branches one on top of the other.
+
+Increment 03 (ADR 0031 R16-R18):
+
+16. **`seq` is at most 2^63 − 1** (§2.1), so every accepted seq fits SQLite's
+    signed integer and range reads work for every held item.
+17. **Views are derived in memory, not stored as tables** (§8.6). DESIGN §D17
+    listed eight view tables; every value in them depends on the roster.
+18. **Store reads are fallible and end the session with `Bye(Unavailable)`**
+    (§8.1, §8.6).
+19. **The marker classification** (§7.5): "rolled back" is precisely
+    `seq_high_water > vv[self] + 64`; a rollback inside one block is a fork,
+    not a marker failure.

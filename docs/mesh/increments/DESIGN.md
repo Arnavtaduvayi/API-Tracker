@@ -10,6 +10,12 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 03 (2026-10-27).** Building storage settled R16-R18
+> (ADR 0031 "Decisions made while building storage"; PROTOCOL.md §7.5, §8.6):
+> seqs ≤ 2^63 − 1; views are the in-memory `State`, not SQL tables; disk reads
+> are fallible and end the session; commits are chunked by whole origins; the
+> marker's rollback rule. Passages marked **[Amended 03]** below.
+>
 > **Amended by Increment 01 (2026-10-26).** Writing the normative protocol exposed
 > ambiguities and two non-convergent rules. They are resolved in ADR 0031
 > ("Decisions resolved while specifying", R1-R7) and `docs/mesh/PROTOCOL.md` §13, and
@@ -199,7 +205,10 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
     - When the node starts: a missing marker, a mismatched `device_id`/`marker_nonce`,
       or `mesh_self.next_seq` below the marker's mark means a clone or local rollback.
       The node refuses to run and `mesh doctor` explains how to recover
-      (`mesh leave` and re-pair).
+      (`mesh leave` and re-pair). **[Amended 03]** Precisely: rolled back means
+      `seq_high_water > vv[self] + 64` (there is no `next_seq` column; it is
+      `vv[self] + 1`). A rollback inside one block is caught as a fork. A store that
+      is not `ok` refuses to mint, whatever the seq (PROTOCOL.md §7.5).
   - **Fork detection on the wire.** This covers the cases the marker can't, such as a
     clone together with its marker. **[Amended 02, R9]** Detection uses per-origin dot
     logs and hash chains compared at `Hello` and bisected with `ChainQuery`/`ChainReply`;
@@ -420,6 +429,9 @@ used. The list below is the original brief:
   everything needed.
 - Superseded rows may be garbage-collected after commit.
 - Exception: `roster.*` and `cap.def` items are never garbage-collected.
+  **[Amended 03]** Under the exclusion rule only (PROTOCOL.md §8.4 (b)): a
+  superseded item of *any* kind is replaced, because the store keeps exactly one
+  item per `(kind, key, origin)`.
 - **[Amended 01, R2]** Otherwise an item may be deleted only when every item of its
   `(kind, key, origin)` is permanently excluded for a reason that does not depend on
   seq (a share to a removed recipient, a day beyond the retention horizon). A removed
@@ -549,7 +561,7 @@ used. The list below is the original brief:
 | Handshakes per source IP | ≤ 10/min (token bucket) |
 | Pairing attempts per token | ≤ 5 |
 | Items minted per origin | ≤ 10 000 per hour, enforced on **ingest** per origin |
-| Write transactions | one Commit per transaction, chunked to stay under ~250 ms, so the gateway writer (busy_timeout 5 s) is never starved |
+| Write transactions | one Commit per transaction, chunked to stay under ~250 ms, so the gateway writer (busy_timeout 5 s) is never starved. **[Amended 03]** Chunks hold whole origins (~2 000 rows); one origin's range is one transaction (PROTOCOL.md §8.6) |
 
 - **Durability:** the transaction that allocates seqs and mints items runs with
   `PRAGMA synchronous=FULL` on the node's own connection. `db::configure` sets no
@@ -711,7 +723,9 @@ used. The list below is the original brief:
   - The **`CapGate`** follows the `RouteState` pattern
     (`crates/gateway/src/routes.rs:784-900`): an `Arc` snapshot rebuilt by the poller
     from:
-    - `mesh_cap_*` views;
+    - `mesh_cap_*` views; **[Amended 03, R17]** there are no view tables: fold the
+      `cap.*`, `roster.*` and `fork.report` rows of `mesh_items` (by the
+      `(kind, item_key)` index) with `views::State::apply`;
     - authoritative local spend for the month, from `gateway_usage_daily` for the bound
       local projects;
     - pending escrow.
@@ -793,10 +807,14 @@ used. The list below is the original brief:
   Increment 03 (v21) and Increment 06 (v22).
 - **Local-only tables** (never replicated; all wiped by `on_restore` and `leave`):
   - `mesh_meta(key PK, value)`: settings, `hlc_high_water`, counters, `clock_skew/*`,
-    `rejected_items`, repair stats.
+    `rejected_items`, repair stats. **[Amended 03]** also `write_gen`, `regressions/*`,
+    `ingest_hour/*`, `ingest_count/*`; `value` is `ANY`.
   - `mesh_self(singleton)`: mesh_id, device_id, device_name, the three public keys, the
     four encrypted private blobs plus the access-key epoch, `next_seq`, `marker_nonce`,
     `state ∈ {active, rollback_recovery, forked, left}`, `created_at`.
+    **[Amended 03]** No `next_seq` (it is `mesh_vv[self] + 1`); adds
+    `genesis_device` (R6); the access keys live in
+    `mesh_access_keys(epoch PK, wrapped_key, created_at)`, one row per epoch.
   - `mesh_peers(addr PK, device_id NULL, source ∈ {manual,gossip,mdns}, last_attempt_at, last_success_at, failures, unreachable_since, last_error)`.
   - `mesh_invites(token_hash PK, created_at, expires_at, attempts, used_at, used_by)`.
   - `mesh_project_bindings(local_project_id PK REFERENCES projects ON DELETE CASCADE, mesh_project_id, bound_at)`.
@@ -818,13 +836,19 @@ used. The list below is the original brief:
 - **Replicated store:**
   - `mesh_items(origin, seq, kind, item_key, hlc, hash, bytes BLOB, received_at, PK(origin, seq))`
     with `UNIQUE(kind, item_key, origin)` (the latest per origin) and an index on
-    `(kind, item_key)`.
+    `(kind, item_key)`. **[Amended 03]** PK `(origin, seq, hash)` (a fork can hold
+    two items at one dot); no `hlc` column (it is in `bytes`); `received_at` is
+    integer ms; the UNIQUE index serves `(kind, item_key)` lookups.
   - `mesh_vv(origin PK, max_seq)`.
 - **Materialized views:** these are plain tables, *derived* only from `mesh_items` and
   rebuildable by `mesh doctor --rebuild`. Their consistency with `mesh_items` is itself
   a test invariant.
   - `mesh_devices`, `mesh_projects`, `mesh_usage_counters`, `mesh_caps`,
     `mesh_cap_targets`, `mesh_cap_rights`, `mesh_cap_used`, `mesh_shares`.
+  - **[Amended 03, R17]** Not created. The views are the in-memory `views::State`,
+    rebuilt from `mesh_items` when the store opens and checked against a rebuild and
+    a fresh load by the conformance suite. A later increment that needs an SQL
+    projection adds it in a new migration with its reader.
 - **Local-only enforcement switch:** `gateway_config.cap_enforcement INTEGER NOT NULL DEFAULT 0`,
   added in v21. `gateway_config` is defined at `db.rs:881`.
 

@@ -192,6 +192,69 @@ not converge. Each is resolved below and in `docs/mesh/increments/DESIGN.md`.
   dot hashes, so the comparison must cover dots, not only items. The 11 seeds
   are now regression tests.
 
+### Decisions made while building storage (Increment 03)
+
+* **R16 — An item's `seq` is at most 2^63 − 1.** The codec now refuses larger
+  values. Every accepted seq then fits SQLite's signed 64-bit `INTEGER` and
+  sorts correctly there, so range reads of the dot log and the item store
+  work for every item a device can hold. Without the bound, a member could
+  sign a repair item at seq 2^64 − 1 (repair skips the gap check) and make
+  every SQLite commit containing it fail. No honest origin reaches 2^63
+  items.
+* **R17 — The views are the in-memory `State`, rebuilt from `mesh_items` when
+  the store opens; migration v21 has no SQL view tables.** DESIGN §D17 listed
+  eight materialized tables (`mesh_devices` … `mesh_shares`). Every value in
+  them depends on the roster (cutoffs, forks and admission), so they would
+  need a full recomputation on every removal or fork report. A raw per-origin
+  projection would also duplicate `mesh_items`, which already holds exactly
+  the latest entry per `(kind, key, origin)`. `State` is the code the
+  simulator and the independent oracle check, and the SQLite store keeps it
+  identical to a rebuild (conformance invariant 3, plus a fresh-load
+  comparison after every run). A reader that needs only some kinds — the
+  gateway's cap snapshot in Increment 08, say — loads those rows by the
+  `(kind, item_key)` index and folds them with the same `State::apply`. If a
+  later increment needs an SQL-side projection for performance, it adds one
+  in a new migration, together with its reader.
+* **R18 — Store reads that go to disk are fallible, and a failed read ends the
+  session.** The dot log grows with every item any device ever minted, so the
+  SQLite store reads it, and the held items, from disk on demand.
+  `MeshStore::{dot_hash, dot_hashes, chain_at, held_items}` return `Result`.
+  A session whose store read fails ends with `Bye { reason: "Unavailable" }`
+  and sends nothing built from the failed read. Treating a failed read as an
+  empty one could stream dot hashes without their items and let a peer commit
+  a range it does not hold. The VV, views, counters and per-origin digests stay
+  in memory, so `vv()`, `state()` and `origin_digest()` cannot fail.
+
+Smaller storage decisions (Increment 03; DESIGN §D17 is amended to match):
+
+- `mesh_items` has primary key `(origin, seq, hash)`, not `(origin, seq)`: a
+  forked origin can put two different items at one dot. `UNIQUE(kind,
+  item_key, origin)` keeps one item per key; its index also serves lookups by
+  `(kind, item_key)`, so there is no separate index. There is no `hlc` column
+  (it is in the stored bytes), and `received_at` is integer milliseconds from
+  the store's clock.
+- `mesh_self` has no `next_seq`; it is `mesh_vv[self] + 1`, so it cannot
+  disagree with the dot log. It does have `genesis_device` (R6). Access keys
+  live in `mesh_access_keys`, one row per epoch, so the rotation in Increment
+  04 needs no migration.
+- AAD for wrapped mesh keys binds the vault **and** the device id
+  (`mesh_*_key(vault_id, device_id)`), or the mesh id and epoch
+  (`mesh_access_key(vault_id, mesh_id, epoch)`). A leftover blob from an
+  earlier identity in the same vault then never opens.
+- **Chunked commits keep whole origins together.** A chunk holds every item,
+  dot and VV entry of some origins, so a crash between chunks leaves the state
+  a smaller valid commit would have produced. Splitting one origin's range is
+  unsafe: a superseded dot would be logged before the item that supersedes
+  it. One origin's range — at most the session's 50 000 staged rows — is one
+  transaction (KNOWN_LIMITATIONS).
+- **The marker's rollback rule.** A store writes the marker one block (64 seqs)
+  ahead before it uses the block's first seq. A database is "rolled back" when
+  the marker's mark exceeds `vv[self] + 64`. A rollback inside the current
+  block cannot be seen by the marker; the wire's fork detection covers it.
+- The store reloads its in-memory mirror when another process has written
+  (`mesh_meta.write_gen`), inside the write transaction. A CLI command and a
+  running node can therefore both mint without reusing a seq.
+
 ### Dependencies
 
 | Crate | Version | Increment | Why |
@@ -237,9 +300,17 @@ reused.
   Ed25519 verification and a domain-separated message. Stored bytes are the
   received bytes. Signature checks stop a member impersonating another origin
   (as long as that origin's signing key stays secret).
-* **Private keys stay encrypted at rest** under the vault key with
-  vault-bound AAD (Increment 03), and in memory only while unlocked
-  (MESH-SI-7). Key types never print their secret halves; tests assert it.
+* **Private keys stay encrypted at rest** under the vault key, with AAD bound
+  to the vault and the device (Increment 03), and are in memory only while the
+  vault is unlocked (MESH-SI-7). `UnlockedVault::mesh_keys` returns the
+  signing, Noise and access keys and never the sealing key. Each key is checked
+  against its stored public key when it is loaded. Key types never print their
+  secret halves; tests assert it.
+* **A restored or copied vault does not keep acting as the device it came
+  from** (MESH-SI-5). Restore wipes every mesh row and the matching marker. A
+  database whose marker is missing, belongs to another identity, or records
+  seqs the database lacks refuses to mint. A database copied together with its
+  marker is caught on the wire as a fork.
 * **Credential values do not replicate** until Increment 11, and then only as
   sealed boxes to specific devices after reauthentication (MESH-SI-6).
 * **A malicious member is still the user's own device.** Signatures stop it
@@ -269,3 +340,6 @@ reused.
   as for the gateway (ADR 0019 D8).
 * Credential shares (Increment 11) have no forward secrecy (static sealing keys).
 * Fork-evidence propagation is finalized in Increment 02 (PROTOCOL §7).
+* The identity marker sees a rollback only when it spans more than one block of
+  64 seqs; a smaller rollback, or a copy of the whole data directory, is caught
+  only when the diverging histories meet on the wire (Increment 03, R17).
