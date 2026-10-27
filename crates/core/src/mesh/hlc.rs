@@ -86,7 +86,7 @@ pub struct Observation {
 }
 
 /// One device's hybrid logical clock.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HlcClock<C: Clock> {
     clock: C,
     last: Hlc,

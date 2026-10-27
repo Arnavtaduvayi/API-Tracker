@@ -6,9 +6,9 @@
 //! data passes intact through an older one. Payload parsing ignores fields
 //! it does not know for the same reason; the envelope itself is strict.
 //!
-//! A known kind whose key or payload fails validation is still a validly
-//! signed item. It is stored and relayed like any other, and every device
-//! deterministically leaves it out of its views.
+//! A known kind whose key or payload fails validation is rejected at ingest,
+//! like a bad signature (PROTOCOL.md §2.4, §3.3): storing it and leaving it out
+//! of views would let it supersede a valid entry on some devices only.
 
 use super::codec::ItemBody;
 use super::dot::{CapId, CredentialRef, DeviceId, MeshId, MeshProjectId, ShareId};

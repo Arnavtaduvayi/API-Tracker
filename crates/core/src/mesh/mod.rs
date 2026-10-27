@@ -8,13 +8,21 @@
 //! `docs/mesh/PROTOCOL.md`; where this code and that document disagree, it
 //! is a bug in one of them.
 //!
-//! What is here today (Increment 01): identifiers and dots ([`dot`]),
-//! version vectors ([`vv`]), the hybrid logical clock ([`hlc`]), the
-//! canonical item codec ([`codec`]), Ed25519 item signing ([`sign`],
-//! [`item`]), typed payloads for every v1 kind ([`kinds`]), and the four
-//! CRDTs ([`crdt`]). Replication sessions, storage and views follow in later
+//! What is here today:
+//! - Increment 01: identifiers and dots ([`dot`]), version vectors ([`vv`]),
+//!   the hybrid logical clock ([`hlc`]), the canonical item codec
+//!   ([`codec`]), Ed25519 item signing ([`sign`], [`item`]), typed payloads
+//!   for every kind ([`kinds`]) and the four CRDTs ([`crdt`]).
+//! - Increment 02: the replication session as a pure state machine
+//!   ([`proto`]) over the [`store::MeshStore`] trait and its in-memory
+//!   implementation ([`memstore`]), dot chains ([`chain`]), the materialized
+//!   views ([`views`]), and — behind the `mesh-sim` feature — the
+//!   deterministic simulator and the independent oracle (`sim`).
+//!
+//! Storage on disk, the network transport and the commands follow in later
 //! increments; see `docs/mesh/increments/STATUS.md`.
 
+pub mod chain;
 pub mod clock;
 pub mod codec;
 pub mod crdt;
@@ -23,7 +31,11 @@ pub mod error;
 pub mod hlc;
 pub mod item;
 pub mod kinds;
+pub mod memstore;
+pub mod proto;
 pub mod sign;
+pub mod store;
+pub mod views;
 pub mod vv;
 
 #[cfg(any(test, feature = "mesh-sim"))]

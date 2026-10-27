@@ -11,7 +11,7 @@
 //! Everything here is plain data: comparable values, no CRDT machinery.
 //! PROTOCOL.md §5.6 ("Views") defines each field.
 
-use crate::mesh::dot::{CapId, CredentialRef, DeviceId, MeshId, MeshProjectId, ShareId};
+use crate::mesh::dot::{CapId, CredentialRef, DeviceId, MeshProjectId, ShareId};
 use crate::mesh::hlc::Hlc;
 use crate::mesh::item::SignedItem;
 use crate::mesh::kinds::{Month, UsageKey, UsageTotals};
@@ -19,13 +19,9 @@ use crate::mesh::sign::PublicKeyBytes;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-/// What every member of one mesh knows from pairing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GenesisInfo {
-    pub mesh_id: MeshId,
-    /// The device that ran `mesh init`; its self-add is the root of trust.
-    pub genesis: DeviceId,
-}
+/// What every member of one mesh knows from pairing (defined in
+/// [`crate::mesh::store`], re-exported here for the oracle).
+pub use crate::mesh::store::GenesisInfo;
 
 /// A naive, independent model of the replicated state.
 pub trait OracleModel {
@@ -37,6 +33,14 @@ pub trait OracleModel {
     /// items that no honest device will accept (bad signatures, unknown
     /// origins); the oracle applies the protocol's validity rules itself.
     fn observe_minted(&mut self, item: &SignedItem);
+
+    /// Called instead of `observe_minted` for an item that was minted but
+    /// never reached a device still in contact — not the item, not its dot
+    /// hash (PROTOCOL.md §5.6 "What converges"). It still fills its dot for
+    /// the dense-prefix rule (its origin signed it, so a later item's commit
+    /// can carry its hash), but it is never an entry, a key or fork evidence.
+    /// (Added in 02 after the soak found the simulator's gap.)
+    fn observe_unreached(&mut self, item: &SignedItem);
 
     /// The state every device must converge to, recomputed from scratch.
     fn expected(&self) -> ExpectedState;

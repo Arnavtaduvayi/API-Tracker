@@ -7,7 +7,9 @@
 //! - [`rng`]: the seeded PRNG every randomized test uses.
 //! - [`oracle_api`]: the contract between the simulator and the oracle.
 //! - [`oracle`]: the independent oracle.
+//! - [`world`]: the deterministic network simulator.
 
 pub mod oracle;
 pub mod oracle_api;
 pub mod rng;
+pub mod world;
