@@ -1302,6 +1302,230 @@ CREATE INDEX IF NOT EXISTS idx_rre_project_at
     ON runtime_request_events(project_id, at);
 "#,
     },
+    Migration {
+        version: 21,
+        name: "tethra mesh: identity, item store, dot log and local-only tables",
+        sql: r#"
+-- Tethra Mesh (ADR 0031, docs/mesh/ARCHITECTURE.md "Storage"). Peer-to-peer
+-- replication between ONE user's own paired devices; there is no server.
+--
+-- Two kinds of table live here, and the difference matters:
+--   * REPLICATED state is only `mesh_items` (signed items, stored as the exact
+--     bytes received) plus the bookkeeping that proves what was received
+--     (`mesh_vv`, `mesh_dots`). Nothing else ever leaves this device.
+--   * Everything else is LOCAL-ONLY: identity, keys, peers, invites,
+--     bindings, cursors, escrow, logs. `mesh::identity::on_restore` and
+--     `mesh leave` delete every row of every `mesh_*` table, because a
+--     restored or departed vault must never keep acting as the device it
+--     copied (DESIGN §D5, MESH-SI-5).
+--
+-- The views (roster, projects, usage, caps, shares) are NOT tables: they are
+-- derived from `mesh_items` in memory, by the same code the simulator and the
+-- independent oracle check (ADR 0031 R16). A second, SQL copy of every
+-- roster-dependent value would have to be kept consistent with the first on
+-- every removal and fork; the item store is the only source.
+--
+-- Ids are 32 lowercase hex characters, public keys 64, hashes 32-byte BLOBs.
+-- Timestamps written by the mesh store come from its injected clock, as
+-- integer milliseconds; the rest are RFC 3339 TEXT like every other table.
+
+-- Counters and markers for `status`/`doctor` and for the store itself:
+-- `hlc_high_water` (written with every write transaction, so the clock never
+-- runs backwards across a restart), `write_gen` (bumped by every mesh write,
+-- so a second process's store notices and reloads), `rejected_items`,
+-- `repairs_changed`, `clock_skew/<origin>`, `regressions/<origin>` and the
+-- per-origin ingest rate (`ingest_hour/<origin>`, `ingest_count/<origin>`).
+CREATE TABLE mesh_meta (
+    key   TEXT PRIMARY KEY,
+    value ANY NOT NULL
+) STRICT;
+
+-- This device's identity. At most one row. The four private keys are
+-- encrypted under the vault key with AAD naming the vault and the device
+-- (crypto::aad::mesh_*_key); only public keys are in the clear. The next seq
+-- is not stored: it is `mesh_vv[device_id] + 1`, so it cannot disagree with
+-- the dot log. `marker_nonce` is also written to
+-- `<data-dir>/mesh/identity.marker`; a database without its matching marker
+-- is a copy and refuses to mint (DESIGN §D5).
+CREATE TABLE mesh_self (
+    id                TEXT PRIMARY KEY CHECK (id = 'self'),
+    mesh_id           TEXT NOT NULL CHECK (length(mesh_id) = 32),
+    genesis_device    TEXT NOT NULL CHECK (length(genesis_device) = 32),
+    device_id         TEXT NOT NULL CHECK (length(device_id) = 32),
+    device_name       TEXT NOT NULL CHECK (length(device_name) BETWEEN 1 AND 64),
+    sign_pub          TEXT NOT NULL CHECK (length(sign_pub) = 64),
+    noise_pub         TEXT NOT NULL CHECK (length(noise_pub) = 64),
+    seal_pub          TEXT NOT NULL CHECK (length(seal_pub) = 64),
+    wrapped_sign_key  BLOB NOT NULL,
+    wrapped_noise_key BLOB NOT NULL,
+    wrapped_seal_key  BLOB NOT NULL,
+    access_key_epoch  INTEGER NOT NULL CHECK (access_key_epoch >= 1),
+    marker_nonce      TEXT NOT NULL CHECK (length(marker_nonce) = 32),
+    state             TEXT NOT NULL DEFAULT 'active'
+                      CHECK (state IN ('active', 'rollback_recovery', 'forked', 'left')),
+    created_at        TEXT NOT NULL
+) STRICT;
+
+-- The mesh access key (the Noise psk of normal sessions), one row per epoch,
+-- encrypted under the vault key. A removal rotates it (Increment 04); the
+-- previous epoch stays usable for 30 days so a device that missed the update
+-- can still reach a peer.
+CREATE TABLE mesh_access_keys (
+    epoch       INTEGER PRIMARY KEY CHECK (epoch >= 1),
+    wrapped_key BLOB NOT NULL,
+    created_at  TEXT NOT NULL
+) STRICT;
+
+-- REPLICATED: the item store. Exactly the bytes received (body || sig), the
+-- latest item per (kind, item_key, origin) — UNIQUE enforces it, and that
+-- index also serves lookups by (kind, item_key). The primary key includes the
+-- hash because a forked origin can put two different items at one dot.
+-- Items of unknown kinds are stored and relayed but never materialized.
+CREATE TABLE mesh_items (
+    origin      TEXT NOT NULL CHECK (length(origin) = 32),
+    seq         INTEGER NOT NULL CHECK (seq >= 1),
+    hash        BLOB NOT NULL CHECK (length(hash) = 32),
+    kind        TEXT NOT NULL,
+    item_key    TEXT NOT NULL,
+    bytes       BLOB NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (origin, seq, hash),
+    UNIQUE (kind, item_key, origin)
+) STRICT;
+
+-- The version vector: origin -> highest seq whose whole prefix is in the dot
+-- log. Advanced only in the transaction that stores what it covers
+-- (MESH-SI-4).
+CREATE TABLE mesh_vv (
+    origin  TEXT PRIMARY KEY CHECK (length(origin) = 32),
+    max_seq INTEGER NOT NULL CHECK (max_seq >= 1)
+) STRICT;
+
+-- The dot log and chain (PROTOCOL.md §7.1): for every origin and every seq up
+-- to its VV, the hash accepted there and chain(o, seq). Written in the same
+-- transaction as the commit or mint that covers the dot; never pruned below
+-- the VV. Fork detection compares these chains.
+CREATE TABLE mesh_dots (
+    origin TEXT NOT NULL CHECK (length(origin) = 32),
+    seq    INTEGER NOT NULL CHECK (seq >= 1),
+    hash   BLOB NOT NULL CHECK (length(hash) = 32),
+    chain  BLOB NOT NULL CHECK (length(chain) = 32),
+    PRIMARY KEY (origin, seq)
+) STRICT, WITHOUT ROWID;
+
+-- Two different hashes seen for one dot (PROTOCOL.md §7.2). Local evidence;
+-- what replicates is the `fork.report` item minted from it.
+CREATE TABLE mesh_fork_evidence (
+    origin  TEXT NOT NULL CHECK (length(origin) = 32),
+    seq     INTEGER NOT NULL CHECK (seq >= 1),
+    hash_a  BLOB NOT NULL CHECK (length(hash_a) = 32),
+    hash_b  BLOB NOT NULL CHECK (length(hash_b) = 32),
+    seen_at INTEGER NOT NULL,
+    PRIMARY KEY (origin, seq)
+) STRICT;
+
+-- Populated from Increment 05 (node runtime): addresses this device dials.
+-- `device_id` is learned from the handshake.
+CREATE TABLE mesh_peers (
+    addr              TEXT PRIMARY KEY,
+    device_id         TEXT CHECK (device_id IS NULL OR length(device_id) = 32),
+    source            TEXT NOT NULL CHECK (source IN ('manual', 'gossip', 'mdns')),
+    last_attempt_at   TEXT,
+    last_success_at   TEXT,
+    failures          INTEGER NOT NULL DEFAULT 0 CHECK (failures >= 0),
+    unreachable_since TEXT,
+    last_error        TEXT
+) STRICT;
+
+-- Populated from Increment 04 (pairing): only the BLAKE3 hash of an invite
+-- token is stored, never the token.
+CREATE TABLE mesh_invites (
+    token_hash BLOB PRIMARY KEY CHECK (length(token_hash) = 32),
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    used_at    TEXT,
+    used_by    TEXT CHECK (used_by IS NULL OR length(used_by) = 32)
+) STRICT;
+
+-- Populated from Increment 06 (shared projects): which local project feeds
+-- which mesh project, on THIS device only. Never automatic (MESH-SI-13).
+-- Deleting the local project unbinds it.
+CREATE TABLE mesh_project_bindings (
+    local_project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+    mesh_project_id  TEXT NOT NULL CHECK (length(mesh_project_id) = 32),
+    bound_at         TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_mesh_bindings_mesh ON mesh_project_bindings(mesh_project_id);
+
+-- Populated from Increment 06 (usage publishing, DESIGN §D14): what this
+-- device has already attributed to mesh usage counters, per local daily
+-- usage row, so each run publishes only the delta.
+CREATE TABLE mesh_publish_cursor (
+    local_project_id      TEXT NOT NULL,
+    day                   TEXT NOT NULL,
+    provider_id           TEXT NOT NULL,
+    model                 TEXT NOT NULL,
+    requests              INTEGER NOT NULL DEFAULT 0,
+    priced_requests       INTEGER NOT NULL DEFAULT 0,
+    unpriced_requests     INTEGER NOT NULL DEFAULT 0,
+    unextracted_requests  INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (local_project_id, day, provider_id, model)
+) STRICT;
+
+-- Populated from Increment 07/08 (spend caps, DESIGN §D15): rights this
+-- device is about to give away, fenced against the running gateway's
+-- snapshot before the transfer is published (MESH-SI-10). `to_device` is a
+-- device id or 'burn'.
+CREATE TABLE mesh_cap_escrow (
+    id               TEXT PRIMARY KEY,
+    cap_id           TEXT NOT NULL CHECK (length(cap_id) = 32),
+    month            TEXT NOT NULL,
+    to_device        TEXT NOT NULL CHECK (to_device = 'burn' OR length(to_device) = 32),
+    amount_micros    INTEGER NOT NULL CHECK (amount_micros > 0),
+    state            TEXT NOT NULL
+                     CHECK (state IN ('pending', 'acked', 'published', 'cancelled')),
+    acked_generation INTEGER,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_mesh_escrow_cap ON mesh_cap_escrow(cap_id, month, state);
+
+-- Populated from Increment 04/05: one row per exchange, kept to the last
+-- 1 000; drives "last exchanged" and freshness labels.
+CREATE TABLE mesh_exchange_log (
+    id          INTEGER PRIMARY KEY,
+    peer_device TEXT CHECK (peer_device IS NULL OR length(peer_device) = 32),
+    at          TEXT NOT NULL,
+    direction   TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+    items_in    INTEGER NOT NULL DEFAULT 0 CHECK (items_in >= 0),
+    items_out   INTEGER NOT NULL DEFAULT 0 CHECK (items_out >= 0),
+    result      TEXT NOT NULL CHECK (result IN ('ok', 'aborted', 'failed')),
+    error       TEXT
+) STRICT;
+CREATE INDEX idx_mesh_exchange_peer_at ON mesh_exchange_log(peer_device, at);
+
+-- Populated from Increment 11 (opt-in credential sharing): which shares this
+-- device imported into which local credential.
+CREATE TABLE mesh_share_imports (
+    share_id      TEXT PRIMARY KEY CHECK (length(share_id) = 32),
+    credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    imported_at   TEXT NOT NULL
+) STRICT;
+CREATE INDEX idx_mesh_share_imports_cred ON mesh_share_imports(credential_id);
+
+-- The local-only spend-cap enforcement switch (Increment 08, DESIGN §D15).
+-- Never replicated: a peer cannot turn enforcement on or off here. Reset to
+-- 0 by a restore.
+ALTER TABLE gateway_config
+    ADD COLUMN cap_enforcement INTEGER NOT NULL DEFAULT 0 CHECK (cap_enforcement IN (0, 1));
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

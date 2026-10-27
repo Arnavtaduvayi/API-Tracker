@@ -34,6 +34,10 @@ pub const MAX_BODY_BYTES: usize = MAX_ITEM_BYTES - SIGNATURE_LEN;
 pub const MAX_KIND_BYTES: usize = 64;
 /// Longest `key` string.
 pub const MAX_KEY_BYTES: usize = 1024;
+/// Largest `seq`: 2^63 − 1, so every accepted seq fits SQLite's signed 64-bit
+/// INTEGER and keeps its order there (ADR 0031 R16). An origin reaches it
+/// only after 2^63 items, so honest devices never come near it.
+pub const MAX_SEQ: u64 = i64::MAX as u64;
 /// Deepest nesting of arrays/objects inside `payload` (the payload object
 /// itself is depth 1).
 pub const MAX_PAYLOAD_DEPTH: usize = 16;
@@ -99,6 +103,9 @@ fn validate_envelope(body: &ItemBody) -> Result<(), MeshError> {
     }
     if body.seq == 0 {
         return Err(MeshError::Malformed("seq must be at least 1"));
+    }
+    if body.seq > MAX_SEQ {
+        return Err(MeshError::Malformed("seq must be at most 2^63 - 1"));
     }
     if !is_valid_kind(&body.kind) {
         return Err(MeshError::Malformed(
@@ -436,6 +443,16 @@ mod tests {
         b.seq = 0;
         assert!(encode_body(&b).is_err());
         let mut b = sample();
+        b.seq = MAX_SEQ;
+        let at_max = encode_body(&b).unwrap();
+        assert_eq!(decode_body(&at_max).unwrap().seq, MAX_SEQ);
+        b.seq = MAX_SEQ + 1;
+        assert!(encode_body(&b).is_err());
+        let above = String::from_utf8(at_max)
+            .unwrap()
+            .replace(&MAX_SEQ.to_string(), &(MAX_SEQ + 1).to_string());
+        assert!(decode_body(above.as_bytes()).is_err());
+        let mut b = sample();
         b.kind = "Roster.Add".into();
         assert!(encode_body(&b).is_err());
         let mut b = sample();
@@ -577,7 +594,7 @@ mod tests {
             let body = ItemBody::new(
                 MeshId::from_bytes(rng.next_u64().to_le_bytes().repeat(2).try_into().unwrap()),
                 DeviceId::from_bytes(rng.next_u64().to_be_bytes().repeat(2).try_into().unwrap()),
-                rng.range_inclusive(1, u64::MAX - 1),
+                rng.range_inclusive(1, MAX_SEQ),
                 Hlc::from_raw(rng.next_u64()),
                 kind,
                 key,

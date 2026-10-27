@@ -224,6 +224,27 @@ pub mod aad {
     pub fn session(session_id: &str) -> String {
         format!("api-tracker:v1:session:{session_id}")
     }
+    /// A Tethra Mesh device's Ed25519 item-signing key (ADR 0031, DESIGN
+    /// §D5). Bound to the vault AND the device id the key belongs to, so a
+    /// blob copied into another vault, or left over from an earlier identity
+    /// in this one, never opens.
+    pub fn mesh_sign_key(vault_id: &str, device_id: &str) -> String {
+        format!("api-tracker:v1:mesh-sign-key:{vault_id}:{device_id}")
+    }
+    /// A mesh device's X25519 Noise static key (transport).
+    pub fn mesh_noise_key(vault_id: &str, device_id: &str) -> String {
+        format!("api-tracker:v1:mesh-noise-key:{vault_id}:{device_id}")
+    }
+    /// A mesh device's X25519 sealing key (credential shares, Increment 11).
+    /// Only the reauth-gated import ever unwraps it (MESH-SI-7).
+    pub fn mesh_seal_key(vault_id: &str, device_id: &str) -> String {
+        format!("api-tracker:v1:mesh-seal-key:{vault_id}:{device_id}")
+    }
+    /// A mesh's access key (the Noise psk for normal sessions) at one epoch,
+    /// bound to the mesh it belongs to so epochs cannot be swapped.
+    pub fn mesh_access_key(vault_id: &str, mesh_id: &str, epoch: u32) -> String {
+        format!("api-tracker:v1:mesh-access-key:{vault_id}:{mesh_id}:{epoch}")
+    }
     /// A retained prior credential value (version history), bound to its
     /// version number so rows cannot be swapped between versions.
     pub fn credential_version(

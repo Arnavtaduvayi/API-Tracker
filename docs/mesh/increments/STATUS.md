@@ -12,7 +12,7 @@ Every session reads this file first and updates it at the end (README §1).
 |---|---|---|---|---|---|---|---|---|
 | 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | done | 2026-10-26 | 2026-10-26 | `e746a01`, `df3d8ec`, `f888eb1` | CI `40397253597` (success); macOS service `40397253640` (success) |
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
-| 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | pending | | | | |
+| 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | in-progress | 2026-10-27 | | | |
 | 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | pending | | | | |
 | 05 | [Node runtime](05-node-runtime.md) | S | M | pending | | | | |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | pending | | | | |

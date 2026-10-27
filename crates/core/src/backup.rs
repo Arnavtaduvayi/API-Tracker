@@ -331,6 +331,11 @@ pub struct BackupInfo {
     pub format_version: u32,
     pub project_count: usize,
     pub credential_count: usize,
+    /// Restore only: the mesh state the restore wiped. A restored vault is a
+    /// copy, so it never keeps acting as the device it came from; it must
+    /// pair again (ADR 0031, DESIGN §D5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_wipe: Option<crate::mesh::identity::WipeReport>,
 }
 
 /// Create an encrypted backup file. Never overwrites unless `overwrite`.
@@ -421,6 +426,7 @@ fn create_backup_with(
             .find(|t| t.name == "credentials")
             .map(|t| t.rows.len())
             .unwrap_or(0),
+        mesh_wipe: None,
     })
 }
 
@@ -485,6 +491,7 @@ fn info_for(path: &Path, file: &BackupFile, payload: &Payload) -> BackupInfo {
         format_version: file.version,
         project_count: payload.table_len("projects"),
         credential_count: payload.table_len("credentials"),
+        mesh_wipe: None,
     }
 }
 
@@ -579,9 +586,15 @@ pub fn restore_backup(
         Payload::V2(payload) => restore_v2(&mut conn, payload)?,
         Payload::V1(payload) => restore_v1(&mut conn, payload)?,
     }
+    // A restored vault must never act as the mesh device it was backed up
+    // from: wipe every mesh row (identity, items, keys, peers) before
+    // anything can use them (MESH-SI-5). No-op for backups without mesh rows.
+    let mesh_wipe = crate::mesh::identity::on_restore(&conn, &target.data_dir)?;
     // Any pre-existing session belongs to the replaced vault.
     session::destroy(target)?;
     crate::audit::record(&conn, "vault_restored_from_backup", None, None, "")?;
+    let mut info = info;
+    info.mesh_wipe = Some(mesh_wipe);
     Ok(info)
 }
 
@@ -913,6 +926,43 @@ mod tests {
         );
         let revealed = restored.reveal_credential("app/main", &master).unwrap();
         assert_eq!(revealed.expose(), "sk-proj-FAKE-legacy-backup-test-0001");
+    }
+
+    /// A v1-format backup carries no mesh tables, so restoring one wipes
+    /// nothing and leaves any marker in the target directory alone (ADR 0031).
+    #[test]
+    fn a_v1_backup_restore_is_a_mesh_no_op() {
+        use crate::mesh::dot::{DeviceId, MarkerNonce};
+        use crate::mesh::marker::{self, MarkerContents, MarkerRemoval};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = VaultPaths::new(dir.path().join("orig"));
+        let master = SecretString::from("legacy-master-password-02");
+        let vault = crate::vault::create_vault(&paths, &master).unwrap();
+        // The source is in a mesh; a v1 payload has no table to carry it.
+        vault.mesh_init("source-device").unwrap();
+        let backup_password = SecretString::from("legacy-backup-password-02");
+        let payload = v1_payload_from_vault(vault.connection(), 5);
+        let file_path = dir.path().join("legacy.backup");
+        write_v1_backup_file(&file_path, vault.vault_id(), &backup_password, &payload);
+
+        // The target directory already holds another identity's marker.
+        let target = VaultPaths::new(dir.path().join("restored"));
+        std::fs::create_dir_all(&target.data_dir).unwrap();
+        let foreign = MarkerContents::new(
+            DeviceId::from_bytes([4; 16]),
+            MarkerNonce::from_bytes([4; 16]),
+            64,
+        );
+        marker::write(&target.data_dir, &foreign).unwrap();
+
+        let info = restore_backup(&file_path, &backup_password, &target, false).unwrap();
+        let wipe = info.mesh_wipe.expect("restore reports the mesh wipe");
+        assert_eq!(wipe.identity, None);
+        assert_eq!(wipe.rows_deleted, 0);
+        assert_eq!(wipe.marker, MarkerRemoval::LeftInPlace);
+        assert_eq!(marker::read(&target.data_dir).unwrap(), Some(foreign));
+        let restored = crate::vault::unlock_vault(&target, &master).unwrap();
+        assert!(!restored.mesh_status().unwrap().initialized);
     }
 
     /// CONC-04 regression: a project-key rotation committing between two

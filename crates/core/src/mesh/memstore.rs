@@ -15,15 +15,13 @@ use super::item::{ItemHash, SignedItem};
 use super::kinds::TypedItem;
 use super::sign::SigningKeyPair;
 use super::store::{
-    CommitBatch, CommitOutcome, Draft, ForkEvidence, GenesisInfo, HlcPolicy, MeshStore, Stats,
-    VerifiedItem,
+    validate_commit, CommitBatch, CommitOutcome, Draft, ForkEvidence, GenesisInfo, HlcPolicy,
+    MeshStore, Stats, Validated, VerifiedItem, HOUR_MS,
 };
 use super::views::{self, State};
 use super::vv::VersionVector;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-
-const HOUR_MS: u64 = 3_600_000;
 
 #[derive(Clone)]
 pub struct MemStore {
@@ -130,6 +128,12 @@ impl MemStore {
         out.forks.push(ev);
     }
 
+    /// `(hash, chain)` in the dot log at `(origin, seq)`.
+    fn logged(&self, origin: &DeviceId, seq: u64) -> Option<(ItemHash, Hash32)> {
+        let i = usize::try_from(seq.checked_sub(1)?).ok()?;
+        self.dots.get(origin)?.get(i).copied()
+    }
+
     fn observe(&mut self, body: &ItemBody) {
         let obs = self.hlc.observe(body.hlc);
         if obs.clamped {
@@ -137,86 +141,6 @@ impl MemStore {
             *e = (*e).max(obs.skew_ms);
         }
     }
-
-    /// Check a batch without changing anything. Returns the dot hashes to
-    /// append for each origin whose committed range extends its log, and the
-    /// forks the batch proves.
-    ///
-    /// Every hash the batch carries for a dot this store has already logged
-    /// is compared with the log — items **and** dots. Another session may have
-    /// extended the log since this one's `Hello` was compared, so a mismatch
-    /// here is the last chance to see a second branch before it is appended
-    /// on top of the first (PROTOCOL.md §7.2). Such an origin's log is not
-    /// extended by this commit; its items still apply as entries, as repair
-    /// would apply them.
-    fn validate(&self, batch: &CommitBatch) -> Result<Validated, MeshError> {
-        let mut incoming: BTreeMap<DeviceId, BTreeMap<u64, ItemHash>> = BTreeMap::new();
-        let mut put = |o: DeviceId, s: u64, h: ItemHash| -> Result<(), MeshError> {
-            match incoming.entry(o).or_default().insert(s, h) {
-                Some(prev) if prev != h => Err(MeshError::InvalidOperation(
-                    "commit carries two hashes for one dot",
-                )),
-                _ => Ok(()),
-            }
-        };
-        for v in &batch.items {
-            let (o, s) = (v.body.origin, v.body.seq);
-            if s > self.vv.get(&o) && s > batch.upto.get(&o) {
-                return Err(MeshError::InvalidOperation(
-                    "commit item lies beyond its origin's committed range",
-                ));
-            }
-            put(o, s, v.item.hash())?;
-        }
-        for (o, s, h) in &batch.dots {
-            if *s >= 1 && *s <= batch.upto.get(o).max(self.vv.get(o)) {
-                put(*o, *s, *h)?;
-            }
-        }
-        let mut out = Validated::default();
-        for (o, hashes) in &incoming {
-            let cur = self.vv.get(o);
-            for (s, h) in hashes.range(..=cur) {
-                if let Some(ours) = self.dot_hash(o, *s) {
-                    if ours != *h {
-                        out.forks.push(ForkEvidence {
-                            origin: *o,
-                            seq: *s,
-                            ours,
-                            theirs: *h,
-                        });
-                        break;
-                    }
-                }
-            }
-        }
-        for (o, upto) in batch.upto.iter() {
-            let cur = self.vv.get(o);
-            if *upto <= cur || out.forks.iter().any(|f| f.origin == *o) {
-                continue;
-            }
-            let have = incoming.get(o);
-            let mut hashes = Vec::with_capacity((*upto - cur) as usize);
-            for s in cur + 1..=*upto {
-                match have.and_then(|m| m.get(&s)) {
-                    Some(h) => hashes.push(*h),
-                    None => {
-                        return Err(MeshError::InvalidOperation(
-                            "commit is missing a dot in its range",
-                        ))
-                    }
-                }
-            }
-            out.ranges.insert(*o, hashes);
-        }
-        Ok(out)
-    }
-}
-
-#[derive(Default)]
-struct Validated {
-    ranges: BTreeMap<DeviceId, Vec<ItemHash>>,
-    forks: Vec<ForkEvidence>,
 }
 
 impl MeshStore for MemStore {
@@ -240,17 +164,15 @@ impl MeshStore for MemStore {
         &self.stats
     }
 
-    fn dot_hash(&self, origin: &DeviceId, seq: u64) -> Option<ItemHash> {
-        let i = usize::try_from(seq.checked_sub(1)?).ok()?;
-        self.dots.get(origin)?.get(i).map(|(h, _)| *h)
+    fn dot_hash(&self, origin: &DeviceId, seq: u64) -> Result<Option<ItemHash>, MeshError> {
+        Ok(self.logged(origin, seq).map(|(h, _)| h))
     }
 
-    fn chain_at(&self, origin: &DeviceId, seq: u64) -> Option<Hash32> {
+    fn chain_at(&self, origin: &DeviceId, seq: u64) -> Result<Option<Hash32>, MeshError> {
         if seq == 0 {
-            return Some(Hash32::ZERO);
+            return Ok(Some(Hash32::ZERO));
         }
-        let i = usize::try_from(seq - 1).ok()?;
-        self.dots.get(origin)?.get(i).map(|(_, c)| *c)
+        Ok(self.logged(origin, seq).map(|(_, c)| c))
     }
 
     fn origin_digest(&self, origin: &DeviceId) -> Hash32 {
@@ -266,17 +188,18 @@ impl MeshStore for MemStore {
         origin: &DeviceId,
         from_exclusive: u64,
         to_inclusive: u64,
-    ) -> Vec<SignedItem> {
+    ) -> Result<Vec<SignedItem>, MeshError> {
         if to_inclusive <= from_exclusive {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        self.held
+        Ok(self
+            .held
             .range(
                 (*origin, from_exclusive + 1, ItemHash([0; 32]))
                     ..=(*origin, to_inclusive, ItemHash([0xff; 32])),
             )
             .map(|(_, i)| i.clone())
-            .collect()
+            .collect())
     }
 
     fn ingest_rate_used(&self, origin: &DeviceId) -> u64 {
@@ -296,7 +219,9 @@ impl MeshStore for MemStore {
     }
 
     fn commit(&mut self, batch: CommitBatch) -> Result<CommitOutcome, MeshError> {
-        let Validated { ranges, forks } = self.validate(&batch)?;
+        let Validated { ranges, forks } = validate_commit(&batch, &self.vv, |o, s| {
+            Ok(self.logged(o, s).map(|(h, _)| h))
+        })?;
         // Nothing below can fail.
         let mut out = CommitOutcome::default();
         for ev in forks {
@@ -327,7 +252,7 @@ impl MeshStore for MemStore {
         }
         for v in &batch.repair {
             let (o, s) = (v.body.origin, v.body.seq);
-            if let Some(ours) = self.dot_hash(&o, s) {
+            if let Some((ours, _)) = self.logged(&o, s) {
                 if ours != v.item.hash() {
                     self.note_fork(
                         ForkEvidence {

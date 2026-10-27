@@ -103,7 +103,8 @@ macro_rules! hex_id {
 
 hex_id!(
     /// One Tethra installation's mesh identity (one data directory, not one
-    /// machine). Random; never derived from anything, never reused.
+    /// machine). Derived from the device's three random public keys
+    /// (`sign::derive_device_id`, ADR 0031 R8); never reused.
     DeviceId
 );
 hex_id!(
@@ -127,6 +128,11 @@ hex_id!(
     /// A stable reference to one shared credential across reshares
     /// (Increment 11).
     CredentialRef
+);
+hex_id!(
+    /// The random nonce that ties a database's mesh identity to the marker
+    /// file in its data directory (DESIGN §D5). Local-only; never replicated.
+    MarkerNonce
 );
 
 /// An item's unique position in its origin's log.

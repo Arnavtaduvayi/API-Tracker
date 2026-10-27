@@ -317,6 +317,7 @@ fn backup_captures_every_table_and_restore_preserves_all_rows() {
     )
     .unwrap(); // usage_snapshots
     v.run_monitor().unwrap(); // alerts (+ activity)
+    v.mesh_init("fixture-device").unwrap(); // mesh_* (ADR 0031)
 
     // v13 gateway tables (no public write API in core — the gateway crate
     // owns them; raw rows are enough to prove backup coverage, since backup
@@ -398,7 +399,7 @@ fn backup_captures_every_table_and_restore_preserves_all_rows() {
     let mut restored = vault::unlock_vault(&restored_paths, &master).unwrap();
     let restored_counts = table_counts(restored.connection());
     // The audit trail gains a restore marker; every other table matches
-    // exactly.
+    // exactly, except the mesh tables.
     for (name, count) in &original_counts {
         let restored_count = restored_counts
             .iter()
@@ -407,6 +408,12 @@ fn backup_captures_every_table_and_restore_preserves_all_rows() {
             .unwrap_or(-1);
         if name == "audit_events" {
             assert!(restored_count >= *count, "audit trail must be preserved");
+        } else if name.starts_with("mesh_") {
+            // Exempt by design (ADR 0031, DESIGN §D5, MESH-SI-5): a restored
+            // vault is a copy, so restore deletes every mesh row — identity,
+            // keys, items, peers — and the user pairs it again. They are in
+            // the backup (it copies every table) and empty after restore.
+            assert_eq!(restored_count, 0, "restore must wipe '{name}'");
         } else {
             assert_eq!(
                 restored_count, *count,

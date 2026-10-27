@@ -54,6 +54,29 @@ pub enum MeshError {
 
     #[error("invalid spend-cap operation: {0}")]
     InvalidOperation(&'static str),
+
+    /// The local mesh database failed. The context is static; SQLite's own
+    /// message is not carried, so a value from a row can never surface here.
+    #[error("local mesh storage failed: {0}")]
+    Storage(&'static str),
+
+    #[error("this device is not part of a mesh; run `tethra mesh init` to start one")]
+    NotInitialized,
+
+    #[error("this device is already part of a mesh; run `tethra mesh leave` before starting or joining another")]
+    AlreadyInMesh,
+
+    /// The identity marker does not vouch for this database: it is missing,
+    /// belongs to another installation, or records seqs the database does
+    /// not have (DESIGN §D5, PROTOCOL.md §7.5).
+    #[error("this device's mesh identity cannot be trusted: {0}; run `tethra mesh leave` and pair again")]
+    IdentityMismatch(&'static str),
+
+    #[error("a device name must be 1-64 characters without control characters")]
+    InvalidDeviceName,
+
+    #[error("this device's mesh identity has forked (another installation used the same identity); run `tethra mesh leave` and pair again")]
+    Forked,
 }
 
 impl MeshError {
@@ -75,6 +98,12 @@ impl MeshError {
             MeshError::GenesisMismatch => "mesh_genesis_mismatch",
             MeshError::InsufficientRights { .. } => "mesh_insufficient_rights",
             MeshError::InvalidOperation(_) => "mesh_invalid_operation",
+            MeshError::Storage(_) => "mesh_storage",
+            MeshError::NotInitialized => "mesh_not_initialized",
+            MeshError::AlreadyInMesh => "mesh_already_in_mesh",
+            MeshError::IdentityMismatch(_) => "mesh_identity_mismatch",
+            MeshError::InvalidDeviceName => "mesh_invalid_device_name",
+            MeshError::Forked => "mesh_forked",
         }
     }
 }

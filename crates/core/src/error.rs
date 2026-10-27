@@ -117,7 +117,9 @@ pub enum CoreError {
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),
 
-    #[error("{0}")]
+    /// Transparent: the mesh error is the whole message (with `{0}` plus
+    /// `#[from]` it would also be the `source()` and print twice in a chain).
+    #[error(transparent)]
     Mesh(#[from] crate::mesh::MeshError),
 }
 

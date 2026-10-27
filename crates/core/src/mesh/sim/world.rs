@@ -7,6 +7,11 @@
 //! expensive invariants are checked, including convergence to an
 //! independently written oracle.
 //!
+//! The world is generic over a [`StoreFactory`]: [`run`] uses [`MemStore`],
+//! and the store conformance suite (Increment 03) runs the same world, the
+//! same invariants and the same oracle over SQLite stores on disk, adding
+//! crashes between commit chunks and restarts from disk.
+//!
 //! Replay: `MESH_SIM_SEED=<seed> MESH_SIM_STEPS=<steps>` re-runs exactly one
 //! seed; the same seed always produces the same event trace hash.
 
@@ -15,6 +20,7 @@ use crate::mesh::clock::{Clock, ManualClock};
 use crate::mesh::crdt::bounded::BoundedCounter;
 use crate::mesh::crdt::Admit;
 use crate::mesh::dot::{CapId, CredentialRef, DeviceId, MeshId, MeshProjectId, ShareId};
+use crate::mesh::error::MeshError;
 use crate::mesh::hlc::{Hlc, MAX_DRIFT_MS};
 use crate::mesh::item::{ItemHash, SignedItem};
 use crate::mesh::kinds::{
@@ -30,6 +36,7 @@ use crate::mesh::sign::{derive_device_id, PublicKeyBytes, SigningKeyPair};
 use crate::mesh::sim::oracle_api::{ExpectedShare, ExpectedState, OracleModel};
 use crate::mesh::sim::rng::SplitMix64;
 use crate::mesh::store::{Draft, ForkEvidence, GenesisInfo, HlcPolicy, MeshStore};
+use crate::mesh::views::State;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -38,6 +45,9 @@ const T0: u64 = 1_700_000_000_000;
 const IDLE_TIMEOUT_MS: u64 = 30_000;
 const MAX_SESSIONS_PER_NODE: usize = 8;
 const MAX_QUIESCE_ROUNDS: u32 = 16;
+/// Catch-up rounds at the start of quiescence that still let stores inject
+/// their own faults.
+const CRASHY_CATCH_UP_ROUNDS: u32 = 2;
 /// Nodes `0..CAP_DEVICES` take part in spend caps; they are never removed or
 /// cloned, so cap safety is a property of honest operation (DESIGN §D21).
 const CAP_DEVICES: usize = 3;
@@ -125,6 +135,8 @@ pub struct SimReport {
     pub max_staged: usize,
     pub quiesce_rounds: u32,
     pub nodes: usize,
+    /// Commits a store crashed in the middle of (SQLite conformance only).
+    pub commit_crashes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,6 +158,70 @@ impl fmt::Display for SimFailure {
     }
 }
 
+/// What the simulator needs from a store beyond [`MeshStore`].
+pub trait SimStore: MeshStore + Sized {
+    /// A restart from whatever the store keeps durably.
+    fn restart(&mut self, clock: Arc<dyn Clock>);
+    /// A byte-for-byte copy of the device's data running on another clock:
+    /// what copying a data directory produces (the fork injection).
+    fn clone_onto(&self, clock: Arc<dyn Clock>) -> Self;
+    /// Every held item.
+    fn all_items(&self) -> Vec<SignedItem>;
+    /// The views recomputed from the held items (invariant 3).
+    fn rebuild_views(&self) -> Result<State, MeshError>;
+    fn holds(&self, hash: &ItemHash) -> bool;
+    /// Whether `err` is a crash the store simulated in the middle of a
+    /// commit. The caller then treats the device as crashed.
+    fn is_simulated_crash(_err: &MeshError) -> bool {
+        false
+    }
+    /// Whether the store injects faults of its own (see [`Self::calm`]).
+    fn injects_faults(&self) -> bool {
+        false
+    }
+    /// Stop injecting store-level faults: quiescence is fault-free.
+    fn calm(&mut self) {}
+    /// Compare what the store keeps in memory with what a fresh open of its
+    /// durable state would load.
+    fn check_durable(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// Creates one store per simulated device.
+pub trait StoreFactory {
+    type Store: SimStore;
+    fn create(&mut self, genesis: GenesisInfo, id: DeviceId, clock: Arc<dyn Clock>) -> Self::Store;
+}
+
+/// In-memory stores: the default world.
+pub struct MemFactory;
+
+impl StoreFactory for MemFactory {
+    type Store = MemStore;
+    fn create(&mut self, genesis: GenesisInfo, id: DeviceId, clock: Arc<dyn Clock>) -> MemStore {
+        MemStore::new(genesis, id, clock)
+    }
+}
+
+impl SimStore for MemStore {
+    fn restart(&mut self, clock: Arc<dyn Clock>) {
+        MemStore::restart(self, clock)
+    }
+    fn clone_onto(&self, clock: Arc<dyn Clock>) -> Self {
+        MemStore::clone_onto(self, clock)
+    }
+    fn all_items(&self) -> Vec<SignedItem> {
+        MemStore::all_items(self).cloned().collect()
+    }
+    fn rebuild_views(&self) -> Result<State, MeshError> {
+        MemStore::rebuild_views(self)
+    }
+    fn holds(&self, hash: &ItemHash) -> bool {
+        MemStore::holds(self, hash)
+    }
+}
+
 /// An oracle that predicts nothing, for runs with `check_oracle = false`.
 pub struct NoOracle;
 
@@ -160,12 +236,12 @@ impl OracleModel for NoOracle {
     }
 }
 
-struct Node {
+struct Node<S> {
     id: DeviceId,
     key: Arc<SigningKeyPair>,
     noise_pub: PublicKeyBytes,
     seal_pub: PublicKeyBytes,
-    store: MemStore,
+    store: S,
     clock: Arc<ManualClock>,
     skew_ms: i64,
     alive: bool,
@@ -200,12 +276,13 @@ struct Pools {
     creds: Vec<CredentialRef>,
 }
 
-struct World {
+struct World<F: StoreFactory> {
     cfg: SimConfig,
+    factory: F,
     rng: SplitMix64,
     now: u64,
     genesis: GenesisInfo,
-    nodes: Vec<Node>,
+    nodes: Vec<Node<F::Store>>,
     sessions: BTreeMap<u64, Sess>,
     next_sid: u64,
     net: Vec<InFlight>,
@@ -224,7 +301,7 @@ struct World {
 
 type Res<T> = Result<T, SimFailure>;
 
-impl World {
+impl<F: StoreFactory> World<F> {
     fn fail<T>(&self, invariant: &'static str, detail: impl Into<String>) -> Res<T> {
         Err(SimFailure {
             seed: self.cfg.seed,
@@ -241,7 +318,7 @@ impl World {
         self.trace.update(&b.to_le_bytes());
     }
 
-    fn new(cfg: &SimConfig) -> Res<Self> {
+    fn new(cfg: &SimConfig, factory: F) -> Res<Self> {
         let mut rng = SplitMix64::new(cfg.seed);
         let mut id_bytes = [0u8; 16];
         rng.fill_bytes(&mut id_bytes);
@@ -272,6 +349,7 @@ impl World {
         };
         let mut w = World {
             cfg: cfg.clone(),
+            factory,
             rng,
             now: T0,
             genesis: GenesisInfo {
@@ -297,8 +375,9 @@ impl World {
         // The genesis device: keys first, because its id is derived from them.
         let g = w.make_node(true)?;
         w.genesis.genesis = w.nodes[g].id;
-        for n in &mut w.nodes {
-            n.store = MemStore::new(w.genesis, n.id, n.clock.clone());
+        for i in 0..w.nodes.len() {
+            let (id, clock) = (w.nodes[i].id, w.nodes[i].clock.clone());
+            w.nodes[i].store = w.factory.create(w.genesis, id, clock);
         }
         let add = w.roster_add_of(g, g);
         w.mint(g, &add, HlcPolicy::Now)?;
@@ -327,7 +406,7 @@ impl World {
             self.rng.below(6_001) as i64 - 3_000
         };
         let clock = Arc::new(ManualClock::new(self.now.saturating_add_signed(skew_ms)));
-        let store = MemStore::new(self.genesis, id, clock.clone());
+        let store = self.factory.create(self.genesis, id, clock.clone());
         self.nodes.push(Node {
             id,
             key: Arc::new(key),
@@ -514,8 +593,17 @@ impl World {
                         .map(|v| v.item.hash())
                         .collect();
                     let before = self.nodes[n].store.hlc_last();
+                    let dots: Vec<(DeviceId, u64, ItemHash)> = batch
+                        .items
+                        .iter()
+                        .chain(batch.repair.iter())
+                        .map(|v| (v.body.origin, v.body.seq, v.item.hash()))
+                        .collect();
                     let out = match self.nodes[n].store.commit(batch) {
                         Ok(o) => o,
+                        Err(e) if F::Store::is_simulated_crash(&e) => {
+                            return self.crash_mid_commit(n, &dots);
+                        }
                         Err(e) => {
                             return self.fail(
                                 "commit",
@@ -568,6 +656,38 @@ impl World {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// The store crashed between two of a commit's chunks: what it applied
+    /// before the crash is durable, the rest is lost, and the device is down
+    /// until a restart step reopens it.
+    fn crash_mid_commit(&mut self, n: usize, batch: &[(DeviceId, u64, ItemHash)]) -> Res<()> {
+        for (o, s, h) in batch {
+            let st = &self.nodes[n].store;
+            let reached = st.holds(h) || st.dot_hash(o, *s).ok().flatten() == Some(*h);
+            if !reached {
+                continue;
+            }
+            if self.forged.contains(h) {
+                return self.fail("6 no forgery", format!("node {n} committed a forged item"));
+            }
+            self.seen_by.entry(*h).or_default().insert(n);
+        }
+        self.nodes[n].alive = false;
+        let dead: Vec<u64> = self
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.a == n || s.b == n)
+            .map(|(k, _)| *k)
+            .collect();
+        for sid in dead {
+            self.sessions.remove(&sid);
+            self.report.sessions_aborted += 1;
+        }
+        self.net.retain(|m| self.sessions.contains_key(&m.sid));
+        self.report.commit_crashes += 1;
+        self.log("commit-crash", n as u64, 0);
         Ok(())
     }
 
@@ -1125,7 +1245,12 @@ impl World {
                     .iter()
                     .filter(|i| {
                         i.decode_unverified().is_ok_and(|b| {
-                            self.nodes[t].store.dot_hash(&b.origin, b.seq) == Some(i.hash())
+                            self.nodes[t]
+                                .store
+                                .dot_hash(&b.origin, b.seq)
+                                .ok()
+                                .flatten()
+                                == Some(i.hash())
                         })
                     })
                     .cloned()
@@ -1288,10 +1413,7 @@ impl World {
         Ok(())
     }
 
-    fn quiesce(&mut self) -> Res<()> {
-        self.groups = None;
-        self.net.clear();
-        self.sessions.clear();
+    fn revive_all(&mut self) {
         for n in 0..self.nodes.len() {
             if !self.nodes[n].alive {
                 self.nodes[n].alive = true;
@@ -1299,24 +1421,50 @@ impl World {
                 self.nodes[n].store.restart(clock);
             }
         }
+    }
+
+    /// One fault-free exchange between every pair that may talk.
+    fn all_pairs_round(&mut self) -> Res<()> {
+        self.now += 60_000;
+        self.set_clocks();
+        let n = self.nodes.len();
+        for a in 0..n {
+            for b in a + 1..n {
+                if self.can_talk(a, b) {
+                    self.run_sync(a, b)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn quiesce(&mut self) -> Res<()> {
+        self.groups = None;
+        self.net.clear();
+        self.sessions.clear();
+        self.revive_all();
+        // Stores that inject their own faults (SQLite: crashes between
+        // commit chunks) first catch up under them: the large, many-origin
+        // commits of this phase are where a partial commit matters most.
+        // Crashed devices restart from disk between rounds.
+        if self.nodes.iter().any(|x| x.store.injects_faults()) {
+            for _ in 0..CRASHY_CATCH_UP_ROUNDS {
+                self.all_pairs_round()?;
+                self.revive_all();
+            }
+        }
+        for n in 0..self.nodes.len() {
+            self.nodes[n].store.calm();
+        }
         let mut stable = 0;
         let mut last_fp: Option<Vec<(crate::mesh::vv::VersionVector, usize)>> = None;
         for round in 0..MAX_QUIESCE_ROUNDS {
             self.report.quiesce_rounds = round + 1;
-            self.now += 60_000;
-            self.set_clocks();
-            let n = self.nodes.len();
-            for a in 0..n {
-                for b in a + 1..n {
-                    if self.can_talk(a, b) {
-                        self.run_sync(a, b)?;
-                    }
-                }
-            }
+            self.all_pairs_round()?;
             let fp: Vec<_> = self
                 .nodes
                 .iter()
-                .map(|x| (x.store.vv().clone(), x.store.all_items().count()))
+                .map(|x| (x.store.vv().clone(), x.store.all_items().len()))
                 .collect();
             if last_fp.as_ref() == Some(&fp) {
                 stable += 1;
@@ -1354,6 +1502,9 @@ impl World {
                     format!("node {i}: incremental views differ from a rebuild"),
                 );
             }
+            if let Err(e) = node.store.check_durable() {
+                return self.fail("3 rebuild", format!("node {i}: {e}"));
+            }
         }
 
         // 1. commit-only VV: every held item is covered by the VV and matches
@@ -1366,7 +1517,7 @@ impl World {
                     continue;
                 }
                 if b.seq > st.vv().get(&b.origin)
-                    || st.dot_hash(&b.origin, b.seq) != Some(item.hash())
+                    || st.dot_hash(&b.origin, b.seq).ok().flatten() != Some(item.hash())
                 {
                     return self.fail(
                         "1 commit-only VV",
@@ -1401,10 +1552,11 @@ impl World {
                 return self.fail(
                     "2 convergence",
                     format!(
-                        "node {} differs from node {}: {}",
+                        "node {} differs from node {}: {}{}",
                         active[k],
                         active[0],
-                        diff(&views[0], v)
+                        diff(&views[0], v),
+                        self.roster_detail(&[active[0], active[k]])
                     ),
                 );
             }
@@ -1449,18 +1601,26 @@ impl World {
             let o = node.id;
             let top = a.vv().get(&o).min(b.vv().get(&o));
             // If one log extends the other there is no divergence (yet).
-            let Some(true_d) = (1..=top).find(|s| a.dot_hash(&o, *s) != b.dot_hash(&o, *s)) else {
+            let Some(true_d) = (1..=top)
+                .find(|s| a.dot_hash(&o, *s).ok().flatten() != b.dot_hash(&o, *s).ok().flatten())
+            else {
                 continue;
             };
             let mut seen: BTreeMap<u64, BTreeSet<ItemHash>> = BTreeMap::new();
             for &i in &active {
                 let st = &self.nodes[i].store;
-                for s in 1..=st.vv().get(&o) {
-                    if let Some(h) = st.dot_hash(&o, s) {
-                        seen.entry(s).or_default().insert(h);
-                    }
+                let logged = match st.dot_hashes(&o, 0, st.vv().get(&o)) {
+                    Ok(l) => l,
+                    Err(e) => return self.fail("5 fork detection", format!("node {i}: {e}")),
+                };
+                for (s, h) in logged {
+                    seen.entry(s).or_default().insert(h);
                 }
-                for it in st.held_items(&o, 0, u64::MAX) {
+                let held = match st.held_items(&o, 0, u64::MAX) {
+                    Ok(h) => h,
+                    Err(e) => return self.fail("5 fork detection", format!("node {i}: {e}")),
+                };
+                for it in held {
                     let b = it.decode_unverified().expect("held items decode");
                     seen.entry(b.seq).or_default().insert(it.hash());
                 }
@@ -1534,6 +1694,31 @@ impl World {
         Ok(())
     }
 
+    /// The roster items each of `nodes` holds, for a convergence failure.
+    fn roster_detail(&self, nodes: &[usize]) -> String {
+        let mut out = String::new();
+        for &n in nodes {
+            let st = &self.nodes[n].store;
+            out.push_str(&format!("\n  node {n} vv {:?}:", st.vv()));
+            for it in st.all_items() {
+                let Ok(b) = it.decode_unverified() else {
+                    continue;
+                };
+                if b.kind.starts_with("roster.") || b.kind == "fork.report" {
+                    let logged = st.dot_hash(&b.origin, b.seq).ok().flatten() == Some(it.hash());
+                    out.push_str(&format!(
+                        "\n    {} {}:{} key {} logged={logged}",
+                        b.kind,
+                        &b.origin.to_hex()[..8],
+                        b.seq,
+                        &b.key[..8.min(b.key.len())]
+                    ));
+                }
+            }
+        }
+        out
+    }
+
     /// Items that never reached a device still in contact (PROTOCOL.md §5.6):
     /// neither the item nor its dot hash. An item superseded at its minter
     /// before it was sent is not lost when its hash travelled in the dot list
@@ -1555,9 +1740,14 @@ impl World {
                 let Ok(b) = i.decode_unverified() else {
                     return true;
                 };
-                !active
-                    .iter()
-                    .any(|&n| self.nodes[n].store.dot_hash(&b.origin, b.seq) == Some(h))
+                !active.iter().any(|&n| {
+                    self.nodes[n]
+                        .store
+                        .dot_hash(&b.origin, b.seq)
+                        .ok()
+                        .flatten()
+                        == Some(h)
+                })
             })
             .map(|i| i.hash())
             .collect()
@@ -1636,9 +1826,17 @@ fn diff(a: &ExpectedState, b: &ExpectedState) -> String {
     "no difference".into()
 }
 
-/// Run one seed to completion.
+/// Run one seed to completion on in-memory stores.
 pub fn run<O: OracleModel>(cfg: &SimConfig) -> Result<SimReport, SimFailure> {
-    let mut w = World::new(cfg)?;
+    run_with::<O, MemFactory>(cfg, MemFactory)
+}
+
+/// Run one seed to completion on the stores `factory` creates.
+pub fn run_with<O: OracleModel, F: StoreFactory>(
+    cfg: &SimConfig,
+    factory: F,
+) -> Result<SimReport, SimFailure> {
+    let mut w = World::new(cfg, factory)?;
     for _ in 0..cfg.steps {
         w.step()?;
     }

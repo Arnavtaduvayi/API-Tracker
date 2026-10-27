@@ -17,6 +17,7 @@ mod destination_cmd;
 mod env_cmd;
 mod gateway_cmd;
 mod key_cmd;
+mod mesh_cmd;
 mod observe_cmd;
 mod pricing_cmd;
 mod project_cmd;
@@ -174,6 +175,10 @@ enum Commands {
     /// User-configured webhook notification channels.
     #[command(subcommand)]
     Notify(alerts_cmd::NotifyCmd),
+    /// Tethra Mesh: replication between your own paired devices, with no
+    /// server (ADR 0031).
+    #[command(subcommand)]
+    Mesh(mesh_cmd::MeshCmd),
 }
 
 /// The whole program. Both shipped entry points — the preferred `tethra`
@@ -235,5 +240,6 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Access(cmd) => access_cmd::run(&ctx, cmd),
         Commands::Backup(cmd) => backup_cmd::run(&ctx, cmd),
         Commands::Notify(cmd) => alerts_cmd::notify(&ctx, cmd),
+        Commands::Mesh(cmd) => mesh_cmd::run(&ctx, cmd),
     }
 }

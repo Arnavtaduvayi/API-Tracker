@@ -485,6 +485,31 @@ check $? "the empty-folder message says what the user can do about it"
 ! printf '%s' "$EMPTY_OUT" | grep -qE "tethra provider list|tethra gateway route add"
 check $? "the empty-folder message points at no unexecutable CLI command"
 
+echo "-- mesh (identity, status, restore wipe; nothing listens) --"
+MESH_A="$WORK/mesh-a"
+API_TRACKER_DIR="$MESH_A" "$BIN" init >/dev/null 2>&1; check $? "mesh: a fresh vault for the mesh checks"
+OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh status 2>&1); RC=$?
+[ $RC -eq 0 ] && echo "$OUT" | grep -q "not part of a mesh"
+check $? "mesh status before init says so and exits 0"
+MESH_OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh init --name smoke-a 2>&1); check $? "mesh init --name smoke-a"
+OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh status 2>&1)
+echo "$OUT" | grep -q '"initialized": true' && echo "$OUT" | grep -q '"roster_size": 1' \
+  && echo "$OUT" | grep -q '"marker": "ok"'
+check $? "mesh status --json: initialized, a roster of 1, identity marker ok"
+MESH_OUT="$MESH_OUT$OUT"
+[ -f "$MESH_A/mesh/identity.marker" ]; check $? "mesh init writes the identity marker"
+printf '%s' "$MESH_OUT" | grep -Eq '[0-9a-f]{64}' && bad "mesh output prints key-shaped hex" || ok "mesh output prints no key material"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh init --name again >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "a second mesh init is refused"
+API_TRACKER_DIR="$MESH_A" "$BIN" backup create "$WORK/mesh.backup" >/dev/null 2>&1; check $? "mesh: backup created"
+API_TRACKER_DIR="$WORK/mesh-restored" "$BIN" backup restore "$WORK/mesh.backup" --yes >/dev/null 2>&1
+check $? "mesh: backup restores into a fresh directory"
+OUT=$(API_TRACKER_DIR="$WORK/mesh-restored" "$BIN" mesh status 2>&1)
+echo "$OUT" | grep -q "not part of a mesh" && [ ! -e "$WORK/mesh-restored/mesh/identity.marker" ]
+check $? "a restored vault keeps no mesh identity (it must pair again)"
+API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh status 2>/dev/null | grep -q '"initialized": true'
+check $? "the original device is still in its mesh after the restore"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

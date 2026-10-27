@@ -12,6 +12,7 @@ use super::codec::MAX_ITEM_BYTES;
 use super::crdt::roster::{AddRecord, Roster};
 use super::crdt::SwEntry;
 use super::dot::{DeviceId, MeshId};
+use super::error::MeshError;
 use super::item::{ItemHash, SignedItem};
 use super::kinds::{TypedItem, KNOWN_KINDS};
 use super::store::{CommitBatch, ForkEvidence, MeshStore, VerifiedItem};
@@ -138,6 +139,9 @@ pub enum ByeReason {
     NotThePeer,
     Protocol,
     TooLarge,
+    /// The sender could not read its own store; nothing it sent in this
+    /// session is to be trusted, and nothing was committed from it.
+    Unavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,11 +165,11 @@ pub struct Frame {
 }
 
 impl Frame {
-    pub fn encode(&self) -> Result<Vec<u8>, super::error::MeshError> {
+    pub fn encode(&self) -> Result<Vec<u8>, MeshError> {
         let bytes = serde_json::to_vec(self)
-            .map_err(|_| super::error::MeshError::Malformed("frame does not serialize"))?;
+            .map_err(|_| MeshError::Malformed("frame does not serialize"))?;
         if bytes.len() > MAX_FRAME_BYTES {
-            return Err(super::error::MeshError::ItemTooLarge {
+            return Err(MeshError::ItemTooLarge {
                 size: bytes.len(),
                 max: MAX_FRAME_BYTES,
             });
@@ -173,15 +177,14 @@ impl Frame {
         Ok(bytes)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, super::error::MeshError> {
+    pub fn decode(bytes: &[u8]) -> Result<Self, MeshError> {
         if bytes.len() > MAX_FRAME_BYTES {
-            return Err(super::error::MeshError::ItemTooLarge {
+            return Err(MeshError::ItemTooLarge {
                 size: bytes.len(),
                 max: MAX_FRAME_BYTES,
             });
         }
-        serde_json::from_slice(bytes)
-            .map_err(|_| super::error::MeshError::Malformed("frame is not valid JSON"))
+        serde_json::from_slice(bytes).map_err(|_| MeshError::Malformed("frame is not valid JSON"))
     }
 }
 
@@ -331,14 +334,31 @@ impl Session {
         out
     }
 
+    /// End the session because this side's store could not be read. A
+    /// failed read never stands in for an empty one: that could stream dots
+    /// without their items and let the peer commit a range it does not hold.
+    fn unavailable(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        self.close(
+            &mut out,
+            Some(ByeReason::Unavailable),
+            CloseReason::Aborted("local storage error"),
+        );
+        out
+    }
+
     /// The opening `Hello`.
     pub fn start<S: MeshStore>(&mut self, store: &S) -> Vec<Action> {
         let vv = store.vv().clone();
         let mut chains = BTreeMap::new();
         let mut digests = BTreeMap::new();
         for (o, s) in vv.iter() {
-            if let Some(c) = store.chain_at(o, *s) {
-                chains.insert(*o, c);
+            match store.chain_at(o, *s) {
+                Ok(Some(c)) => {
+                    chains.insert(*o, c);
+                }
+                Ok(None) => {}
+                Err(_) => return self.unavailable(),
             }
             digests.insert(*o, store.origin_digest(o));
         }
@@ -431,7 +451,15 @@ impl Session {
             if *pv == 0 || *pv > own.get(o) {
                 continue;
             }
-            let (Some(ours), Some(theirs)) = (store.chain_at(o, *pv), h.chains.get(o)) else {
+            let ours = match store.chain_at(o, *pv) {
+                Ok(c) => c,
+                Err(_) => {
+                    // Frames already queued keep their numbers; Bye follows.
+                    out.extend(self.unavailable());
+                    return out;
+                }
+            };
+            let (Some(ours), Some(theirs)) = (ours, h.chains.get(o)) else {
                 continue;
             };
             if ours != *theirs {
@@ -442,7 +470,15 @@ impl Session {
             }
         }
         // Stream what the peer lacks, then repair, then Commit.
-        let plan = self.plan(&h, store);
+        // `plan` reads everything before it numbers a frame, so on an error
+        // nothing of it was queued.
+        let plan = match self.plan(&h, store) {
+            Ok(plan) => plan,
+            Err(_) => {
+                out.extend(self.unavailable());
+                return out;
+            }
+        };
         self.peer = Some(h);
         out.extend(plan);
         out
@@ -458,7 +494,7 @@ impl Session {
         v
     }
 
-    fn plan<S: MeshStore>(&mut self, peer: &Hello, store: &S) -> Vec<Action> {
+    fn plan<S: MeshStore>(&mut self, peer: &Hello, store: &S) -> Result<Vec<Action>, MeshError> {
         let own = store.vv();
         let mut budget = self.limits.max_staged as u64;
         let mut main: Vec<SignedItem> = Vec::new();
@@ -473,15 +509,16 @@ impl Session {
                 continue;
             }
             let to = (*ov).min(pv.saturating_add(budget));
-            let held = store.held_items(o, pv, to);
+            let logged: BTreeMap<u64, ItemHash> =
+                store.dot_hashes(o, pv, to)?.into_iter().collect();
             let mut by_seq: BTreeMap<u64, SignedItem> = BTreeMap::new();
-            for item in held {
+            for item in store.held_items(o, pv, to)? {
                 let Ok(body) = item.decode_unverified() else {
                     continue;
                 };
                 // On the main path send the item our dot log recorded; a
                 // second branch's item at the same dot travels by repair.
-                if store.dot_hash(o, body.seq) == Some(item.hash()) {
+                if logged.get(&body.seq) == Some(&item.hash()) {
                     by_seq.insert(body.seq, item);
                 }
             }
@@ -489,8 +526,8 @@ impl Session {
                 match by_seq.remove(&s) {
                     Some(item) => main.push(item),
                     None => {
-                        if let Some(h) = store.dot_hash(o, s) {
-                            dots.push((*o, s, h));
+                        if let Some(h) = logged.get(&s) {
+                            dots.push((*o, s, *h));
                         }
                     }
                 }
@@ -504,7 +541,7 @@ impl Session {
             let differs = peer.digests.get(o) != Some(&store.origin_digest(o));
             let eligible = *ov == peer.vv.get(o) || roster.fork_seq(o).is_some();
             if differs && eligible {
-                repair.extend(store.held_items(o, 0, u64::MAX));
+                repair.extend(store.held_items(o, 0, u64::MAX)?);
             }
         }
 
@@ -559,7 +596,7 @@ impl Session {
         }));
         out.push(f);
         self.sent_commit = true;
-        out
+        Ok(out)
     }
 
     fn bump_staged(&mut self) -> bool {
@@ -822,17 +859,17 @@ impl Session {
         if q.seqs.len() > self.limits.max_query_seqs {
             return self.abort("ChainQuery asks for too many seqs");
         }
-        let entries = q
-            .seqs
-            .iter()
-            .filter_map(|s| {
-                Some((
-                    *s,
-                    store.chain_at(&q.origin, *s)?,
-                    store.dot_hash(&q.origin, *s)?,
-                ))
-            })
-            .collect();
+        let mut entries = Vec::with_capacity(q.seqs.len());
+        for s in &q.seqs {
+            let (chain, hash) = match (store.chain_at(&q.origin, *s), store.dot_hash(&q.origin, *s))
+            {
+                (Ok(c), Ok(h)) => (c, h),
+                _ => return self.unavailable(),
+            };
+            if let (Some(c), Some(h)) = (chain, hash) {
+                entries.push((*s, c, h));
+            }
+        }
         vec![self.frame(Body::ChainReply(ChainReply {
             origin: q.origin,
             entries,
@@ -853,12 +890,13 @@ impl Session {
                 continue;
             }
             match store.chain_at(&r.origin, seq) {
-                Some(ours) if ours == chain => new_lo = seq,
-                Some(_) => {
+                Ok(Some(ours)) if ours == chain => new_lo = seq,
+                Ok(Some(_)) => {
                     found = Some((seq, hash));
                     break;
                 }
-                None => break,
+                Ok(None) => break,
+                Err(_) => return self.unavailable(),
             }
         }
         match found {
@@ -867,7 +905,11 @@ impl Session {
             }
             Some((hi, theirs)) if hi == new_lo + 1 => {
                 self.queries.remove(&r.origin);
-                if let Some(ours) = store.dot_hash(&r.origin, hi) {
+                let ours = match store.dot_hash(&r.origin, hi) {
+                    Ok(h) => h,
+                    Err(_) => return self.unavailable(),
+                };
+                if let Some(ours) = ours {
                     out.push(Action::ForkDetected(ForkEvidence {
                         origin: r.origin,
                         seq: hi,
@@ -1132,6 +1174,121 @@ mod tests {
         assert!(acts
             .iter()
             .any(|a| matches!(a, Action::Close(CloseReason::Aborted(_)))));
+    }
+
+    /// A store whose disk reads fail (the SQLite store's dot log and held
+    /// items live on disk).
+    struct FailingReads(MemStore);
+
+    impl MeshStore for FailingReads {
+        fn genesis(&self) -> GenesisInfo {
+            self.0.genesis()
+        }
+        fn self_id(&self) -> DeviceId {
+            self.0.self_id()
+        }
+        fn vv(&self) -> &VersionVector {
+            self.0.vv()
+        }
+        fn state(&self) -> &crate::mesh::views::State {
+            self.0.state()
+        }
+        fn stats(&self) -> &crate::mesh::store::Stats {
+            self.0.stats()
+        }
+        fn dot_hash(&self, o: &DeviceId, s: u64) -> Result<Option<ItemHash>, MeshError> {
+            self.0.dot_hash(o, s)
+        }
+        fn dot_hashes(
+            &self,
+            _o: &DeviceId,
+            _from: u64,
+            _to: u64,
+        ) -> Result<Vec<(u64, ItemHash)>, MeshError> {
+            Err(MeshError::Storage("injected read failure"))
+        }
+        fn chain_at(&self, o: &DeviceId, s: u64) -> Result<Option<Hash32>, MeshError> {
+            self.0.chain_at(o, s)
+        }
+        fn origin_digest(&self, o: &DeviceId) -> Hash32 {
+            self.0.origin_digest(o)
+        }
+        fn held_items(
+            &self,
+            _o: &DeviceId,
+            _f: u64,
+            _t: u64,
+        ) -> Result<Vec<SignedItem>, MeshError> {
+            Err(MeshError::Storage("injected read failure"))
+        }
+        fn ingest_rate_used(&self, o: &DeviceId) -> u64 {
+            self.0.ingest_rate_used(o)
+        }
+        fn now_ms(&self) -> u64 {
+            self.0.now_ms()
+        }
+        fn hlc_last(&self) -> crate::mesh::hlc::Hlc {
+            self.0.hlc_last()
+        }
+        fn commit(
+            &mut self,
+            b: CommitBatch,
+        ) -> Result<crate::mesh::store::CommitOutcome, MeshError> {
+            self.0.commit(b)
+        }
+        fn mint(&mut self, k: &SigningKeyPair, d: Draft) -> Result<SignedItem, MeshError> {
+            self.0.mint(k, d)
+        }
+        fn record_rejected(&mut self, n: u64) {
+            self.0.record_rejected(n)
+        }
+    }
+
+    #[test]
+    fn a_failed_store_read_ends_the_session_and_sends_nothing_built_from_it() {
+        let (mut g, b) = pair();
+        setting(&mut g, 7);
+        let failing = FailingReads(g.store.clone());
+        let mut s = Session::new(Limits::default(), Some(b.id));
+        let _ = s.start(&failing);
+        let mut peer = Session::new(Limits::default(), Some(g.id));
+        let Action::Send(hello) = peer.start(&b.store).into_iter().next().unwrap() else {
+            panic!()
+        };
+        // g has items b lacks; planning them needs the failing reads.
+        let acts = s.on_frame(hello, &failing);
+        assert!(acts.iter().any(|a| matches!(
+            a,
+            Action::Send(Frame {
+                body: Body::Bye {
+                    reason: ByeReason::Unavailable
+                },
+                ..
+            })
+        )));
+        assert!(acts
+            .iter()
+            .any(|a| matches!(a, Action::Close(CloseReason::Aborted(_)))));
+        // No items, dots or Commit were sent: an empty read is never assumed.
+        assert!(!acts.iter().any(|a| matches!(
+            a,
+            Action::Send(Frame {
+                body: Body::Items(_) | Body::Commit(_),
+                ..
+            })
+        )));
+        assert!(s.is_closed());
+        // The peer ends on the Bye, with nothing to commit.
+        let bye = acts
+            .into_iter()
+            .find_map(|a| match a {
+                Action::Send(f) => Some(f),
+                _ => None,
+            })
+            .unwrap();
+        let acts = peer.on_frame(bye, &b.store);
+        assert!(!acts.iter().any(|a| matches!(a, Action::Commit(_))));
+        assert!(peer.is_closed());
     }
 
     #[test]

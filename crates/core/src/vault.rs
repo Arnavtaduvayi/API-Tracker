@@ -9364,6 +9364,46 @@ pub fn projects_for_folder(conn: &Connection, folder: &std::path::Path) -> Resul
 }
 
 // ---------------------------------------------------------------------------
+// Tethra Mesh (ADR 0031): this device's identity in a mesh of the user's own
+// devices. Key material is unwrapped here, under the vault key, and nowhere
+// else; `crate::mesh::identity` holds the logic.
+// ---------------------------------------------------------------------------
+impl UnlockedVault {
+    /// Start a mesh with this device as its first member (`tethra mesh
+    /// init`). `device_name` replicates to every device paired later.
+    pub fn mesh_init(&self, device_name: &str) -> Result<crate::mesh::identity::MeshSelfInfo> {
+        crate::mesh::identity::init(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            &self.paths.data_dir,
+            device_name,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )
+    }
+
+    /// This device's mesh identity, roster and replication counters
+    /// (`tethra mesh status`). Contains no key material.
+    pub fn mesh_status(&self) -> Result<crate::mesh::identity::MeshStatus> {
+        crate::mesh::identity::status(
+            &self.conn,
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )
+    }
+
+    /// The keys a running mesh node holds: the item-signing key, the Noise
+    /// key and the current access key, in zeroizing buffers. Never the
+    /// sealing key (MESH-SI-7). Like the gateway's route-MAC key, this needs
+    /// an unlocked vault but no reauthentication: the node runs only while
+    /// the vault is unlocked and drops the keys when it stops (ADR 0020).
+    pub fn mesh_keys(&self) -> Result<crate::mesh::identity::MeshKeys> {
+        crate::mesh::identity::load_keys(&self.conn, &self.vault_key, &self.vault_id)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Runtime API observability
 //
 // The vault owns CA-key encryption/storage and reauthentication-gated actions;

@@ -236,17 +236,21 @@ impl State {
     }
 }
 
-/// Recompute the state from scratch from stored items (which were verified
-/// when they were accepted). Pure.
+/// Fold one stored item (verified when it was accepted) into `state`.
+pub fn apply_stored(state: &mut State, item: &SignedItem) -> Result<ApplyOutcome, MeshError> {
+    let body = item.decode_unverified()?;
+    let typed = TypedItem::parse(&body)?;
+    Ok(state.apply(&body, item.hash(), &typed))
+}
+
+/// Recompute the state from scratch from stored items. Pure.
 pub fn rebuild<'a>(
     genesis: GenesisInfo,
     items: impl IntoIterator<Item = &'a SignedItem>,
 ) -> Result<State, MeshError> {
     let mut state = State::new(genesis);
     for item in items {
-        let body = item.decode_unverified()?;
-        let typed = TypedItem::parse(&body)?;
-        state.apply(&body, item.hash(), &typed);
+        apply_stored(&mut state, item)?;
     }
     Ok(state)
 }
