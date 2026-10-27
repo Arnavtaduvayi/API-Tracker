@@ -55,7 +55,8 @@ permanent design choice or something a later increment changes.
 - **One device's batch is one transaction.** A large exchange is written in
   several short transactions, but everything received from one origin in one
   exchange is a single transaction (at most the 50 000-row session limit), so
-  the gateway's writer may wait for it.
+  the gateway's writer may wait for it. Measured on a Mac: 10 000 items in about
+  60 ms, so the 50 000-row maximum takes roughly 0.3 s.
 - **Windows: marker permissions and directory sync.** On Unix the marker is
   0600 in a 0700 `mesh/` directory, and its directory is fsynced after every
   rename. On Windows the file inherits the data directory's per-user ACLs (as

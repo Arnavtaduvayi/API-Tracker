@@ -310,3 +310,87 @@ fn commits_wait_for_a_busy_writer_and_stay_consistent() {
         .unwrap();
     assert_eq!(probe, 1);
 }
+
+/// Commit cost on this machine (ignored; run in release): one origin's range
+/// of N items is one transaction, so this is the longest a chunk can hold
+/// SQLite's write lock for that range. Prints the timings; asserts nothing
+/// about speed.
+#[test]
+#[ignore]
+fn commit_timing() {
+    let dir = tempfile::tempdir().unwrap();
+    for n in [500u64, 2_000, 10_000] {
+        let (gk, gid, g) = device(1, None);
+        let (bk, bid, _) = device(2, Some(g));
+        let sub = dir.path().join(format!("n{n}"));
+        std::fs::create_dir_all(&sub).unwrap();
+        let mut a = open_store(&sub.join("a.db"), g, gid);
+        // Only the receiving store's commit is measured, at full durability;
+        // the sender's thousands of single mints need not be F_FULLFSYNCed.
+        a.relax_fsync_for_tests().unwrap();
+        let mut b = open_store(&sub.join("b.db"), g, bid);
+        let add = |k: &SigningKeyPair, d: DeviceId, s: u8| RosterAdd {
+            device: d,
+            name: format!("dev {s}"),
+            sign_pub: k.public_key(),
+            noise_pub: PublicKeyBytes([s; 32]),
+            seal_pub: PublicKeyBytes([s.wrapping_add(1); 32]),
+            added_by: gid,
+        };
+        a.mint(&gk, Draft::of(&add(&gk, gid, 1), HlcPolicy::Now))
+            .unwrap();
+        a.mint(&gk, Draft::of(&add(&bk, bid, 2), HlcPolicy::Now))
+            .unwrap();
+        for v in 0..n {
+            let m = MeshSetting {
+                name: format!("s{v}"),
+                value: serde_json::json!(v),
+            };
+            a.mint(&gk, Draft::of(&m, HlcPolicy::After(None))).unwrap();
+        }
+        let mut sa = Session::new(Limits::default(), Some(bid));
+        let mut sb = Session::new(Limits::default(), Some(gid));
+        let mut to_b: Vec<_> = sa
+            .start(&a)
+            .into_iter()
+            .filter_map(|x| match x {
+                Action::Send(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let mut to_a: Vec<_> = sb
+            .start(&b)
+            .into_iter()
+            .filter_map(|x| match x {
+                Action::Send(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        let mut batch = None;
+        for _ in 0..50 {
+            for f in std::mem::take(&mut to_a) {
+                for act in sa.on_frame(f, &a) {
+                    if let Action::Send(f) = act {
+                        to_b.push(f);
+                    }
+                }
+            }
+            for f in std::mem::take(&mut to_b) {
+                for act in sb.on_frame(f, &b) {
+                    match act {
+                        Action::Send(f) => to_a.push(f),
+                        Action::Commit(c) => batch = Some(c),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let batch = batch.expect("a commit");
+        let started = Instant::now();
+        b.commit(batch).unwrap();
+        eprintln!(
+            "commit_timing: {n} items of one origin in {:?} (one transaction)",
+            started.elapsed()
+        );
+    }
+}

@@ -12,7 +12,7 @@ Every session reads this file first and updates it at the end (README §1).
 |---|---|---|---|---|---|---|---|---|
 | 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | done | 2026-10-26 | 2026-10-26 | `e746a01`, `df3d8ec`, `f888eb1` | CI `40397253597` (success); macOS service `40397253640` (success) |
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
-| 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | in-progress | 2026-10-27 | | | |
+| 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | done | 2026-10-27 | 2026-10-27 | `1b4c8a2`, `6a8213f` | CI `40554008854` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40554008811` (success) |
 | 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | pending | | | | |
 | 05 | [Node runtime](05-node-runtime.md) | S | M | pending | | | | |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | pending | | | | |
@@ -38,6 +38,8 @@ rule (README §1 step 12).
 | 01 `df3d8ec` | **1,591 passed, 0 failed, 9 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`); of these, 100 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`, 1.7 s) and 5 in `--test mesh_foundations` | unchanged (not touched) | **140 passed** (`bash scripts/smoke.sh`) |
 | 02 `db52154` | **1,643 passed, 0 failed, 10 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`); includes `--test mesh_sim` (200 seeds in ~10 s, replay, per-adversary, 18 regression seeds; soak ignored), 10 `proto` session tests, 32 oracle tests | unchanged (not touched) | **140 passed** (`bash scripts/smoke.sh`) |
 
+| 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
+
 ## Deviations from DESIGN.md
 
 _(Increment, what changed, why, where it's recorded: ADR or doc. Material deviations
@@ -61,12 +63,129 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 02 | **R13** A suspected-forked origin is never streamed on the main path (simulator finding). | A session that died mid-bisection left mixed logs. | ADR R13, PROTOCOL §7.2 |
 | 02 | **R14** The dense-prefix validity rule applies only below an origin's fork point (oracle finding). | Repair delivers a forked device's items without a dot log. | ADR R14, PROTOCOL §5.6 |
 | 02 | **R15** A commit compares every overlapping hash, items and dots, with the dot log, and never extends a disagreeing log (soak finding). | Two concurrent sessions appended two branches. | ADR R15, PROTOCOL §7.2 |
+| 03 | **R16** `seq` ≤ 2^63 − 1 in the codec. | Every accepted seq must fit and sort as SQLite's signed INTEGER; repair skips the gap check, so a member could otherwise sign a seq that makes every SQLite commit fail. | ADR 0031 R16, PROTOCOL §2.1, DESIGN header |
+| 03 | **R17** No SQL view tables: the views are the in-memory `State`, rebuilt from `mesh_items` at open. | Every view value depends on the roster (cutoffs, forks); SQL copies would need full recomputation on each removal or fork, or would duplicate `mesh_items`. Readers fold rows by the `(kind, item_key)` index with `State::apply`. | ADR 0031 R17, PROTOCOL §8.6, DESIGN §D15/§D17 [Amended 03] |
+| 03 | **R18** `MeshStore::{dot_hash, dot_hashes, chain_at, held_items}` return `Result`; a failed read ends the session with `Bye(Unavailable)` (new `ByeReason`). | The dot log is unbounded and lives on disk; an empty read in place of a failed one would stream dots without items. | ADR 0031 R18, PROTOCOL §8.1/§8.6 |
+| 03 | Schema details: `mesh_items` PK `(origin, seq, hash)`, no `hlc` column, `received_at` integer ms, no separate `(kind, item_key)` index (the UNIQUE index serves it); `mesh_self` without `next_seq` (= `vv[self]+1`) and with `genesis_device`; access keys in `mesh_access_keys(epoch, …)`; `mesh_meta.value` is `ANY`; `mesh_publish_cursor` has no FK (06 decides deletion semantics). | Forks hold two items per dot; one source of truth for the next seq; rotation (04) without a migration. | ADR 0031 "Smaller storage decisions", DESIGN §D17 [Amended 03] |
+| 03 | Commits chunk by **whole origins** (never split one origin's range); one origin's range is one transaction. | A split range could log a superseded dot before the item that supersedes it. Measured: 2 000 / 10 000 items of one origin commit in ~12 / ~60 ms (release, FULL + F_FULLFSYNC); the 50 000 maximum extrapolates to ~0.3 s. | ADR 0031, PROTOCOL §8.6, DESIGN §D12 [Amended 03] |
+| 03 | Marker rule made precise: rolled back ⇔ `seq_high_water > vv[self] + 64`; a store not `ok` refuses to mint and does not trust the old mark. | `next_seq` below the mark is the normal state with block allocation. | ADR 0031, PROTOCOL §7.5, DESIGN §D5 [Amended 03] |
+| 03 | AAD binds vault **and** device id (`mesh_*_key(vault_id, device_id)`) / mesh id and epoch (`mesh_access_key(vault_id, mesh_id, epoch)`). | Stronger than vault-only binding: a leftover blob of an earlier identity never opens. | ADR 0031 |
+| 03 | Small, this table only: `identity::init` (not `init_mesh`) behind `UnlockedVault::mesh_init`; `UnlockedVault::mesh_keys` added for 04/05; `MeshError::{Storage, NotInitialized, AlreadyInMesh, IdentityMismatch, InvalidDeviceName, Forked}`; `CoreError::Mesh` is `#[error(transparent)]` (it printed twice in CLI chains); new audit event `mesh_identity_wiped` on restore; `BackupInfo.mesh_wipe` (restore only); `projects_first_schema.rs` no longer pins v20 as current; PROTOCOL §8.4 clarified: rule (a) supersession applies to every kind, the never-deleted list is about rule (b). | Required by what was built or a bug fix. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 03 — Persistence & identity (2026-10-27)
+
+**What landed.**
+- Migration v21 (`db.rs`): 14 tables — `mesh_meta`, `mesh_self`, `mesh_access_keys`,
+  `mesh_items`, `mesh_vv`, `mesh_dots`, `mesh_fork_evidence`, `mesh_peers` (05),
+  `mesh_invites` (04), `mesh_project_bindings` (06), `mesh_publish_cursor` (06),
+  `mesh_cap_escrow` (07/08), `mesh_exchange_log` (04/05), `mesh_share_imports` (11) —
+  plus `gateway_config.cap_enforcement`. All STRICT with CHECKs.
+- `core::mesh::sqlite_store::SqliteStore`, `core::mesh::marker`, `core::mesh::identity`,
+  `core::mesh::sim::sqlite` (the conformance factory).
+- `UnlockedVault::{mesh_init, mesh_status, mesh_keys}`; the restore hook in
+  `backup::restore_backup`.
+- CLI `tethra mesh init [--name]` and `tethra mesh status` (both `--json`).
+- Tests: `tests/mesh_schema.rs`, `tests/mesh_store_conformance.rs`,
+  `apps/cli/tests/mesh_cli.rs`, and unit tests in `sqlite_store`, `identity`,
+  `marker` and `proto`.
+- Smoke has a `-- mesh --` block (11 checks).
+
+**How 04 gets what it needs (load-bearing).**
+- **Keys.** Call `vault.mesh_keys()?`, which returns `identity::MeshKeys`:
+  - `signing_key()` gives the item-signing `&SigningKeyPair`;
+  - `expose_noise_secret()` gives the X25519 static secret, already clamped, and
+    `noise_pub()` its public key;
+  - `expose_access_key()` and `access_epoch()` give the psk0 key and its epoch;
+  - `device_id()`, `mesh_id()` and `genesis_device()` give the ids.
+
+  There is no reauth (D5: the node runs only while unlocked), and the sealing key is
+  never in it. The public keys are derived with `crypto_box`'s X25519
+  (`identity::x25519_public`). **04 should assert that snow's public key for
+  `expose_noise_secret()` equals `noise_pub()`.**
+- **Noise public keys of the roster.** Use
+  `store.state().roster.keys(&device)` → `DeviceKeys { sign_pub, noise_pub, seal_pub }`.
+  They come from `roster.add` items, and `is_active(&d)` is the MESH-SI-2 check. This
+  device's own `noise_pub` is in `mesh_self.noise_pub` / `MeshSelfInfo.noise_pub`.
+- **Opening the store.** Call
+  `identity::open_store(&db_path, &data_dir, clock) -> Option<SqliteStore>`. It opens
+  its own connection via `open_at_current_version`. Run `identity::preflight(&store)`
+  before starting a node: it fails on a bad marker (`IdentityMismatch`) or a fork
+  report naming this device (`Forked`).
+- **The session must handle `ByeReason::Unavailable`** (R18). `proto` already does:
+  `Action::Close(CloseReason::Aborted("local storage error"))`.
+- **Joining** needs a new identity path inside an existing mesh: the keys like
+  `identity::init`, but with the received `mesh_id`/`genesis`/access key and **no**
+  genesis items.
+  - Write the marker (mark 0 is fine) **before** the joiner's first mint; without a
+    marker the store refuses to mint (`Missing`).
+  - Reuse the private helpers in `identity.rs`. They are `x25519_generate`, `random_key`,
+    `delete_mesh_rows` and the `mesh_self` insert, so factor them rather than copying.
+- **`mesh leave`.** `identity::leave_local_wipe(conn, data_dir)` does the local half.
+  The `AlreadyInMesh`, `IdentityMismatch` and `Forked` error texts already tell users to
+  run `tethra mesh leave`, **which 04 must add**.
+
+**Surprises and bugs found (all fixed):**
+1. **Marker trust at open (real bug).** `SqliteStore::open` cached the marker's mark
+   whenever the marker *named* this identity. A rolled-back database still names it,
+   so it would have minted seqs below the cached mark without re-checking — reusing
+   seqs. Now the mark is trusted only when the classification is `ok`. The rollback
+   test exercises the real path (`copies_and_rollbacks_are_detected_and_refuse_to_mint`).
+2. **Harness bug.** A simulated commit crash during the fault-free quiescence phase
+   left a device down for the rest of the run (seed 22 shrank to 457 steps). Now
+   `SimStore::calm()` turns store faults off before the calm rounds, after two
+   explicit crash-prone catch-up rounds (`CRASHY_CATCH_UP_ROUNDS`). Those two rounds
+   are where the large multi-origin commits happen; during the step phase, most
+   sessions abort under network faults.
+3. **`CoreError::Mesh` printed twice** in CLI error chains (`{0}` + `#[from]`); it is now
+   `#[error(transparent)]`.
+
+**Conformance facts.**
+- `SqliteFactory` defaults: chunk size 1 (every origin is its own transaction) and
+  250‰ of splittable commits crash.
+- With crashes off, a SQLite run has **the same trace hash** as a `MemStore` run
+  (`without_crashes_sqlite_runs_are_identical_to_memstore_runs`). The 02 replay hash
+  and the regression seeds are untouched, because the world's RNG stream is unchanged.
+- Release soak: **600 seeds × 2 000 steps with crashes, 0 failing, 172 s**
+  (`MESH_SIM_START=10000 MESH_SIM_COUNT=600 MESH_SIM_STEPS=2000 cargo test --release -p api-tracker-core --test mesh_store_conformance soak -- --ignored`).
+- `thirty_seeds_with_crashes_between_chunks` takes about 13 s locally. Windows CI ran
+  the whole suite green.
+
+**Measured (release, this Mac, `synchronous=FULL` + F_FULLFSYNC):**
+- Committing 500 / 2 000 / 10 000 items of one origin in one transaction takes
+  7.4 ms / 11.9 ms / 60 ms (`mesh_store_conformance::commit_timing`, ignored).
+- Extrapolated, the 50 000-row session maximum is about 0.3 s, a little over D12's
+  ~250 ms. That is the documented cost of never splitting one origin.
+- Each **mint** is its own fsynced transaction: about 5.5 ms each (12 500 mints in
+  about 69 s while setting up that test). If a later increment mints many items at
+  once (the 06 publisher), give it a batch-mint path that uses one `write`.
+
+**Environment gotchas.**
+- `scripts/smoke.sh` now runs 151 checks, and the `migration_safety` pin (`ok. 9`) holds.
+- **Flaky, unrelated test.** `git_execution_canaries::each_canary_is_armed_against_unhardened_git`
+  failed once ("clean/smudge filters" did not fire against unhardened git), then passed
+  5/5 on rerun. It drives real `git`, so it looks like a racy-git stat timing issue. It is
+  not mesh code; rerun it before treating it as a regression.
+- Python heredocs used to edit Rust swallow `\`-newline string continuations. Check
+  any multi-line Rust string after editing it that way.
+- A Bash call containing `rm -rf "$(…)"` is refused whole by the harness's safety
+  check, including any edits earlier in the same call. Remove temp dirs by literal path.
+- The CI-toolchain clippy target dir for this session was
+  `<scratchpad>/target199` (rebuilds from scratch in about 3 min).
+
+**Not done / honest list.**
+- Nothing in 03's scope was moved.
+- `mesh doctor` and `--rebuild` belong to 05. The building blocks exist:
+  `SqliteStore::{rebuild_views, verify_against_disk, rematerialize}` and
+  `identity::preflight`.
+- "A forked node refuses to run" exists as `preflight`. The node that calls it is 05.
+- The device name defaults to the `hostname` command (or `COMPUTERNAME`) and falls back
+  to `this-device`. 04 may want a prompt.
 
 ### Increment 02 — Sans-IO protocol & simulator (2026-10-26/27)
 
