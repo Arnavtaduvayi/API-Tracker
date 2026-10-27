@@ -6,11 +6,11 @@ cloud of any kind. Decision record: [ADR 0031](../decisions/0031-device-mesh.md)
 Normative protocol: [PROTOCOL.md](PROTOCOL.md).
 
 > **Status.** In development on `feat/device-mesh`, built in twelve increments
-> (`increments/STATUS.md`). As of Increment 01 the pure foundations exist in
-> `crates/core/src/mesh/` — identifiers, version vectors, the hybrid logical
-> clock, the canonical item codec, Ed25519 item signing, typed payloads and the
-> four CRDTs — with no user-visible commands yet. Each section below says what
-> is implemented and what is specified.
+> (`increments/STATUS.md`). As of Increment 02 `crates/core/src/mesh/` holds the
+> pure foundations (Increment 01) and the replication protocol as a sans-IO
+> state machine over an in-memory store, proven by a deterministic simulator
+> against an independently written oracle. There are no user-visible commands
+> yet. Each section below says what is implemented and what is specified.
 
 ## Vocabulary
 
@@ -75,7 +75,11 @@ Nothing outside this table ever replicates.
 | `mesh::kinds` | implemented (01) | typed payloads for every v1 kind |
 | `mesh::crdt` | implemented (01) | LWW map, owner counter, roster, bounded counter |
 | `mesh::sim::rng` | implemented (01) | seeded `SplitMix64` for tests and the simulator |
-| `mesh::proto`, `store`, `memstore`, `views`, `sim` world + oracle | specified, lands in 02 | anti-entropy state machine, in-memory store, views, simulator |
+| `mesh::proto` | implemented (02) | the anti-entropy session as a pure state machine (frames, staging, prefix commits, dot hashes, repair, fork bisection, rollback notice) |
+| `mesh::store`, `mesh::memstore` | implemented (02) | the `MeshStore` trait and its in-memory implementation (dot logs, chains, atomic commit, mint) |
+| `mesh::chain` | implemented (02) | dot chains and per-origin digests |
+| `mesh::views` | implemented (02) | the CRDT containers every stored item feeds, `rebuild`, and the comparable state |
+| `mesh::sim::world`, `oracle`, `oracle_api` | implemented (02) | the deterministic simulator and the independent oracle (feature `mesh-sim`) |
 | `mesh::sqlite_store`, `identity` | specified, lands in 03 | SQLite store (migration v21), keys wrapped under the vault key |
 | `crates/mesh` | specified, lands in 04-05 | Noise transport, pairing, node runtime |
 | `mesh::publish`, `caps`, `share` | specified, lands in 06, 07-08, 11 | usage publisher, spend caps, credential shares |

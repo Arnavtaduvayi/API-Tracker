@@ -804,6 +804,11 @@ used. The list below is the original brief:
   - `mesh_cap_escrow(id PK, cap_id, month, to_device, amount_micros, state ∈ {pending,acked,published,cancelled}, acked_generation, created_at, updated_at)`.
   - `mesh_exchange_log(id INTEGER PK, peer_device, at, direction, items_in, items_out, result, error)`: bounded to the last 1 000 rows; drives "last exchanged".
   - `mesh_fork_evidence(origin, seq, hash_a, hash_b, seen_at, PK(origin, seq))`.
+  - **[Added 02, R13/R14/R15]** PROTOCOL.md §7.2 and §5.6 rule 4 add three rules the
+    simulator and oracle forced: never stream a suspected-forked origin on the main path;
+    judge items at or above an origin's fork point without the dense-prefix rule; and at
+    commit, compare every hash for an already-logged dot (items and dots) with the dot
+    log and never extend a log that disagrees. `SqliteStore` (03) must do the same.
   - **[Added 02, R9]** `mesh_dots(origin, seq, hash, chain, PK(origin, seq))`: the dot
     log and chain (PROTOCOL.md §7.1). One row per accepted dot, written in the same
     transaction as the commit or mint that covers it; never pruned below the VV.

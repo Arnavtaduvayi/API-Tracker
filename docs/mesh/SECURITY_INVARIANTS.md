@@ -21,10 +21,13 @@ NN)** otherwise.
 - **MESH-SI-2 No mesh data before authentication.** No mesh data is accepted or
   sent before a Noise handshake completes with an **active** roster device's
   static key (PROTOCOL §6.4), or with a valid pairing token.
-  *Status:* partial (01): the roster's `is_active` rule exists. Transport lands
-  in 04. *Tests:* `crdt::roster::tests::removal_cuts_off_later_items_but_keeps_earlier_ones`
-  and `a_fork_cuts_the_forked_origin_off_at_the_fork_point` (a removed or forked
-  device is not active); transport tests in 04.
+  *Status:* partial (02): the roster's `is_active` rule, the session's check
+  that the `Hello` names the authenticated peer, and the simulator's rule that
+  devices only exchange with peers they consider active. The Noise transport
+  lands in 04. *Tests:* `crdt::roster::tests::removal_cuts_off_later_items_but_keeps_earlier_ones`,
+  `a_fork_report_cuts_the_forked_origin_off_at_the_fork_point`,
+  `proto::tests::a_different_mesh_or_peer_is_refused_with_bye`; transport
+  tests in 04.
 - **MESH-SI-12 No third parties.** No Tethra server, relay, rendezvous or
   third-party NAT service. *Enforced by:* there is no such code; reachability is
   the user's LAN or VPN. *Status:* implemented (01) as a design rule.
@@ -37,7 +40,10 @@ NN)** otherwise.
   domain-separated message and verified (strictly) before it is stored; the
   stored bytes are exactly the received bytes; a body has one canonical
   encoding. *Status:* implemented (01) for signing, verification and the codec;
-  storage lands in 02/03. *Tests:*
+  (02) for ingest: every received item passes the ordered checks of PROTOCOL
+  §3.3 before it is staged. *Tests:* `mesh_sim::ci_200_seeds` and
+  `each_adversary_alone_is_exercised_and_defended` (simulator invariant 6:
+  forged-origin and huge-seq injections are never stored or committed),
   `mesh_foundations::flipping_any_byte_of_body_or_signature_fails_verification`,
   `mesh_foundations::roster_built_from_signed_items_drives_verification_and_admission`
   (forged origin refused), `mesh_foundations::wrong_mesh_wrong_key_oversize_and_unknown_field_are_refused`,
@@ -46,17 +52,26 @@ NN)** otherwise.
   `codec::tests::non_canonical_encodings_are_refused`,
   `codec::tests::encoding_is_deterministic_over_10k_random_bodies`.
 - **MESH-SI-4 Commit-only VV.** A version-vector entry advances only in the
-  transaction that stores every item it covers. *Status:* specified (lands in
-  02, SQLite in 03). *Tests:* none yet (simulator invariant 1; store
-  conformance).
+  transaction that stores every item it covers. *Status:* implemented (02) in
+  `MemStore::commit` (validate everything, then apply) and the session (one
+  commit per session, only after a `Commit` whose count and batch hash match);
+  SQLite in 03. *Tests:* `proto::tests::a_dead_sender_leaves_nothing_half_applied`,
+  `a_commit_that_does_not_match_the_items_aborts_and_applies_nothing`,
+  `mesh_sim::ci_200_seeds` (invariant 1, under crashes and dropped frames).
 - **MESH-SI-5 No identity reuse.** A restored backup wipes mesh identity; a
   clone/rollback marker mismatch or a fork stops the node. *Status:* partial
-  (01): fork cutoffs exist in the roster. Marker and restore wipe land in 03,
-  fork detection in 02. *Tests:*
-  `crdt::roster::tests::a_fork_cuts_the_forked_origin_off_at_the_fork_point`.
+  (02): forks are detected by dot-log chains and reported at their true
+  divergence point; rollbacks get a `RollbackNotice`. Marker, restore wipe and
+  "a forked node refuses to run" land in 03/05. *Tests:*
+  `mesh_sim::ci_200_seeds` (invariant 5 with cloned data directories),
+  `proto::tests::a_device_behind_its_own_history_gets_a_rollback_notice`.
 - **MESH-SI-8 Bounds.** Every frame, batch, stage, session, rate and transaction
-  is bounded (PROTOCOL §11). *Status:* partial (01): items ≤ 64 KiB, bodies,
-  payload depth, `kind` and `key` lengths. *Tests:*
+  is bounded (PROTOCOL §11). *Status:* partial (02): items, bodies, payload
+  depth, `kind`/`key` (01); per session ≤ 50 000 staged items and dots,
+  batches ≤ 512 items, frames ≤ 1 MiB, a 50 000-seq gap bound, 10 000 items per
+  origin per hour, `ChainQuery` ≤ 64 seqs (02, `proto::Limits`). Concurrency and
+  timeouts land in 04-05. *Tests:* `mesh_sim::ci_200_seeds` (invariant 8),
+  `proto::tests::frames_have_the_documented_json_shape`,
   `codec::tests::oversize_is_refused_both_ways`, `codec::tests::depth_limit`,
   `codec::tests::envelope_field_validation`,
   `item::tests::short_and_oversize_wire_items_are_refused`.

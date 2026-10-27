@@ -107,8 +107,11 @@ Enable it in core tests through a self dev-dependency, following the
   3. **Incremental views = rebuild** on every node.
   4. **Removal exclusion.** Nothing above a removed origin's cutoff contributes to shared
      LWW values on any node at quiescence.
-  5. **Fork detection.** At quiescence every node's roster records every forked
-     origin at its true divergence seq (via a replicated `fork.report`, PROTOCOL.md §7),
+  5. **Fork detection.** At quiescence every node in contact records every forked
+     origin in contact with a fork seq f where true divergence ≤ f ≤ the divergence
+     visible among devices in contact (amended during 02: the earliest divergent dots
+     may never reach a device in contact, and a cut-off device's earlier report stays
+     valid). Recording is via a replicated `fork.report` (PROTOCOL.md §7),
      and no item of it at or above that seq is admitted. Amended in 02's contract: a
      forked origin's items keep relaying (like a removed origin's), because refusing
      them breaks convergence.

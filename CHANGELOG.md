@@ -6,6 +6,35 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh replication protocol and simulator (in development)
+
+The next layer of **Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md))
+is in the shared Rust core. Two devices can now run a complete replication
+exchange: they swap version vectors, stream only what the other lacks, and
+apply it in one all-or-nothing commit. A dropped connection, an out-of-order
+frame or a lying peer leaves nothing half-applied. Nothing is user-visible yet:
+storage on disk, the network transport and the commands come in the next
+increments.
+
+- **Cloned data directories are caught.** If a copied data directory (a Time
+  Machine restore, a copied folder) keeps running beside the original, the two
+  devices' histories diverge. Every device keeps a hash chain of each other
+  device's history. When two diverging histories meet, the first differing
+  record is found in a few round trips and a signed report spreads to every
+  device. The clone's later records then stop counting.
+- **Proved under failure.** A deterministic simulator runs real devices
+  through dropped, duplicated and reordered messages, partitions, crashes,
+  clock skew, joins, removals, forged records, replays and clones. After every
+  run it checks nine invariants, including that every device ends up with
+  exactly the state an **independently written model** of the specification
+  predicts, and that spend-cap rights are never overspent. 200 runs execute in
+  every CI build. Any failure prints a seed that replays it exactly, and
+  `scripts/mesh_soak.sh` runs long soaks.
+- Building the simulator and the independent model exposed four places where
+  the written protocol was incomplete or could not converge. Each is fixed in
+  the specification ([docs/mesh/PROTOCOL.md](docs/mesh/PROTOCOL.md) §13) and
+  recorded in the ADR.
+
 ### Added — Tethra Mesh foundations (in development)
 
 Work has started on **Tethra Mesh**: replicating usage, shared projects and
@@ -25,8 +54,8 @@ shared Rust core:
 - a hybrid logical clock that accepts a device with a wrong clock but flags it,
   and never lets it drag your other devices' clocks into the future;
 - the four replicated data types the mesh is built from — last-writer-wins
-  values, per-device counters, the device roster (removal, fork and key-conflict
-  rules) and a bounded counter for spend-cap rights that refuses to let one
+  values, per-device counters, the device roster (removal and fork rules, with device ids
+  derived from each device's keys) and a bounded counter for spend-cap rights that refuses to let one
   device create rights out of nothing — each proved commutative, associative
   and idempotent over at least 10 000 seeded cases.
 

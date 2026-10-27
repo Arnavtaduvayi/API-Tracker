@@ -189,6 +189,8 @@ Ed25519 is deterministic, one body signed by one key always yields one item.
 
 ### 3.3 Ingest checks
 
+**Status: implemented (01 for checks 1-3 and 5; 02 for 4, 6-8 and prefix commits, `mesh::proto`)**
+
 A receiver MUST apply these checks in order. Any failure rejects the item: it
 is not stored, it is counted in `mesh_meta.rejected_items`, and the receiver's
 VV MUST NOT advance past it.
@@ -393,6 +395,16 @@ One instance per `(cap_id, month)` (UTC calendar month). Amounts are micro-USD.
   `R[i][burn] + x`; `mint(i, x)` writes `R[i][i] + x`. Who may mint is policy
   (Increment 07). The gateway's bounded overshoot (MESH-SI-9) is a separate,
   explicit path (Increment 08).
+- **Reported figures.** `clamped(i)` = Σ over `i`'s outgoing entries (burn
+  included) of `amount − honoured`; `total_minted` = Σ `R[i][i]` over admitted
+  entries (overrides included); `total_burned` = Σ honoured burns;
+  `total_used` = Σ `U[i]` over admitted entries.
+- **Collusion.** The budget counts *raw* incoming amounts, so two colluding
+  devices can pass on rights neither held: `M` (unfunded) writes `R[M][A]`, and
+  `A`, if it is also malicious, spends or forwards it. One malicious device
+  cannot (an honest recipient checks its own clamped `avail` before spending
+  or forwarding). Any device can also self-mint a labelled override, so
+  colluding devices gain nothing they could not get openly.
 - **Invariant** (honest operation, any partitions, any merge order):
   `Σ_i U[i] ≤ Σ minted − Σ burned`, and `avail(i) ≥ 0` for every device; with
   gateway overshoot, `Σ U` may exceed that by at most one request's cost per cap
@@ -418,7 +430,7 @@ And if M wrote `R[M][burn] = 40`, `R[M][Z] = 50`, `R[M][A] = 50` with a budget o
 
 ### 5.6 Views: the comparable state
 
-**Status: specified, lands in 02** — `mesh::views`, `mesh::sim::oracle_api::ExpectedState`
+**Status: implemented (02)** — `mesh::views`, `mesh::sim::oracle_api::ExpectedState`; checked against the independent oracle (`mesh::sim::oracle`) by the simulator
 
 What a device shows — and what every device converges to — is a pure function
 of the **valid items** it holds. Start from all valid items; for every
@@ -447,9 +459,25 @@ oracle) must judge them:
    and block nothing.
 3. Its kind is unknown (opaque: valid, never materialized), or it parses
    (§2.4).
-4. If an origin ever signed an item that passes 1-2 but fails 3, at seq `s`,
-   then none of that origin's items at seq `s` or above are valid (§3.3: no
-   honest device can commit past it).
+4. **Dense prefix.** For each origin, let `g` be the lowest seq at which it
+   has two different items passing 1-3 (its ground-truth fork point; ∞ if
+   none), and `s*` the smallest seq `≥ 1` at which it has **no** item passing
+   1-3. If `s* < g`, none of the origin's items at `s*` or above are valid:
+   main-path commits need a hash for every dot (§8.2), so no device can commit
+   past a gap — whether the gap is a seq the origin never signed (a forged huge
+   seq) or one it signed with an invalid payload (§3.3). Items at or above `g`
+   need only pass 1-3: after a fork they travel by repair (§8.5), which needs
+   no dot log. (Amended in 02: the oracle caught a forked device's own
+   `fork.report` that every device held via repair while this rule, applied to
+   all seqs, discarded it.)
+
+**What converges.** The target is over items that can reach the devices still
+talking to each other. An item that never left a device which every other
+device now refuses (a removed or forked device, §6.4) can affect nobody, so a
+model of "every item ever minted" must leave such items out of entries and
+fork evidence. They still fill their seq for rule 4: their origin signed them,
+and a later item's commit carries their hash as a dot. (The simulator tells
+its oracle which items these are, through `OracleModel::observe_unreached`.)
 
 **Forks** in the converged state: an origin's fork seq is the minimum over
 (a) admitted-by-known `fork.report` entries about it (§6.3) and (b) the lowest
@@ -513,9 +541,15 @@ A pure function of the state, in this fixed order (so nothing is circular):
    devices that remove each other concurrently are both removed, a removed or
    forked device's removes still count (a compromised member can remove others;
    recovery is re-pairing), and removal is forever.
-4. **Members**: step 1 again, but an add counts only if it is admitted at its
-   own seq: below its origin's fork seq and at or below its origin's cutoff. A
-   removed or forked device's later adds bring no one in.
+4. **Members**: step 1 again — starting from `{genesis}` exactly as step 1
+   does, whatever the genesis's own cutoff or fork seq — but an add of any
+   other device counts only if it is admitted at its own seq: below its
+   origin's fork seq and at or below its origin's cutoff. A removed or forked
+   device's later adds bring no one in. (Clarified in 02: whether the genesis's
+   own items count is decided by admission, §6.4, not by membership.)
+
+A device is **removed** when a counting remove names it — even an id that is
+not known (shares addressed to it are then hidden, §5.6).
 
 ### 6.4 Admission
 
@@ -551,7 +585,7 @@ Genesis G. Each line is an item `origin seq: content`.
 
 ## 7. Forks and rollback
 
-**Status: specified, lands in 02 (detection) and 03 (marker)**
+**Status: implemented (02) for §7.1-7.4 — `mesh::chain`, `mesh::proto`, `mesh::memstore`; the clone marker (§7.5) lands in 03**
 
 ### 7.1 Dot logs and chains
 
@@ -580,8 +614,20 @@ every later one, so the first difference can be found by bisection.
   and `ChainReply { origin, entries: [[seq, chain, hash]] }`, narrowing
   `(lo, hi]` — chains equal at `lo`, different at `hi` — until `hi = lo + 1`.
   The fork seq is `hi`; the two hashes at `hi` are its own and the peer's.
-- A direct collision also proves a fork: an item arriving with the same dot as
-  an entry in the dot log but a different hash.
+- A direct collision also proves a fork: an item **or a dot hash** arriving for
+  a dot already in the dot log but with a different hash. At commit a receiver
+  MUST compare every hash the batch carries for an already-logged dot — the
+  batch may overlap its log, because another session can extend the log after
+  this session's `Hello` was compared — and on a mismatch MUST NOT extend that
+  origin's log in this commit (its items still apply as entries). Otherwise two
+  concurrent sessions append two branches one on top of the other. (Found by
+  the simulator's soak in 02.)
+- A device whose chain for `o` disagrees with the peer's MUST NOT stream `o`'s
+  items on the main path in that session (repair still applies, §8.5). Otherwise
+  a session that dies after the peer commits them, but before the bisection
+  finishes, leaves the peer with a log that mixes two branches and no report —
+  and comparisons between mixed logs find the fork late or never. (Found by the
+  simulator in 02.)
 - On detection a device mints `fork.report { key: o, seq, hash_a, hash_b }`
   unless its roster already records a fork of `o` at that seq or lower. The
   report replicates like any item; every device applies it (§6.3).
@@ -624,7 +670,7 @@ before any seq above the mark is used. A missing or mismatched marker, or
 
 ## 8. Replication sessions
 
-**Status: specified, lands in 02 (state machine) and 04 (transport)** — `mesh::proto`
+**Status: implemented (02) as a pure state machine — `mesh::proto` over the `mesh::store::MeshStore` trait (`mesh::memstore::MemStore`); the Noise transport lands in 04**
 
 ### 8.1 Frames
 
@@ -780,8 +826,9 @@ replicate.
 
 ## 11. Bounds
 
-**Status: specified, lands in 02-05 (MESH-SI-8)**; the per-item bounds are
-implemented (01).
+**Status: partly implemented (MESH-SI-8).** Per-item bounds (01); per-session
+staging, batch, frame, gap, rate and query bounds (02, `mesh::proto::Limits`);
+concurrency, timeouts and handshake rates land in 04-05.
 
 | Bound | Value |
 |---|---|
@@ -846,3 +893,14 @@ Increment 02 (ADR 0031 R8-R12):
     of `(kind, scope)` buckets exchanged in `RepairDigest`/`RepairWant`;
     `Want` is not used.
 12. **Frames carry a per-direction sequence number `n`** (§8.1).
+13. **A suspected-forked origin is never streamed on the main path** (§7.2).
+    Found by the simulator: a session that died between the peer's commit and
+    the end of the bisection left a log mixing two branches and no report.
+14. **The dense-prefix validity rule applies only below an origin's fork
+    point** (§5.6 rule 4). Found by the oracle: after a fork, a forked device's
+    items (including its own `fork.report`) reach others by repair, without a
+    dot log.
+15. **Commits compare every overlapping hash with the dot log** (§7.2), items
+    and dot hashes alike, and never extend a log that disagrees. Found by the
+    release soak: two concurrent sessions, each compared at `Hello` against
+    the same prefix, appended two branches one on top of the other.

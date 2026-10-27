@@ -53,6 +53,20 @@ change it.
 
 It implements `MeshStore` on a `rusqlite::Connection` the node owns.
 
+- **Match `MemStore` exactly** (added by 02): `MemStore` is the reference
+  implementation of `MeshStore`, and the conformance suite compares against it. In
+  particular, `commit` must:
+  - validate the whole batch before writing anything;
+  - compare **every** hash the batch carries for an already-logged dot, items and dot
+    hashes alike, with `mesh_dots`;
+  - on a mismatch, record fork evidence and not extend that origin's log (its items
+    still apply as entries);
+  - require a hash for every dot it appends;
+  - never touch the VV, the dot log or the chain for repair items.
+
+  `mint` validates the payload, signs, and extends the log in one transaction. The
+  store owns the `HlcClock`, since `hlc_high_water` must persist with each mint, and
+  the per-origin hourly ingest counts.
 - **`commit`** runs in **one** `BEGIN IMMEDIATE` transaction: insert items
   (`INSERT OR IGNORE` plus a hash comparison for fork evidence), garbage-collect
   superseded rows, update the views, advance `mesh_vv`. Chunk large commits so each

@@ -52,11 +52,141 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 01 | **R6** Genesis device id is a mesh parameter carried in `PairAccept`. | A self-add proves nothing alone. | ADR 0031 R6, PROTOCOL §9, DESIGN D10, increment 04 |
 | 01 | **R7** `local_write_ts` lifts the write but not the clock; simulator invariant 9 reworded. | Keeps a device's clock within `now + MAX_DRIFT` of observations. | ADR 0031 R7, PROTOCOL §4, increment 02 |
 | 01 | Small: payload structs live in `mesh/kinds.rs` (not `item.rs`); `encode_body` returns `Result` (floats/oversize/invalid fields are errors); `SignedItem::verify` plus `verify_with`/`decode_unverified`; `DeviceId::MIN/MAX`; extra id types (`MeshProjectId`, `CapId`, `ShareId`, `CredentialRef`). | Smaller modules; an infallible encoder would have to accept invalid bodies. | this table |
+| 02 | **R8** Device ids are derived from the three public keys (BLAKE3 derive-key, 16 bytes). | Random ids allowed key-conflict re-adds whose resolution (banning) cannot converge: whether a banned device's own adds were stored depends on timing. | ADR 0031 R8, PROTOCOL §6.1, DESIGN D5 |
+| 02 | **R9** Fork detection uses per-origin dot logs and hash chains compared at `Hello`, bisected with `ChainQuery`/`ChainReply`. Forks are recorded as replicated `fork.report` items (new kind), and a forked origin is repaired in full. | Latest-only storage makes dot-collision detection incomplete. | ADR 0031 R9, PROTOCOL §7, DESIGN D5/D6/D17 (`mesh_dots`) |
+| 02 | **R10** A known kind with an invalid payload is rejected at ingest; the valid prefix is kept. | Storing it unmaterialized lets it supersede valid entries on some devices only. | ADR R10, PROTOCOL §2.4/§3.3 |
+| 02 | **R11** Repair compares per-origin digests in `Hello`. `Want`, `RepairDigest` and `RepairWant` are unused. | Simpler; per-origin granularity is what fork repair needs. | ADR R11, PROTOCOL §8.5 |
+| 02 | **R12** Frames carry a per-direction sequence number `n`. | Reordered, duplicated or dropped frames end the session. | ADR R12, PROTOCOL §8.1 |
+| 02 | **R13** A suspected-forked origin is never streamed on the main path (simulator finding). | A session that died mid-bisection left mixed logs. | ADR R13, PROTOCOL §7.2 |
+| 02 | **R14** The dense-prefix validity rule applies only below an origin's fork point (oracle finding). | Repair delivers a forked device's items without a dot log. | ADR R14, PROTOCOL §5.6 |
+| 02 | **R15** A commit compares every overlapping hash, items and dots, with the dot log, and never extends a disagreeing log (soak finding). | Two concurrent sessions appended two branches. | ADR R15, PROTOCOL §7.2 |
+| 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 02 — Sans-IO protocol & simulator (2026-10-26/27)
+
+**What landed** (all in `crates/core/src/mesh/`, still pure and sans-IO):
+- `chain` (dot chains and origin digests).
+- `store` (the `MeshStore` trait, `GenesisInfo`, `CommitBatch`, `ForkEvidence`, `Draft`,
+  `HlcPolicy`, `Stats`).
+- `memstore` (the reference store).
+- `views` (the CRDT containers, `rebuild`, `State::expected`).
+- `proto` (the session).
+- `sim::{world, oracle, oracle_api}`.
+- `crates/core/tests/mesh_sim.rs` and `scripts/mesh_soak.sh`.
+- The contract changes: key-derived ids, `fork.report`, and the roster without
+  conflicts.
+
+**`MeshStore` surface that 03's `SqliteStore` must implement:**
+- `genesis()`, `self_id()`, `vv()`, `state() -> &views::State` (keep an in-memory
+  `State`, rebuilt at open), `stats()`;
+- `dot_hash(o, s)`, `chain_at(o, s)` (seq 0 = zero), `origin_digest(o)`;
+- `held_items(o, from_excl, to_incl)` (seq order; forks can hold two per dot);
+- `ingest_rate_used(o)`, `now_ms()`, `hlc_last()`;
+- `commit(CommitBatch) -> CommitOutcome`, `mint(&SigningKeyPair, Draft)`,
+  `record_rejected(n)`.
+
+`MemStore` is the reference. Copy its validate-then-apply commit, including the R15
+overlap comparison, exactly; the 03 file now spells this out.
+
+**The oracle** (`sim/oracle.rs`, 1 860 lines, 32 tests):
+- **Isolation.** It was written by an isolated subagent from PROTOCOL.md alone. Its
+  imports show it never used `crdt`, `views`, `proto`, `memstore` or `world`.
+- **Tooling quirk.** The agent's worktree was created from `main` (5ec8198), not this
+  branch. The agent therefore built from a read-only `git archive` export of `a9fddeb`
+  in the session scratchpad, and the file was copied in by the orchestrator.
+- **Ambiguity report** (13 items) and how each was resolved:
+  - 1, 4-8, 11 and 12: the oracle's literal reading equals the implementation's; no
+    change.
+  - 2: moot under the amended rule 4.
+  - 3 (genesis membership when its self-add is cut off): the spec was clarified to the
+    implementation's reading (the genesis is always a member once its self-add
+    exists), and the oracle was changed to match.
+  - 9: definitions of `clamped` and the totals were added to §5.5.
+  - 10: the collusion caveat was added to §5.5.
+  - 13: the stale `kinds.rs` doc comment was fixed.
+  - Its `oracle_api` note: the `Mutex` for its cache is fine.
+
+**Oracle/implementation disagreement log** (the evidence the oracle earned its keep):
+1. **29/200 seeds, harness bug.** The simulator's "lost item" filter dropped items
+   superseded before sending whose dot hashes did travel, so the oracle saw gaps.
+   *Fix:* an item is lost only if neither it nor its dot hash reached a device in
+   contact.
+2. **Seed 163, spec bug (R14).** A forked device's own `fork.report` arrives by repair,
+   and the dense-prefix rule discarded it in the oracle. *Fix:* rule 4 applies only
+   below the fork point; the oracle was changed, and a test was added
+   (`above_its_fork_point_a_forked_origin_needs_no_dense_prefix`).
+3. **5 soak seeds, contract gap.** The forked device's superseded items never reached
+   contact even as dots, so the oracle saw a gap below a report that devices held.
+   *Fix:* the contract gained `observe_unreached` (the item fills its dot for rule 4
+   and nothing else); the oracle implements it; PROTOCOL §5.6 "What converges" says
+   so.
+
+**Simulator-found bugs without the oracle:**
+- **Harness bugs:** the partition table was indexed by later joiners; the fork
+  "truth" was taken from lost items; the fork invariant wrongly owed detection for
+  out-of-contact devices.
+- **Protocol bugs:**
+  - **R13** (seeds 1000, 1004, 1178): a mid-bisection abort mixed logs.
+  - **R15** (soak seeds 1008759, 1011053, 1018365 and others): concurrent sessions
+    appended two branches.
+
+**The final fork invariant** is a range: true divergence ≤ recorded ≤ divergence
+visible among devices in contact. It is never early, never later than can be seen,
+and allows a valid earlier report from a device that has since been cut off. The
+increment file had "exactly the divergence"; the range is the provable property.
+
+**Regression seeds** (`mesh_sim::regression_seeds`):
+- 4, 15, 34, 163, 1000, 1004 and 1178 at 2 000 steps;
+- 1008114, 1008759, 1011053, 1012130, 1015682, 1016234, 1017206, 1017426, 1018365,
+  1019427 and 1021656 at 3 000 steps.
+
+**Each defence disabled → the simulator fails** (seeds 0-199 × 2 000 steps, first
+failure; not committed):
+| Mutation | First failure |
+|---|---|
+| M1: signature check in `proto::check` removed | `MESH_SIM_SEED=0`, invariant 6 (node committed a forged item) |
+| M2: supersession check in `MemStore::apply_entry` removed | `MESH_SIM_SEED=1`, the replay check (replaying an accepted item changed the store) |
+| M3: `Hello` chain comparison off | no failure in 200 seeds: the commit-time overlap check (R15) catches forks too |
+| M3b: chain comparison, commit overlap check and repair collision check all off | `MESH_SIM_SEED=4`, invariant 1 (a forked origin's item is held outside the log) |
+| M4: gap check, session completeness and store completeness off | `MESH_SIM_SEED=2`, invariant 8 (a session staged 50 001) |
+| M5: drift clamp in `HlcClock::observe` removed | `MESH_SIM_SEED=0`, invariant 9 (clock beyond now + drift) |
+
+The mid-session-crash defence (Commit-only application) is shown by
+`proto::tests::a_dead_sender_leaves_nothing_half_applied` and by crashes in every seed.
+
+**Purity** (acceptance):
+`grep -nE "std::net|std::fs|SystemTime|std::thread|thread::|Instant|TcpStream|File::"`
+over `proto.rs`, `views.rs`, `store.rs`, `memstore.rs`, `chain.rs` and `crdt/*.rs`
+gives no matches (exit 1).
+
+**Replay determinism.** `MESH_SIM_SEED=12345 MESH_SIM_STEPS=2000` gives trace hash
+`48ed5b75e81cb919…`, identical over two runs (the `replay` test asserts it).
+
+**Soaks** (`scripts/mesh_soak.sh`, release):
+1. 22 000 seeds × 3 000 steps from 1 000 000 in 1 403 s: 11 failing seeds, all fixed
+   (R15, the fork-invariant range and the `observe_unreached` contract) and now
+   regression tests.
+2. After the fixes, 10 minutes from 2 000 000: **58 000 seeds × 3 000 steps in 606 s, 0 failing** (`bash scripts/mesh_soak.sh --minutes 10 --start 2000000 --batch 2000`).
+
+**Environment notes.**
+- `ci_200_seeds` takes about 10 s on 10 cores; expect 25-40 s on CI's 4 cores.
+- The oracle's `expected()` takes about 8 ms over 2 000 items.
+- Debug sign/verify costs about 51/77 µs with the crypto-only `opt-level = 3` override
+  in the workspace `Cargo.toml`, against 205/315 µs without it.
+
+**Left for later increments:**
+- 03: the SQLite store, the clone marker, the restore wipe, "a forked node refuses to
+  run".
+- 04: transport, session concurrency and timeouts.
+- 07: cap-policy views (owner labels and overrides; who may mint).
+
+The `cap.def` conflict rule and the `share.*` ordering are specified and implemented
+(§5.6), not deferred.
 
 ### Increment 01 — Foundations & decision (2026-10-26)
 

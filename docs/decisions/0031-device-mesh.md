@@ -170,6 +170,28 @@ not converge. Each is resolved below and in `docs/mesh/increments/DESIGN.md`.
 * **R12 — Frames carry a per-direction sequence number**, so any reordered,
   duplicated or dropped frame ends the session instead of being misapplied.
 
+### Decisions forced by the simulator and the oracle (Increment 02)
+
+* **R13 — Never stream an origin whose chains disagree.** The simulator found
+  seeds where a session died after the peer committed a second branch's items
+  but before the fork bisection finished, leaving a log that mixed both
+  branches and no report; later comparisons then found the fork late or never.
+  A suspected-forked origin now travels by repair only, which never touches a
+  dot log, so the detection guarantee holds.
+* **R14 — The dense-prefix validity rule applies only below an origin's fork
+  point.** The independent oracle disagreed with every device about a forked
+  device's own `fork.report`: devices held it (repair needs no dot log), while
+  the rule, applied to every seq, discarded it. The spec now matches what can
+  be implemented: at or above the fork point items need only be signed and
+  well-formed.
+* **R15 — A commit compares every hash it carries for an already-logged dot
+  with the dot log, and never extends a log that disagrees.** The release soak
+  (22 000 seeds) found the race: two concurrent sessions at one device each
+  passed the `Hello` chain comparison against the same prefix, and the second
+  commit appended its branch on top of the first. Superseded items travel as
+  dot hashes, so the comparison must cover dots, not only items. The 11 seeds
+  are now regression tests.
+
 ### Dependencies
 
 | Crate | Version | Increment | Why |
