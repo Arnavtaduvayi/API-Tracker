@@ -107,6 +107,10 @@ fn a_node_finds_a_peer_through_discovery_alone_and_ignores_strangers() {
     let a_port = na.listen_addrs()[0].port();
     let b = vault();
     join_via(&a, &na.listen_addrs()[0].to_string(), &b, "dev-b");
+    // Joining recorded the invite's address as a peer; forget it, so only
+    // discovery can lead B to A.
+    let a_addr = na.listen_addrs()[0].to_string();
+    assert!(b.vault.mesh_peer_remove(&a_addr).unwrap().is_some());
     // A stranger on the same network, announcing with another key.
     net.inject(
         "stranger",

@@ -113,12 +113,12 @@ pub fn join(
     // A failure on the way (nothing listening, a different service, a
     // handshake that does not complete) moves on to the next; a refusal from
     // the inviter, or a malformed reply, ends the attempt.
-    let socks: Vec<std::net::SocketAddr> = addrs
+    let socks: Vec<(&String, std::net::SocketAddr)> = addrs
         .iter()
-        .filter_map(|a| a.to_socket_addrs().ok())
+        .filter_map(|a| a.to_socket_addrs().ok().map(|s| s.map(move |x| (a, x))))
         .flatten()
         .collect();
-    for sock in socks {
+    for (addr, sock) in socks {
         let (reader, writer, remote, reply) = match attempt(sock, hint, &psk, &pending, limits) {
             Ok(r) => r,
             Err(e @ (NetError::Io(_) | NetError::Handshake(_) | NetError::Refused(_))) => {
@@ -142,6 +142,19 @@ pub fn join(
         let node = MeshNode::open(vault, clock, limits)?;
         let report = exchange(&node, reader, writer, accept.inviter, Direction::Outbound);
         crate::replicate::log(&node, &report);
+        // The invite's address that answered becomes this device's first
+        // peer (the user entered it, with the invite), so a node started
+        // next has someone to dial even before any device published an
+        // address. Best effort: joining succeeded either way.
+        if let Ok((addr, _)) = vault.mesh_peer_add(addr) {
+            let store = node.store();
+            let _ = api_tracker_core::mesh::peers::record_attempt(
+                store.connection(),
+                &addr,
+                node.clock().now_ms(),
+                api_tracker_core::mesh::peers::AttemptOutcome::Reached(accept.inviter),
+            );
+        }
         let inviter_verified = node
             .store()
             .state()

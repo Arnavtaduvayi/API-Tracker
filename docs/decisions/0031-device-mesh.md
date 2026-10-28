@@ -366,7 +366,11 @@ Smaller node decisions (Increment 05):
   in the tree through `mdns-sd`; link-local and loopback addresses are not
   published.
 - `record_attempt` updates only addresses already in `mesh_peers`: an ad-hoc
-  `replicate --peer` does not add a peer.
+  `replicate --peer` does not add a peer. `mesh join` does record the invite
+  address that answered (source `manual`: the user entered it with the
+  invite), so a new device always has one address to dial even if no device
+  has published one yet. CI found that race: a device that joined before its
+  inviter's node published an address had no one to dial.
 
 ### Dependencies
 

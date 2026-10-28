@@ -383,21 +383,23 @@ fn peers_node_status_doctor_replicate_and_stop_from_the_cli() {
     );
     assert!(ok, "{err}");
 
-    // peer add / list / remove.
+    // peer add / list / remove. Joining already made A's address a peer.
     let added = json(&b, &["mesh", "peer", "add", &node_a.addr]);
     assert_eq!(added["addr"], node_a.addr.as_str());
-    assert_eq!(added["added"], true);
-    assert_eq!(
-        json(&b, &["mesh", "peer", "add", &node_a.addr])["added"],
-        false
-    );
+    assert_eq!(added["added"], false);
+    let extra = json(&b, &["mesh", "peer", "add", "Spare-Box.local:7420"]);
+    assert_eq!(extra["addr"], "spare-box.local:7420");
+    assert_eq!(extra["added"], true);
     for bad in ["laptop", "0.0.0.0:7420", "x y:1"] {
         let (ok, _, err) = run(&b, &["mesh", "peer", "add", bad]);
         assert!(!ok && err.contains("HOST:PORT"), "{bad}: {err}");
     }
+    let removed = json(&b, &["mesh", "peer", "remove", "spare-box.local:7420"]);
+    assert_eq!(removed["removed"], true);
     let list = json(&b, &["mesh", "peer", "list"]);
     let rows = list.as_array().unwrap();
     assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["device_name"], "dev-a");
     for field in [
         "addr",
         "device_id",

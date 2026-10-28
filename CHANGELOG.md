@@ -13,8 +13,9 @@ Dates are UTC.
 It keeps your paired devices converged without anyone running `replicate`.
 
 - **Automatic exchanges.** Every 30 seconds (`--interval`, at least 5) the node
-  exchanges with each peer it knows. Add one with `tethra mesh peer add
-  HOST:PORT`. The node then learns the addresses your other devices publish.
+  exchanges with each peer it knows. Joining makes the inviting device's
+  address the first peer, and `tethra mesh peer add HOST:PORT` adds others.
+  The node then learns the addresses your other devices publish.
   A peer that doesn't answer is retried after 5 s, doubling up to every 15
   minutes. `peer list` and `peer remove` manage the addresses.
 - **Optional LAN discovery.** `serve --discover` finds your devices with mDNS.

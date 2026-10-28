@@ -36,20 +36,27 @@ fn peer_row(dev: &Dev, addr: &str) -> Option<api_tracker_core::mesh::peers::Peer
 fn three_nodes_converge_on_their_own_and_gossip_lets_c_find_a() {
     let a = genesis("dev-a");
     let na = run_node(&a, node_config(200), sys(), Box::new(Never));
+    // Each node has published its address (its first round) before another
+    // device pairs through it.
+    wait_for(10, || na.status().rounds >= 1, "A's first round");
     let b = vault();
     join_via(&a, &addr_of(&na), &b, "dev-b");
     let nb = run_node(&b, node_config(200), sys(), Box::new(Never));
-    // C pairs through B and is given no peer address at all: everything it
-    // dials it learns from the device.info items it replicates.
+    let a_addr = addr_of(&na);
+    wait_for(
+        10,
+        || peer_row(&b, &a_addr).is_some_and(|r| r.last_success_at.is_some()),
+        "B's first exchange with A",
+    );
+    // C pairs through B. Its only peer is the invite's address (B's); A it
+    // must learn from the device.info items it replicates.
     let c = vault();
     join_via(&b, &addr_of(&nb), &c, "dev-c");
     let nc = run_node(&c, node_config(200), sys(), Box::new(Never));
-    assert!(c
-        .vault
-        .mesh_peers()
-        .unwrap()
-        .iter()
-        .all(|r| r.source != PeerSource::Manual));
+    let c_peers = c.vault.mesh_peers().unwrap();
+    assert_eq!(c_peers.len(), 1, "{c_peers:?}");
+    assert_eq!(c_peers[0].addr, addr_of(&nb));
+    assert_eq!(c_peers[0].device_id, Some(device_id(&b)));
 
     // No manual exchange from here on: every device renames itself and
     // every other device sees it.
@@ -71,7 +78,6 @@ fn three_nodes_converge_on_their_own_and_gossip_lets_c_find_a() {
         );
     }
     // C reached A directly, at the address A published (gossip).
-    let a_addr = addr_of(&na);
     wait_for(
         10,
         || {
@@ -427,7 +433,17 @@ fn a_node_publishes_its_listen_address_and_the_other_dials_it() {
     let na = run_node(&a, node_config(200), sys(), Box::new(Never));
     let b = vault();
     join_via(&a, &addr_of(&na), &b, "dev-b");
-    b.vault.mesh_peer_add(&addr_of(&na)).unwrap();
+    // Joining made the invite's address B's first peer.
+    let rows = b.vault.mesh_peers().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        (rows[0].addr.as_str(), rows[0].source, rows[0].device_id),
+        (
+            addr_of(&na).as_str(),
+            PeerSource::Manual,
+            Some(device_id(&a))
+        )
+    );
     let nb = run_node(&b, node_config(200), sys(), Box::new(Never));
     // B publishes its listen address in device.info; A learns it by gossip
     // and dials it, though nobody told A about B's address.

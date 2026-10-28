@@ -175,10 +175,9 @@ fn peer_findings(vault: &UnlockedVault, findings: &mut Vec<Finding>) -> NetResul
              (same LAN, or the same VPN such as Tailscale)",
         ));
     }
-    let changes = {
-        let store = vault.mesh_open_store()?;
-        peers::device_changes(store.connection())?
-    };
+    // From the vault's own connection: doctor must work on a store that no
+    // longer loads.
+    let changes = peers::device_changes(vault.connection())?;
     for c in changes {
         findings.push(Finding::new(
             "peers",

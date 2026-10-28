@@ -38,13 +38,14 @@ On the second device:
 
 ```bash
 tethra mesh join -          # paste the invite; reading it from stdin keeps it out of shell history
-tethra mesh peer add 192.168.1.20:7420
 tethra mesh serve --listen 192.168.1.30:7420
 ```
 
-From here on, each running node exchanges with every peer it knows about every
-30 seconds, and learns the addresses your other devices publish. Adding one
-address by hand is usually enough to get a mesh going.
+Joining records the invite's address that answered as this device's first
+peer. From here on, each running node exchanges with every peer it knows about
+every 30 seconds, and learns the addresses your other devices publish, so the
+inviting device starts dialling the new one too. Add other addresses with
+`tethra mesh peer add HOST:PORT` (for example a device that moved).
 
 ### On Tailscale (or another VPN)
 
@@ -120,7 +121,7 @@ tethra mesh peer remove HOST:PORT   # forget one
 |---|---|
 | ADDRESS | What the node dials. |
 | DEVICE | The device that answered there last (name and id), once a handshake succeeded. |
-| SOURCE | `manual` (you added it), `gossip` (another device publishes it as its listen address), or `mdns` (found by discovery). A manual address stays manual. |
+| SOURCE | `manual` (you added it, or it is the invite address you joined through), `gossip` (another device publishes it as its listen address), or `mdns` (found by discovery). A manual address stays manual. |
 | LAST SUCCESS | The last time a handshake there succeeded. |
 | FAILURES | Failed attempts since the last success; drives the backoff. |
 | UNREACHABLE SINCE | When the current run of failures began. |

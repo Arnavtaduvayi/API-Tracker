@@ -70,8 +70,13 @@ fn a_healthy_device_has_no_problem_and_a_device_outside_a_mesh_has_little_to_che
     ] {
         assert_eq!(finding(&r, check).severity, Severity::Ok, "{check}");
     }
-    // No node runs and no peer address is known: said, with how to fix it.
+    // No node runs: said, with how to fix it. Joining made the inviter's
+    // address a peer.
     assert_eq!(finding(&r, "node").severity, Severity::Info);
+    assert_eq!(finding(&r, "peers").severity, Severity::Ok);
+    assert_fixes_are_given(&r);
+    // The genesis knows no address to dial.
+    let r = doctor(&a, false, false);
     assert_eq!(finding(&r, "peers").severity, Severity::Warning);
     assert_fixes_are_given(&r);
     // Nothing in a report is key material.
