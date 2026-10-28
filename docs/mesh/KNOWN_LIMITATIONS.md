@@ -5,8 +5,9 @@ What the mesh does not do, stated plainly
 permanent design choice or something a later increment changes.
 
 > **Status.** The mesh is in development on `feat/device-mesh`. As of Increment
-> 03, `tethra mesh init` and `tethra mesh status` work on one device; pairing
-> arrives in 04. These limitations describe the design the increments build.
+> 04, devices pair (`mesh invite`/`join`), serve (`mesh serve --listen`),
+> replicate on demand (`mesh replicate --peer`), and remove or leave; the
+> automatic node loop arrives in 05. These limitations describe the design the increments build.
 
 ## Reachability
 
@@ -20,9 +21,25 @@ permanent design choice or something a later increment changes.
 ## Membership
 
 - **Removal is eventually consistent.** A removed device keeps exchanging with
-  devices that have not yet heard of its removal.
-- **Access-key rotation is eventually consistent.** A device that misses a
-  rotation for 30 days must re-pair.
+  devices that have not yet heard of its removal. Each device refuses it at its
+  next handshake after hearing.
+- **Leaving without a reachable peer.** `mesh leave` wipes this device either
+  way. If no peer was reachable to receive the departure, the other devices
+  keep listing it until one of them removes it.
+- **The invite is a bearer secret.** Anyone who has it during its lifetime can
+  add a device. On the command line it ends up in shell history; pass `-` to
+  read it from standard input instead.
+- **Pairing reveals the inviter's static key to a client that knows a live
+  invite's hint** (message 2 of `XXpsk3` comes before the psk is mixed in). The
+  hint is derived from the token, so in practice that means someone who saw
+  the invite.
+- **Access-key rotation is eventually consistent.** Every session carries the
+  current access key, so a rotation spreads as devices talk. A device keeps
+  being accepted with the previous key for 30 days after the rotation; after
+  that it must pair again. If two devices remove different devices while apart,
+  a removed device can briefly get a current key from a member that has not
+  yet heard of its removal. Members that have heard still refuse it, because
+  the roster check, not the key, decides who gets in.
 - **A compromised member is powerful.** It is your own device: it can remove all
   your other devices (recovery is re-pairing), publish false usage about itself,
   and raise its own spend cap with a labelled override. Item signatures stop it
@@ -35,6 +52,16 @@ permanent design choice or something a later increment changes.
   latest write to a value came after its removal cutoff, that value stops
   counting, and its *earlier* value is not restored: the value falls back to the
   next device's.
+
+## Transport
+
+- **Key copies inside `snow`.** Tethra's own copies of private keys and psks are
+  zeroized when dropped, but the Noise library (`snow` 0.10) keeps its own
+  copies in its handshake and cipher states and does not zeroize them.
+- **Handshake budget.** A client may hold one of a listener's 8 connection
+  slots for up to the 5-second handshake timeout, and may make 10 attempts a
+  minute from one address. Many addresses can deny service for as long as they
+  keep it up.
 
 ## Identity and storage
 

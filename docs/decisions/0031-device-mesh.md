@@ -255,12 +255,66 @@ Smaller storage decisions (Increment 03; DESIGN §D17 is amended to match):
   (`mesh_meta.write_gen`), inside the write transaction. A CLI command and a
   running node can therefore both mint without reusing a seq.
 
+### Decisions made while building the transport (Increment 04)
+
+* **R19 — The pairing psk is stored, encrypted under the vault key.** PROTOCOL
+  §9 derives the psk from the invite *token* and stores only the token's hash,
+  so the inviter could never run the handshake. Migration v22 adds
+  `mesh_invites.wrapped_psk`: the psk encrypted under the vault key, with AAD
+  naming the vault and the token hash. The invite row is still keyed by the
+  hash. A running node reads the psk through `MeshVault`, a capability limited
+  to mesh access keys and invite psks. A copy of the database alone cannot
+  pair. The alternative, storing the psk in the clear, would make database
+  read access during an invite's lifetime enough to join. Increment 06's
+  usage-split migration becomes v23.
+* **R20 — A 16-byte preamble picks the handshake, and pairing sends the invite
+  hint.** The responder must know which handshake to run (and, for pairing,
+  which invite's psk) before it reads message 1. The hint is the first 8 bytes
+  of the token's hash. The inviter answers only a hint that matches a live
+  invite, so its static key (sent in `XXpsk3`'s message 2, before the psk is
+  mixed in) reaches only a client holding the invite's hint.
+* **R21 — Each side sends its current access key in every authenticated
+  session** (`Direct AccessKeyUpdate`), so a rotation spreads with no per-peer
+  queue, and a device that was offline catches up in its next session within
+  the 30-day grace period. Three rules, added after the Increment 04 review,
+  make this safe:
+  - A received key is applied only after the exchange's commit, and only if
+    its epoch is at most `1 + removals in the local roster`. Without the bound,
+    any member could push epoch `u32::MAX` and block every later removal's
+    rotation. Without the ordering, a device could take a key before it learns
+    of the removal behind it and pass it to the removed device.
+  - Two keys for one epoch (concurrent removals) resolve to the larger BLAKE3
+    hash, so the mesh cannot split.
+  - Removing an already-removed device is refused.
+
+  The roster check at the handshake stays the real gate. The access key keeps
+  probers from learning static keys and cuts removed devices off at message 1
+  once every member has moved on.
+
+Smaller transport decisions (Increment 04):
+
+- `snow` supports both `XXpsk0` and `XXpsk3`, so the D10 fallback to plain
+  `Noise_XX` was not needed: a wrong access key fails at message 1, and the
+  responder sends nothing (`bounds::a_wrong_access_key_fails_at_message_one_and_reveals_no_static_key`).
+- An exchange uses a writer thread beside the reading thread, sharing `snow`'s
+  stateless transport (explicit nonces per direction). Two peers streaming at
+  once could otherwise block on full socket buffers.
+- A running node refreshes its store from disk (`SqliteStore::refresh`, one
+  read of the write generation) before each use, so a removal made by a CLI
+  command applies at the node's next handshake.
+- The inviter's side of pairing is `membership::accept_pairing(store, …)`, called
+  by the network crate with the node's keys, instead of an `UnlockedVault`
+  method: the serving thread holds the node, not the vault. The reauth-gated
+  step is creating the invite.
+- `mesh remove` and `mesh leave` confirm with `--yes` in non-interactive runs
+  (the `backup restore` pattern), then reauthenticate.
+
 ### Dependencies
 
 | Crate | Version | Increment | Why |
 |---|---|---|---|
 | `ed25519-dalek` | 2.2.0 (features `fast`, `std`, `zeroize`; no `rand_core`) | 01 | Item signatures. Reviewed dalek implementation; `verify_strict`. |
-| `snow` | 0.10.x (planned) | 04 | Noise XXpsk0 / XXpsk3 transport. |
+| `snow` | 0.10.0 (no default features; `std`, `default-resolver`, `use-chacha20poly1305`, `use-blake2`, `use-curve25519`, `use-getrandom`) | 04 | Noise XXpsk0 / XXpsk3 transport, in `crates/mesh` only. MSRV 1.85. |
 | `mdns-sd` | 0.21.x (planned) | 05 | Opt-in LAN discovery without an async runtime. |
 
 `ed25519-dalek` 2.2.0 reuses the `curve25519-dalek` 4.1.3, `sha2` 0.10,
@@ -272,6 +326,13 @@ and are not built. Keys are generated from 32 bytes of the operating-system RNG
 (`getrandom`), like every other key in core. BLAKE3, `crypto_box`,
 ChaCha20-Poly1305, `serde_json`, `time`, `uuid`, `zeroize` and `subtle` are
 reused.
+
+`snow` 0.10.0 reuses `curve25519-dalek` 4.1.3, `blake2` 0.10, `subtle` and
+`getrandom` 0.3 from the lockfile. It adds three crates: `snow` itself, plus
+`chacha20poly1305` 0.10.1 and `chacha20` 0.9.1. Those two are older lines that
+sit beside core's `chacha20poly1305` 0.11 (duplicate versions, shown by
+`cargo tree -d -p api-tracker-mesh`), because `snow` 0.10 pins 0.10. `snow` does
+not zeroize its internal copies of keys (KNOWN_LIMITATIONS).
 
 ## Alternatives considered
 

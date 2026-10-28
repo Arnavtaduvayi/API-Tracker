@@ -14,7 +14,7 @@ deletion-aware counters. `tethra mesh usage` shows honest cross-device totals:
 
 ## Read first
 
-- DESIGN §D11, §D14, §D17 (the v22 columns), §D19 (MESH-SI-11/13) and the "What replicates" table in §D1.
+- DESIGN §D11, §D14, §D17 (the usage-split columns; **v23**, since Increment 04 took v22 for the pairing psk), §D19 (MESH-SI-11/13) and the "What replicates" table in §D1.
 - `crates/gateway/src/writer.rs`: 723-817 (attribution, `write_usage`, the daily upsert, line 812 `cost.unwrap_or(0)`) and 886-913 (retention sweep).
 - `crates/core/src/projectcost.rs` (14-21, the honesty split).
 - `crates/core/src/runtime/store.rs:1149-1200` (`delete_project_data`, `delete_all`).
@@ -24,7 +24,9 @@ deletion-aware counters. `tethra mesh usage` shows honest cross-device totals:
 
 ## Scope (build all of this)
 
-### 1. Migration v22, the honest usage split
+### 1. Migration v23, the honest usage split
+
+(Renumbered by Increment 04, which added v22 `mesh_invites.wrapped_psk`; DESIGN §D14/§D17 say v22 for this one.)
 
 - Add `unpriced_requests INTEGER NOT NULL DEFAULT 0` and
   `unextracted_requests INTEGER NOT NULL DEFAULT 0` to `gateway_usage_daily`.
@@ -35,7 +37,7 @@ deletion-aware counters. `tethra mesh usage` shows honest cross-device totals:
   Don't create a second classifier; share a function in core if you need to.
 - Gateway tests (`crates/gateway/tests/writer.rs` or a new file) cover each class
   landing in the right column.
-- Keep `migration_safety` at 9 tests. Put the v22 schema test in `mesh_schema.rs`.
+- Keep `migration_safety` at 9 tests. Put the v23 schema test in `mesh_schema.rs`.
 
 ### 2. Projects (`core::mesh::projects`, plus `UnlockedVault` methods)
 
@@ -181,7 +183,7 @@ bash scripts/smoke.sh
 - `docs/mesh/USER_GUIDE.md`: sharing and binding, reading `mesh usage`, retention.
 - `docs/mesh/ARCHITECTURE.md`: the publisher.
 - `docs/mesh/KNOWN_LIMITATIONS.md`: origin-side pricing, cached-token undercount, and the
-  pre-v22 split being unknown.
+  pre-v23 split being unknown.
 - `docs/gateway/SECURITY_INVARIANTS.md` (SI-19).
 - `docs/gateway/PRIVACY.md`: the deletion tools also propagate to paired devices through
   the epoch.

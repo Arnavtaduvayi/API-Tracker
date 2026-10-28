@@ -11,10 +11,11 @@ Normative protocol: [PROTOCOL.md](PROTOCOL.md).
 > (02). That protocol is proven by a deterministic simulator against an
 > independently written oracle, over in-memory stores and, since 03, over the
 > SQLite store. A device has a real identity (keys encrypted in the vault, a
-> clone/rollback marker), and two commands exist: `tethra mesh init` and
-> `tethra mesh status`. A single device is a working one-device mesh; pairing
-> and the network transport arrive in 04. Each section below says what is
-> implemented and what is specified.
+> clone/rollback marker). Since 04, `crates/mesh` carries the protocol over Noise
+> on TCP. Devices pair with a one-time invite, serve, replicate on demand, relay
+> through one another, remove a device (with access-key rotation) and leave,
+> all from `tethra mesh …`. The automatic node loop arrives in 05. Each section
+> below says what is implemented and what is specified.
 
 ## Vocabulary
 
@@ -88,7 +89,9 @@ Nothing outside this table ever replicates.
 | `mesh::identity` | implemented (03) | `mesh init`, keys wrapped under the vault key, `MeshKeys` for the node, `status`, the restore/leave wipe, `preflight` |
 | `mesh::marker` | implemented (03) | the clone/rollback marker file and its classification |
 | `mesh::sim::sqlite` | implemented (03) | SQLite devices for the simulator (store conformance) |
-| `crates/mesh` | specified, lands in 04-05 | Noise transport, pairing, node runtime |
+| `mesh::invite`, `mesh::membership` | implemented (04) | invite tokens and strings, pairing messages, `MeshVault`, the inviter's single-use claim, devices, rename, removal with rotation, leave, the exchange log |
+| `crates/mesh` (`api-tracker-mesh`) | implemented (04) | `bind` (the only bind), `noise`, `wire` (preamble, framing), `handshake` (roster check), `session` (one exchange), `pair`, `serve` (accept loop, limits), `replicate`, `directs`, `node` |
+| `crates/mesh` node loop, discovery | specified, lands in 05 | outbound loop, peers, mDNS, control socket |
 | `mesh::publish`, `caps`, `share` | specified, lands in 06, 07-08, 11 | usage publisher, spend caps, credential shares |
 
 **Rules.** Core performs no network I/O (`crates/core/src/lib.rs`), and

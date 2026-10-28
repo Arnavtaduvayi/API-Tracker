@@ -459,6 +459,15 @@ used. The list below is the original brief:
 
 ## D10. Membership: pairing, sessions, removal
 
+> **[Amended 04, R19-R21]** As built (PROTOCOL.md §9): the pairing psk is
+> stored encrypted under the vault key next to the token hash (migration v22),
+> because the hash alone cannot run the handshake. A 16-byte preamble selects
+> pairing or a session, and pairing carries the invite's hint (the first 8
+> bytes of the token's hash). The responder answers only a live invite's hint.
+> The invite string has two checksum characters. `AccessKeyUpdate` goes out in
+> every session. The inviter's side is `membership::accept_pairing`, called by
+> `crates/mesh`.
+
 **Invite (on an existing member):**
 - `UnlockedVault::mesh_invite_create(master_password, ttl)` requires reauth.
 - It generates a 20-byte random **token** (160 bits) and stores `blake3(token)` in
@@ -628,6 +637,7 @@ used. The list below is the original brief:
   - Its additive upsert is at `crates/gateway/src/writer.rs:790-815`, and line 812 stores
     `cost.unwrap_or(0)`, so unpriced usage looks free.
   - **Migration v22** therefore adds `unpriced_requests INTEGER NOT NULL DEFAULT 0` and
+    **[Amended 04]** (v23: Increment 04 took v22 for `mesh_invites.wrapped_psk`)
     `unextracted_requests INTEGER NOT NULL DEFAULT 0`. The writer increments them where
     `projectcost.rs:14-21` already classifies an exchange as priced, unpriced or
     unextracted.
@@ -802,6 +812,7 @@ used. The list below is the original brief:
 ## D17. Storage schema
 
 - **Migration v21** (mesh) and **v22** (the usage-split columns) are appended to `MIGRATIONS` in
+  **[Amended 04]** v22 is `mesh_invites.wrapped_psk` (Increment 04); the usage split is v23 (06).
   `crates/core/src/db.rs`. v20, at line 1178, is the latest today. The tables are
   STRICT, and migrations are append-only (SI-17). Exact columns are finalized in
   Increment 03 (v21) and Increment 06 (v22).

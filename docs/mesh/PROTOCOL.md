@@ -845,35 +845,148 @@ of an origin that is not forked is a bug signal: count it
 
 ## 9. Pairing, sessions, rotation, removal
 
-**Status: specified, lands in 04**
+**Status: implemented (04)** — `crates/mesh` (`api-tracker-mesh`: `wire`,
+`noise`, `handshake`, `session`, `pair`, `serve`, `replicate`, `directs`) over
+`core::mesh::{invite, membership}`
 
-- **Invite** (reauth-gated): a 20-byte random token; `blake3(token)` stored with
-  an expiry (default 10 minutes, maximum 60), `attempts = 0`, `used_at = NULL`.
-  Printed once as `tethra-mesh-invite:v1:<base32 token>@<host:port>[,…]`. The
-  token is a bearer secret for its lifetime; move it over a channel you trust.
-- **Join**: `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s`, psk
-  `blake3::derive_key("tethra-mesh v1 pairing psk", token)`, prologue
-  `"tethra-mesh/v1-pair" || 0x00`. The inviter checks the token hash is unused,
-  unexpired and `attempts < 5` (each failure increments), and marks it used
-  **before** replying. Inside the channel the joiner sends `PairRequest` (its
-  three public keys and name); the inviter mints the joiner's `roster.add` and
-  replies `PairAccept` with `mesh_id`, **`genesis` device id**, the access key
-  and its epoch, and its own `device_id`. A normal exchange then runs on the same
-  connection.
-- **Normal sessions**: `Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s`, psk = access key
-  (current epoch), prologue `"tethra-mesh/v1" || 0x00 || mesh_id`. After the
-  handshake the remote static key MUST equal the `noise_pub` of an **active**
-  roster device (§6.4), or the session closes (MESH-SI-2). The responder tries
-  the current access-key epoch, then the previous one if it is younger than
-  30 days. If `snow` lacks `XXpsk0`, Increment 04 falls back to `Noise_XX` and
-  records the static-key exposure in ADR 0031.
-- **Rotation**: a removal generates access-key epoch + 1, delivered by
-  `Direct AccessKeyUpdate` inside authenticated sessions and forwarded by every
-  member. A device that misses it for 30 days must re-pair.
-- **Removal** (confirm + reauth): mints `roster.remove { cutoff_seq = local
-  vv[target] }`. Effects follow from §6.4 and §8.3. **Self-removal**
-  (`mesh leave`) mints a self-remove if a peer is reachable, then wipes local
-  mesh state. Removal is eventually consistent.
+### 9.1 Transport
+
+Every connection is TCP. Bytes, in order:
+
+1. **Preamble** (16 bytes, the only thing read before the handshake):
+   `"TMSH"`, version `0x01`, kind `'S'` (member session) or `'P'` (pairing),
+   two zero bytes, then 8 bytes: zero for `'S'`, the invite **hint** for `'P'`
+   (§9.2). Anything else closes the connection without a reply.
+2. **Handshake messages**: a `u16` big-endian length, then the Noise message.
+   A message over 1 KiB closes the connection (MESH-SI-2). Handshake payloads
+   are empty.
+3. **Frames** after the handshake: plaintext `u32` big-endian length (≤ 1 MiB)
+   || frame bytes, split into Noise transport messages of ≤ 65 535 bytes (each
+   `u16`-length-prefixed) with nonces counting from 0 per direction. A frame
+   over 1 MiB, or a message that does not decrypt, ends the session.
+
+Timeouts: 5 s for the preamble and handshake, 30 s idle once authenticated,
+10 minutes per exchange. A listener runs at most 8 connections at once and
+accepts at most 10 new connections per source IP per minute (token bucket);
+more are closed at once (§11).
+
+### 9.2 Invites
+
+- **Create** (reauthenticated, `mesh invite`): a 20-byte random token. The
+  device stores `BLAKE3(token)` as the invite's key with an expiry (default 10
+  minutes, at most 60), `attempts = 0`, `used_at = NULL`, and the pairing psk
+  `BLAKE3-derive_key("tethra-mesh v1 pairing psk", token)` **encrypted under
+  the vault key** (`mesh_invites.wrapped_psk`, AAD naming the vault and the
+  token hash). The responder needs the psk to run the handshake, and storing
+  only the hash would not give it one. A copy of the database alone cannot pair
+  (ADR 0031 R19).
+- **Format**, shown once:
+  `tethra-mesh-invite:v1:<token as 32 base32 chars (RFC 4648 lowercase, no
+  padding)><2 checksum chars>@<host:port>[,<host:port>…]` (at most 8
+  addresses). The checksum is the low 5 bits of the first two bytes of
+  `BLAKE3-derive_key("tethra-mesh v1 invite checksum", token32 || "@" ||
+  addresses)`, as base32 characters. A typo is caught before any connection
+  (about 1 in 1 024 single-character typos slips through).
+- **Hint**: the first 8 bytes of `BLAKE3(token)`. The joiner sends it in the
+  pairing preamble so the inviter can find the invite. It reveals nothing that
+  helps recover the token or the psk.
+- The token is a bearer secret for its lifetime. Move it over a channel you
+  trust; `mesh join -` reads it from standard input, out of shell history.
+
+### 9.3 Pairing
+
+`Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s`, prologue `"tethra-mesh/v1-pair" ||
+0x00`, psk = the pairing psk. The joiner (initiator) uses a freshly generated
+Noise static key; the inviter (responder) uses its own.
+
+```text
+joiner                                             inviter
+  preamble 'P' + hint            ──►  live invite with this hint? if none: close,
+                                      send nothing
+  msg1  -> e                     ──►
+                                 ◄──  msg2  <- e, ee, s, es       (inviter's
+                                                                    static key)
+  msg3  -> s, se, psk            ──►  fails ⇒ attempts += 1 (5 ⇒ dead), close
+  frame PairRequest              ──►  {name, sign_pub, noise_pub, seal_pub}:
+                                      noise_pub MUST equal the handshake's
+                                      static key; claim the invite in one
+                                      transaction (unused, unexpired,
+                                      attempts < 5 → used_at, used_by)
+                                      BEFORE replying; mint roster.add
+                                 ◄──  frame {"t":"Accepted","accept":PairAccept}
+                                      or {"t":"Refused","reason":…}
+  (decrypting the reply proves the inviter holds the token)
+  store identity in accept.mesh_id
+  ═══════════ a normal exchange (§8.2) on the same channel ═══════════
+```
+
+`PairAccept` = `{mesh_id, genesis, inviter, access_epoch, access_key}`. The
+inviter's static key is shown only to a client that presents the hint of a
+live invite. Refusal reasons come from a fixed list, and a joiner shows only
+reasons on that list. Two joiners holding the same token race for the claim
+transaction, and exactly one wins. After its first exchange the joiner checks
+that the inviter's roster entry carries the Noise key that answered the
+pairing (`inviter_verified`).
+
+### 9.4 Member sessions
+
+`Noise_XXpsk0_25519_ChaChaPoly_BLAKE2s`, psk = the access key, prologue
+`"tethra-mesh/v1" || 0x00 || mesh_id` (16 raw bytes).
+
+```text
+initiator                                          responder
+  preamble 'S'                   ──►
+  msg1  -> psk, e                ──►  try the current access key, then the
+                                      previous one if it was rotated < 30 days
+                                      ago; neither decrypts ⇒ close, send
+                                      nothing (a prober never sees a static key)
+                                 ◄──  msg2  <- e, ee, s, es
+  responder's static key must be an ACTIVE roster device (§6.4), else close
+  msg3  -> s, se                 ──►  initiator's static key must be an ACTIVE
+                                      roster device, else close
+  ═══════════ exchange (§8.2) ═══════════
+```
+
+The initiator tries its current key, then (on a handshake failure) its
+previous one within the grace period, on a new connection. Neither side sends a
+frame until both checks have passed (MESH-SI-2). A running node re-reads its
+roster before every check, so a removal made by another process applies at the
+next handshake.
+
+### 9.5 Rotation and removal
+
+- **Removal** (confirmation + reauthentication, `mesh remove`): mints
+  `roster.remove { cutoff_seq = local vv[target] }` and rotates the access key
+  to epoch + 1 (stored under the vault key). The removed device is refused at
+  the transport by every device that has heard of the removal. Its items up to
+  the cutoff keep counting (§6.4, §8.3).
+- **Rotation delivery**: each side of every authenticated session sends
+  `Direct AccessKeyUpdate { epoch, key }` with its current key right after its
+  `Hello`. The receiver holds it until the exchange's commit is in, then:
+  - refuses an epoch above `1 + (removals in its roster)`. Every rotation is
+    justified by a removal, so a member cannot jump the epoch (which would
+    block later rotations), and no device takes a removal's key before it
+    knows that removal;
+  - stores a newer epoch under its vault key and uses it from then on;
+  - for an equal epoch with a different key (two removals made while apart),
+    keeps the key with the larger BLAKE3 hash, so every device converges on
+    one.
+
+  It then passes its key on in its own sessions. A device that misses a
+  rotation for over 30 days must pair again. A repeated removal of a device
+  already removed is refused (no second rotation). A device that is not active
+  in its own roster (removed or forked) creates no invites and admits no one.
+- **The access key is defense in depth; the roster check is the gate.** Under
+  concurrent removals, a removed device can briefly obtain a current key from a
+  member that has not yet heard of its removal. Every member that has heard
+  still refuses it at the roster check (§9.4).
+- **Self-removal** (`mesh leave`, confirmation + reauthentication): mints a
+  self-remove, tries to hand it to a peer in one exchange (`--peer`, or the
+  addresses other devices published), then wipes local mesh state (§8.6). If
+  no peer is reachable, the others keep listing the device until one removes
+  it.
+- Removal is eventually consistent: a device that has not heard of a removal
+  still exchanges with the removed device.
 
 ## 10. Data that never replicates
 
@@ -887,9 +1000,10 @@ replicate.
 
 ## 11. Bounds
 
-**Status: partly implemented (MESH-SI-8).** Per-item bounds (01); per-session
+**Status: implemented (MESH-SI-8).** Per-item bounds (01); per-session
 staging, batch, frame, gap, rate and query bounds (02, `mesh::proto::Limits`);
-concurrency, timeouts and handshake rates land in 04-05.
+the transport's frame, handshake-message, concurrency, timeout and handshake-rate
+bounds (04, `api-tracker-mesh::{wire, TransportLimits}`).
 
 | Bound | Value |
 |---|---|
@@ -977,3 +1091,14 @@ Increment 03 (ADR 0031 R16-R18):
 19. **The marker classification** (§7.5): "rolled back" is precisely
     `seq_high_water > vv[self] + 64`; a rollback inside one block is a fork,
     not a marker failure.
+
+Increment 04 (ADR 0031 R19-R21):
+
+20. **The pairing psk is stored, encrypted under the vault key** (§9.2), beside
+    the token hash. DESIGN §D10 stored only the hash, from which the inviter
+    could not run the handshake.
+21. **A 16-byte preamble selects the handshake, and pairing carries the
+    invite hint** (§9.1-9.3). The brief did not say how a responder chooses
+    between the two handshakes, or which invite's psk to use.
+22. **`AccessKeyUpdate` is sent in every session** (§9.5), rather than queued
+    per peer: forwarding then needs no state.

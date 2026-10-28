@@ -6,6 +6,41 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh pairing and replication between devices (in development)
+
+**Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md)) devices can now
+pair and exchange data directly, on your LAN or a VPN you run. No server,
+relay or Tethra service is involved.
+
+- **Pair with a one-time invite.** `tethra mesh invite --addr HOST:PORT` asks
+  for your master password and prints an invite, once. Treat it like a
+  password for the next 10 minutes: it works once, expires, and five wrong
+  attempts kill it. A built-in checksum catches typos. On the new device,
+  `tethra mesh join <invite>` (or `join -` to paste it from standard input,
+  out of your shell history) adds it to the mesh and runs a first exchange.
+- **Serve and replicate.** `tethra mesh serve --listen ADDR:PORT` accepts
+  connections from your paired devices; nothing listens unless you ask, and
+  listening on every interface needs `--all-interfaces`.
+  `tethra mesh replicate --peer HOST:PORT` runs one exchange now. Devices
+  relay for one another: what laptop A shares reaches desktop C through
+  server B, and C checks A's signature.
+- **Encrypted and authenticated.** Connections use the Noise protocol. A
+  device that doesn't hold your mesh's access key fails at the first message
+  and learns nothing about your devices. Only current members get past the
+  handshake.
+- **See, rename, remove and leave.** `tethra mesh devices` lists the roster
+  with each device's last exchange. `rename` renames this device. `remove`
+  (confirmation and master password) cuts a device off. Each device refuses it
+  as soon as it hears, and the mesh's access key rotates. The new key reaches
+  devices as they talk, and a device that stays away for more than 30 days
+  must pair again. `leave` hands this device's departure to a peer if one is
+  reachable, then deletes its mesh identity.
+- **Bounded.** At most 8 connections at once, 10 new ones a minute from one
+  address, 5-second handshakes, 30-second idle and 10-minute exchange limits,
+  and messages capped before authentication.
+- **Upgrading.** This adds database schema v22; an already-installed background
+  gateway built before it keeps forwarding but stops recording until updated.
+
 ### Added — Tethra Mesh device identity and durable storage (in development)
 
 **Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md)) now stores

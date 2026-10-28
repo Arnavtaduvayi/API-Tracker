@@ -15,23 +15,48 @@ NN)** otherwise.
 - **MESH-SI-1 Bind discipline.** No mesh listener binds an unspecified address
   (`0.0.0.0`, `::`) unless `--all-interfaces` was given; nothing listens unless
   `--listen` was given; the gateway stays loopback-only (gateway SI-1 untouched).
-  *Enforced by:* one `bind` function in `crates/mesh/src/bind.rs`.
-  *Status:* specified (lands in 04). *Tests:* none yet (a grep guard modelled on
-  `crates/gateway/tests/no_insecure_verifier.rs`).
+  *Enforced by:* one `bind_listener` function in `crates/mesh/src/bind.rs`;
+  `tethra mesh serve` requires `--listen`.
+  *Status:* implemented (04). *Tests:*
+  `bind_guard::only_bind_rs_binds_and_no_file_names_a_wildcard_address` (no
+  other file binds; no wildcard literal anywhere),
+  `bind_guard::unspecified_addresses_are_refused_without_the_flag`,
+  `no_mesh_dependency::the_gateway_does_not_depend_on_api_tracker_mesh`
+  (the gateway's listener stays its own, loopback-only).
 - **MESH-SI-2 No mesh data before authentication.** No mesh data is accepted or
   sent before a Noise handshake completes with an **active** roster device's
   static key (PROTOCOL §6.4), or with a valid pairing token.
-  *Status:* partial (02): the roster's `is_active` rule, the session's check
-  that the `Hello` names the authenticated peer, and the simulator's rule that
-  devices only exchange with peers they consider active. The Noise transport
-  lands in 04. *Tests:* `crdt::roster::tests::removal_cuts_off_later_items_but_keeps_earlier_ones`,
+  *Status:* implemented (04).
+  - The roster's `is_active` rule, and the session's check that `Hello` names
+    the authenticated peer (02).
+  - Over TCP (04), only a 16-byte preamble and handshake messages of at most
+    1 KiB are read before authentication. A wrong access key fails at message 1
+    with nothing sent back.
+  - Each side checks the other's static key against the active roster — the
+    initiator before message 3, the responder after it — before any frame
+    moves.
+  - Pairing answers only a live invite's hint, and the joiner's key is bound to
+    the handshake.
+
+  *Tests:* `crdt::roster::tests::removal_cuts_off_later_items_but_keeps_earlier_ones`,
   `a_fork_report_cuts_the_forked_origin_off_at_the_fork_point`,
-  `proto::tests::a_different_mesh_or_peer_is_refused_with_bye`; transport
-  tests in 04.
+  `proto::tests::a_different_mesh_or_peer_is_refused_with_bye`,
+  `bounds::{garbage_before_the_handshake_gets_nothing_back,
+  a_malformed_handshake_message_gets_nothing_back,
+  a_wrong_access_key_fails_at_message_one_and_reveals_no_static_key}`,
+  `replication::a_removed_device_is_refused_and_its_later_writes_stop_counting`,
+  `replication::a_device_that_missed_a_rotation_for_over_30_days_is_refused`,
+  `pairing::{five_wrong_attempts_lock_the_invite_out,
+  a_token_is_single_use_even_for_two_concurrent_joiners,
+  a_typo_fails_before_any_connection_and_a_wrong_mesh_cannot_talk}`,
+  `noise_spike::a_wrong_access_key_fails_at_message_one`.
 - **MESH-SI-12 No third parties.** No Tethra server, relay, rendezvous or
   third-party NAT service. *Enforced by:* there is no such code; reachability is
   the user's LAN or VPN. *Status:* implemented (01) as a design rule.
-  *Tests:* none yet (04/05 assert the node dials only roster-gossiped or
+  *Status:* implemented (04) for what exists: `replicate --peer`, `leave --peer`
+  and `join` dial only addresses the user typed or the invite carries, and
+  `leave` also tries the addresses other devices published. *Tests:* none
+  beyond review yet (05 asserts the node loop dials only roster-gossiped or
   user-entered addresses).
 
 ## Items and replication
@@ -105,7 +130,11 @@ NN)** otherwise.
   origin per hour, `ChainQuery` ≤ 64 seqs (02, `proto::Limits`); write
   transactions chunked by whole origins (03, `SqliteStore`, ~2 000 rows a
   chunk; one origin's range is one transaction). Concurrency and timeouts land
-  in 04-05. *Tests:* `mesh_sim::ci_200_seeds` (invariant 8),
+  in 04-05. Transport (04): frames ≤ 1 MiB, handshake messages ≤ 1 KiB, a
+  5 s handshake, 30 s idle and 10 min exchange timeout, ≤ 8 connections at once,
+  ≤ 10 new connections per source IP per minute, ≤ 5 pairing attempts per
+  invite. *Tests:* `bounds::*` (oversize frame, slowloris, idle session, session
+  limit, per-IP flood, the defaults), `mesh_sim::ci_200_seeds` (invariant 8),
   `proto::tests::frames_have_the_documented_json_shape`,
   `mesh_store_conformance::commits_wait_for_a_busy_writer_and_stay_consistent`,
   `codec::tests::oversize_is_refused_both_ways`, `codec::tests::depth_limit`,
