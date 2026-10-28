@@ -9565,6 +9565,146 @@ impl UnlockedVault {
         )
     }
 
+    /// Share a local project with the mesh (`tethra mesh project share`):
+    /// a new mesh project with its name, bound to it here.
+    pub fn mesh_project_share(&self, local: &str) -> Result<(crate::mesh::MeshProjectId, String)> {
+        let project = self.get_project(local)?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::share(
+            &mut store,
+            keys.signing_key(),
+            &project.id,
+            &project.name,
+        )?;
+        Ok((id, project.name))
+    }
+
+    /// Bind a local project to an existing mesh project, on this device.
+    /// Never automatic (MESH-SI-13).
+    pub fn mesh_project_bind(&self, mesh: &str, local: &str) -> Result<crate::mesh::MeshProjectId> {
+        let project = self.get_project(local)?;
+        let store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::resolve(&store, mesh)?;
+        crate::mesh::projects::bind(&store, &id, &project.id)?;
+        Ok(id)
+    }
+
+    /// Unbind a local project. Returns whether it was bound.
+    pub fn mesh_project_unbind(&self, local: &str) -> Result<bool> {
+        let project = self.get_project(local)?;
+        crate::mesh::projects::unbind(&self.conn, &project.id)
+    }
+
+    pub fn mesh_project_rename(
+        &self,
+        mesh: &str,
+        name: &str,
+    ) -> Result<crate::mesh::MeshProjectId> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::resolve(&store, mesh)?;
+        crate::mesh::projects::rename(&mut store, keys.signing_key(), &id, name)?;
+        Ok(id)
+    }
+
+    pub fn mesh_project_archive(&self, mesh: &str) -> Result<crate::mesh::MeshProjectId> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::resolve(&store, mesh)?;
+        crate::mesh::projects::archive(&mut store, keys.signing_key(), &id)?;
+        Ok(id)
+    }
+
+    /// Merge two mesh projects; returns `(root, merged)`.
+    pub fn mesh_project_merge(
+        &self,
+        a: &str,
+        b: &str,
+    ) -> Result<(crate::mesh::MeshProjectId, crate::mesh::MeshProjectId)> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let a = crate::mesh::projects::resolve(&store, a)?;
+        let b = crate::mesh::projects::resolve(&store, b)?;
+        crate::mesh::projects::merge(&mut store, keys.signing_key(), &a, &b)
+    }
+
+    pub fn mesh_projects(&self) -> Result<Vec<crate::mesh::projects::MeshProjectRow>> {
+        crate::mesh::projects::list(&self.mesh_open_store()?)
+    }
+
+    /// Run the usage publisher once (`mesh replicate` and `mesh usage` do,
+    /// before they exchange or report).
+    pub fn mesh_publish(&self) -> Result<crate::mesh::publish::PublishReport> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let now = crate::mesh::clock::Clock::now_ms(&crate::mesh::clock::SystemClock);
+        crate::mesh::publish::publish(&mut store, keys.signing_key(), now)
+    }
+
+    /// Cross-device usage, labelled per device (`tethra mesh usage`).
+    pub fn mesh_usage(
+        &self,
+        filter: &crate::mesh::usage::UsageFilter,
+    ) -> Result<crate::mesh::usage::UsageReport> {
+        let store = self.mesh_open_store()?;
+        let now = crate::mesh::clock::Clock::now_ms(&crate::mesh::clock::SystemClock);
+        crate::mesh::usage::usage_report(&store, filter, now)
+    }
+
+    /// The mesh settings this build understands, with their values.
+    pub fn mesh_settings(&self) -> Result<Vec<(String, serde_json::Value, bool)>> {
+        let store = self.mesh_open_store()?;
+        let state = crate::mesh::store::MeshStore::state(&store);
+        let name = crate::mesh::publish::RETENTION_SETTING.to_owned();
+        let set = state.settings.value(&name, &state.roster).is_some();
+        let value = serde_json::json!(crate::mesh::publish::retention_days(&store));
+        Ok(vec![(name, value, set)])
+    }
+
+    /// Set a mesh setting (LWW, replicated). Only `retention.usage_days`
+    /// (1-3650) exists today.
+    pub fn mesh_setting_set(&self, name: &str, value: &str) -> Result<serde_json::Value> {
+        if name != crate::mesh::publish::RETENTION_SETTING {
+            return Err(CoreError::InvalidInput(format!(
+                "unknown mesh setting '{name}'; the only one is {}",
+                crate::mesh::publish::RETENTION_SETTING
+            )));
+        }
+        let days: u64 = value
+            .trim()
+            .parse()
+            .ok()
+            .filter(|d| (1..=crate::mesh::publish::MAX_RETENTION_DAYS).contains(d))
+            .ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "retention.usage_days must be a whole number of days from 1 to 3650".into(),
+                )
+            })?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let winner = {
+            let state = crate::mesh::store::MeshStore::state(&store);
+            state
+                .settings
+                .register(&name.to_owned())
+                .and_then(|r| r.winning_hlc(&state.roster))
+        };
+        let v = serde_json::json!(days);
+        crate::mesh::store::MeshStore::mint(
+            &mut store,
+            keys.signing_key(),
+            crate::mesh::store::Draft::of(
+                &crate::mesh::kinds::MeshSetting {
+                    name: name.to_owned(),
+                    value: v.clone(),
+                },
+                crate::mesh::store::HlcPolicy::After(winner),
+            ),
+        )?;
+        Ok(v)
+    }
+
     fn require_mesh(&self) -> Result<()> {
         match crate::mesh::membership::mesh_of(&self.conn)? {
             Some(_) => Ok(()),

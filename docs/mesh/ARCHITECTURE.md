@@ -93,8 +93,9 @@ Nothing outside this table ever replicates.
 | `mesh::invite`, `mesh::membership` | implemented (04) | invite tokens and strings, pairing messages, `MeshVault`, the inviter's single-use claim, devices, rename, removal with rotation, leave, the exchange log |
 | `crates/mesh` (`api-tracker-mesh`) | implemented (04) | `bind` (the only bind), `noise`, `wire` (preamble, framing), `handshake` (roster check), `session` (one exchange), `pair`, `serve` (accept loop, limits), `replicate`, `directs`, `node` |
 | `mesh::peers`, `mesh::doctor` | implemented (05) | the peer table (`mesh_peers`), lag and repair records; the store-side checks of `mesh doctor` and `--rebuild` |
+| `mesh::projects`, `mesh::publish`, `mesh::usage` | implemented (06) | shared projects and local bindings; the usage publisher (cursor, deltas, epoch bumps, hourly budget, retention); the per-device usage report and `local_month_spend_micros` |
 | `crates/mesh` `runtime`, `peers`, `instance`, `discover`, `doctor` | implemented (05) | the node loop (rounds, hooks, stop conditions), backoff and targets, one node per data directory with its control socket, opt-in mDNS and its in-memory fake, `mesh doctor` |
-| `mesh::publish`, `caps`, `share` | specified, lands in 06, 07-08, 11 | usage publisher, spend caps, credential shares |
+| `mesh::caps`, `share` | specified, lands in 07-08, 11 | spend caps, credential shares |
 
 **Rules.** Core performs no network I/O (`crates/core/src/lib.rs`), and
 `core::mesh` keeps it that way: it reads time only through `Clock` and draws
@@ -212,9 +213,40 @@ reporting device in `mesh_meta` (`rollback_hold/<device>`), so every process
 minting on this database — the node, its round hooks, a CLI command — refuses
 until `vv[self]` reaches the reported seq (ADR 0031 R22).
 
+## Usage publishing
+
+**Status: implemented (06)** — `core::mesh::{projects, publish, usage}`,
+migration v23, the gateway writer's split, the node's `UsagePublisher` hook.
+
+- **Split at the source.** The gateway writer classifies each request with
+  `projectcost::UsageClass` (the same rule `projectcost` reports by) and adds it
+  to `gateway_usage_daily.unpriced_requests` / `unextracted_requests`; rows it
+  creates carry `split_known = 1`. Rows from before v23 keep 0: they publish
+  `unextracted` (always derivable) and leave priced/unpriced at 0, so views show
+  the remainder as "split unknown".
+- **Cursor and deltas.** `mesh_publish_cursor` (rebuilt by v23 with
+  `mesh_project_id` in its key) records what each local row contributed to each
+  mesh project's counter. A run adds new traffic to the project bound **now**;
+  a shrunk or deleted row is taken back from every counter it fed, with an
+  epoch bump. Counters and cursor commit in one transaction
+  (`SqliteStore::mint_batch`), and a `publish/gen` check makes two publishers on
+  one database (node and CLI) safe.
+- **Bounds and retention.** ≤ 5 000 counters an hour, oldest days first;
+  `retention.usage_days` (LWW, default 90): older days are not published, and
+  past the horizon plus two days every store drops them at ingest and
+  collects them (`SqliteStore::{set_usage_floor, gc_usage}`), which PROTOCOL
+  §8.4 (b) allows because the exclusion does not depend on seq.
+- **Views.** `usage_report` folds merged projects into their root and reports
+  per device with `as_of`, `stale`, `removed`, the split-unknown remainder, "no
+  data from" the active devices without figures, and a labelled sum.
+- **Local month spend.** `usage::local_month_spend_micros(store, project,
+  month)` sums this device's own rollup for the local projects bound to a mesh
+  project: the one function Increments 07 and 08 use.
+
 ## Data flow
 
-**Status: specified; lands in 02-06.** Text diagram of one usage figure's path:
+**Status: implemented (06)** up to the views; caps follow in 07-08. Text
+diagram of one usage figure's path:
 
 ```text
  device A                                            device B

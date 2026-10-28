@@ -8,14 +8,16 @@ encrypted Noise channel that only your paired devices can open
 ([ADR 0031](../decisions/0031-device-mesh.md)).
 
 This guide covers what exists today: pairing, the node that keeps devices
-converged, and the `status` and `doctor` views. Shared projects, cross-device
-usage and spend caps are later increments.
+converged, shared projects and cross-device usage, and the `status` and
+`doctor` views. Spend caps are a later increment.
 
 ## What replicates
 
 Only what [ARCHITECTURE.md "What replicates"](ARCHITECTURE.md#what-replicates)
-lists: today, the device roster (ids, names, public keys, removals) and each
-device's published listen addresses. Credential values never replicate.
+lists: today, the device roster (ids, names, public keys, removals), each
+device's published listen addresses, the projects you share (id, name,
+archived, merged), the daily usage counters of those projects, and the mesh
+settings. Credential values never replicate.
 
 ## 1. Pair your devices
 
@@ -130,7 +132,71 @@ Removing a `gossip` or `mdns` address only lasts until a device publishes it
 again. If a different device starts answering at a known address (expected after
 that device paired again), `status` notes it.
 
-## 4. `tethra mesh status`
+## 4. Shared projects and cross-device usage
+
+Your devices each have their own local projects. To see one project's
+gateway usage across devices, share it once and bind it on the others:
+
+```bash
+# on the laptop
+tethra mesh project share app            # a new mesh project, bound to "app" here
+# on the desktop (after its next exchange)
+tethra mesh project list                 # the shared project, not bound here yet
+tethra mesh project bind <id-or-name> app  # this device's own "app" feeds it
+```
+
+Nothing binds by itself: not by name, not by id. `unbind` stops publishing
+(what was published stays); `rename` and `archive` apply everywhere;
+`merge <a> <b>` joins two mesh projects that turned out to be the same real
+project (the one with the smaller id stays; merging two projects that both
+have spend caps is refused).
+
+**Publishing.** Each device publishes its own gateway-observed usage for the
+projects bound on it: per day, provider and model, the request count split
+into priced, unpriced and never-extracted requests, tokens, and its estimate.
+No request, path, endpoint, host or credential is ever published. A running
+node publishes before every round; `tethra mesh replicate` and `tethra mesh
+usage` publish first too. Deleting local gateway data (`tethra observe
+delete-all`, per-project deletion, the retention sweep) takes the amounts back
+on every device.
+
+```bash
+tethra mesh usage [--project <id-or-name>] [--month YYYY-MM | --day YYYY-MM-DD] [--by-device] [--json]
+```
+
+How to read it:
+
+- **Every row is one device**, with **AS OF** — the last successful exchange
+  with that device — and **(stale)** after 24 hours. Your own row is current.
+  A removed device's figures (up to its removal) are labelled `(removed)`.
+- **No data from X** means X is in the mesh but has no figures for this
+  project in the period: unknown, not zero (it may not have bound the project,
+  or not exchanged yet).
+- **PRICED / UNPRICED / NOT EXTRACTED / SPLIT UNKNOWN.** Only priced requests
+  are in the estimate. Unpriced (no pricing record, or the response named no
+  model, shown as model `(not reported)`) and not-extracted requests (no usage
+  in the response) are counted, never shown as $0. Split unknown is traffic a
+  device recorded before it could tell priced from unpriced (before this
+  version); the line under the table says from which day the split is known.
+- **EST.** is each device's own estimate, computed with its own pricing table
+  when the traffic happened; cached-read tokens are not in it.
+- **Total** sums the rows and always says what it is: "estimated,
+  gateway-observed, across N device(s); M stale; K with no data". `--by-device`
+  leaves it out. These figures are never added to provider-reported cost
+  (`tethra usage`, which is separate and unchanged).
+
+**Retention.** Usage counters are kept for `retention.usage_days` days (default
+90), a setting that applies to every device:
+
+```bash
+tethra mesh settings list
+tethra mesh settings set retention.usage_days 30
+```
+
+Older days are not published, and two days past the horizon every device
+drops them.
+
+## 5. `tethra mesh status`
 
 Everything `status` shows is local; nothing in it is secret. `--json` gives the
 same fields.
@@ -153,8 +219,9 @@ same fields.
 | `peers` | The rows of `peer list`, with each device's name. |
 | `lag` | Per device, from the last exchange with it: `at`, `completed`, `at_hello` (per origin, the peer's seq minus this device's at the start of that exchange), `peer_behind` (items it lacked then), `peer_ahead` (items this device lacked then), `peer_behind_now` (items this device holds now that, as far as it knows, the peer still lacks) and `digest_mismatches` (origins repaired in that exchange). A converged pair shows zeros. |
 | `address_changes` | Addresses at which a different device answered than before. |
+| `publish` | The usage publisher's last run: when, counters published, counters waiting for the next hour's budget (at most 5 000 an hour), counters collected past the retention horizon. |
 
-## 5. `tethra mesh doctor`
+## 6. `tethra mesh doctor`
 
 `doctor` runs every check below and prints each finding with a plain-language
 fix. `--json` gives `findings: [{check, severity, summary, fix}]` and `worst`.

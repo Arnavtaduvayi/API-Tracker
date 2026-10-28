@@ -14,8 +14,8 @@ Every session reads this file first and updates it at the end (README §1).
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
 | 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | done | 2026-10-27 | 2026-10-27 | `1b4c8a2`, `6a8213f` | CI `40554008854` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40554008811` (success) |
 | 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | done | 2026-10-27 | 2026-10-28 | `bd6d89e`, `40bd38a` | CI `40630951922` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40630951920` (success). 03 record commit `21b4c70`: CI `40588124547`, service `40588124805` (both success) |
-| 05 | [Node runtime](05-node-runtime.md) | S | M | done | 2026-10-28 | 2026-10-28 | `5b37ae7`, `beb3aa1` | CI `40739758045` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40739757930` **pending** (check first next session). First commit `5b37ae7`: CI `40737167919` **failed** on Linux (`node::three_nodes_converge…`, a pairing race, fixed in `beb3aa1`; its Windows job passed), service `40737167795` success |
-| 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | pending | | | | |
+| 05 | [Node runtime](05-node-runtime.md) | S | M | done | 2026-10-28 | 2026-10-28 | `5b37ae7`, `beb3aa1` | CI `40739758045` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40739757930` (success). First commit `5b37ae7`: CI `40737167919` **failed** on Linux (`node::three_nodes_converge…`, a pairing race, fixed in `beb3aa1`; its Windows job passed), service `40737167795` success |
+| 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | in-progress | 2026-10-28 | | | |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | pending | | | | |
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | pending | | | | |
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | pending | | | | |
@@ -40,6 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
+| 06 | **1,779 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (15): core `--test mesh_usage` 12, `mesh_schema` 9 (+1 v23), gateway `--test mesh_publish_e2e` 1, `cli --test mesh_cli` 9 (+1) | unchanged (not touched) | **175 passed** (`bash scripts/smoke.sh`; 9 usage checks) |
 | 05 `beb3aa1` | **1,764 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (40): `-p api-tracker-mesh` unit 14 (`instance` 5, `peers` 3, `runtime` 4, `wire` 2), `--test node` 8, `--test discover` 5, `--test doctor` 5, `--test replication` 7 (+1 rollback); core `mesh::peers` 6 + `sqlite_store` 1 (rollback hold); `cli --test mesh_cli` 7 (+2) | unchanged (not touched) | **166 passed** (`bash scripts/smoke.sh`; 9 node checks replace 1) |
 
 | 04 `40bd38a` | **1,724 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New: `-p api-tracker-mesh` 30 (`wire` unit 2, `bind_guard` 2, `bounds` 9, `noise_spike` 3, `pairing` 8, `replication` 6); `--test mesh_membership` 5; `mesh_schema` 8; `gateway --test no_mesh_dependency` 1; `cli --test mesh_cli` 5 | unchanged (not touched) | **158 passed** (`bash scripts/smoke.sh`; 7 two-node checks) |
@@ -79,6 +80,9 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 04 | **R20** A 16-byte preamble picks the handshake; pairing carries the invite hint (`blake3(token)[..8]`); the inviter answers only a live invite's hint. | The responder must choose the handshake and the invite's psk before message 1. | ADR 0031 R20, PROTOCOL §9.1-9.3 |
 | 04 | **R21** `AccessKeyUpdate` in every session; applied after the exchange's commit, bounded by `1 + removals`, equal epochs resolved by the larger BLAKE3 hash; re-removal refused. | The review found epoch poisoning (`u32::MAX`), a split on concurrent rotations, and a key travelling ahead of its removal. | ADR 0031 R21, PROTOCOL §9.5 |
 | 04 | Small, this table only: the inviter's side is `membership::accept_pairing(store, …)` (not an `UnlockedVault` method; the serving thread holds the node); `mesh_device_rename(name)` renames self only; `remove`/`leave` confirm via `--yes` in non-interactive runs (the `backup restore` pattern) rather than `confirm_default_no`; `invite --addr HOST:PORT` (plus `--wait --listen`) supplies the invite's addresses (05 publishes listen addresses); `join -` reads the invite from stdin; two checksum characters, not one; `SqliteStore::refresh` added. | Required by what was built, or stronger. | — |
+| 06 | **R23** Retention: below `horizon + 2 days` a store drops arriving `usage.counter`s at ingest (dot logged, not a rejection) and the publisher collects held ones; views stop at the horizon. | D14 said "garbage-collected on every device" and "dropped at ingest" without the clock-straddling case or where the floor lives. | ADR 0031 R23, PROTOCOL §8.4, DESIGN header [Amended 06] |
+| 06 | `model = ''` rows are published as model `(not reported)`, not skipped as "sentinels"; the split cut-over is a per-row `split_known` flag (v23), not a marker; v23 also rebuilds `mesh_publish_cursor` keyed by mesh project. | Only the writer inserts daily rows, and `''` is its "no model" value (real unpriced traffic); a migration-inserted marker row collides with restore; deletions after a rebind must go back to the right counter. | ADR 0031 "Smaller usage decisions", DESIGN §D14 [Amended 06] |
+| 06 | Small, this table only: `UsageClass` lives in `projectcost.rs` (the one classifier); `--by-device` hides the labelled total (rows are always per device); "no data from" lists active members without figures (other devices' bindings are private); `split_known_since` is derived from counters; publisher budget 5 000/hour of its own; `publish/gen` optimistic check; `mesh status` shows the publisher's last run; `Day::{next, from_unix_ms}` and `Serialize`; vault wrappers `mesh_project_*`, `mesh_publish`, `mesh_usage`, `mesh_settings`, `mesh_setting_set`; the 06 simulator item was already covered (`sim/world.rs` bumps epochs with lowered totals). | Simpler, or required by what was built. | — |
 | 05 | **R22** A `RollbackNotice` is stored per reporting device in `mesh_meta` (`rollback_hold/<reporter>`) and binds every minter on the database; it counts only while the reporter is active; a completed exchange without a repeated notice, or `mesh remove` of the reporter, clears it. | PROTOCOL §7.4 said "MUST NOT mint" without saying where the state lives or what ends it: an in-memory flag lets a CLI command fork the device; a hold with no release lets a lying member block its own removal (found by the unit test). | ADR 0031 R22, PROTOCOL §7.4, DESIGN §D5 [Amended 05] |
 | 05 | D9's "repair every 24 h" is a recorded **repair round** (`node/last_repair`), and `doctor --repair` runs one; D17's "corrupt view row" is checked as item-row corruption, and `doctor --rebuild` rewrites the item store's index columns and removes unusable rows. | Every exchange already repairs (R11); there are no view tables (R17). | ADR 0031 "Smaller node decisions", DESIGN §D13 [Amended 05] |
 | 05 | Small, this table only: the loop is `crates/mesh::runtime` (`RunningNode`), not `node.rs` (which keeps `MeshNode`); the peer table and lag/repair records are `core::mesh::peers` (shared with the desktop), backoff/targets are `crates/mesh::peers`; **Ctrl-C ends `serve` without a signal handler** (as `gateway serve`; `tethra mesh stop` is the graceful path); `--interval` (≥ 5 s) is a documented option so release binaries and smoke can use short rounds (the ms env override is debug-only); new `tethra mesh stop`; `Discovery::announce` takes the IPs too; `record_attempt` updates only existing `mesh_peers` rows; `mesh join` records the invite address that answered as a manual peer (CI found the race without it); `MeshError::{InvalidPeerAddress, RollbackHold}`, `NetError::Node`; `MeshStatusDetail.rollback_hold`; `Day::from_unix_ms`; `session::peek_session_id`; `membership::publish_listen_addrs`. | Simpler, or required by what was built. | — |
@@ -88,6 +92,62 @@ also update DESIGN.md and the affected increment files; README §7.)_
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 06 — Shared projects & cross-device usage (2026-10-28)
+
+**What landed.**
+- Migration **v23**: `gateway_usage_daily.{unpriced_requests,
+  unextracted_requests, split_known}`; `mesh_publish_cursor` rebuilt with
+  `mesh_project_id` in its key (+ index). `migration_safety` still 9.
+- Gateway writer: `projectcost::UsageClass::of(usage_reported, estimate)` per
+  request → the split columns; new rows `split_known = 1`.
+- Core: `mesh::projects` (share, bind, unbind, rename, archive, merge, list,
+  resolve, root_of, bindings), `mesh::publish` (publisher, retention,
+  `apply_retention`, `publish_with_budget`, `last_report`), `mesh::usage`
+  (`usage_report`, `split_unknown`, `local_month_spend_micros`);
+  `SqliteStore::{mint_batch, set_usage_floor, usage_floor, gc_usage}`;
+  vault wrappers.
+- `crates/mesh::hooks::{UsagePublisher, default_hooks}`; `serve` runs it.
+- CLI: `mesh project share|bind|unbind|rename|archive|merge|list`,
+  `mesh usage [--project] [--month] [--day] [--by-device]`,
+  `mesh settings list|get|set`; `replicate` and `usage` publish first;
+  `status` shows `publish`; `tethra usage report` prints a stderr hint.
+- Docs: gateway SI-19 amendment and PRIVACY deletion note; USER_GUIDE §4;
+  ARCHITECTURE "Usage publishing"; KNOWN_LIMITATIONS "Usage and cost";
+  SECURITY_INVARIANTS SI-11/SI-13; ADR 0031 R23 + smaller decisions;
+  PROTOCOL §8.4; DESIGN [Amended 06]; TEST_PLAN; README; CHANGELOG.
+- Smoke: share on A, seed A's rollup with `sqlite3`, A's node, B replicates,
+  binds, and `mesh usage --json` shows A's labelled numbers (9 checks).
+
+**For 07 and 08 (load-bearing).**
+- **Local month spend:** `core::mesh::usage::local_month_spend_micros(store,
+  mesh_project, month)` sums this device's `gateway_usage_daily` estimate for
+  every local project bound to the mesh project's root. Use it; do not write a
+  second one.
+- **Round-hook order:** `hooks::default_hooks()` = `[UsagePublisher]`. Add the
+  cap reconciler **after** it, so caps see this round's usage. The CLI and the
+  desktop both take `default_hooks()`.
+- Cap fixtures: `mesh_usage::merge_folds…` mints `CapDef`s directly;
+  `projects::cap_count` is the merge guard 07 keeps working.
+- Own counters: `publish::own_counter(store, key)`; all counters:
+  `store.state().usage` (`OwnerCounterMap<UsageKey, UsageTotals>`), admitted
+  through `roster.is_admitted(origin, entry.seq)`.
+
+**Surprises.**
+- `model = ''` in the rollup is real traffic (the writer's "no model"), not a
+  sentinel; skipping it as D14 said would have hidden unpriced usage.
+- A migration may not insert rows: `restore_v2` inserts every backed-up row
+  into a freshly migrated database (first attempt used `vault_meta`; the
+  restore tests failed with a UNIQUE violation).
+- `request_count − usage_event_count` already gives "not extracted" for every
+  row, including old ones; only priced vs unpriced was lost before v23.
+
+**Not done / honest list.**
+- Nothing in 06's scope was moved. The simulator item needed no change (epoch
+  bumps with lowered totals were already in the workload); the oracle and
+  simulator run with no usage floor, so R23's ingest drop is covered by
+  `mesh_usage::the_retention_sweep…` and the store unit paths, not by the
+  simulator.
 
 ### Increment 05 — Node runtime (2026-10-28)
 

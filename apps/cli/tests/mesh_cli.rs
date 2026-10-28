@@ -560,3 +560,129 @@ fn serve_refuses_a_second_node_and_a_too_short_interval() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("at least 5 seconds"));
 }
+
+/// Seed a gateway daily row for local project `name` (the gateway writer's
+/// own path is covered by crates/gateway/tests/mesh_publish_e2e.rs).
+fn seed_usage(tv: &TestVault, name: &str, requests: i64, unpriced: i64, cost: i64) {
+    let conn = tv.conn();
+    let id: String = conn
+        .query_row("SELECT id FROM projects WHERE name = ?1", [name], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    let day = api_tracker_core::mesh::kinds::Day::from_unix_ms(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64,
+    )
+    .to_string();
+    conn.execute(
+        "INSERT INTO gateway_usage_daily (day, provider_id, project_id, model, request_count,
+             usage_event_count, input_tokens, output_tokens, estimated_cost_micros, updated_at,
+             unpriced_requests, unextracted_requests, split_known)
+         VALUES (?1, 'openai', ?2, 'gpt-x', ?3, ?3, 10, 5, ?4, 'x', ?5, 0, 1)",
+        rusqlite::params![day, id, requests, cost, unpriced],
+    )
+    .unwrap();
+}
+
+#[test]
+fn share_bind_and_read_usage_across_two_devices_from_the_cli() {
+    let a = TestVault::new();
+    run(&a, &["mesh", "init", "--name", "dev-a"]);
+    let (ok, _, err) = run(&a, &["project", "create", "app"]);
+    assert!(ok, "{err}");
+    let node_a = serve(&a);
+    let inv = json(&a, &["mesh", "invite", "--addr", &node_a.addr]);
+    let b = TestVault::new();
+    run(
+        &b,
+        &[
+            "mesh",
+            "join",
+            inv["invite"].as_str().unwrap(),
+            "--name",
+            "dev-b",
+        ],
+    );
+    let (ok, _, err) = run(&b, &["project", "create", "app"]);
+    assert!(ok, "{err}");
+
+    // Share on A.
+    let shared = json(&a, &["mesh", "project", "share", "app"]);
+    let p = shared["mesh_project_id"].as_str().unwrap().to_owned();
+    assert_eq!(shared["bound"], true);
+    let (ok, _, err) = run(&a, &["mesh", "project", "share", "app"]);
+    assert!(!ok && err.contains("already bound"), "{err}");
+    seed_usage(&a, "app", 6, 2, 4_000);
+
+    // B replicates (one-shot; A's serve publishes nothing on its own here,
+    // so B pulls what A's `mesh usage` publishes).
+    let ua = json(&a, &["mesh", "usage"]);
+    assert_eq!(ua["projects"][0]["devices"][0]["totals"]["requests"], 6);
+    let r = json(&b, &["mesh", "replicate"]);
+    assert!(r["exchanges"][0]["error"].is_null(), "{r}");
+    // Not bound on B until B binds it.
+    let list = json(&b, &["mesh", "project", "list"]);
+    assert_eq!(list[0]["mesh_project_id"], p.as_str());
+    assert!(list[0]["bound_local_project"].is_null());
+    let bound = json(&b, &["mesh", "project", "bind", &p[..10], "app"]);
+    assert_eq!(bound["bound"], true);
+
+    let u = json(&b, &["mesh", "usage"]);
+    let proj = &u["projects"][0];
+    let dev_a = proj["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_name"] == "dev-a")
+        .unwrap();
+    assert_eq!(dev_a["totals"]["requests"], 6);
+    assert_eq!(dev_a["totals"]["unpriced_requests"], 2);
+    assert_eq!(dev_a["totals"]["priced_requests"], 4);
+    assert!(dev_a["as_of"].is_string());
+    assert_eq!(dev_a["stale"], false);
+    assert!(proj["total_label"]
+        .as_str()
+        .unwrap()
+        .starts_with("estimated, gateway-observed"));
+    assert!(proj["no_data_from"].as_array().unwrap().len() == 1);
+    let (_, text, _) = run(&b, &["mesh", "usage"]);
+    assert!(
+        text.lines()
+            .next()
+            .unwrap()
+            .contains("never summed with provider-reported cost"),
+        "honesty label first: {text}"
+    );
+    assert!(text.contains("No data from dev-b"), "{text}");
+    assert!(!has_hex64(&text));
+
+    // Rename, settings, archive.
+    json(&a, &["mesh", "project", "rename", &p, "app-shared"]);
+    let s = json(&a, &["mesh", "settings", "list"]);
+    assert_eq!(s[0]["name"], "retention.usage_days");
+    assert_eq!(s[0]["default"], true);
+    json(
+        &a,
+        &["mesh", "settings", "set", "retention.usage_days", "30"],
+    );
+    assert_eq!(
+        json(&a, &["mesh", "settings", "get", "retention.usage_days"])[0]["value"],
+        30
+    );
+    let (ok, _, err) = run(
+        &a,
+        &["mesh", "settings", "set", "retention.usage_days", "0"],
+    );
+    assert!(!ok && err.contains("1 to 3650"), "{err}");
+    let st = json(&a, &["mesh", "status"]);
+    assert!(st["publish"]["minted"].is_u64(), "{st}");
+    // `tethra usage` points at the mesh view, without mixing figures in.
+    let (_, _, err) = run(&a, &["usage", "report"]);
+    assert!(err.contains("tethra mesh usage"), "{err}");
+    let unbound = json(&b, &["mesh", "project", "unbind", "app"]);
+    assert_eq!(unbound["unbound"], true);
+    drop(node_a);
+}

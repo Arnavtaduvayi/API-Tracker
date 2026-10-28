@@ -29,6 +29,7 @@ pub mod discover;
 pub mod doctor;
 pub mod error;
 pub mod handshake;
+pub mod hooks;
 pub mod instance;
 pub mod node;
 pub mod noise;

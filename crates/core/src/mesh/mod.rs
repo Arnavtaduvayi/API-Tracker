@@ -54,17 +54,20 @@ pub mod marker;
 pub mod membership;
 pub mod memstore;
 pub mod peers;
+pub mod projects;
 pub mod proto;
+pub mod publish;
 pub mod sign;
 pub mod sqlite_store;
 pub mod store;
+pub mod usage;
 pub mod views;
 pub mod vv;
 
 #[cfg(any(test, feature = "mesh-sim"))]
 pub mod sim;
 
-pub use dot::{DeviceId, Dot, MeshId};
+pub use dot::{DeviceId, Dot, MeshId, MeshProjectId};
 pub use error::MeshError;
 pub use hlc::Hlc;
 pub use item::{ItemHash, SignedItem};

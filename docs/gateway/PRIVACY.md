@@ -106,3 +106,11 @@ degradation).
   all — their only removal mechanism was the age-based retention sweep — so
   this promise was false when first written. It is now asserted by
   `deleting_all_observability_data_really_removes_gateway_rows`.)*
+- **Paired devices (Tethra Mesh, ADR 0031).** If a project is shared with
+  your own paired devices, only daily per-model counts, token totals and the
+  estimate travel — never a request, path, endpoint, host or credential. The
+  deletion tools above (and the retention sweep) reach those devices too: the
+  next usage publish takes the deleted amounts back with a higher counter
+  epoch, which every device adopts in place of the old totals
+  (`mesh_usage::deleting_local_data_bumps_the_epoch_and_the_peer_sees_the_reduction`).
+  A device that is switched off learns it when it next exchanges.

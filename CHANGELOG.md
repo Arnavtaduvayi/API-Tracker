@@ -6,6 +6,34 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: shared projects and cross-device usage (in development)
+
+Share a project between your own devices and see its gateway-observed API
+usage from all of them in one place
+([ADR 0031](docs/decisions/0031-device-mesh.md), [user guide](docs/mesh/USER_GUIDE.md)).
+
+- **Share and bind.** `tethra mesh project share app` shares a local project.
+  On each other device, `tethra mesh project bind <project> app` connects that
+  device's own project to it. Nothing binds automatically. `rename`,
+  `archive`, `merge`, `unbind` and `list` manage shared projects.
+- **Honest cross-device usage.** `tethra mesh usage` shows each device's
+  requests, tokens and estimated cost on its own row. Each row says how fresh
+  it is ("as of" the last exchange with that device, stale after 24 hours) and
+  marks removed devices. Devices with no data are listed as unknown, not zero.
+  A total across devices always carries its label, and these figures are
+  never added to provider-reported cost.
+- **Unpriced is not free.** The gateway now records whether each request was
+  priced, unpriced (no pricing record, or no model reported) or had no usage
+  in the response. Only priced requests are in the estimate; the others are
+  counted beside it. Traffic recorded before this version shows as "split
+  unknown".
+- **Deletion follows.** Deleting gateway data, or letting it expire, removes
+  it from your other devices at their next exchange.
+- **Retention.** `tethra mesh settings set retention.usage_days <n>` (default
+  90) sets how long every device keeps the counters.
+- `tethra usage` is unchanged; when this device is in a mesh it points to
+  `tethra mesh usage`.
+
 ### Added — Tethra Mesh node: devices stay in step on their own (in development)
 
 `tethra mesh serve` is now a long-running **node**

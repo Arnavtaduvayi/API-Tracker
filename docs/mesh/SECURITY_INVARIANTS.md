@@ -218,11 +218,23 @@ NN)** otherwise.
 
 - **MESH-SI-11 Honest cross-device figures.** Labelled per device with
   freshness; a missing device is unknown, never zero; never summed with
-  provider-reported cost. *Status:* partial (01): owner counters expose values
-  per origin only (`OwnerCounterMap::admitted`). Views land in 06. *Tests:*
-  `crdt::owner_counter::tests::admitted_values_are_per_origin`.
+  provider-reported cost. *Status:* implemented (01, 06): owner counters expose
+  values per origin only (`OwnerCounterMap::admitted`); `usage_report` gives
+  every figure a device, an `as_of` and `stale`, lists active devices without
+  figures under `no_data_from`, labels any sum, and reads nothing
+  provider-reported; `tethra usage` only points to it (gateway SI-19, amended).
+  *Tests:* `crdt::owner_counter::tests::admitted_values_are_per_origin`,
+  `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`,
+  `mesh_usage::views_label_stale_and_removed_devices_and_devices_with_no_data`,
+  `mesh_usage::rows_from_before_the_split_publish_an_honest_unknown_remainder`,
+  `mesh_publish_e2e::gateway_usage_reaches_a_paired_device_split_and_labelled`,
+  `mesh_cli::share_bind_and_read_usage_across_two_devices_from_the_cli`.
 - **MESH-SI-13 Nothing automatic.** No auto-binding, auto-import or
-  auto-enforcement. *Status:* specified (lands in 06/08/11). *Tests:* none yet.
+  auto-enforcement. *Status:* implemented (06) for binding: sharing binds only
+  the sharer's own project; every other device binds by an explicit command,
+  never by name or local id; caps (08) and imports (11) follow. *Tests:*
+  `mesh_usage::binding_is_never_automatic_cascades_on_delete_and_is_refused_twice`,
+  `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the
   `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01, 05):
   no mesh code, the node included, references the analytics module. *Tests:* none yet (12 adds a grep

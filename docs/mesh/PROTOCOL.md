@@ -797,6 +797,14 @@ item per `(kind, key, origin)`, so a device's digest (§8.5) covers the same set
 everywhere. The dot log is never pruned below the VV; Increment 03 keeps all of
 it (on disk), so forks of any age are found by chain comparison.
 
+**Retention (implemented, 06; ADR 0031 R23).** A `usage.counter` whose day is
+before `today − (retention.usage_days + 2)` (the LWW `mesh.setting`, default
+90) is excluded under (b): a store does not keep it — an arriving one is not
+stored (not a rejection; its dot is logged as usual) and held ones are deleted
+when the publisher runs. The two days of slack keep devices whose clocks
+straddle midnight from disagreeing about what they hold; while two devices
+briefly do, their digests differ and repair resends what the other then drops.
+
 ### 8.5 Repair
 
 `Hello.digests` maps every origin in the sender's VV to

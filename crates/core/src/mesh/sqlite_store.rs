@@ -49,7 +49,7 @@ use super::dot::{DeviceId, MarkerNonce};
 use super::error::MeshError;
 use super::hlc::{Hlc, HlcClock};
 use super::item::{ItemHash, SignedItem};
-use super::kinds::TypedItem;
+use super::kinds::{Day, TypedItem};
 use super::marker::{self, MarkerContents, MarkerStatus, SEQ_BLOCK};
 use super::sign::SigningKeyPair;
 use super::store::{
@@ -121,6 +121,9 @@ struct Mirror {
     /// `RollbackNotice`s (PROTOCOL.md §7.4): reporting device → the seq of
     /// this device's own log it said it holds (`mesh_meta.rollback_hold/*`).
     rollback_holds: BTreeMap<DeviceId, u64>,
+    /// Usage counters for days before this are not stored (the retention
+    /// horizon, set by the publisher; `None` stores everything).
+    usage_floor: Option<Day>,
 }
 
 impl Mirror {
@@ -137,6 +140,7 @@ impl Mirror {
             generation: 0,
             dirty: BTreeSet::new(),
             rollback_holds: BTreeMap::new(),
+            usage_floor: None,
         }
     }
 
@@ -447,6 +451,14 @@ fn apply_entry(
     now_ms: u64,
 ) -> Result<(bool, bool), MeshError> {
     let (o, s, h) = (v.body.origin, v.body.seq, v.item.hash());
+    // Beyond the retention horizon a usage counter is excluded for a reason
+    // that does not depend on seq, so it is not stored (PROTOCOL.md §8.4);
+    // its dot is still logged by the caller. Not a rejection.
+    if let (Some(floor), TypedItem::UsageCounter(c)) = (m.usage_floor, &v.typed) {
+        if c.key.day < floor {
+            return Ok((false, false));
+        }
+    }
     let origin = o.to_hex();
     let seq = to_i64(s)?;
     let received_at = to_i64(now_ms).unwrap_or(i64::MAX);
@@ -892,6 +904,77 @@ impl SqliteStore {
     /// reported holding more of its own log than it has (`status`, `doctor`).
     pub fn rollback_hold(&self) -> Option<u64> {
         self.m.rollback_hold()
+    }
+
+    /// Stop storing usage counters for days before `floor` (the publisher
+    /// sets it from the retention horizon). Items below it that arrive are
+    /// dropped at ingest, their dots logged; [`Self::gc_usage`] removes the
+    /// ones already held.
+    pub fn set_usage_floor(&mut self, floor: Option<Day>) {
+        self.m.usage_floor = floor;
+    }
+
+    pub fn usage_floor(&self) -> Option<Day> {
+        self.m.usage_floor
+    }
+
+    /// Delete held usage counters (any origin) for days before the floor
+    /// and reload the views. Allowed because such an item is excluded for a
+    /// reason that does not depend on its seq (PROTOCOL.md §8.4 (b)): every
+    /// device drops it the same way. Returns how many rows went.
+    pub fn gc_usage(&mut self) -> Result<usize, MeshError> {
+        let Some(floor) = self.m.usage_floor else {
+            return Ok(0);
+        };
+        let floor = floor.to_string();
+        let n = self.write(|tx, m, _| {
+            let mut st = tx
+                .prepare_cached(
+                    "SELECT origin FROM mesh_items WHERE kind = ?1
+                     AND substr(item_key, 34, 10) < ?2",
+                )
+                .map_err(sql("reading mesh_items"))?;
+            let origins: BTreeSet<String> = st
+                .query_map(params![super::kinds::names::USAGE_COUNTER, floor], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(sql("reading mesh_items"))?
+                .collect::<Result<_, _>>()
+                .map_err(sql("reading mesh_items"))?;
+            let n = tx
+                .execute(
+                    "DELETE FROM mesh_items WHERE kind = ?1 AND substr(item_key, 34, 10) < ?2",
+                    params![super::kinds::names::USAGE_COUNTER, floor],
+                )
+                .map_err(sql("collecting old usage counters"))?;
+            for o in origins {
+                m.dirty.insert(DeviceId::parse(&o)?);
+            }
+            Ok(n)
+        })?;
+        if n > 0 {
+            self.reload()?;
+        }
+        Ok(n)
+    }
+
+    /// Mint `drafts` in one durable transaction, then run `also` inside it
+    /// (the publisher records what it attributed in the same commit, so a
+    /// crash can neither publish twice nor lose a delta). All or nothing.
+    pub fn mint_batch(
+        &mut self,
+        key: &SigningKeyPair,
+        drafts: Vec<Draft>,
+        also: impl FnOnce(&Connection) -> Result<(), MeshError>,
+    ) -> Result<Vec<SignedItem>, MeshError> {
+        self.write(|tx, m, marker| {
+            let mut out = Vec::with_capacity(drafts.len());
+            for d in drafts {
+                out.push(mint_in(tx, m, marker, key, d)?);
+            }
+            also(tx)?;
+            Ok(out)
+        })
     }
 
     /// The views recomputed from `mesh_items` alone (`doctor --rebuild`,

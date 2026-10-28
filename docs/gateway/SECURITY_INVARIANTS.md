@@ -169,5 +169,13 @@ reporting a blocker.
   limitations (local machine only, base-URL-repointed traffic only, no
   remote/production) are stated wherever coverage is shown. Absence of
   recorded traffic is never presented as absence of traffic.
+  *Amended for Tethra Mesh (ADR 0031, Increment 06):* coverage may now include
+  the user's own paired devices' gateways (`tethra mesh usage`). Their figures
+  are labelled per device, with the time of the last exchange with that device
+  and "stale" after 24 hours; a device with no data is listed as unknown, never
+  counted as zero; a sum across devices is shown only with its label
+  ("estimated, gateway-observed, across N devices; M stale"); and these figures
+  are never summed with provider-reported cost. `tethra usage` (provider and
+  manual usage) is unchanged and only points to the mesh view.
 - **SI-20 No unsafe code in Tethra-owned Rust.** `#![forbid(unsafe_code)]`
   at the crate root.

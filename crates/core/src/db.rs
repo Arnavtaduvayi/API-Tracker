@@ -1538,6 +1538,59 @@ ALTER TABLE gateway_config
 ALTER TABLE mesh_invites ADD COLUMN wrapped_psk BLOB;
 "#,
     },
+    Migration {
+        version: 23,
+        name: "honest usage split in the daily rollup; publish cursor per mesh project",
+        sql: r#"
+-- Gateway usage, split the way projectcost.rs classifies a request (ADR 0029,
+-- DESIGN §D14, Increment 06): priced = request_count - unpriced_requests -
+-- unextracted_requests. The writer has always stored an unpriced request's
+-- cost as 0, so before this migration an unpriced request and a free one were
+-- the same row. `split_known` is 1 only on rows the writer created after it:
+-- a row that already existed keeps 0 as it grows, because its earlier
+-- requests were never classified. (unextracted is also request_count -
+-- usage_event_count, so it is known for every row; unpriced is not.)
+ALTER TABLE gateway_usage_daily ADD COLUMN unpriced_requests INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gateway_usage_daily ADD COLUMN unextracted_requests INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE gateway_usage_daily
+    ADD COLUMN split_known INTEGER NOT NULL DEFAULT 0 CHECK (split_known IN (0, 1));
+
+-- Tethra Mesh usage publishing (Increment 06): what this device has
+-- attributed to each mesh project's usage counters, per local daily row. Keyed
+-- by the mesh project too, so after a rebind a deletion is taken back from
+-- the counter each part went to. v21 created the table without that column
+-- and nothing wrote it; any row is kept against its current binding.
+CREATE TABLE mesh_publish_cursor_v23 (
+    local_project_id      TEXT NOT NULL,
+    mesh_project_id       TEXT NOT NULL CHECK (length(mesh_project_id) = 32),
+    day                   TEXT NOT NULL,
+    provider_id           TEXT NOT NULL,
+    model                 TEXT NOT NULL,
+    requests              INTEGER NOT NULL DEFAULT 0,
+    priced_requests       INTEGER NOT NULL DEFAULT 0,
+    unpriced_requests     INTEGER NOT NULL DEFAULT 0,
+    unextracted_requests  INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens   INTEGER NOT NULL DEFAULT 0,
+    estimated_cost_micros INTEGER NOT NULL DEFAULT 0,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (local_project_id, mesh_project_id, day, provider_id, model)
+) STRICT;
+INSERT INTO mesh_publish_cursor_v23
+    (local_project_id, mesh_project_id, day, provider_id, model, requests, priced_requests,
+     unpriced_requests, unextracted_requests, input_tokens, output_tokens,
+     cached_input_tokens, estimated_cost_micros, updated_at)
+SELECT c.local_project_id, b.mesh_project_id, c.day, c.provider_id, c.model, c.requests,
+       c.priced_requests, c.unpriced_requests, c.unextracted_requests, c.input_tokens,
+       c.output_tokens, c.cached_input_tokens, c.estimated_cost_micros, c.updated_at
+FROM mesh_publish_cursor c
+JOIN mesh_project_bindings b ON b.local_project_id = c.local_project_id;
+DROP TABLE mesh_publish_cursor;
+ALTER TABLE mesh_publish_cursor_v23 RENAME TO mesh_publish_cursor;
+CREATE INDEX idx_mesh_cursor_mesh ON mesh_publish_cursor(mesh_project_id, day);
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

@@ -138,6 +138,27 @@ pub enum MeshCmd {
     /// The addresses this device's node dials.
     #[command(subcommand)]
     Peer(PeerCmd),
+    /// Share local projects with your devices and bind them.
+    #[command(subcommand)]
+    Project(ProjectCmd),
+    /// Gateway-observed usage across your devices, labelled per device.
+    Usage {
+        /// One mesh project (id, id prefix or name).
+        #[arg(long)]
+        project: Option<String>,
+        /// A UTC month, YYYY-MM (default: this month).
+        #[arg(long)]
+        month: Option<String>,
+        /// One UTC day, YYYY-MM-DD.
+        #[arg(long)]
+        day: Option<String>,
+        /// Per-device rows only, without the labelled cross-device total.
+        #[arg(long)]
+        by_device: bool,
+    },
+    /// Mesh-wide settings (replicated to every device).
+    #[command(subcommand)]
+    Settings(SettingsCmd),
     /// Check this device's mesh: identity, keys, stored items, the node,
     /// its listeners and peers. Every finding comes with a fix.
     Doctor {
@@ -151,6 +172,43 @@ pub enum MeshCmd {
         #[arg(long)]
         repair: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectCmd {
+    /// Share a local project: a new mesh project, bound to it here.
+    Share {
+        local: String,
+    },
+    /// Bind a local project to a mesh project another device shared.
+    Bind {
+        mesh: String,
+        local: String,
+    },
+    /// Stop publishing a local project's usage (what was published stays).
+    Unbind {
+        local: String,
+    },
+    Rename {
+        mesh: String,
+        name: String,
+    },
+    Archive {
+        mesh: String,
+    },
+    /// Merge two mesh projects that are the same real project.
+    Merge {
+        a: String,
+        b: String,
+    },
+    List,
+}
+
+#[derive(Subcommand)]
+pub enum SettingsCmd {
+    List,
+    Get { name: String },
+    Set { name: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -305,6 +363,14 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
         MeshCmd::Stop => stop_node(ctx)?,
         MeshCmd::Replicate { peer } => replicate(ctx, peer)?,
         MeshCmd::Peer(cmd) => peer_cmd(ctx, cmd)?,
+        MeshCmd::Project(cmd) => project_cmd(ctx, cmd)?,
+        MeshCmd::Usage {
+            project,
+            month,
+            day,
+            by_device,
+        } => usage(ctx, project, month, day, by_device)?,
+        MeshCmd::Settings(cmd) => settings_cmd(ctx, cmd)?,
         MeshCmd::Doctor { rebuild, repair } => doctor(ctx, rebuild, repair)?,
     }
     Ok(())
@@ -370,6 +436,7 @@ fn serve_node(ctx: &Ctx, args: ServeArgs) -> Result<()> {
         cfg.discovery = Some(Arc::new(MdnsDiscovery::new()?));
     }
     cfg.log = Some(Arc::new(|m: &str| note(&format!("mesh: {m}"))));
+    cfg.hooks = api_tracker_mesh::hooks::default_hooks();
     let running = RunningNode::start(node, &ctx.paths.data_dir, cfg, Box::new(AnyOf(stops)))?;
     for a in running.listen_addrs() {
         // Tests and scripts read the bound port from this line.
@@ -462,6 +529,10 @@ fn replicate(ctx: &Ctx, peer: Option<String>) -> Result<()> {
         }
     } else {
         let (vault, _token) = ctx.unlocked()?;
+        // Publish fresh usage first, so this exchange carries it.
+        if let Err(e) = vault.mesh_publish() {
+            note(&format!("mesh: usage was not published: {e}"));
+        }
         let addrs = match &peer {
             Some(p) => vec![p.clone()],
             None => vault.mesh_peers()?.into_iter().map(|r| r.addr).collect(),
@@ -519,6 +590,290 @@ fn replicate(ctx: &Ctx, peer: Option<String>) -> Result<()> {
     });
     if !out.exchanges.is_empty() && out.exchanges.iter().all(|e| e.error.is_some()) {
         bail!("no exchange completed");
+    }
+    Ok(())
+}
+
+fn project_cmd(ctx: &Ctx, cmd: ProjectCmd) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    match cmd {
+        ProjectCmd::Share { local } => {
+            let (id, name) = vault.mesh_project_share(&local)?;
+            let out = serde_json::json!({ "mesh_project_id": id, "name": name, "bound": true });
+            render::emit(ctx.json, &out, || {
+                println!(
+                    "Shared {} as mesh project {}. On each other device, bind a local \
+                     project to it: tethra mesh project bind {} <local-project>",
+                    render::sanitize(&name),
+                    short(&id.to_hex()),
+                    short(&id.to_hex())
+                );
+            });
+        }
+        ProjectCmd::Bind { mesh, local } => {
+            let id = vault.mesh_project_bind(&mesh, &local)?;
+            let out = serde_json::json!({ "mesh_project_id": id, "bound": true });
+            render::emit(ctx.json, &out, || {
+                println!(
+                    "Bound {} to mesh project {}. Its gateway usage is published from the \
+                     next run of the node (or `tethra mesh replicate`).",
+                    render::sanitize(local.trim()),
+                    short(&id.to_hex())
+                );
+            });
+        }
+        ProjectCmd::Unbind { local } => {
+            let was = vault.mesh_project_unbind(&local)?;
+            let out = serde_json::json!({ "unbound": was });
+            render::emit(ctx.json, &out, || {
+                if was {
+                    println!("Unbound. Usage already published stays; nothing new is published.");
+                } else {
+                    println!("That project was not bound.");
+                }
+            });
+        }
+        ProjectCmd::Rename { mesh, name } => {
+            let id = vault.mesh_project_rename(&mesh, &name)?;
+            let out = serde_json::json!({ "mesh_project_id": id, "name": name.trim() });
+            render::emit(ctx.json, &out, || {
+                println!("Renamed mesh project {}.", short(&id.to_hex()))
+            });
+        }
+        ProjectCmd::Archive { mesh } => {
+            let id = vault.mesh_project_archive(&mesh)?;
+            let out = serde_json::json!({ "mesh_project_id": id, "archived": true });
+            render::emit(ctx.json, &out, || {
+                println!("Archived mesh project {}.", short(&id.to_hex()))
+            });
+        }
+        ProjectCmd::Merge { a, b } => {
+            let (root, merged) = vault.mesh_project_merge(&a, &b)?;
+            let out = serde_json::json!({ "root": root, "merged": merged });
+            render::emit(ctx.json, &out, || {
+                println!(
+                    "Merged {} into {}: its usage now counts under {}.",
+                    short(&merged.to_hex()),
+                    short(&root.to_hex()),
+                    short(&root.to_hex())
+                )
+            });
+        }
+        ProjectCmd::List => {
+            let rows = vault.mesh_projects()?;
+            render::emit(ctx.json, &rows, || {
+                if rows.is_empty() {
+                    println!(
+                        "No mesh projects. Share one with `tethra mesh project share <local>`."
+                    );
+                    return;
+                }
+                let table: Vec<Vec<String>> = rows
+                    .iter()
+                    .map(|r| {
+                        let mut state = Vec::new();
+                        if r.archived {
+                            state.push("archived".to_owned());
+                        }
+                        if let Some(m) = r.merged_into {
+                            state.push(format!("merged into {}", short(&m.to_hex())));
+                        }
+                        vec![
+                            render::sanitize(&r.name),
+                            short(&r.mesh_project_id.to_hex()).to_owned(),
+                            r.bound_local_project_name
+                                .as_deref()
+                                .map_or("-".to_owned(), render::sanitize),
+                            r.publishing_devices.len().to_string(),
+                            if state.is_empty() {
+                                "active".to_owned()
+                            } else {
+                                state.join(", ")
+                            },
+                        ]
+                    })
+                    .collect();
+                render::table(
+                    &["NAME", "ID", "BOUND HERE TO", "DEVICES PUBLISHING", "STATE"],
+                    &table,
+                );
+            });
+        }
+    }
+    Ok(())
+}
+
+fn usd(micros: u64) -> String {
+    format!("${}.{:04}", micros / 1_000_000, (micros % 1_000_000) / 100)
+}
+
+fn usage(
+    ctx: &Ctx,
+    project: Option<String>,
+    month: Option<String>,
+    day: Option<String>,
+    by_device: bool,
+) -> Result<()> {
+    use api_tracker_core::mesh::kinds::{Day, Month};
+    use api_tracker_core::mesh::usage::{split_unknown, UsageFilter};
+    let (vault, _token) = ctx.unlocked()?;
+    if let Err(e) = vault.mesh_publish() {
+        note(&format!("mesh: this device's usage was not published: {e}"));
+    }
+    let mut filter = UsageFilter::default();
+    if let Some(d) = day {
+        filter.day = Some(Day::parse(d.trim()).context("--day must be YYYY-MM-DD")?);
+    }
+    if let Some(m) = month {
+        filter.month = Some(Month::parse(m.trim()).context("--month must be YYYY-MM")?);
+    }
+    if let Some(p) = project {
+        let store = vault.mesh_open_store()?;
+        filter.project = Some(api_tracker_core::mesh::projects::resolve(&store, &p)?);
+    }
+    let report = vault.mesh_usage(&filter)?;
+    render::emit(ctx.json, &report, || {
+        println!(
+            "Mesh usage for {} — estimated, gateway-observed, per device; never summed with \
+             provider-reported cost.",
+            report.period
+        );
+        for n in &report.notes[1..] {
+            println!("  {n}");
+        }
+        if report.projects.is_empty() {
+            println!("No shared projects. Share one with `tethra mesh project share <local>`.");
+        }
+        for p in &report.projects {
+            println!();
+            println!(
+                "{} ({}){}",
+                render::sanitize(&p.name),
+                short(&p.mesh_project_id.to_hex()),
+                if p.archived { ", archived" } else { "" }
+            );
+            let rows: Vec<Vec<String>> = p
+                .devices
+                .iter()
+                .map(|d| {
+                    let mut who = render::sanitize(d.device_name.as_deref().unwrap_or("-"));
+                    if d.is_self {
+                        who.push_str(" (this device)");
+                    }
+                    if d.removed {
+                        who.push_str(" (removed)");
+                    }
+                    let as_of = if d.is_self {
+                        "current".to_owned()
+                    } else {
+                        format!(
+                            "{}{}",
+                            d.as_of.as_deref().unwrap_or("never exchanged directly"),
+                            if d.stale { " (stale)" } else { "" }
+                        )
+                    };
+                    let t = &d.totals;
+                    vec![
+                        who,
+                        as_of,
+                        t.requests.to_string(),
+                        t.priced_requests.to_string(),
+                        t.unpriced_requests.to_string(),
+                        t.unextracted_requests.to_string(),
+                        split_unknown(t).to_string(),
+                        t.input_tokens.to_string(),
+                        t.output_tokens.to_string(),
+                        usd(t.estimated_cost_micros),
+                    ]
+                })
+                .collect();
+            render::table(
+                &[
+                    "DEVICE",
+                    "AS OF",
+                    "REQUESTS",
+                    "PRICED",
+                    "UNPRICED",
+                    "NOT EXTRACTED",
+                    "SPLIT UNKNOWN",
+                    "IN TOKENS",
+                    "OUT TOKENS",
+                    "EST. (PRICED ONLY)",
+                ],
+                &rows,
+            );
+            if !by_device && !p.devices.is_empty() {
+                println!(
+                    "  Total ({}): {} requests, {} estimated for priced requests only",
+                    p.total_label,
+                    p.total.requests,
+                    usd(p.total.estimated_cost_micros)
+                );
+            }
+            for (d, name) in &p.no_data_from {
+                println!(
+                    "  No data from {} ({}): unknown, not zero.",
+                    render::sanitize(name.as_deref().unwrap_or("-")),
+                    short(&d.to_hex())
+                );
+            }
+            for d in p.devices.iter().filter(|d| d.split_unknown_requests > 0) {
+                if let Some(since) = d.split_known_since {
+                    println!(
+                        "  {}: priced/unpriced split unknown before {since}.",
+                        render::sanitize(d.device_name.as_deref().unwrap_or("-"))
+                    );
+                }
+            }
+        }
+    });
+    Ok(())
+}
+
+fn settings_cmd(ctx: &Ctx, cmd: SettingsCmd) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    match cmd {
+        SettingsCmd::List | SettingsCmd::Get { .. } => {
+            let want = match &cmd {
+                SettingsCmd::Get { name } => Some(name.clone()),
+                _ => None,
+            };
+            let rows: Vec<serde_json::Value> = vault
+                .mesh_settings()?
+                .into_iter()
+                .filter(|(n, _, _)| want.as_ref().is_none_or(|w| w == n))
+                .map(|(n, v, set)| serde_json::json!({ "name": n, "value": v, "default": !set }))
+                .collect();
+            if let Some(w) = &want {
+                if rows.is_empty() {
+                    bail!("unknown mesh setting '{w}'");
+                }
+            }
+            render::emit(ctx.json, &rows, || {
+                for r in &rows {
+                    println!(
+                        "{} = {}{}",
+                        r["name"].as_str().unwrap_or_default(),
+                        r["value"],
+                        if r["default"] == true {
+                            " (default)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            });
+        }
+        SettingsCmd::Set { name, value } => {
+            let v = vault.mesh_setting_set(name.trim(), &value)?;
+            let out = serde_json::json!({ "name": name.trim(), "value": v });
+            render::emit(ctx.json, &out, || {
+                println!(
+                    "Set {} = {v}. Every device applies it after its next exchange.",
+                    name.trim()
+                )
+            });
+        }
     }
     Ok(())
 }
@@ -662,6 +1017,9 @@ struct StatusOut {
     lag: Option<Vec<LagOut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     address_changes: Option<Vec<DeviceChange>>,
+    /// The usage publisher's last run (Increment 06).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish: Option<api_tracker_core::mesh::publish::PublishReport>,
 }
 
 fn status(ctx: &Ctx) -> Result<()> {
@@ -673,6 +1031,7 @@ fn status(ctx: &Ctx) -> Result<()> {
         peers: None,
         lag: None,
         address_changes: None,
+        publish: None,
     };
     if out.status.initialized {
         let node = instance::status(&ctx.paths.data_dir);
@@ -695,6 +1054,7 @@ fn status(ctx: &Ctx) -> Result<()> {
                 .collect(),
         );
         out.address_changes = Some(peers::device_changes(store.connection())?);
+        out.publish = api_tracker_core::mesh::publish::last_report(store.connection())?;
     }
     render::emit(ctx.json, &out, || print_status(&out));
     Ok(())
@@ -981,6 +1341,20 @@ fn print_status(out: &StatusOut) {
                 "COMPLETED",
             ],
             &rows,
+        );
+    }
+    if let Some(p) = &out.publish {
+        println!(
+            "Publishing:   last run {}: {} counter(s) published{}, {} collected (retention {} days)",
+            peers::ms_rfc3339(p.at_ms),
+            p.minted,
+            if p.deferred > 0 {
+                format!(", {} waiting for the next hour's budget", p.deferred)
+            } else {
+                String::new()
+            },
+            p.collected,
+            p.retention_days
         );
     }
     for c in out.address_changes.iter().flatten() {

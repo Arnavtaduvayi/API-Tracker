@@ -51,6 +51,29 @@ pub const ESTIMATE_CURRENCY: &str = "USD";
 /// pathological history cannot make a refresh unbounded.
 pub const MAX_GROUPS: usize = 2_000;
 
+/// A request's honesty class: the one rule this module applies to groups of
+/// requests, and the gateway writer applies to each request it adds to the
+/// daily rollup's split columns (migration v23). Usage that was not reported
+/// is unextracted whatever else is known; reported usage is priced only if
+/// an estimate came out of a pricing record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageClass {
+    Priced,
+    Unpriced,
+    Unextracted,
+}
+
+impl UsageClass {
+    pub fn of(usage_reported: bool, estimate_micros: Option<i64>) -> Self {
+        match (usage_reported, estimate_micros) {
+            (false, _) => Self::Unextracted,
+            (true, Some(_)) => Self::Priced,
+            (true, None) => Self::Unpriced,
+        }
+    }
+}
+
 /// Why a slice of usage carries no estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]

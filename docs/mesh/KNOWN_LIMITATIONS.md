@@ -153,12 +153,29 @@ permanent design choice or something a later increment changes.
 
 - **Cost is computed where the usage happened.** Each device prices its own
   traffic with its own pricing table at ingest time; figures from different
-  devices may use different price versions.
-- **Cached-read tokens are excluded from cost estimates**, so spend caps
-  undercount cached-heavy traffic.
-- **Figures are per device, with freshness.** A device not heard from in over
-  24 hours is shown as stale, never as zero; mesh figures are never summed with
-  provider-reported cost.
+  devices may use different price versions, and a price added later is not
+  applied to usage already published.
+- **Cached-read tokens are excluded from cost estimates**, so the estimate (and
+  later the spend caps) undercount cached-heavy traffic.
+- **Gateway-observed only.** Only traffic that went through a device's
+  gateway, for a project bound on that device, is counted.
+- **The split is unknown before the upgrade.** Traffic a device recorded
+  before migration v23 cannot be told apart as priced or unpriced: it shows as
+  "split unknown" (its not-extracted part is known). A daily row that already
+  existed at the upgrade stays "split unknown" for that day.
+- **Figures are per device, with freshness.** "As of" is the last direct
+  exchange with that device; figures relayed through another device can be
+  newer than it says. A device not heard from in over 24 hours is shown as
+  stale, never as zero; mesh figures are never summed with provider-reported
+  cost.
+- **Who has bound a project is private to each device.** The mesh sees only
+  who has published usage for it, so "no data from X" covers both "X has not
+  bound it" and "X has not been heard from".
+- **Deletions reach other devices when they exchange.** A deletion is
+  published as lower totals with a higher epoch; a device that is off keeps the
+  old figures until it next exchanges.
+- **Retention drops data on every device.** After `retention.usage_days` plus
+  two days, counters are dropped everywhere; there is no per-device override.
 
 ## Spend caps
 

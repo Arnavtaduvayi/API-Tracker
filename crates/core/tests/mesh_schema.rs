@@ -218,9 +218,9 @@ fn populate_mesh(v: &vault::UnlockedVault, project_id: &str) {
              VALUES (x'{h}', 'x', 'x');
              INSERT INTO mesh_project_bindings (local_project_id, mesh_project_id, bound_at)
              VALUES ('{project_id}', '{id}', 'x');
-             INSERT INTO mesh_publish_cursor (local_project_id, day, provider_id, model,
-                 requests, updated_at)
-             VALUES ('{project_id}', '2026-10-27', 'openai', 'gpt-x', 3, 'x');
+             INSERT INTO mesh_publish_cursor (local_project_id, mesh_project_id, day,
+                 provider_id, model, requests, updated_at)
+             VALUES ('{project_id}', '{id}', '2026-10-27', 'openai', 'gpt-x', 3, 'x');
              INSERT INTO mesh_cap_escrow (id, cap_id, month, to_device, amount_micros, state,
                  created_at, updated_at)
              VALUES ('e1', '{id}', '2026-10', 'burn', 5, 'pending', 'x', 'x');
@@ -351,4 +351,59 @@ fn v22_stores_each_invites_pairing_psk_only_encrypted() {
         .query_row("SELECT COUNT(*) FROM mesh_invites", [], |r| r.get(0))
         .unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn v23_splits_the_daily_rollup_and_keys_the_cursor_by_mesh_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v22.db");
+    let mesh = "0123456789abcdef0123456789abcdef";
+    {
+        let conn = db_at_version(&path, 22);
+        conn.execute_batch(&format!(
+            "INSERT INTO projects (id, name, description, notes, environments, archived,
+                 created_at, updated_at, wrapped_project_key, key_wrap_mode)
+             VALUES ('p1', 'app', '', '', 'development', 0,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', x'00112233', 'vault');
+             INSERT INTO gateway_usage_daily (day, provider_id, project_id, model,
+                 request_count, usage_event_count, estimated_cost_micros, updated_at)
+             VALUES ('2026-10-01', 'openai', 'p1', 'gpt-x', 5, 4, 70, 'x');
+             INSERT INTO mesh_project_bindings (local_project_id, mesh_project_id, bound_at)
+             VALUES ('p1', '{mesh}', 'x');
+             INSERT INTO mesh_publish_cursor (local_project_id, day, provider_id, model,
+                 requests, updated_at)
+             VALUES ('p1', '2026-10-01', 'openai', 'gpt-x', 5, 'x');"
+        ))
+        .unwrap();
+    }
+    let mut conn = db::open(&path).unwrap();
+    db::migrate(&mut conn).unwrap();
+    assert!(db::user_version(&conn).unwrap() >= 23);
+    // A row written before the split keeps it unknown, with zeros.
+    let (unpriced, unextracted, known): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT unpriced_requests, unextracted_requests, split_known FROM gateway_usage_daily",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((unpriced, unextracted, known), (0, 0, 0));
+    assert!(conn
+        .execute("UPDATE gateway_usage_daily SET split_known = 2", [],)
+        .is_err());
+    // The cursor row kept its totals and gained the mesh project it went to.
+    let (m, requests): (String, i64) = conn
+        .query_row(
+            "SELECT mesh_project_id, requests FROM mesh_publish_cursor",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((m.as_str(), requests), (mesh, 5));
+    // Restore must not collide with anything the migration inserted: it
+    // inserts no row anywhere.
+    let meta: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vault_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(meta, 0);
 }

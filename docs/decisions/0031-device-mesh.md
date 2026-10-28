@@ -372,6 +372,52 @@ Smaller node decisions (Increment 05):
   has published one yet. CI found that race: a device that joined before its
   inviter's node published an address had no one to dial.
 
+### Decisions made while building usage publishing (Increment 06)
+
+* **R23 — Retention drops usage counters at ingest and from storage, two days
+  after the horizon.** DESIGN §D14 said counters older than the horizon are
+  "garbage-collected from views and `mesh_items` on every device" and "dropped
+  at ingest". As built, each store has a usage floor (`horizon + 2 days`, set
+  by the publisher from the LWW `retention.usage_days` and the device's clock):
+  below it an arriving counter is not stored (its dot is logged; it is not a
+  rejection), and held ones are deleted (`SqliteStore::gc_usage`). This is rule
+  (b) of PROTOCOL §8.4: the exclusion does not depend on seq. Views stop at the
+  horizon itself. The two days keep devices whose clocks or settings differ
+  slightly from dropping different sets for long; in that window repair resends
+  what the other side drops. The simulator does not set a floor, so its
+  convergence checks are unaffected.
+
+Smaller usage decisions (Increment 06):
+
+- **Unknown model, not "sentinel".** The writer stores `model = ''` for a
+  response that named no model; it is real, unpriced traffic, not an "all"
+  sentinel (nothing writes aggregate rows to `gateway_usage_daily`). It is
+  published under the model label `(not reported)` instead of being skipped as
+  DESIGN §D14 said. Rows with `project_id = ''` (unattributed) are never
+  published; they cannot be bound.
+- **The split cut-over is per row, not per device.** Migration v23 adds
+  `split_known` to `gateway_usage_daily` (1 on rows the writer creates from v23
+  on; a row that already existed stays 0 as it grows). A row with 0 publishes
+  `unextracted = request_count − usage_event_count` (always known) and leaves
+  priced and unpriced at 0, so views show the remainder as "split unknown" and
+  derive each device's `split_known_since` from its counters. No new item field
+  was needed. The alternatives — a marker row written by the migration (a
+  restore inserts every backed-up row into a freshly migrated database, so a
+  migration-inserted row collides) or a `gateway_config` column (its row may not
+  exist) — were rejected.
+- **The publish cursor is keyed by mesh project too** (v23 rebuilds
+  `mesh_publish_cursor`; v21 created it and nothing wrote it). After a rebind, a
+  deletion is taken back from each counter its traffic went to.
+- **Publishing is atomic and safe to race.** Counters and cursor commit in one
+  transaction (`SqliteStore::mint_batch`), and a `publish/gen` check inside it
+  makes a node and a CLI command on one database unable to attribute one delta
+  twice (the loser re-reads and retries).
+- **The hourly budget is the publisher's own** (5 000 counters an hour, oldest
+  days first): own mints are not counted against the per-origin ingest rate
+  that peers enforce (10 000 an hour).
+- **`local_month_spend_micros`** (`core::mesh::usage`) is the single function
+  for "this device's spend this month on a mesh project", for 07 and 08.
+
 ### Dependencies
 
 | Crate | Version | Increment | Why |

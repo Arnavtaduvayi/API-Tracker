@@ -174,6 +174,11 @@ impl Day {
         self.0
     }
 
+    /// The day after (the same day at the end of the calendar).
+    pub fn next(&self) -> Self {
+        Self(self.0.next_day().unwrap_or(self.0))
+    }
+
     /// The UTC day containing `ms` milliseconds after the Unix epoch.
     pub fn from_unix_ms(ms: u64) -> Self {
         let t = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
@@ -207,6 +212,12 @@ impl Day {
         time::Date::from_calendar_date(year, month, day)
             .ok()
             .map(Self)
+    }
+}
+
+impl Serialize for Day {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
     }
 }
 

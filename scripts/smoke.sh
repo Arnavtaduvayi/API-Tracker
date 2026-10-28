@@ -572,6 +572,50 @@ check $? "both nodes stop through the control socket's Stop"
 [ ! -e "$MESH_A/mesh/node.sock" ] && [ ! -e "$MESH_B/mesh/node.nonce" ]
 check $? "a stopped node leaves no control socket or nonce behind"
 
+echo "-- mesh shared project and cross-device usage --"
+API_TRACKER_DIR="$MESH_A" "$BIN" project create smoke-app >/dev/null 2>&1; check $? "A: a local project"
+API_TRACKER_DIR="$MESH_B" "$BIN" project create smoke-app >/dev/null 2>&1; check $? "B: a local project of its own"
+SHARE=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh project share smoke-app 2>/dev/null)
+MESH_P=$(printf '%s' "$SHARE" | sed -n 's/.*"mesh_project_id": "\([0-9a-f]*\)".*/\1/p')
+[ ${#MESH_P} -eq 32 ]; check $? "mesh project share creates a mesh project bound on A"
+# Seed A's gateway rollup directly (no gateway runs in smoke). The full path —
+# the real gateway writer, the publisher, replication, the report — is covered
+# by crates/gateway/tests/mesh_publish_e2e.rs, which drives the writer itself.
+APP_A=$(sqlite3 "$MESH_A/vault.db" "SELECT id FROM projects WHERE name = 'smoke-app'" 2>/dev/null)
+sqlite3 "$MESH_A/vault.db" "INSERT INTO gateway_usage_daily (day, provider_id, project_id,
+  model, request_count, usage_event_count, input_tokens, output_tokens, estimated_cost_micros,
+  updated_at, unpriced_requests, unextracted_requests, split_known)
+  VALUES (date('now'), 'openai', '$APP_A', 'gpt-smoke', 7, 7, 100, 50, 3000, 'x', 2, 0, 1)" 2>/dev/null
+check $? "seed A's gateway usage with sqlite3"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh serve --listen "$MESH_ADDR" --interval 5 > "$WORK/serve-a2.out" 2>/dev/null &
+SERVE_PID=$!
+for _ in $(seq 1 120); do grep -q '^Listening on' "$WORK/serve-a2.out" 2>/dev/null && break; sleep 0.25; done
+REPL=1
+for _ in $(seq 1 20); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1 \
+    && API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh project list 2>/dev/null | grep -q "$MESH_P" \
+    && { REPL=0; break; }
+  sleep 0.5
+done
+check $REPL "B receives the shared project (and is not bound to it)"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh project bind "$MESH_P" smoke-app >/dev/null 2>&1; check $? "B binds its own project to it"
+SEEN=1
+for _ in $(seq 1 30); do
+  USAGE=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh usage 2>/dev/null)
+  if printf '%s' "$USAGE" | grep -q '"device_name": "smoke-a-renamed"' \
+     && printf '%s' "$USAGE" | grep -q '"requests": 7' \
+     && printf '%s' "$USAGE" | grep -q '"unpriced_requests": 2' \
+     && printf '%s' "$USAGE" | grep -q '"as_of": "'; then SEEN=0; break; fi
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1
+  sleep 0.5
+done
+check $SEEN "mesh usage on B shows A's numbers, labelled with A's device and an as-of time"
+printf '%s' "$USAGE" | grep -q '"total_label": "estimated, gateway-observed'
+check $? "the cross-device total carries its honesty label"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh stop >/dev/null 2>&1
+wait "$SERVE_PID" >/dev/null 2>&1
+! kill -0 "$SERVE_PID" 2>/dev/null; check $? "A's node stops"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

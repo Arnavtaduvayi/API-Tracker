@@ -10,6 +10,13 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 06 (2026-10-28).** Usage publishing settled R23
+> (retention drops counters two days past the horizon, PROTOCOL.md §8.4). The
+> usage-split cut-over is a per-row `split_known` flag (v23) rather than a
+> marker; `model = ''` rows are real, unpriced traffic published as model
+> `(not reported)`, not skipped sentinels; v23 also keys
+> `mesh_publish_cursor` by mesh project. Passages marked **[Amended 06]**.
+>
 > **Amended by Increment 05 (2026-10-28).** Building the node settled R22
 > (ADR 0031 "Decisions made while building the node"; PROTOCOL.md §7.4): a
 > rollback hold is stored per reporting device and binds every minter. D9's
@@ -653,6 +660,9 @@ used. The list below is the original brief:
     `projectcost.rs:14-21` already classifies an exchange as priced, unpriced or
     unextracted.
   - Rows dated before v22 are labelled "split unknown before <date>".
+    **[Amended 06]** v23 marks each row `split_known` (1 only on rows created
+    from v23 on); views derive "split unknown before <day>" per device from the
+    counters' unclassified remainder.
 - **Publishing deltas through a cursor:**
   - `mesh_publish_cursor(local_project_id, day, provider_id, model, published_totals…)`
     records what has been attributed so far.
@@ -665,7 +675,10 @@ used. The list below is the original brief:
     at `writer.rs:886-913`). The publisher then **bumps the epoch** of the affected
     counters and republishes the corrected totals. Deletion propagates, which keeps the
     promise in `docs/gateway/PRIVACY.md` that the deletion tools cover gateway data.
-  - Skip sentinel rows whose model or provider is `''`.
+  - Skip sentinel rows whose model or provider is `''`. **[Amended 06]** Only
+    `project_id = ''` (unattributed) rows are never published; `model = ''` is
+    real traffic whose response named no model, published as model
+    `(not reported)` (ADR 0031 "Smaller usage decisions").
 - **Totals per counter:**
   - `requests`, `priced_requests`, `unpriced_requests`, `unextracted_requests`;
   - `input_tokens`, `output_tokens`, `cached_input_tokens`;
