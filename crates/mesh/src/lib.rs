@@ -13,19 +13,29 @@
 //! - [`session`]: one replication exchange over an authenticated channel.
 //! - [`pair`]: joining with an invite, and the inviter's answer.
 //! - [`serve`]: the accept loop; [`replicate`]: a one-shot outbound exchange.
-//! - [`directs`]: point-to-point messages (access-key rotation).
+//! - [`directs`]: point-to-point messages (access-key rotation, rollback).
 //! - [`node`]: the state every connection shares, and the transport limits.
+//! - [`runtime`]: the long-running node (Increment 05): the outbound loop,
+//!   round hooks, stop conditions; [`peers`]: backoff and targets;
+//!   [`instance`]: one node per data directory and its control channel;
+//!   [`discover`]: opt-in mDNS discovery and its in-memory fake;
+//!   [`doctor`]: `tethra mesh doctor`.
 
 #![forbid(unsafe_code)]
 
 pub mod bind;
 pub mod directs;
+pub mod discover;
+pub mod doctor;
 pub mod error;
 pub mod handshake;
+pub mod instance;
 pub mod node;
 pub mod noise;
 pub mod pair;
+pub mod peers;
 pub mod replicate;
+pub mod runtime;
 pub mod serve;
 pub mod session;
 pub mod wire;

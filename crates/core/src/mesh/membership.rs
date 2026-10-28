@@ -675,6 +675,64 @@ pub(crate) fn rename(
     Ok(())
 }
 
+/// The listen addresses this device's latest `device.info` publishes.
+pub fn published_listen_addrs(store: &SqliteStore) -> Vec<String> {
+    let me = store.self_id();
+    let state = store.state();
+    state
+        .device_info
+        .value(&me, &state.roster)
+        .map(|v| v.listen_addrs.clone())
+        .unwrap_or_default()
+}
+
+/// Publish the addresses a running node listens on (DESIGN §D13 "address
+/// gossip"): an LWW `device.info` that keeps this device's name. Mints only
+/// when they changed; returns whether it did. At most
+/// [`super::kinds::MAX_LISTEN_ADDRS`] are kept.
+pub fn publish_listen_addrs(
+    store: &mut SqliteStore,
+    signing: &SigningKeyPair,
+    addrs: &[String],
+) -> Result<bool> {
+    let mut addrs: Vec<String> = addrs.to_vec();
+    addrs.dedup();
+    addrs.truncate(super::kinds::MAX_LISTEN_ADDRS);
+    let me = store.self_id();
+    let (winner, current, name) = {
+        let state = store.state();
+        let current = state.device_info.value(&me, &state.roster);
+        (
+            state
+                .device_info
+                .register(&me)
+                .and_then(|r| r.winning_hlc(&state.roster)),
+            current.map(|v| v.listen_addrs.clone()),
+            current
+                .map(|v| v.name.clone())
+                .or_else(|| state.roster.added_name(&me).map(str::to_owned)),
+        )
+    };
+    if current.as_deref() == Some(addrs.as_slice()) {
+        return Ok(false);
+    }
+    let name = match name {
+        Some(n) => n,
+        None => {
+            identity::self_info(store.connection())?
+                .ok_or(MeshError::NotInitialized)?
+                .device_name
+        }
+    };
+    let info = DeviceInfo {
+        device: me,
+        name,
+        listen_addrs: addrs,
+    };
+    store.mint(signing, Draft::of(&info, HlcPolicy::After(winner)))?;
+    Ok(true)
+}
+
 /// Remove another device: mint `roster.remove` with this device's view of
 /// its log as the cutoff, and rotate the access key to a new epoch, which
 /// sessions then deliver to every remaining member (PROTOCOL.md §9).
@@ -702,6 +760,9 @@ pub(crate) fn remove(
     if !roster.is_active(&store.self_id()) {
         return Err(MeshError::NotActive.into());
     }
+    // A member that keeps reporting a rollback that never comes back would
+    // otherwise block its own removal (PROTOCOL.md §7.4).
+    store.settle_rollback_holds(target)?;
     let cutoff = store.vv().get(&target);
     store.mint(
         signing,

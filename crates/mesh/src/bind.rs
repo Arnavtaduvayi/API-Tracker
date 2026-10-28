@@ -20,3 +20,19 @@ pub fn bind_listener(addr: SocketAddr, allow_all_interfaces: bool) -> io::Result
     }
     TcpListener::bind(addr)
 }
+
+/// Bind the node's local control socket (Unix): the single-instance lock
+/// and the channel `status`, `replicate-now` and `stop` arrive on
+/// ([`crate::instance`]). The caller checked that nothing live owns `path`
+/// and restricts it to this user right after.
+#[cfg(unix)]
+pub fn bind_control_socket(path: &std::path::Path) -> io::Result<std::os::unix::net::UnixListener> {
+    std::os::unix::net::UnixListener::bind(path)
+}
+
+/// Windows has no Unix socket here: the control channel is a loopback TCP
+/// listener on an ephemeral port, written to the nonce file.
+#[cfg(not(unix))]
+pub fn bind_control_loopback() -> io::Result<TcpListener> {
+    bind_listener(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0)), false)
+}

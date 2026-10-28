@@ -35,8 +35,10 @@ fn only_bind_rs_binds_and_no_file_names_a_wildcard_address() {
     assert!(files.len() >= 8, "found {} source files", files.len());
     const BINDS: &[&str] = &[
         "TcpListener::bind",
+        "UnixListener::bind",
         "UdpSocket::bind",
         "Socket::bind",
+        "Listener::bind",
         ".bind(",
     ];
     const WILDCARDS: &[&str] = &["0.0.0.0", "INADDR_ANY", "\"::\"", "[::]:", "UNSPECIFIED"];

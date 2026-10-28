@@ -272,6 +272,17 @@ pub fn status(paths: &VaultPaths) -> Result<Option<SessionStatus>> {
     }))
 }
 
+/// The id of the session in the file at `path` (not secret: it names the
+/// session, it unlocks nothing), or `None` if there is no readable session
+/// file. A long-running `tethra mesh serve` records it at start, so a later
+/// `lock` + `unlock` (a new session with a new id) stops the node too.
+pub fn peek_session_id(path: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<SessionFile>(&raw)
+        .ok()
+        .map(|f| f.session_id)
+}
+
 /// The lifecycle state of a session file, for a long-running observed run to
 /// watch so that a manual `lock` (which deletes the file) or an auto-lock
 /// timeout (the file's recorded `expires_at`) can interrupt it.

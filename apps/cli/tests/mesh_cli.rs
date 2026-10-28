@@ -328,3 +328,233 @@ fn invite_join_devices_remove_and_leave_across_three_devices() {
     assert!(!has_hex64(&later), "key-shaped hex in the output");
     drop(server);
 }
+
+/// `tethra mesh serve` as a full node with a short round interval (the
+/// debug-only `TETHRA_MESH_INTERVAL_MS`).
+fn serve_node(tv: &TestVault, interval_ms: u64) -> Serving {
+    use std::io::BufRead;
+    let mut child = tv
+        .raw()
+        .args(["mesh", "serve", "--listen", "127.0.0.1:0"])
+        .env("TETHRA_MESH_INTERVAL_MS", interval_ms.to_string())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .strip_prefix("Listening on ")
+        .unwrap_or_else(|| panic!("unexpected serve output: {line}"))
+        .to_owned();
+    Serving { child, addr }
+}
+
+fn wait_for(secs: u64, mut f: impl FnMut() -> bool, what: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if f() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+fn peers_node_status_doctor_replicate_and_stop_from_the_cli() {
+    let a = TestVault::new();
+    run(&a, &["mesh", "init", "--name", "dev-a"]);
+    let node_a = serve_node(&a, 300);
+    let inv = json(&a, &["mesh", "invite", "--addr", &node_a.addr]);
+    let b = TestVault::new();
+    let (ok, _, err) = run(
+        &b,
+        &[
+            "mesh",
+            "join",
+            inv["invite"].as_str().unwrap(),
+            "--name",
+            "dev-b",
+        ],
+    );
+    assert!(ok, "{err}");
+
+    // peer add / list / remove.
+    let added = json(&b, &["mesh", "peer", "add", &node_a.addr]);
+    assert_eq!(added["addr"], node_a.addr.as_str());
+    assert_eq!(added["added"], true);
+    assert_eq!(
+        json(&b, &["mesh", "peer", "add", &node_a.addr])["added"],
+        false
+    );
+    for bad in ["laptop", "0.0.0.0:7420", "x y:1"] {
+        let (ok, _, err) = run(&b, &["mesh", "peer", "add", bad]);
+        assert!(!ok && err.contains("HOST:PORT"), "{bad}: {err}");
+    }
+    let list = json(&b, &["mesh", "peer", "list"]);
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    for field in [
+        "addr",
+        "device_id",
+        "device_name",
+        "source",
+        "last_attempt_at",
+        "last_success_at",
+        "failures",
+        "unreachable_since",
+        "last_error",
+    ] {
+        assert!(rows[0].get(field).is_some(), "peer list lacks {field}");
+    }
+    assert_eq!(rows[0]["source"], "manual");
+
+    // B's node converges with A on its own.
+    let node_b = serve_node(&b, 300);
+    let (ok, _, err) = run(&a, &["mesh", "rename", "alpha"]);
+    assert!(ok, "{err}");
+    wait_for(
+        20,
+        || devices(&b).iter().any(|d| d["name"] == "alpha"),
+        "B to see A's new name",
+    );
+
+    // status --json: the node, peers with their device names, lag.
+    let st = json(&b, &["mesh", "status"]);
+    assert_eq!(st["initialized"], true);
+    let node = &st["node"];
+    assert_eq!(node["running"], true);
+    assert_eq!(node["interval_ms"], 300);
+    assert_eq!(node["listen"][0], node_b.addr.as_str());
+    assert_eq!(node["advertised"][0], node_b.addr.as_str());
+    assert!(node["pid"].as_u64().unwrap() > 0);
+    assert!(node["rounds"].as_u64().unwrap() >= 1);
+    for field in [
+        "started_at",
+        "last_round_at",
+        "discovery",
+        "hooks",
+        "active_sessions",
+    ] {
+        assert!(node.get(field).is_some(), "node lacks {field}");
+    }
+    let peer = st["peers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["addr"] == node_a.addr.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(peer["device_name"], "alpha");
+    assert!(peer["last_success_at"].is_string());
+    assert_eq!(peer["failures"], 0);
+    let lag = st["lag"].as_array().unwrap();
+    let la = lag.iter().find(|l| l["device_name"] == "alpha").unwrap();
+    for field in [
+        "at",
+        "completed",
+        "at_hello",
+        "peer_behind",
+        "peer_ahead",
+        "peer_behind_now",
+        "digest_mismatches",
+    ] {
+        assert!(la.get(field).is_some(), "lag lacks {field}");
+    }
+    for field in [
+        "clock_skew",
+        "rejected_items",
+        "fork_evidence",
+        "repairs_changed",
+        "rollback_hold",
+        "address_changes",
+    ] {
+        assert!(st.get(field).is_some(), "status lacks {field}");
+    }
+    let (_, text, _) = run(&b, &["mesh", "status"]);
+    assert!(text.contains("Node:         running"), "{text}");
+    assert!(text.contains("Lag at the last exchange"), "{text}");
+    assert!(!has_hex64(&serde_json::to_string(&st).unwrap()));
+    assert!(!has_hex64(&text));
+
+    // doctor --json.
+    let d = json(&b, &["mesh", "doctor"]);
+    assert_eq!(d["initialized"], true);
+    let checks: Vec<&str> = d["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["check"].as_str().unwrap())
+        .collect();
+    for c in [
+        "schema", "keys", "marker", "items", "views", "node", "listener", "peers",
+    ] {
+        assert!(checks.contains(&c), "doctor lacks {c}: {checks:?}");
+    }
+    assert!(
+        d["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["severity"] != "problem"),
+        "{d}"
+    );
+    assert!(matches!(
+        d["worst"].as_str(),
+        Some("ok" | "info" | "warning")
+    ));
+    let (_, text, _) = run(&b, &["mesh", "doctor"]);
+    assert!(text.contains("[ok     ] node:"), "{text}");
+
+    // replicate goes through the running node.
+    let r = json(&b, &["mesh", "replicate"]);
+    assert_eq!(r["via_node"], true);
+    assert!(r["exchanges"][0]["error"].is_null(), "{r}");
+
+    // stop, through the control socket.
+    let stopped = json(&b, &["mesh", "stop"]);
+    assert_eq!(stopped["stopped"], true);
+    let mut node_b = node_b;
+    assert!(node_b.child.wait().unwrap().success());
+    assert_eq!(json(&b, &["mesh", "status"])["node"]["running"], false);
+    assert_eq!(json(&b, &["mesh", "stop"])["stopped"], false);
+    // With no node, replicate runs one exchange itself.
+    let r = json(&b, &["mesh", "replicate"]);
+    assert_eq!(r["via_node"], false);
+    assert!(r["exchanges"][0]["error"].is_null(), "{r}");
+
+    let removed = json(&b, &["mesh", "peer", "remove", &node_a.addr]);
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["source"], "manual");
+    drop(node_a);
+}
+
+#[test]
+fn serve_refuses_a_second_node_and_a_too_short_interval() {
+    let a = TestVault::new();
+    run(&a, &["mesh", "init", "--name", "dev-a"]);
+    let _node = serve_node(&a, 1_000);
+    let (ok, _, err) = run(&a, &["mesh", "serve", "--listen", "127.0.0.1:0"]);
+    assert!(!ok);
+    assert!(err.contains("already running"), "{err}");
+    let b = TestVault::new();
+    run(&b, &["mesh", "init", "--name", "dev-b"]);
+    let out = b
+        .raw()
+        .args([
+            "mesh",
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--interval",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("at least 5 seconds"));
+}

@@ -96,6 +96,14 @@ pub enum MeshError {
 
     #[error("this device's mesh identity has forked (another installation used the same identity); run `tethra mesh leave` and pair again")]
     Forked,
+
+    #[error("a peer address must be HOST:PORT (an IP address or a host name, and a port from 1 to 65535)")]
+    InvalidPeerAddress,
+
+    /// A peer holds this device's own items past what its database
+    /// remembers (PROTOCOL.md §7.4): minting waits until they come back.
+    #[error("this device is recovering its own mesh items from a peer after a rollback; it creates new items again once they are back")]
+    RollbackHold,
 }
 
 impl MeshError {
@@ -129,6 +137,8 @@ impl MeshError {
             MeshError::NotActive => "mesh_not_active",
             MeshError::AlreadyRemoved => "mesh_already_removed",
             MeshError::Forked => "mesh_forked",
+            MeshError::InvalidPeerAddress => "mesh_invalid_peer_address",
+            MeshError::RollbackHold => "mesh_rollback_hold",
         }
     }
 }

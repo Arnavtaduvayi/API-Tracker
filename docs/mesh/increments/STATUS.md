@@ -14,7 +14,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
 | 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | done | 2026-10-27 | 2026-10-27 | `1b4c8a2`, `6a8213f` | CI `40554008854` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40554008811` (success) |
 | 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | done | 2026-10-27 | 2026-10-28 | `bd6d89e`, `40bd38a` | CI `40630951922` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40630951920` (success). 03 record commit `21b4c70`: CI `40588124547`, service `40588124805` (both success) |
-| 05 | [Node runtime](05-node-runtime.md) | S | M | pending | | | | |
+| 05 | [Node runtime](05-node-runtime.md) | S | M | in-progress | 2026-10-28 | | | |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | pending | | | | |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | pending | | | | |
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | pending | | | | |
@@ -39,6 +39,8 @@ rule (README §1 step 12).
 | 02 `db52154` | **1,643 passed, 0 failed, 10 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`); includes `--test mesh_sim` (200 seeds in ~10 s, replay, per-adversary, 18 regression seeds; soak ignored), 10 `proto` session tests, 32 oracle tests | unchanged (not touched) | **140 passed** (`bash scripts/smoke.sh`) |
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
+
+| 05 | **1,764 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (40): `-p api-tracker-mesh` unit 14 (`instance` 5, `peers` 3, `runtime` 4, `wire` 2), `--test node` 8, `--test discover` 5, `--test doctor` 5, `--test replication` 7 (+1 rollback); core `mesh::peers` 6 + `sqlite_store` 1 (rollback hold); `cli --test mesh_cli` 7 (+2) | unchanged (not touched) | see the 05 handoff |
 
 | 04 `40bd38a` | **1,724 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New: `-p api-tracker-mesh` 30 (`wire` unit 2, `bind_guard` 2, `bounds` 9, `noise_spike` 3, `pairing` 8, `replication` 6); `--test mesh_membership` 5; `mesh_schema` 8; `gateway --test no_mesh_dependency` 1; `cli --test mesh_cli` 5 | unchanged (not touched) | **158 passed** (`bash scripts/smoke.sh`; 7 two-node checks) |
 
@@ -77,12 +79,115 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 04 | **R20** A 16-byte preamble picks the handshake; pairing carries the invite hint (`blake3(token)[..8]`); the inviter answers only a live invite's hint. | The responder must choose the handshake and the invite's psk before message 1. | ADR 0031 R20, PROTOCOL §9.1-9.3 |
 | 04 | **R21** `AccessKeyUpdate` in every session; applied after the exchange's commit, bounded by `1 + removals`, equal epochs resolved by the larger BLAKE3 hash; re-removal refused. | The review found epoch poisoning (`u32::MAX`), a split on concurrent rotations, and a key travelling ahead of its removal. | ADR 0031 R21, PROTOCOL §9.5 |
 | 04 | Small, this table only: the inviter's side is `membership::accept_pairing(store, …)` (not an `UnlockedVault` method; the serving thread holds the node); `mesh_device_rename(name)` renames self only; `remove`/`leave` confirm via `--yes` in non-interactive runs (the `backup restore` pattern) rather than `confirm_default_no`; `invite --addr HOST:PORT` (plus `--wait --listen`) supplies the invite's addresses (05 publishes listen addresses); `join -` reads the invite from stdin; two checksum characters, not one; `SqliteStore::refresh` added. | Required by what was built, or stronger. | — |
+| 05 | **R22** A `RollbackNotice` is stored per reporting device in `mesh_meta` (`rollback_hold/<reporter>`) and binds every minter on the database; it counts only while the reporter is active; a completed exchange without a repeated notice, or `mesh remove` of the reporter, clears it. | PROTOCOL §7.4 said "MUST NOT mint" without saying where the state lives or what ends it: an in-memory flag lets a CLI command fork the device; a hold with no release lets a lying member block its own removal (found by the unit test). | ADR 0031 R22, PROTOCOL §7.4, DESIGN §D5 [Amended 05] |
+| 05 | D9's "repair every 24 h" is a recorded **repair round** (`node/last_repair`), and `doctor --repair` runs one; D17's "corrupt view row" is checked as item-row corruption, and `doctor --rebuild` rewrites the item store's index columns and removes unusable rows. | Every exchange already repairs (R11); there are no view tables (R17). | ADR 0031 "Smaller node decisions", DESIGN §D13 [Amended 05] |
+| 05 | Small, this table only: the loop is `crates/mesh::runtime` (`RunningNode`), not `node.rs` (which keeps `MeshNode`); the peer table and lag/repair records are `core::mesh::peers` (shared with the desktop), backoff/targets are `crates/mesh::peers`; **Ctrl-C ends `serve` without a signal handler** (as `gateway serve`; `tethra mesh stop` is the graceful path); `--interval` (≥ 5 s) is a documented option so release binaries and smoke can use short rounds (the ms env override is debug-only); new `tethra mesh stop`; `Discovery::announce` takes the IPs too; `record_attempt` updates only existing `mesh_peers` rows; `MeshError::{InvalidPeerAddress, RollbackHold}`, `NetError::Node`; `MeshStatusDetail.rollback_hold`; `Day::from_unix_ms`; `session::peek_session_id`; `membership::publish_listen_addrs`. | Simpler, or required by what was built. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 05 — Node runtime (2026-10-28)
+
+**What landed.**
+- `crates/mesh`: `runtime` (`RunningNode`, `NodeConfig`, `RoundHook`,
+  `StopCondition` with `Never`/`SessionAlive`/`Deadline`/`StopFlag`/`AnyOf`,
+  `StopReport{reason, keys_dropped}`), `peers` (`Jitter`, `Scheduler`,
+  `gossip_addrs`, `targets`), `instance` (claim, nonce, `ControlServer`,
+  `Request`/`Response`/`NodeStatus`, `send`/`request`/`status`/`stop`/
+  `running_pid`), `discover` (`Discovery`, `MdnsDiscovery`, `FakeDiscovery`,
+  `tag`/`txt`/`recognises`), `doctor`. `MeshNode` gained shared session slots
+  (`try_session`, in + out ≤ 8); `serve` uses them. `bind.rs` binds the
+  control socket too.
+- Core: `mesh::peers` (peer table, lag and repair records, `backoff_ms`),
+  `mesh::doctor` (store-side checks, `--rebuild`), `SqliteStore::{hold_minting,
+  settle_rollback_holds, rollback_hold}` (R22), `membership::{publish_listen_addrs,
+  published_listen_addrs}`, `Session::peer_hello`, `UnlockedVault::{mesh_peer_add,
+  mesh_peer_remove, mesh_peers, mesh_doctor}`.
+- CLI: `serve` is the full node (`--discover`, `--advertise`, `--interval`,
+  `--max-runtime`), `stop`, `replicate` (through the node, else one-shot with
+  every known peer), `peer add|list|remove`, `status` (node, peers, lag,
+  address changes, rollback hold, skew lines), `doctor [--rebuild] [--repair]`.
+- Dependencies: `mdns-sd` 0.21.6 (no default features) and `if-addrs` 0.15;
+  new in the lockfile: `flume`, `if-addrs`, `mdns-sd`, `socket-pktinfo`,
+  `spin`; `libc` 0.2.186 → 0.2.191 (required by `socket-pktinfo`).
+- Docs: `docs/mesh/USER_GUIDE.md` (new), ARCHITECTURE "Runtime",
+  KNOWN_LIMITATIONS "Running the node", SECURITY_INVARIANTS (SI-1, 5, 7, 8,
+  12, 14, 15), ADR 0031 R22 + smaller decisions + dependencies, PROTOCOL §7.4,
+  TEST_PLAN, DESIGN [Amended 05], README, CHANGELOG.
+- Smoke: a two-node block where B's node brings A's rename over by itself
+  (5 s rounds), status/doctor checks, a second node refused, and both nodes
+  stopped through the control socket.
+
+**The round-hook API (for 06 and 07).**
+```rust
+pub trait RoundHook: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn before_round(&self, node: &MeshNode) -> NetResult<()>;
+}
+// NodeConfig.hooks: Vec<Arc<dyn RoundHook>>, run in order before every round
+// (scheduled, replicate-now and repair rounds alike).
+```
+- A hook mints through `node.store()` (a `MutexGuard<SqliteStore>`, refreshed)
+  and `node.keys().signing_key()`. Keep the guard short: exchanges lock the same
+  store between frames.
+- A mint may be refused with `MeshError::RollbackHold`, `IdentityMismatch` or
+  `Forked` (`session::is_mint_refusal(&e)`); treat that as "not now".
+- An error is shown as `status.node.last_hook_error` and logged through
+  `NodeConfig.log`; the round continues.
+- The CLI builds `NodeConfig` in `apps/cli/src/mesh_cmd.rs::serve_node`: add
+  hooks there (06: the usage publisher, which also runs at the start of
+  `mesh replicate`). The desktop (09) will build its own.
+- `Direct` messages are dispatched in `crates/mesh/src/directs.rs::handle`
+  (07: `RightsRequest`).
+
+**Running nodes with short intervals in tests.**
+- In-process: `tests/common::{node_config(ms), run_node(dev, cfg, clock, stop)}`
+  (127.0.0.1:0, fixed jitter seed). `RunningNode::{listen_addrs, status, stop,
+  replicate_now, wait}`; `wait()` returns `StopReport` and joins everything.
+- A `ManualClock` drives rounds and backoff: the loop polls every 100 ms of
+  real time and runs a round when the injected clock passes the next round
+  (see `node::an_unreachable_peer_is_retried_with_exponential_backoff`).
+- CLI tests: `TETHRA_MESH_INTERVAL_MS` (debug builds only, ≥ 50 ms); release
+  binaries: `--interval 5` (the minimum).
+- `FakeDiscovery::network()` + `.join()` per node; never `MdnsDiscovery::new`
+  in a test (a guard test scans every test source).
+
+**Surprises.**
+- **The rollback hold could deadlock removal.** A hold that only satisfaction
+  releases would block `mesh remove` of a member that reports falsely (a
+  removal is a mint). Found by the unit test; fixed by R22's release rules.
+- **Unix socket path limit.** The scratchpad directory of this session was
+  over 100 bytes, so `serve` refused with the long-path error. Smoke's work dir
+  is ~96 bytes on macOS (`$TMPDIR/api-tracker-smoke.XXXXXX/mesh-a/mesh/node.sock`)
+  — close to the limit; use `mktemp -d` dirs for manual runs.
+- Learned in the manual run: a node publishes its address and the other side
+  starts dialling it by gossip within a round, so a 2-device mesh needs only
+  one `peer add`.
+
+**Gotchas.**
+- The node's per-IP handshake budget (10/min) applies to its peers too: with
+  `--interval 5` two nodes on one IP stay within it only for short runs (smoke
+  is fine). Tests use `test_limits()` (1 000/min).
+- `serve`'s stdout carries only the `Listening on` lines (tests read them and
+  drop the pipe); everything later goes to stderr through write-and-ignore.
+- `mesh_meta` now also holds `node/peer/<device>` (JSON), `node/last_repair`
+  (JSON), `node/addr_changed/<addr>` (JSON) and `rollback_hold/<device>`
+  (integer). The store's loader ignores non-integer values; only
+  `rollback_hold/` is loaded into the mirror.
+
+**Not done / honest list.**
+- Nothing in 05's scope was moved.
+- mDNS was not exercised on a real network (the safety rules forbid multicast
+  on this machine; CI never multicasts). `MdnsDiscovery` compiles against
+  `mdns-sd` 0.21.6's API and is reviewed, not run. KNOWN_LIMITATIONS says so.
+- A removed device cannot learn of its own removal in practice (every member
+  that knows refuses it), so `StopReason::Removed` fires only in the rare case
+  it does; such a node keeps running, refused by everyone, until stopped.
+- The Windows control channel (loopback TCP) and node run in Windows CI's
+  automated tests (`-p api-tracker-mesh`), but were never run by hand.
 
 ### Increment 04 — Transport & pairing (2026-10-27)
 

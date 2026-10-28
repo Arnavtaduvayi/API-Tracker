@@ -2,10 +2,11 @@
 # drives `api-tracker-core::mesh` (pure, sans-IO) over Noise on TCP: pairing,
 # authenticated replication sessions, the accept loop, one-shot exchanges.
 #
-# Dependency policy: std threads, no async runtime (like the gateway). One new
-# third-party crate, `snow` (Noise), with only the ChaCha20-Poly1305, BLAKE2s,
-# Curve25519 and getrandom backends enabled; it reuses curve25519-dalek 4.1.3,
-# blake2 0.10 and subtle from the lockfile (ADR 0031 "Dependencies").
+# Dependency policy: std threads, no async runtime (like the gateway). Two
+# third-party crates of its own: `snow` (Noise), with only the
+# ChaCha20-Poly1305, BLAKE2s, Curve25519 and getrandom backends enabled (it
+# reuses curve25519-dalek 4.1.3, blake2 0.10 and subtle from the lockfile),
+# and `mdns-sd` for opt-in discovery (ADR 0031 "Dependencies").
 
 [package]
 name = "api-tracker-mesh"
@@ -22,6 +23,12 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 zeroize = { version = "1.9.0", features = ["derive"] }
 blake3 = { version = "1.8.5", features = ["zeroize"] }
+# Opt-in LAN discovery (`serve --discover`), no async runtime and no logging
+# backend; never constructed in tests (ADR 0031 "Dependencies").
+mdns-sd = { version = "0.21.6", default-features = false }
+# Interface addresses for a node bound to every interface (`--all-interfaces`);
+# already in the tree through mdns-sd.
+if-addrs = "0.15"
 
 [dev-dependencies]
 tempfile = "3.27.0"

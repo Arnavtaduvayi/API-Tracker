@@ -1,11 +1,12 @@
-//! The accept loop (`tethra mesh serve`): one thread per connection, at most
-//! `max_sessions` at once (8), and a per-source-IP token bucket of 10
+//! The accept loop: one thread per connection, at most `max_sessions` at once
+//! (8, counted together with the node's outbound exchanges through
+//! [`MeshNode::try_session`]), and a per-source-IP token bucket of 10
 //! handshakes a minute (MESH-SI-8). Only the 16-byte preamble and handshake
 //! messages of at most 1 KiB are read before a peer authenticates
 //! (MESH-SI-2). Listeners come only from [`crate::bind::bind_listener`].
 //!
-//! Increment 05's node adds the outbound loop beside this one (it shares the
-//! [`MeshNode`]).
+//! The node runtime ([`crate::runtime`]) runs this beside its outbound loop;
+//! `tethra mesh invite --wait` runs it alone.
 
 use crate::bind::bind_listener;
 use crate::handshake;
@@ -148,10 +149,10 @@ pub fn serve(
                 stats.refused_rate.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            if active.load(Ordering::SeqCst) >= limits.max_sessions {
+            let Some(slot) = node.try_session() else {
                 stats.refused_busy.fetch_add(1, Ordering::Relaxed);
                 continue;
-            }
+            };
             active.fetch_add(1, Ordering::SeqCst);
             stats.accepted.fetch_add(1, Ordering::Relaxed);
             let guard = Active(active.clone());
@@ -159,6 +160,10 @@ pub fn serve(
             std::thread::spawn(move || {
                 let _guard = guard;
                 handle(&node, stream, &stats);
+                drop(slot);
+                // Release this thread's hold on the node (and its keys)
+                // before the drain below can see the count reach zero.
+                drop(node);
             });
         }
         if idle {

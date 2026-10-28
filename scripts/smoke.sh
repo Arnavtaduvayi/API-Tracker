@@ -512,7 +512,7 @@ check $? "the original device is still in its mesh after the restore"
 
 echo "-- mesh pairing between two nodes on 127.0.0.1 --"
 MESH_B="$WORK/mesh-b"
-API_TRACKER_DIR="$MESH_A" "$BIN" mesh serve --listen 127.0.0.1:0 > "$WORK/serve-a.out" 2>/dev/null &
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh serve --listen 127.0.0.1:0 --interval 5 > "$WORK/serve-a.out" 2>/dev/null &
 SERVE_PID=$!
 MESH_ADDR=""
 for _ in $(seq 1 120); do
@@ -538,8 +538,39 @@ check $? "a third device cannot reuse the invite (and joins nothing)"
 CODE=$(echo "$INVITE" | sed 's/^tethra-mesh-invite:v1://' | cut -c1-32)
 printf '%s' "$OUT$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh devices 2>&1)" | grep -qF "$CODE" \
   && bad "the invite code was printed again" || ok "the invite code is shown only once"
-{ kill "$SERVE_PID" && wait "$SERVE_PID"; } >/dev/null 2>&1
-kill -0 "$SERVE_PID" 2>/dev/null; [ $? -ne 0 ]; check $? "mesh serve stops cleanly"
+
+echo "-- mesh node: two nodes converge on their own (5 s rounds) --"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh peer add "$MESH_ADDR" >/dev/null 2>&1; check $? "mesh peer add (B dials A)"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh serve --listen 127.0.0.1:0 --interval 5 > "$WORK/serve-b.out" 2>/dev/null &
+SERVE_B_PID=$!
+MESH_B_ADDR=""
+for _ in $(seq 1 120); do
+  MESH_B_ADDR=$(sed -n 's/^Listening on //p' "$WORK/serve-b.out" 2>/dev/null | head -1)
+  [ -n "$MESH_B_ADDR" ] && break
+  sleep 0.25
+done
+[ -n "$MESH_B_ADDR" ]; check $? "B's node binds 127.0.0.1 and prints its port"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh serve --listen 127.0.0.1:0 >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "a second node on B's data directory is refused"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh rename smoke-a-renamed >/dev/null 2>&1; check $? "A renames itself"
+SEEN=1
+for _ in $(seq 1 60); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh devices 2>/dev/null | grep -q '"smoke-a-renamed"' && { SEEN=0; break; }
+  sleep 0.5
+done
+check $SEEN "B's node brings A's rename over with no manual exchange (about 2 rounds)"
+OUT=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh status 2>/dev/null)
+echo "$OUT" | grep -q '"running": true' && echo "$OUT" | grep -q '"lag"'
+check $? "mesh status shows B's node running, its peers and lag"
+API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh doctor 2>/dev/null | grep -q '"severity": "problem"' \
+  && bad "mesh doctor reports a problem on B" || ok "mesh doctor finds no problem on B"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh stop >/dev/null 2>&1; RC_A=$?
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh stop >/dev/null 2>&1; RC_B=$?
+wait "$SERVE_PID" "$SERVE_B_PID" >/dev/null 2>&1
+[ $RC_A -eq 0 ] && [ $RC_B -eq 0 ] && ! kill -0 "$SERVE_PID" 2>/dev/null && ! kill -0 "$SERVE_B_PID" 2>/dev/null
+check $? "both nodes stop through the control socket's Stop"
+[ ! -e "$MESH_A/mesh/node.sock" ] && [ ! -e "$MESH_B/mesh/node.nonce" ]
+check $? "a stopped node leaves no control socket or nonce behind"
 
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0

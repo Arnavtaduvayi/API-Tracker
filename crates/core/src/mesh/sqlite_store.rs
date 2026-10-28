@@ -118,6 +118,9 @@ struct Mirror {
     /// Origins whose digest or per-origin counters changed in the open
     /// transaction.
     dirty: BTreeSet<DeviceId>,
+    /// `RollbackNotice`s (PROTOCOL.md §7.4): reporting device → the seq of
+    /// this device's own log it said it holds (`mesh_meta.rollback_hold/*`).
+    rollback_holds: BTreeMap<DeviceId, u64>,
 }
 
 impl Mirror {
@@ -133,7 +136,21 @@ impl Mirror {
             hlc: HlcClock::new(clock),
             generation: 0,
             dirty: BTreeSet::new(),
+            rollback_holds: BTreeMap::new(),
         }
+    }
+
+    /// The seq this device must recover before it mints again: the highest
+    /// a still-active device reported holding above `vv[self]`, if any. A
+    /// report from a device since removed no longer counts, so removing a
+    /// member that lies about holding this device's items lifts its hold.
+    fn rollback_hold(&self) -> Option<u64> {
+        let own = self.vv.get(&self.self_id);
+        self.rollback_holds
+            .iter()
+            .filter(|(d, held)| **held > own && self.state.roster.is_active(d))
+            .map(|(_, held)| *held)
+            .max()
     }
 }
 
@@ -337,6 +354,7 @@ fn load(conn: &Connection, m: &mut Mirror) -> Result<(), MeshError> {
     let mut rate: BTreeMap<DeviceId, (u64, u64)> = BTreeMap::new();
     let mut hlc_high_water = 0u64;
     let mut generation = 0i64;
+    let mut rollback_holds = BTreeMap::new();
     {
         let mut st = conn
             .prepare("SELECT key, value FROM mesh_meta")
@@ -371,6 +389,8 @@ fn load(conn: &Connection, m: &mut Mirror) -> Result<(), MeshError> {
                 rate.entry(o?).or_insert((0, 0)).0 = to_u64(v)?;
             } else if let Some(o) = origin("ingest_count/") {
                 rate.entry(o?).or_insert((0, 0)).1 = to_u64(v)?;
+            } else if let Some(o) = origin("rollback_hold/") {
+                rollback_holds.insert(o?, to_u64(v)?);
             }
         }
     }
@@ -406,6 +426,7 @@ fn load(conn: &Connection, m: &mut Mirror) -> Result<(), MeshError> {
     m.hlc.restore(Hlc::from_raw(hlc_high_water));
     m.generation = generation;
     m.dirty.clear();
+    m.rollback_holds = rollback_holds;
     Ok(())
 }
 
@@ -588,6 +609,9 @@ fn mint_in(
     draft: Draft,
 ) -> Result<SignedItem, MeshError> {
     let me = m.self_id;
+    if m.rollback_hold().is_some() {
+        return Err(MeshError::RollbackHold);
+    }
     let last = m.vv.get(&me);
     let seq = last + 1;
     if seq > MAX_SEQ {
@@ -813,6 +837,61 @@ impl SqliteStore {
         let tx = begin(&self.conn, TransactionBehavior::Deferred)?;
         load(&tx, &mut self.m)?;
         tx.commit().map_err(sql("reading the mesh store"))
+    }
+
+    /// Record a peer's `RollbackNotice` (PROTOCOL.md §7.4): `reporter` holds
+    /// this device's own log up to `held_seq`, past what this database
+    /// remembers. Until `vv[self]` reaches it, every mint (by the node or by
+    /// another process on this database) is refused with
+    /// [`MeshError::RollbackHold`]; the items come back through ordinary
+    /// exchanges. A notice at or below `vv[self]` is ignored.
+    pub fn hold_minting(&mut self, reporter: DeviceId, held_seq: u64) -> Result<(), MeshError> {
+        if held_seq <= self.m.vv.get(&self.m.self_id) || reporter == self.m.self_id {
+            return Ok(());
+        }
+        let held = to_i64(held_seq.min(MAX_SEQ))?;
+        self.write(|tx, m, _| {
+            meta_set(tx, &format!("rollback_hold/{}", reporter.to_hex()), held)?;
+            let entry = m.rollback_holds.entry(reporter).or_insert(0);
+            *entry = (*entry).max(to_u64(held)?);
+            Ok(())
+        })
+    }
+
+    /// Forget `reporter`'s hold: after an exchange with it completed without
+    /// a new report (it holds nothing past this device's log any more), or
+    /// when the user removes it (`mesh remove`; a member that keeps
+    /// reporting falsely would otherwise block its own removal). Holds
+    /// already satisfied are cleared too.
+    pub fn settle_rollback_holds(&mut self, reporter: DeviceId) -> Result<(), MeshError> {
+        let own = self.m.vv.get(&self.m.self_id);
+        let done: Vec<DeviceId> = self
+            .m
+            .rollback_holds
+            .iter()
+            .filter(|(d, held)| **d == reporter || **held <= own)
+            .map(|(d, _)| *d)
+            .collect();
+        if done.is_empty() {
+            return Ok(());
+        }
+        self.write(|tx, m, _| {
+            for d in &done {
+                tx.execute(
+                    "DELETE FROM mesh_meta WHERE key = ?1",
+                    [format!("rollback_hold/{}", d.to_hex())],
+                )
+                .map_err(sql("writing mesh_meta"))?;
+                m.rollback_holds.remove(d);
+            }
+            Ok(())
+        })
+    }
+
+    /// The seq this device must recover before it mints again, if a peer
+    /// reported holding more of its own log than it has (`status`, `doctor`).
+    pub fn rollback_hold(&self) -> Option<u64> {
+        self.m.rollback_hold()
     }
 
     /// The views recomputed from `mesh_items` alone (`doctor --rebuild`,
@@ -1407,6 +1486,61 @@ mod tests {
                 route(acts, &mut to_b, &mut a.store);
             }
         }
+    }
+
+    #[test]
+    fn a_rollback_hold_refuses_every_mint_until_the_own_log_is_back() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut g, mut b) = pair(root.path());
+        exchange(&mut g, &mut b);
+        let own = g.store.vv().get(&g.id);
+        // b reports holding g's log 3 past what g has.
+        g.store.hold_minting(b.id, own + 3).unwrap();
+        assert_eq!(g.store.rollback_hold(), Some(own + 3));
+        let draft = Draft::of(
+            &MeshSetting {
+                name: "x".into(),
+                value: json!(1),
+            },
+            HlcPolicy::Now,
+        );
+        assert!(matches!(
+            g.store.mint(&g.key, draft.clone()),
+            Err(MeshError::RollbackHold)
+        ));
+        // Another connection to the same database sees the hold too.
+        let mut other = open_at(&g.dir, g.store.params().clone());
+        assert!(matches!(
+            other.mint(&g.key, draft.clone()),
+            Err(MeshError::RollbackHold)
+        ));
+        drop(other);
+        // A notice at or below what g has, or from itself, changes nothing.
+        g.store.hold_minting(b.id, own).unwrap();
+        g.store.hold_minting(g.id, own + 99).unwrap();
+        assert_eq!(g.store.rollback_hold(), Some(own + 3));
+        // A completed exchange with the reporter settles its report.
+        g.store.settle_rollback_holds(b.id).unwrap();
+        assert_eq!(g.store.rollback_hold(), None);
+        g.store.mint(&g.key, draft.clone()).unwrap();
+        // A reporter that is no longer active holds nothing.
+        g.store.hold_minting(b.id, own + 50).unwrap();
+        assert!(g.store.rollback_hold().is_some());
+        let r = RosterRemove {
+            device: b.id,
+            cutoff_seq: g.store.vv().get(&b.id),
+        };
+        // Removing the reporter is itself a mint: `mesh remove` forgets the
+        // target's report first (`membership::remove`).
+        assert!(matches!(
+            g.store.mint(&g.key, Draft::of(&r, HlcPolicy::Now)),
+            Err(MeshError::RollbackHold)
+        ));
+        g.store.settle_rollback_holds(b.id).unwrap();
+        g.store.mint(&g.key, Draft::of(&r, HlcPolicy::Now)).unwrap();
+        g.store.hold_minting(b.id, own + 80).unwrap();
+        assert_eq!(g.store.rollback_hold(), None);
+        g.store.mint(&g.key, draft).unwrap();
     }
 
     /// The batch `b` would commit from `a` (one session, commit not applied).

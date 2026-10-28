@@ -16,10 +16,16 @@ NN)** otherwise.
   (`0.0.0.0`, `::`) unless `--all-interfaces` was given; nothing listens unless
   `--listen` was given; the gateway stays loopback-only (gateway SI-1 untouched).
   *Enforced by:* one `bind_listener` function in `crates/mesh/src/bind.rs`;
-  `tethra mesh serve` requires `--listen`.
-  *Status:* implemented (04). *Tests:*
+  `tethra mesh serve` requires `--listen`. The node's local control socket
+  (05) is bound in `bind.rs` too (`bind_control_socket`, a Unix socket in the
+  0700 `mesh/` directory; on Windows a loopback listener through
+  `bind_listener`). With `--all-interfaces` the node publishes concrete
+  interface addresses, never a wildcard. mDNS (`--discover`, off by default) is
+  the `mdns-sd` crate's own multicast sockets.
+  *Status:* implemented (04, 05). *Tests:*
   `bind_guard::only_bind_rs_binds_and_no_file_names_a_wildcard_address` (no
-  other file binds; no wildcard literal anywhere),
+  other file binds, `UnixListener` included; no wildcard literal anywhere),
+  `runtime::tests::an_every_interface_bind_publishes_concrete_non_loopback_addresses`,
   `bind_guard::unspecified_addresses_are_refused_without_the_flag`,
   `no_mesh_dependency::the_gateway_does_not_depend_on_api_tracker_mesh`
   (the gateway's listener stays its own, loopback-only).
@@ -53,11 +59,13 @@ NN)** otherwise.
 - **MESH-SI-12 No third parties.** No Tethra server, relay, rendezvous or
   third-party NAT service. *Enforced by:* there is no such code; reachability is
   the user's LAN or VPN. *Status:* implemented (01) as a design rule.
-  *Status:* implemented (04) for what exists: `replicate --peer`, `leave --peer`
-  and `join` dial only addresses the user typed or the invite carries, and
-  `leave` also tries the addresses other devices published. *Tests:* none
-  beyond review yet (05 asserts the node loop dials only roster-gossiped or
-  user-entered addresses).
+  *Status:* implemented (04, 05): `replicate --peer`, `leave --peer` and `join`
+  dial only addresses the user typed or the invite carries; the node (05) dials
+  only `mesh_peers` rows, which come from `peer add`, from the `device.info`
+  of **active** roster devices (gossip), or from mDNS sightings carrying this
+  mesh's daily tag. There is no rendezvous, relay or NAT service. *Tests:*
+  `node::three_nodes_converge_on_their_own_and_gossip_lets_c_find_a`,
+  `discover::a_node_finds_a_peer_through_discovery_alone_and_ignores_strangers`.
 
 ## Items and replication
 
@@ -99,7 +107,10 @@ NN)** otherwise.
   `mesh_store_conformance::crashes_between_chunks_happen_and_are_survived`.
 - **MESH-SI-5 No identity reuse.** A restored backup wipes mesh identity; a
   clone/rollback marker mismatch or a fork stops the node. *Status:* implemented
-  (03) for everything but the running node, which is 05:
+  (03, 05). The node (05) refuses to open on a bad marker or a fork naming this
+  device, and stops itself if one appears while it runs; a peer's
+  `RollbackNotice` holds every mint on this database until the device's own
+  items are back (ADR 0031 R22):
   - Forks are detected by dot-log chains and reported at their true divergence
     point (02); rollbacks get a `RollbackNotice` (02).
   - Restore deletes every `mesh_*` row and the marker that names the wiped
@@ -122,7 +133,10 @@ NN)** otherwise.
   `sqlite_store::tests::two_stores_on_one_database_never_reuse_a_seq`,
   `sqlite_store::tests::a_device_reported_forked_does_not_pass_preflight`,
   `marker::tests::classification_covers_every_case`,
-  `mesh_cli::a_restored_backup_leaves_the_mesh_and_can_start_a_new_one`.
+  `mesh_cli::a_restored_backup_leaves_the_mesh_and_can_start_a_new_one`,
+  `sqlite_store::tests::a_rollback_hold_refuses_every_mint_until_the_own_log_is_back`,
+  `replication::a_rolled_back_device_recovers_its_own_items_before_minting_again`,
+  `doctor::a_marker_mismatch_is_found_and_the_node_refuses_to_start`.
 - **MESH-SI-8 Bounds.** Every frame, batch, stage, session, rate and transaction
   is bounded (PROTOCOL §11). *Status:* partial (02): items, bodies, payload
   depth, `kind`/`key` (01); per session ≤ 50 000 staged items and dots,
@@ -133,8 +147,13 @@ NN)** otherwise.
   in 04-05. Transport (04): frames ≤ 1 MiB, handshake messages ≤ 1 KiB, a
   5 s handshake, 30 s idle and 10 min exchange timeout, ≤ 8 connections at once,
   ≤ 10 new connections per source IP per minute, ≤ 5 pairing attempts per
-  invite. *Tests:* `bounds::*` (oversize frame, slowloris, idle session, session
-  limit, per-IP flood, the defaults), `mesh_sim::ci_200_seeds` (invariant 8),
+  invite. The node (05): the 8 session slots are shared by inbound and
+  outbound exchanges, at most 4 outbound at once, a round interval of at least
+  5 s outside tests, control requests ≤ 8 KiB and ≤ 4 control connections at
+  once, at most 16 published addresses and 64 mDNS addresses kept per round.
+  *Tests:* `bounds::*` (oversize frame, slowloris, idle session, session
+  limit, per-IP flood, the defaults),
+  `instance::tests::an_unparseable_or_oversize_request_gets_an_error_not_a_panic`, `mesh_sim::ci_200_seeds` (invariant 8),
   `proto::tests::frames_have_the_documented_json_shape`,
   `mesh_store_conformance::commits_wait_for_a_busy_writer_and_stay_consistent`,
   `codec::tests::oversize_is_refused_both_ways`, `codec::tests::depth_limit`,
@@ -152,14 +171,28 @@ NN)** otherwise.
 - **MESH-SI-7 Key lifetime.** Mesh private keys are in memory only while the
   vault is unlocked or the CLI session lives; the sealing key is used only
   inside a reauth-gated import. Key types never print secret material.
-  *Status:* partial: `SigningKeyPair` wipes on drop (dalek `zeroize`) and
+  *Status:* implemented (01, 03, 05); the reauth-gated import that uses the
+  sealing key is 11. `SigningKeyPair` wipes on drop (dalek `zeroize`) and
   redacts in `Debug`/`Display` (01). The four private keys are encrypted under
   the vault key with AAD naming the vault and the device (or mesh and epoch)
   (03). `UnlockedVault::mesh_keys` returns only the signing key, the Noise key
   and the current access key, in zeroizing buffers, each checked against its
   stored public key. It never returns the sealing key. The CLI prints no key,
-  public or private. Holding the keys only while the vault is unlocked is the
-  node's job (05). *Tests:*
+  public or private. *Implemented (05):* the node holds its keys in one
+  `MeshNode` that only its serve and main threads hold (the control channel
+  holds status only). It stops when its CLI session is deleted, expires or is
+  replaced, on an opted-in maximum runtime, on a lock signal, or on `stop`; it
+  then joins every thread so the last reference drops and `MeshKeys` and
+  `MeshVault` zeroize, which `StopReport::keys_dropped` reports. `mesh serve`
+  drops its `UnlockedVault` once the node is built. `doctor` unwraps the node's
+  keys only to compare them with their public keys, and never the sealing key.
+  *Tests:*
+  `node::a_node_stops_within_an_interval_when_its_session_expires_or_ends_and_drops_its_keys`,
+  `node::a_lock_signal_stops_the_node_and_a_new_session_does_too`,
+  `node::the_control_channel_answers_status_replicate_now_and_stop_and_refuses_a_wrong_nonce`,
+  `runtime::tests::a_session_file_that_disappears_expires_or_changes_stops_the_node`,
+  `doctor::a_healthy_device_has_no_problem_and_a_device_outside_a_mesh_has_little_to_check`
+  (no key in a doctor report),
   `sign::tests::debug_and_display_never_print_the_secret`,
   `mesh_foundations::no_key_signature_or_sealed_bytes_leak_through_debug_display_or_errors`,
   `identity::tests::keys_round_trip_and_never_include_the_sealing_key`,
@@ -191,9 +224,12 @@ NN)** otherwise.
 - **MESH-SI-13 Nothing automatic.** No auto-binding, auto-import or
   auto-enforcement. *Status:* specified (lands in 06/08/11). *Tests:* none yet.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the
-  `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01): no
-  mesh code references the analytics module. *Tests:* none yet (12 adds a grep
+  `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01, 05):
+  no mesh code, the node included, references the analytics module. *Tests:* none yet (12 adds a grep
   guard).
 - **MESH-SI-15 No unsafe code.** `#![forbid(unsafe_code)]` in `crates/mesh`, and
   core keeps its crate-level `#![forbid(unsafe_code)]`. *Status:* implemented
-  (01) for core (`core::mesh` is inside core). *Tests:* the compiler.
+  (01) for core (`core::mesh` is inside core), (04) for `crates/mesh`. The
+  control channel's same-user check is filesystem permissions, not a peer
+  credential call, which would need `unsafe` or a new dependency (as for the
+  gateway). *Tests:* the compiler.

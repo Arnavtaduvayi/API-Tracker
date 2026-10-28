@@ -550,6 +550,10 @@ pub struct MeshStatusDetail {
     pub forked_devices: usize,
     pub regressions: u64,
     pub repairs_changed: u64,
+    /// A peer reported holding this device's own items up to this seq, past
+    /// what this database has: nothing is minted until they come back
+    /// (PROTOCOL.md §7.4).
+    pub rollback_hold: Option<u64>,
 }
 
 impl MeshStatus {
@@ -617,6 +621,7 @@ pub(crate) fn status(
             forked_devices: roster.forks().count(),
             regressions: stats.regressions.values().sum(),
             repairs_changed: stats.repairs_changed,
+            rollback_hold: store.rollback_hold(),
         }),
     })
 }

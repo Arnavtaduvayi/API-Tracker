@@ -200,9 +200,11 @@ the Tethra landing site — see [docs/PACKAGING.md](docs/PACKAGING.md)).
 In development, not yet a feature: **Tethra Mesh**, peer-to-peer replication of
 usage, shared projects and spend caps between your own paired devices, with no
 server. It is being built on the `feat/device-mesh` branch. So far devices can
-start a mesh, pair with a one-time invite, and replicate on demand over your
-LAN or VPN (`tethra mesh init|invite|join|serve|replicate|devices|remove|leave`);
-the automatic background exchange comes next. See [docs/mesh/](docs/mesh/ARCHITECTURE.md) and
+start a mesh, pair with a one-time invite, and run a node that keeps them in
+step on its own over your LAN or VPN
+(`tethra mesh init|invite|join|serve|stop|peer|replicate|status|doctor|devices|remove|leave`);
+shared projects and cross-device usage come next. See the
+[user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md) and
 [ADR 0031](docs/decisions/0031-device-mesh.md).
 
 ## Install and build

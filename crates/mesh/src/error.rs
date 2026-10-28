@@ -17,6 +17,8 @@ pub enum NetError {
     Refused(&'static str),
     /// The replication session ended early.
     Session(&'static str),
+    /// The local node: its single-instance claim or control channel.
+    Node(&'static str),
     Core(CoreError),
 }
 
@@ -27,6 +29,7 @@ impl fmt::Display for NetError {
             NetError::Handshake(why) => write!(f, "mesh handshake failed: {why}"),
             NetError::Refused(why) => write!(f, "mesh connection refused: {why}"),
             NetError::Session(why) => write!(f, "mesh exchange ended early: {why}"),
+            NetError::Node(why) => write!(f, "mesh node: {why}"),
             NetError::Core(e) => write!(f, "{e}"),
         }
     }
@@ -57,7 +60,10 @@ impl NetError {
     pub fn log_text(&self) -> &'static str {
         match self {
             NetError::Io(_) => "connection failed",
-            NetError::Handshake(w) | NetError::Refused(w) | NetError::Session(w) => w,
+            NetError::Handshake(w)
+            | NetError::Refused(w)
+            | NetError::Session(w)
+            | NetError::Node(w) => w,
             NetError::Core(_) => "local error",
         }
     }

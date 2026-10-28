@@ -1,5 +1,6 @@
-//! A one-shot outbound exchange (`tethra mesh replicate --peer`), and the
-//! exchange log every exchange writes (`mesh_exchange_log`).
+//! A one-shot outbound exchange (`tethra mesh replicate --peer`, and each
+//! exchange of a node's round), and what every exchange records: a row of
+//! `mesh_exchange_log` and the peer's last `Hello` (lag, `core::mesh::peers`).
 
 use crate::error::{NetError, NetResult};
 use crate::handshake;
@@ -7,6 +8,7 @@ use crate::node::MeshNode;
 use crate::session::{exchange, Direction, ExchangeReport};
 use crate::wire;
 use api_tracker_core::mesh::membership::{self, ExchangeRecord};
+use api_tracker_core::mesh::peers;
 use std::net::{TcpStream, ToSocketAddrs};
 
 /// Record an exchange; a failure to log never fails the exchange.
@@ -25,6 +27,9 @@ pub(crate) fn log(node: &MeshNode, report: &ExchangeReport) {
     };
     let store = node.store();
     let _ = membership::log_exchange(store.connection(), &rec);
+    if let Some(hello) = &report.hello {
+        let _ = peers::record_hello(store.connection(), &report.peer, hello);
+    }
 }
 
 /// Prepare an authenticated stream for an exchange: idle timeouts, halves.

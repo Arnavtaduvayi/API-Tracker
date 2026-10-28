@@ -1,6 +1,11 @@
 //! The state every connection shares: the store, the keys, the vault
-//! capability, the clock and the limits. `serve`, `replicate` and pairing use
-//! it; the Increment 05 node loop extends it.
+//! capability, the clock, the limits and the session slots. `serve`,
+//! `replicate`, pairing and the node runtime ([`crate::runtime`]) use it.
+//!
+//! The keys live here and nowhere else in the crate: when the last
+//! `Arc<MeshNode>` drops (the runtime joins every thread that holds one
+//! before it reports a stop), [`MeshKeys`] and [`MeshVault`] zeroize
+//! (MESH-SI-7).
 
 use crate::error::NetResult;
 use api_tracker_core::mesh::clock::Clock;
@@ -10,6 +15,7 @@ use api_tracker_core::mesh::sqlite_store::SqliteStore;
 use api_tracker_core::mesh::store::MeshStore;
 use api_tracker_core::mesh::{DeviceId, MeshId};
 use api_tracker_core::vault::UnlockedVault;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -41,6 +47,17 @@ pub struct MeshNode {
     vault: MeshVault,
     clock: Arc<dyn Clock>,
     limits: TransportLimits,
+    sessions: Arc<AtomicUsize>,
+}
+
+/// One of the node's `max_sessions` session slots (inbound and outbound
+/// together, DESIGN §D12); released on drop.
+pub struct SessionSlot(Arc<AtomicUsize>);
+
+impl Drop for SessionSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl MeshNode {
@@ -59,7 +76,40 @@ impl MeshNode {
             vault: vault.mesh_vault(),
             clock,
             limits,
+            sessions: Arc::new(AtomicUsize::new(0)),
         })
+    }
+
+    /// Take a session slot, or `None` when `max_sessions` exchanges (in and
+    /// out together) are already running.
+    pub fn try_session(&self) -> Option<SessionSlot> {
+        let max = self.limits.max_sessions;
+        let mut cur = self.sessions.load(Ordering::SeqCst);
+        loop {
+            if cur >= max {
+                return None;
+            }
+            match self.sessions.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Some(SessionSlot(self.sessions.clone())),
+                Err(actual) => cur = actual,
+            }
+        }
+    }
+
+    /// Exchanges running now, in and out.
+    pub fn active_sessions(&self) -> usize {
+        self.sessions.load(Ordering::SeqCst)
+    }
+
+    /// The session counter alone (for status readers that must not hold
+    /// the node, and so its keys).
+    pub fn session_counter(&self) -> Arc<AtomicUsize> {
+        self.sessions.clone()
     }
 
     /// The store, for one short operation, refreshed if another process

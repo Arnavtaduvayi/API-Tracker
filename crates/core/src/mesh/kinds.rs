@@ -174,6 +174,13 @@ impl Day {
         self.0
     }
 
+    /// The UTC day containing `ms` milliseconds after the Unix epoch.
+    pub fn from_unix_ms(ms: u64) -> Self {
+        let t = time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000)
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+        Self(t.date())
+    }
+
     pub fn month(&self) -> Month {
         Month {
             year: self.0.year(),

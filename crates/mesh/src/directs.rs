@@ -1,5 +1,6 @@
 //! Point-to-point messages a session delivers (`proto::DirectMsg`). They are
-//! never stored or relayed as items. This is the dispatch point later
+//! never stored or relayed as items: `AccessKeyUpdate` (rotation) and
+//! `RollbackNotice` (the hold on minting). This is the dispatch point later
 //! increments extend (Increment 07: `RightsRequest`).
 
 use crate::error::NetResult;
@@ -10,13 +11,17 @@ use api_tracker_core::mesh::DeviceId;
 /// What a session does with a direct message while it runs. An access key
 /// is held back and applied by [`apply_access_key`] once the exchange's
 /// commit is in, so the removal that justifies a rotation is known first.
-pub fn handle(_node: &MeshNode, _peer: DeviceId, msg: DirectMsg) -> NetResult<Option<DirectMsg>> {
+pub fn handle(node: &MeshNode, peer: DeviceId, msg: DirectMsg) -> NetResult<Option<DirectMsg>> {
     match msg {
         msg @ DirectMsg::AccessKeyUpdate { .. } => Ok(Some(msg)),
         // The peer holds this device's history past what it remembers
-        // (PROTOCOL.md §7.4). Increment 05's node stops minting until its own
-        // items come back; a one-shot exchange has nothing to hold back.
-        DirectMsg::RollbackNotice { .. } => Ok(None),
+        // (PROTOCOL.md §7.4): every mint on this database waits until its
+        // own items come back (`SqliteStore::hold_minting`), which the same
+        // exchange normally does.
+        DirectMsg::RollbackNotice { held_seq } => {
+            node.store().hold_minting(peer, held_seq)?;
+            Ok(None)
+        }
     }
 }
 

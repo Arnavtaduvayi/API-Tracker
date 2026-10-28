@@ -9528,6 +9528,51 @@ impl UnlockedVault {
     }
 }
 
+impl UnlockedVault {
+    /// Add (or promote to manual) an address this device's node dials
+    /// (`tethra mesh peer add`). Returns the normalized address and whether
+    /// anything changed.
+    pub fn mesh_peer_add(&self, addr: &str) -> Result<(String, bool)> {
+        self.require_mesh()?;
+        crate::mesh::peers::add_manual(&self.conn, addr)
+    }
+
+    /// Forget a peer address (`tethra mesh peer remove`).
+    pub fn mesh_peer_remove(&self, addr: &str) -> Result<Option<crate::mesh::peers::PeerSource>> {
+        self.require_mesh()?;
+        crate::mesh::peers::remove(&self.conn, addr)
+    }
+
+    /// Every address the node dials, with its attempt history.
+    pub fn mesh_peers(&self) -> Result<Vec<crate::mesh::peers::PeerRow>> {
+        self.require_mesh()?;
+        crate::mesh::peers::list(&self.conn)
+    }
+
+    /// The store-side checks of `tethra mesh doctor` (and `--rebuild`).
+    /// Unwraps the node's keys only to check them; never the sealing key.
+    pub fn mesh_doctor(
+        &self,
+        opts: crate::mesh::doctor::DoctorOptions,
+    ) -> Result<crate::mesh::doctor::StoreDoctorReport> {
+        crate::mesh::doctor::run(
+            &self.conn,
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            &self.vault_key,
+            &self.vault_id,
+            opts,
+        )
+    }
+
+    fn require_mesh(&self) -> Result<()> {
+        match crate::mesh::membership::mesh_of(&self.conn)? {
+            Some(_) => Ok(()),
+            None => Err(crate::mesh::MeshError::NotInitialized.into()),
+        }
+    }
+}
+
 /// What `mesh leave` did.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MeshLeaveReport {

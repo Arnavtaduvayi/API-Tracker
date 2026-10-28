@@ -58,8 +58,9 @@ Nothing outside this table ever replicates.
         └──────────────┬───────────────┘
                        ▼
         crates/mesh  (api-tracker-mesh, from Increment 04)
-        noise · frame · pair · session · node · peers ·
-        discover · instance · bind  — the ONLY network code
+        noise · wire · handshake · pair · session · serve ·
+        replicate · node · runtime · peers · discover ·
+        instance · doctor · bind  — the ONLY network code
                        │ drives
                        ▼
         crates/core::mesh   (pure, sans-IO)          ◄── crates/gateway reads
@@ -91,7 +92,8 @@ Nothing outside this table ever replicates.
 | `mesh::sim::sqlite` | implemented (03) | SQLite devices for the simulator (store conformance) |
 | `mesh::invite`, `mesh::membership` | implemented (04) | invite tokens and strings, pairing messages, `MeshVault`, the inviter's single-use claim, devices, rename, removal with rotation, leave, the exchange log |
 | `crates/mesh` (`api-tracker-mesh`) | implemented (04) | `bind` (the only bind), `noise`, `wire` (preamble, framing), `handshake` (roster check), `session` (one exchange), `pair`, `serve` (accept loop, limits), `replicate`, `directs`, `node` |
-| `crates/mesh` node loop, discovery | specified, lands in 05 | outbound loop, peers, mDNS, control socket |
+| `mesh::peers`, `mesh::doctor` | implemented (05) | the peer table (`mesh_peers`), lag and repair records; the store-side checks of `mesh doctor` and `--rebuild` |
+| `crates/mesh` `runtime`, `peers`, `instance`, `discover`, `doctor` | implemented (05) | the node loop (rounds, hooks, stop conditions), backoff and targets, one node per data directory with its control socket, opt-in mDNS and its in-memory fake, `mesh doctor` |
 | `mesh::publish`, `caps`, `share` | specified, lands in 06, 07-08, 11 | usage publisher, spend caps, credential shares |
 
 **Rules.** Core performs no network I/O (`crates/core/src/lib.rs`), and
@@ -150,6 +152,66 @@ than one block behind it, refuses to mint. Restoring a backup wipes every mesh
 row and the matching marker (MESH-SI-5): a restored vault is a copy and must
 pair again.
 
+## Runtime
+
+**Status: implemented (05)** — `crates/mesh::{runtime, peers, instance,
+discover, doctor}`; the user-facing view is [USER_GUIDE.md](USER_GUIDE.md).
+
+A **node** is `RunningNode::start(MeshNode, data_dir, NodeConfig,
+StopCondition)`. `tethra mesh serve` runs one in the foreground; the desktop
+app runs one on a thread from Increment 09. In order, it:
+
+1. claims the data directory (`instance::claim`): binding
+   `<data-dir>/mesh/node.sock` (0600, in the 0700 `mesh/` directory) is the
+   single-instance lock, and a fresh per-boot nonce goes to `node.nonce`
+   (0600). On Windows the control channel is a loopback TCP listener whose port
+   is in the nonce file (compiled and unit-tested, runtime untested);
+2. binds its listeners (`bind::bind_listener` only, MESH-SI-1);
+3. starts three threads:
+
+| Thread | Holds the keys? | Does |
+|---|---|---|
+| serve | yes (`Arc<MeshNode>`) | the accept loop: authenticated exchanges and pairing |
+| control | **no** (status only) | one JSON line per request: `health`, `status`, `replicate_now`, `stop`; all but `health` need the nonce |
+| main | yes | the outbound loop below, and the stop conditions |
+
+**A round** (every `interval`, 30 s ± 20% jitter by default, and on
+`replicate_now`):
+
+```text
+round hooks (06: usage publisher; 07: cap reconciler)
+  → publish listen addresses in device.info if they changed
+  → refresh learned peers: gossip (active devices' device.info addresses),
+    mDNS sightings whose daily tag matches this mesh
+  → targets: one per known device (its addresses, last success first), one
+    per address of a device not seen yet; skip removed/forked devices and
+    peers in backoff (5 s doubling to 15 min, ±20%)
+  → ≤ 4 exchanges at once, inside the node's 8 session slots (in + out)
+  → record each dial in mesh_peers and each peer's Hello (lag) in mesh_meta
+  → once a day: record it as a repair round (node/last_repair)
+```
+
+Every exchange already compares per-origin digests and repairs differences
+(PROTOCOL.md §8.5), so the daily repair round is a record of whether repair
+changed anything, not a separate protocol.
+
+**Stopping and keys (MESH-SI-7).** The keys live in the `MeshNode`; only the
+serve and main threads, and the exchanges they run, hold it. The node stops on
+its `StopCondition` (`SessionAlive`: the CLI session file deleted, expired or
+replaced; `Deadline`: an opted-in maximum runtime; `StopFlag`: the desktop's
+lock signal), on `stop`, or by itself when this device left the mesh, was
+removed, or forked (`identity::preflight`). It then closes the listeners, lets
+running exchanges finish, joins every thread, and the last reference to the
+`MeshNode` drops, which zeroizes `MeshKeys` and `MeshVault`.
+`StopReport::keys_dropped` states it. Ctrl-C ends the process without this
+sequence (no signal handler, like the gateway); stored state is safe because
+every write is one transaction and an interrupted exchange commits nothing.
+
+**Rollback hold (PROTOCOL.md §7.4).** A peer's `RollbackNotice` is stored per
+reporting device in `mesh_meta` (`rollback_hold/<device>`), so every process
+minting on this database — the node, its round hooks, a CLI command — refuses
+until `vv[self]` reaches the reported seq (ADR 0031 R22).
+
 ## Data flow
 
 **Status: specified; lands in 02-06.** Text diagram of one usage figure's path:
@@ -196,6 +258,7 @@ storage (03).
 
 ## Related documents
 
+- [USER_GUIDE.md](USER_GUIDE.md) — setup, the node, `status` and `doctor`.
 - [PROTOCOL.md](PROTOCOL.md) — the normative spec, with worked examples.
 - [SECURITY_INVARIANTS.md](SECURITY_INVARIANTS.md) — MESH-SI-1 to MESH-SI-15.
 - [THREAT_MODEL.md](THREAT_MODEL.md) — the device-mesh trust boundary.

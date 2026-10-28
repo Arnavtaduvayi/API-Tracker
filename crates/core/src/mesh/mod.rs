@@ -32,13 +32,17 @@
 //!   `MeshVault` capability a node holds. The network code that uses them is
 //!   the `api-tracker-mesh` crate.
 //!
-//! The node runtime follows in Increment 05; see
-//! `docs/mesh/increments/STATUS.md`.
+//! - Increment 05: the peer table and lag records a running node keeps
+//!   ([`peers`]), the rollback hold on minting, listen-address publishing
+//!   (`membership::publish_listen_addrs`), and the store-side checks of
+//!   `tethra mesh doctor` ([`doctor`]). The node itself (its loop, control
+//!   socket and discovery) is in the `api-tracker-mesh` crate.
 
 pub mod chain;
 pub mod clock;
 pub mod codec;
 pub mod crdt;
+pub mod doctor;
 pub mod dot;
 pub mod error;
 pub mod hlc;
@@ -49,6 +53,7 @@ pub mod kinds;
 pub mod marker;
 pub mod membership;
 pub mod memstore;
+pub mod peers;
 pub mod proto;
 pub mod sign;
 pub mod sqlite_store;

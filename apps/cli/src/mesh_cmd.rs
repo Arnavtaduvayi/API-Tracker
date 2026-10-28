@@ -1,6 +1,7 @@
 //! `mesh` subcommands: Tethra Mesh, peer-to-peer replication between your own
-//! paired devices (ADR 0031): identity, pairing, devices, removal, leave, and
-//! serving or replicating over the network (`api-tracker-mesh`).
+//! paired devices (ADR 0031): identity, pairing, devices, removal, leave, the
+//! node (`serve`, `stop`, `replicate`, `peer`), and `status`/`doctor`
+//! (`api-tracker-mesh`).
 //!
 //! Nothing printed here carries key material: not the private keys, not the
 //! access key, not even public keys. Identifiers are random and not secret.
@@ -9,20 +10,34 @@
 use crate::ctx::{self, Ctx};
 use crate::render;
 use anyhow::{bail, Context, Result};
-use api_tracker_core::mesh::clock::SystemClock;
+use api_tracker_core::mesh::clock::{Clock, SystemClock};
+use api_tracker_core::mesh::doctor::Severity;
 use api_tracker_core::mesh::identity::{MeshStatus, MeshStatusDetail};
 use api_tracker_core::mesh::invite::format_invite;
 use api_tracker_core::mesh::marker::MarkerStatus;
+use api_tracker_core::mesh::peers::{self, DeviceChange, PeerLag, PeerRow};
 use api_tracker_core::mesh::store::MeshStore;
 use api_tracker_core::mesh::{DeviceId, MeshId};
+use api_tracker_mesh::discover::MdnsDiscovery;
+use api_tracker_mesh::instance::{self, ExchangeSummary, NodeStatus, Response};
 use api_tracker_mesh::replicate::replicate_once;
+use api_tracker_mesh::runtime::{
+    AnyOf, Deadline, NodeConfig, RunningNode, SessionAlive, StopCondition,
+};
 use api_tracker_mesh::serve::{bind_all, serve};
 use api_tracker_mesh::{MeshNode, TransportLimits};
 use clap::Subcommand;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// The shortest round interval `serve --interval` accepts. Each round dials
+/// every peer once, and a node answers at most 10 handshakes a minute per
+/// source address (DESIGN §D12).
+const MIN_INTERVAL_SECS: u64 = 5;
 
 #[derive(Subcommand)]
 pub enum MeshCmd {
@@ -82,8 +97,10 @@ pub enum MeshCmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Accept connections from paired devices until stopped (Ctrl-C).
-    /// Nothing listens unless you give --listen.
+    /// Run this device's mesh node in the foreground: accept connections
+    /// from paired devices and, every interval, exchange with each known
+    /// peer. It stops when the vault session locks or expires, on `tethra
+    /// mesh stop`, or on Ctrl-C. Nothing listens unless you give --listen.
     Serve {
         /// Address to listen on (repeatable); port 0 picks a free port.
         #[arg(long, required = true, value_name = "ADDR:PORT")]
@@ -91,12 +108,61 @@ pub enum MeshCmd {
         /// Allow 0.0.0.0 or [::] (every network interface).
         #[arg(long)]
         all_interfaces: bool,
-    },
-    /// Run one exchange with a paired device now.
-    Replicate {
+        /// Announce and find this mesh's devices on the local network
+        /// (mDNS). Off unless given.
+        #[arg(long)]
+        discover: bool,
+        /// The address other devices should dial (repeatable), when it is
+        /// not the --listen address: a VPN name, say. Published to your
+        /// devices only.
         #[arg(long, value_name = "HOST:PORT")]
-        peer: String,
+        advertise: Vec<String>,
+        /// Seconds between rounds (default 30, at least 5).
+        #[arg(long, value_name = "SECONDS")]
+        interval: Option<u64>,
+        /// Stop after this many minutes. A vault session already stops the
+        /// node when it locks; with TETHRA_PASSWORD it otherwise runs until
+        /// stopped.
+        #[arg(long, value_name = "MINUTES")]
+        max_runtime: Option<u64>,
     },
+    /// Stop the mesh node running for this data directory.
+    Stop,
+    /// Exchange with paired devices now: through the running node if there
+    /// is one, otherwise directly from this command.
+    Replicate {
+        /// Only this address (default: every known peer).
+        #[arg(long, value_name = "HOST:PORT")]
+        peer: Option<String>,
+    },
+    /// The addresses this device's node dials.
+    #[command(subcommand)]
+    Peer(PeerCmd),
+    /// Check this device's mesh: identity, keys, stored items, the node,
+    /// its listeners and peers. Every finding comes with a fix.
+    Doctor {
+        /// Rewrite the item store's index columns from the item bytes and
+        /// remove rows that are unreadable or unsigned (a peer returns them
+        /// at the next exchange).
+        #[arg(long)]
+        rebuild: bool,
+        /// Run a repair round now: one exchange with every peer, comparing
+        /// what each side holds.
+        #[arg(long)]
+        repair: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PeerCmd {
+    /// Add an address to dial: another device's listen address
+    /// (`HOST:PORT`; an IP address, or a LAN or VPN host name).
+    Add { addr: String },
+    /// List the addresses, where each came from, and how dialling went.
+    List,
+    /// Forget an address. One that a device still publishes, or mDNS still
+    /// finds, comes back at the next round.
+    Remove { addr: String },
 }
 
 /// What `mesh init` reports. Deliberately no key, public or private.
@@ -134,14 +200,13 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
                     "The device name is shown to every device you pair. Its keys are \
                      encrypted in this vault and never leave it."
                 );
-                println!("Pairing other devices is not available in this build yet.");
+                println!(
+                    "Pair another device with `tethra mesh invite`, then run a node with \
+                     `tethra mesh serve`."
+                );
             });
         }
-        MeshCmd::Status => {
-            let (vault, _token) = ctx.unlocked()?;
-            let status = vault.mesh_status()?;
-            render::emit(ctx.json, &status, || print_status(&status));
-        }
+        MeshCmd::Status => status(ctx)?,
         MeshCmd::Invite {
             addrs,
             ttl,
@@ -222,39 +287,466 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
         MeshCmd::Serve {
             listen,
             all_interfaces,
-        } => {
-            let (vault, _token) = ctx.unlocked()?;
-            let node = Arc::new(MeshNode::open(
-                &vault,
-                Arc::new(SystemClock),
-                TransportLimits::default(),
-            )?);
-            let listeners = bind_all(&listen, all_interfaces)?;
-            for l in &listeners {
-                // Tests and scripts read the bound port from this line.
-                println!("Listening on {}", l.local_addr()?);
-            }
-            std::io::stdout().flush()?;
-            serve(node, listeners, &|| false)?;
+            discover,
+            advertise,
+            interval,
+            max_runtime,
+        } => serve_node(
+            ctx,
+            ServeArgs {
+                listen,
+                all_interfaces,
+                discover,
+                advertise,
+                interval,
+                max_runtime,
+            },
+        )?,
+        MeshCmd::Stop => stop_node(ctx)?,
+        MeshCmd::Replicate { peer } => replicate(ctx, peer)?,
+        MeshCmd::Peer(cmd) => peer_cmd(ctx, cmd)?,
+        MeshCmd::Doctor { rebuild, repair } => doctor(ctx, rebuild, repair)?,
+    }
+    Ok(())
+}
+
+/// A line for the operator on stderr. A closed stderr is ignored: the node
+/// keeps running (stdout and stderr may belong to a script that went away).
+fn note(msg: &str) {
+    let _ = writeln!(std::io::stderr(), "{msg}");
+}
+
+struct ServeArgs {
+    listen: Vec<SocketAddr>,
+    all_interfaces: bool,
+    discover: bool,
+    advertise: Vec<String>,
+    interval: Option<u64>,
+    max_runtime: Option<u64>,
+}
+
+/// The round interval: `--interval` (at least 5 s), or in debug builds only
+/// `TETHRA_MESH_INTERVAL_MS` for tests.
+fn round_interval(interval: Option<u64>) -> Result<Duration> {
+    #[cfg(debug_assertions)]
+    if let Some(ms) = std::env::var("TETHRA_MESH_INTERVAL_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        return Ok(Duration::from_millis(ms.max(50)));
+    }
+    match interval {
+        None => Ok(Duration::from_secs(30)),
+        Some(s) if s < MIN_INTERVAL_SECS => {
+            bail!("--interval must be at least {MIN_INTERVAL_SECS} seconds")
         }
-        MeshCmd::Replicate { peer } => {
-            let (vault, _token) = ctx.unlocked()?;
-            let node = MeshNode::open(&vault, Arc::new(SystemClock), TransportLimits::default())?;
-            let report = replicate_once(&node, &peer)?;
-            render::emit(ctx.json, &report, || {
-                println!(
-                    "Exchanged with {}: {} item(s) in, {} out, {} ms.",
-                    short(&report.peer.to_hex()),
-                    report.items_in,
-                    report.items_out,
-                    report.duration_ms
-                );
-            });
-            if let Some(why) = report.aborted {
-                bail!("the exchange ended early: {why}");
+        Some(s) => Ok(Duration::from_secs(s)),
+    }
+}
+
+fn serve_node(ctx: &Ctx, args: ServeArgs) -> Result<()> {
+    let interval = round_interval(args.interval)?;
+    let (vault, token) = ctx.unlocked()?;
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let node = MeshNode::open(&vault, clock.clone(), TransportLimits::default())?;
+    // The node holds the keys it needs (MESH-SI-7); nothing else here keeps
+    // the vault open while it runs.
+    drop(vault);
+    let mut stops: Vec<Box<dyn StopCondition>> = Vec::new();
+    if token.is_some() {
+        stops.push(Box::new(SessionAlive::new(&ctx.paths.session_path())));
+    }
+    if let Some(m) = args.max_runtime {
+        stops.push(Box::new(Deadline::after(
+            clock.clone(),
+            Duration::from_secs(m.saturating_mul(60)),
+        )));
+    }
+    let mut cfg = NodeConfig::new(args.listen);
+    cfg.all_interfaces = args.all_interfaces;
+    cfg.advertise = args.advertise;
+    cfg.interval = interval;
+    if args.discover {
+        cfg.discovery = Some(Arc::new(MdnsDiscovery::new()?));
+    }
+    cfg.log = Some(Arc::new(|m: &str| note(&format!("mesh: {m}"))));
+    let running = RunningNode::start(node, &ctx.paths.data_dir, cfg, Box::new(AnyOf(stops)))?;
+    for a in running.listen_addrs() {
+        // Tests and scripts read the bound port from this line.
+        println!("Listening on {a}");
+    }
+    std::io::stdout().flush()?;
+    let st = running.status();
+    note(&format!(
+        "Mesh node running (pid {}): a round every {} s{}{}.",
+        st.pid,
+        interval.as_secs_f64(),
+        if st.advertised.is_empty() {
+            String::new()
+        } else {
+            format!("; publishing {}", st.advertised.join(", "))
+        },
+        if args.discover {
+            "; mDNS discovery on"
+        } else {
+            ""
+        }
+    ));
+    note(if token.is_some() {
+        "It stops when this vault session locks or expires, on `tethra mesh stop`, or Ctrl-C."
+    } else {
+        "It stops on `tethra mesh stop`, Ctrl-C, or --max-runtime."
+    });
+    let report = running.wait();
+    note(&format!(
+        "Mesh node stopped: {}{}.",
+        report.reason.describe(),
+        if report.keys_dropped {
+            "; its keys were dropped"
+        } else {
+            ""
+        }
+    ));
+    Ok(())
+}
+
+fn stop_node(ctx: &Ctx) -> Result<()> {
+    let dir = &ctx.paths.data_dir;
+    let pid = instance::running_pid(dir);
+    let stopped = match pid {
+        Some(_) => instance::stop(dir)?,
+        None => false,
+    };
+    if stopped {
+        // The node finishes the exchanges it is in, then releases the data
+        // directory.
+        for _ in 0..200 {
+            if instance::running_pid(dir).is_none() {
+                break;
             }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
+    let out = serde_json::json!({ "stopped": stopped, "pid": pid });
+    render::emit(ctx.json, &out, || match pid {
+        Some(p) if stopped => println!("Stopped the mesh node (pid {p})."),
+        _ => println!("No mesh node is running for this data directory."),
+    });
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ReplicateOut {
+    via_node: bool,
+    exchanges: Vec<ExchangeSummary>,
+}
+
+fn replicate(ctx: &Ctx, peer: Option<String>) -> Result<()> {
+    let dir = &ctx.paths.data_dir;
+    let out = if instance::running_pid(dir).is_some() {
+        match instance::request(
+            dir,
+            |nonce| instance::Request::ReplicateNow {
+                nonce,
+                peer: peer.clone(),
+                repair: false,
+            },
+            instance::REPLICATE_WAIT,
+        )? {
+            Response::Replicated { exchanges, .. } => ReplicateOut {
+                via_node: true,
+                exchanges,
+            },
+            Response::Error { message, .. } => bail!("the mesh node refused: {message}"),
+            _ => bail!("the mesh node gave an unexpected answer"),
+        }
+    } else {
+        let (vault, _token) = ctx.unlocked()?;
+        let addrs = match &peer {
+            Some(p) => vec![p.clone()],
+            None => vault.mesh_peers()?.into_iter().map(|r| r.addr).collect(),
+        };
+        if addrs.is_empty() {
+            bail!(
+                "no peer is known: give --peer HOST:PORT, or add one with `tethra mesh peer add`"
+            );
+        }
+        let node = MeshNode::open(&vault, Arc::new(SystemClock), TransportLimits::default())?;
+        let exchanges = addrs
+            .into_iter()
+            .map(|addr| match replicate_once(&node, &addr) {
+                Ok(r) => ExchangeSummary {
+                    addr,
+                    device: Some(r.peer),
+                    items_in: r.items_in,
+                    items_out: r.items_out,
+                    duration_ms: r.duration_ms,
+                    error: r.aborted.map(str::to_owned),
+                },
+                Err(e) => ExchangeSummary {
+                    addr,
+                    device: None,
+                    items_in: 0,
+                    items_out: 0,
+                    duration_ms: 0,
+                    error: Some(e.to_string()),
+                },
+            })
+            .collect();
+        ReplicateOut {
+            via_node: false,
+            exchanges,
+        }
+    };
+    render::emit(ctx.json, &out, || {
+        for e in &out.exchanges {
+            match (&e.error, e.device) {
+                (None, Some(d)) => println!(
+                    "Exchanged with {} at {}: {} item(s) in, {} out, {} ms.",
+                    short(&d.to_hex()),
+                    e.addr,
+                    e.items_in,
+                    e.items_out,
+                    e.duration_ms
+                ),
+                (Some(why), _) => println!("{}: {}", e.addr, render::sanitize(why)),
+                (None, None) => println!("{}: no exchange", e.addr),
+            }
+        }
+        if out.exchanges.is_empty() {
+            println!("No peer was due or known.");
+        }
+    });
+    if !out.exchanges.is_empty() && out.exchanges.iter().all(|e| e.error.is_some()) {
+        bail!("no exchange completed");
+    }
+    Ok(())
+}
+
+fn peer_cmd(ctx: &Ctx, cmd: PeerCmd) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    match cmd {
+        PeerCmd::Add { addr } => {
+            let (addr, changed) = vault.mesh_peer_add(&addr)?;
+            let out = serde_json::json!({ "addr": addr, "added": changed });
+            render::emit(ctx.json, &out, || {
+                if changed {
+                    println!("Added peer {addr}. A running node dials it at its next round.");
+                } else {
+                    println!("{addr} is already a peer.");
+                }
+            });
+        }
+        PeerCmd::Remove { addr } => {
+            let removed = vault.mesh_peer_remove(&addr)?;
+            let out = serde_json::json!({ "removed": removed.is_some(), "source": removed });
+            render::emit(ctx.json, &out, || match removed {
+                None => println!("{} was not a peer.", render::sanitize(addr.trim())),
+                Some(peers::PeerSource::Manual) => println!("Removed peer {}.", addr.trim()),
+                Some(_) => println!(
+                    "Removed {}; a device still publishing it brings it back at the next round.",
+                    addr.trim()
+                ),
+            });
+        }
+        PeerCmd::List => {
+            let rows = peer_rows(&vault)?;
+            render::emit(ctx.json, &rows, || print_peer_rows(&rows));
+        }
+    }
+    Ok(())
+}
+
+/// One `mesh_peers` row with the name of the device behind it.
+#[derive(Serialize)]
+struct PeerOut {
+    #[serde(flatten)]
+    row: PeerRow,
+    device_name: Option<String>,
+}
+
+fn device_names(
+    vault: &api_tracker_core::vault::UnlockedVault,
+) -> Result<BTreeMap<DeviceId, String>> {
+    Ok(vault
+        .mesh_devices()?
+        .into_iter()
+        .filter_map(|d| d.name.map(|n| (d.device_id, n)))
+        .collect())
+}
+
+fn peer_rows(vault: &api_tracker_core::vault::UnlockedVault) -> Result<Vec<PeerOut>> {
+    let names = device_names(vault)?;
+    Ok(vault
+        .mesh_peers()?
+        .into_iter()
+        .map(|row| PeerOut {
+            device_name: row.device_id.and_then(|d| names.get(&d).cloned()),
+            row,
+        })
+        .collect())
+}
+
+fn print_peer_rows(rows: &[PeerOut]) {
+    if rows.is_empty() {
+        println!(
+            "No peer addresses. Add one with `tethra mesh peer add HOST:PORT`; a running node \
+             also learns the addresses your other devices publish."
+        );
+        return;
+    }
+    let table: Vec<Vec<String>> = rows
+        .iter()
+        .map(|p| {
+            vec![
+                p.row.addr.clone(),
+                match (&p.device_name, p.row.device_id) {
+                    (Some(n), Some(d)) => {
+                        format!("{} ({})", render::sanitize(n), short(&d.to_hex()))
+                    }
+                    (None, Some(d)) => short(&d.to_hex()).to_owned(),
+                    _ => "-".into(),
+                },
+                p.row.source.as_str().to_owned(),
+                p.row
+                    .last_success_at
+                    .clone()
+                    .unwrap_or_else(|| "never".into()),
+                p.row.failures.to_string(),
+                p.row
+                    .unreachable_since
+                    .clone()
+                    .unwrap_or_else(|| "-".into()),
+            ]
+        })
+        .collect();
+    render::table(
+        &[
+            "ADDRESS",
+            "DEVICE",
+            "SOURCE",
+            "LAST SUCCESS",
+            "FAILURES",
+            "UNREACHABLE SINCE",
+        ],
+        &table,
+    );
+}
+
+/// The lag record of one device (from its last `Hello`).
+#[derive(Serialize)]
+struct LagOut {
+    device_id: DeviceId,
+    device_name: Option<String>,
+    #[serde(flatten)]
+    lag: PeerLag,
+}
+
+/// The running node, as `status` reports it.
+#[derive(Serialize)]
+struct NodeOut {
+    running: bool,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    status: Option<NodeStatus>,
+}
+
+#[derive(Serialize)]
+struct StatusOut {
+    #[serde(flatten)]
+    status: MeshStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<NodeOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peers: Option<Vec<PeerOut>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lag: Option<Vec<LagOut>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address_changes: Option<Vec<DeviceChange>>,
+}
+
+fn status(ctx: &Ctx) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    let status = vault.mesh_status()?;
+    let mut out = StatusOut {
+        status,
+        node: None,
+        peers: None,
+        lag: None,
+        address_changes: None,
+    };
+    if out.status.initialized {
+        let node = instance::status(&ctx.paths.data_dir);
+        out.node = Some(NodeOut {
+            running: node.is_some(),
+            status: node,
+        });
+        out.peers = Some(peer_rows(&vault)?);
+        let names = device_names(&vault)?;
+        let store = vault.mesh_open_store()?;
+        let now = store.vv().clone();
+        out.lag = Some(
+            peers::hello_records(store.connection())?
+                .into_iter()
+                .map(|(d, rec)| LagOut {
+                    device_id: d,
+                    device_name: names.get(&d).cloned(),
+                    lag: peers::lag(&rec, &now),
+                })
+                .collect(),
+        );
+        out.address_changes = Some(peers::device_changes(store.connection())?);
+    }
+    render::emit(ctx.json, &out, || print_status(&out));
+    Ok(())
+}
+
+fn doctor(ctx: &Ctx, rebuild: bool, repair: bool) -> Result<()> {
+    let (vault, _token) = ctx.unlocked()?;
+    let report = api_tracker_mesh::doctor::run(
+        &vault,
+        &ctx.paths.data_dir,
+        Arc::new(SystemClock),
+        api_tracker_mesh::doctor::DoctorOptions { rebuild, repair },
+    )?;
+    #[derive(Serialize)]
+    struct DoctorOut<'a> {
+        worst: Severity,
+        #[serde(flatten)]
+        report: &'a api_tracker_mesh::doctor::DoctorReport,
+    }
+    let out = DoctorOut {
+        worst: report.worst(),
+        report: &report,
+    };
+    render::emit(ctx.json, &out, || {
+        for f in &report.findings {
+            println!(
+                "[{:<7}] {}: {}",
+                f.severity.as_str(),
+                f.check,
+                render::sanitize(&f.summary)
+            );
+            if f.severity != Severity::Ok {
+                if let Some(fix) = &f.fix {
+                    println!("          fix: {}", render::sanitize(fix));
+                }
+            }
+        }
+        if let Some(r) = &report.rebuild {
+            println!(
+                "Rebuild: {} row(s) rewritten from their bytes, {} removed.",
+                r.rows_rewritten, r.rows_removed
+            );
+        }
+        println!(
+            "{}",
+            match report.worst() {
+                Severity::Ok | Severity::Info => "No problems found.",
+                Severity::Warning => "Warnings found; see the fixes above.",
+                Severity::Problem => "Problems found; see the fixes above.",
+            }
+        );
+    });
     Ok(())
 }
 
@@ -425,12 +917,80 @@ fn short(hex: &str) -> &str {
     &hex[..8.min(hex.len())]
 }
 
-fn print_status(status: &MeshStatus) {
-    let Some(d) = &status.detail else {
+fn print_status(out: &StatusOut) {
+    let Some(d) = &out.status.detail else {
         println!("This device is not part of a mesh. Run `tethra mesh init` to start one.");
         return;
     };
     print_detail(d);
+    match out.node.as_ref().and_then(|n| n.status.as_ref()) {
+        Some(n) => {
+            println!(
+                "Node:         running (pid {}), listening on {}; a round every {} s, {} so far{}",
+                n.pid,
+                n.listen.join(", "),
+                n.interval_ms as f64 / 1000.0,
+                n.rounds,
+                n.last_round_at
+                    .as_deref()
+                    .map(|t| format!(", last at {t}"))
+                    .unwrap_or_default()
+            );
+            if !n.advertised.is_empty() {
+                println!("              publishing {}", n.advertised.join(", "));
+            }
+            if let Some(e) = &n.last_publish_error {
+                println!(
+                    "              could not publish its addresses: {}",
+                    render::sanitize(e)
+                );
+            }
+        }
+        None => println!(
+            "Node:         not running (start one with `tethra mesh serve --listen ADDR:PORT`)"
+        ),
+    }
+    if let Some(peers) = &out.peers {
+        println!("Peers:");
+        print_peer_rows(peers);
+    }
+    if let Some(lag) = out.lag.as_ref().filter(|l| !l.is_empty()) {
+        println!("Lag at the last exchange with each device (items):");
+        let rows: Vec<Vec<String>> = lag
+            .iter()
+            .map(|l| {
+                vec![
+                    render::sanitize(l.device_name.as_deref().unwrap_or("-")),
+                    short(&l.device_id.to_hex()).to_owned(),
+                    l.lag.at.clone(),
+                    l.lag.peer_behind.to_string(),
+                    l.lag.peer_ahead.to_string(),
+                    l.lag.peer_behind_now.to_string(),
+                    if l.lag.completed { "yes" } else { "no" }.to_owned(),
+                ]
+            })
+            .collect();
+        render::table(
+            &[
+                "NAME",
+                "DEVICE",
+                "LAST EXCHANGE",
+                "IT LACKED",
+                "WE LACKED",
+                "IT LACKS NOW",
+                "COMPLETED",
+            ],
+            &rows,
+        );
+    }
+    for c in out.address_changes.iter().flatten() {
+        println!(
+            "Note: a different device ({}) now answers at {} (was {}).",
+            short(&c.to.to_hex()),
+            c.addr,
+            short(&c.from.to_hex())
+        );
+    }
 }
 
 fn print_detail(d: &MeshStatusDetail) {
@@ -510,6 +1070,19 @@ fn print_detail(d: &MeshStatusDetail) {
         d.forked_devices,
         d.repairs_changed
     );
+    for (dev, ms) in &d.clock_skew {
+        println!(
+            "              clock of {} ahead by {} s",
+            short(&dev.to_hex()),
+            ms / 1000
+        );
+    }
+    if let Some(held) = d.rollback_hold {
+        println!(
+            "Rollback:     a peer holds this device's items up to seq {held}; nothing is \
+             created here until they come back"
+        );
+    }
 }
 
 /// This machine's host name, first label only, or a placeholder. `hostname`

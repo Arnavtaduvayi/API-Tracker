@@ -309,13 +309,73 @@ Smaller transport decisions (Increment 04):
 - `mesh remove` and `mesh leave` confirm with `--yes` in non-interactive runs
   (the `backup restore` pattern), then reauthenticate.
 
+### Decisions made while building the node (Increment 05)
+
+* **R22 — A rollback hold is stored per reporting device, applies to every
+  minter, and ends with the report.** PROTOCOL §7.4 says a device told it is
+  behind its own history "MUST NOT mint again until `vv[self] ≥ held_seq`", but
+  not where that state lives or what ends it. As built:
+  - the notice is stored in `mesh_meta` as `rollback_hold/<reporter>`, so the
+    node, its round hooks and every CLI command on the same database refuse to
+    mint (`MeshError::RollbackHold`), not just the session that heard it;
+  - a hold counts only while its reporter is an **active** device, and while
+    the reported seq is above `vv[self]`;
+  - a completed exchange with the reporter in which it did **not** report
+    again clears its hold (it no longer holds anything past this device's
+    log); a repeated report stays, because one exchange carries at most
+    50 000 items and a large rollback takes several;
+  - `mesh remove` clears the target's own report before it mints the removal.
+    Otherwise a member that falsely reports a rollback would block its own
+    removal (a removal is a mint).
+  The alternatives were an in-memory flag in the node (other processes could
+  then mint into a seq a peer holds, forking the device) and a hold with no
+  release but satisfaction (a lying member could stop this device's writes for
+  good, with no way to remove it).
+
+Smaller node decisions (Increment 05):
+
+- The loop lives in `crates/mesh::runtime` (`RunningNode`); `node.rs` keeps the
+  shared `MeshNode`. The peer table and lag/repair records are in
+  `core::mesh::peers` (shared with the desktop); backoff and target selection
+  are `crates/mesh::peers`.
+- **Repair cadence.** Every exchange compares per-origin digests and repairs
+  (R11), so DESIGN §D9's "repair every 24 h" is a record, not a mechanism: once
+  a day the node marks a round as a repair round (`node/last_repair` in
+  `mesh_meta`: when, exchanges, and whether `repairs_changed` moved).
+  `doctor --repair` runs one on demand.
+- **Lag** is the peer's `Hello` VV next to this device's at that moment
+  (`node/peer/<device>` in `mesh_meta`), plus the origins whose digests
+  differed at equal VVs. No migration: `mesh_meta.value` is `ANY`, and the
+  store's loader skips non-integer values.
+- **`doctor --rebuild` rebuilds the item store, not view tables** (there are
+  none, R17): it rewrites each row's index columns from its bytes and removes
+  rows that are unreadable or unsigned. The VV and dot log stay, so repair
+  re-fetches removed items from a peer.
+- **The control channel** is the gateway's pattern: a Unix socket bound in
+  `bind.rs` (the single-instance lock), a per-boot nonce compared in constant
+  time, one JSON line ≤ 8 KiB, and a target that holds status only, never the
+  keys. On Windows it is a loopback TCP listener whose port is in the nonce
+  file (runtime untested).
+- **Ctrl-C** ends `mesh serve` without a signal handler, like `tethra gateway
+  serve` (no new dependency); `tethra mesh stop` is the graceful path that runs
+  the key-drop sequence.
+- **`--interval`** (default 30 s, at least 5 s) is a documented option, so a
+  release binary (and `scripts/smoke.sh`) can run short rounds; the
+  millisecond `TETHRA_MESH_INTERVAL_MS` override exists in debug builds only.
+- **Interface addresses** for `--all-interfaces` come from `if-addrs`, already
+  in the tree through `mdns-sd`; link-local and loopback addresses are not
+  published.
+- `record_attempt` updates only addresses already in `mesh_peers`: an ad-hoc
+  `replicate --peer` does not add a peer.
+
 ### Dependencies
 
 | Crate | Version | Increment | Why |
 |---|---|---|---|
 | `ed25519-dalek` | 2.2.0 (features `fast`, `std`, `zeroize`; no `rand_core`) | 01 | Item signatures. Reviewed dalek implementation; `verify_strict`. |
 | `snow` | 0.10.0 (no default features; `std`, `default-resolver`, `use-chacha20poly1305`, `use-blake2`, `use-curve25519`, `use-getrandom`) | 04 | Noise XXpsk0 / XXpsk3 transport, in `crates/mesh` only. MSRV 1.85. |
-| `mdns-sd` | 0.21.x (planned) | 05 | Opt-in LAN discovery without an async runtime. |
+| `mdns-sd` | 0.21.6 (no default features: no `async`, no `log`) | 05 | Opt-in LAN discovery (`serve --discover`) without an async runtime, in `crates/mesh` only. Never constructed in tests. |
+| `if-addrs` | 0.15.0 (already a dependency of `mdns-sd`) | 05 | This machine's interface addresses, published for a node bound with `--all-interfaces`. |
 
 `ed25519-dalek` 2.2.0 reuses the `curve25519-dalek` 4.1.3, `sha2` 0.10,
 `subtle` and `zeroize` already in the lockfile for `crypto_box`
@@ -333,6 +393,13 @@ reused.
 sit beside core's `chacha20poly1305` 0.11 (duplicate versions, shown by
 `cargo tree -d -p api-tracker-mesh`), because `snow` 0.10 pins 0.10. `snow` does
 not zeroize its internal copies of keys (KNOWN_LIMITATIONS).
+
+`mdns-sd` 0.21.6 reuses `socket2` 0.6, `mio` 1.2 and `fastrand` 2 from the
+lockfile and adds `flume` 0.12 (its event channels, with only the `spin`
+backend), `if-addrs` 0.15, `socket-pktinfo` 0.4 and `spin` 0.9. Its
+`socket-pktinfo` needs `libc` ≥ 0.2.191, so `libc` moved from 0.2.186 to
+0.2.191 for the workspace (a patch release). It runs its own thread and
+multicast sockets only when a user passes `--discover`.
 
 ## Alternatives considered
 

@@ -313,6 +313,13 @@ impl Session {
         self.max_staged_seen
     }
 
+    /// The peer's `Hello`, once it arrived and passed the mesh, version and
+    /// identity checks. A node records its VV and digests as the lag and
+    /// repair figures of `status` and `doctor`.
+    pub fn peer_hello(&self) -> Option<&Hello> {
+        self.peer.as_ref()
+    }
+
     fn frame(&mut self, body: Body) -> Action {
         let f = Frame {
             n: self.next_send,

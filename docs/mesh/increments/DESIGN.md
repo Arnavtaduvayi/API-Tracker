@@ -10,6 +10,13 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 05 (2026-10-28).** Building the node settled R22
+> (ADR 0031 "Decisions made while building the node"; PROTOCOL.md §7.4): a
+> rollback hold is stored per reporting device and binds every minter. D9's
+> 24-hour repair is a recorded repair round (every exchange already repairs,
+> R11), and D17's "corrupt view row" is an item-row check (no view tables,
+> R17). Passages marked **[Amended 05]** below.
+>
 > **Amended by Increment 03 (2026-10-27).** Building storage settled R16-R18
 > (ADR 0031 "Decisions made while building storage"; PROTOCOL.md §7.5, §8.6):
 > seqs ≤ 2^63 − 1; views are the in-memory `State`, not SQL tables; disk reads
@@ -218,6 +225,8 @@ Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
     - Hello carries the sender's own `next_seq`. A peer that holds items from that
       origin *above* it tells the sender, and the sender enters `rollback-recovery`: it
       fetches its own items first and sets `next_seq` above them before minting.
+      **[Amended 05, R22]** The hold is stored per reporting device in `mesh_meta`
+      and binds every process minting on the database (PROTOCOL.md §7.4).
     - Two items with the same `(origin, seq)` and different hashes mean the origin has
       **forked**. Every device that sees this stores a `ForkEvidence` record, stops
       accepting new items from that origin, and surfaces it.
@@ -607,7 +616,9 @@ used. The list below is the original brief:
   - Peer status tracks `last_success_at`, `failures` and `unreachable_since`. (The
     phi-accrual failure detector was considered and is unnecessary for ≤ 10 devices.)
   - Before each round, run the usage publisher (D14) and the cap reconciler (D15).
-  - Run repair every 24 h.
+  - Run repair every 24 h. **[Amended 05]** Every exchange already repairs
+    (R11); the node records one round a day as a repair round, and
+    `doctor --repair` runs one on demand.
 - **Single instance:**
   - The node owns `<data-dir>/mesh/node.sock`, a 0600 Unix socket in a 0700 dir,
     following the gateway's pattern (`crates/gateway/src/control.rs:42-48, 661-727`).

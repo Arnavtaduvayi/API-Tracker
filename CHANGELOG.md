@@ -6,6 +6,40 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh node: devices stay in step on their own (in development)
+
+`tethra mesh serve` is now a long-running **node**
+([ADR 0031](docs/decisions/0031-device-mesh.md), [user guide](docs/mesh/USER_GUIDE.md)).
+It keeps your paired devices converged without anyone running `replicate`.
+
+- **Automatic exchanges.** Every 30 seconds (`--interval`, at least 5) the node
+  exchanges with each peer it knows. Add one with `tethra mesh peer add
+  HOST:PORT`. The node then learns the addresses your other devices publish.
+  A peer that doesn't answer is retried after 5 s, doubling up to every 15
+  minutes. `peer list` and `peer remove` manage the addresses.
+- **Optional LAN discovery.** `serve --discover` finds your devices with mDNS.
+  It is off unless you ask. The announcement carries no name, only a random
+  per-start label and a daily tag that only your mesh recognises. Discovery
+  only suggests addresses; every connection still has to authenticate.
+- **One node per data directory, controllable.** `tethra mesh stop` stops it.
+  `tethra mesh replicate` runs an exchange through it now. `status` shows
+  whether it runs, where it listens, and its rounds.
+- **Keys only while unlocked.** The node holds this device's mesh keys only
+  while it runs. Started from a vault session, it stops when the session locks
+  or expires. With `TETHRA_PASSWORD`, it runs until stopped or for
+  `--max-runtime` minutes. On stop it drops its keys. There is no background
+  service.
+- **`status` and `doctor`.** `tethra mesh status` adds each peer's last
+  success, failures, and how far each device was behind or ahead at the last
+  exchange. `tethra mesh doctor` checks the identity marker, keys, stored
+  items, version vector, views, clock skew, forks, repair, the node and its
+  listeners, and gives a fix for each finding. `--rebuild` repairs a damaged
+  item store, and `--repair` runs a repair round now.
+- **Safer recovery from an older copy.** If a peer holds this device's own
+  items that its database lost (restored from an older copy), the device waits
+  to create anything until it has them back, so it never reuses a position in
+  its history.
+
 ### Added — Tethra Mesh pairing and replication between devices (in development)
 
 **Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md)) devices can now

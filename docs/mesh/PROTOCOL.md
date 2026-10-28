@@ -661,6 +661,13 @@ NOT mint again until its own `vv[self] ≥ held_seq`; it recovers its own items
 through ordinary exchanges (a device accepts its own origin's items like any
 other), and its next seq then follows them.
 
+**Status: implemented (05)** (ADR 0031 R22). The receiver stores the notice per
+reporting device (`mesh_meta.rollback_hold/<reporter>`), so every process that
+mints on its database refuses while any **active** reporter's seq is above
+`vv[self]`. A completed exchange with the reporter in which it does not report
+again clears that reporter's hold; removing the reporter (`mesh remove`) clears
+it too. A fork report found while held is left for a later exchange.
+
 ### 7.5 Clone marker
 
 `<data-dir>/mesh/identity.marker` (a 0600 file in a 0700 directory) holds

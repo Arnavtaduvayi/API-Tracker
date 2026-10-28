@@ -96,13 +96,56 @@ permanent design choice or something a later increment changes.
 
 ## Running the node
 
-- **No LaunchAgent for the mesh in v1.** The node runs only while the desktop
-  app is open and unlocked, or while `tethra mesh serve` runs from an unlocked
-  CLI session. A LaunchAgent would have to hold keys while locked, which ADR 0020
-  forbids.
-- **Windows runtime is untested.** It compiles and its unit tests run in Windows
-  CI, but behaviour on Windows has not been validated, as for the gateway
-  (ADR 0019 D8).
+- **No background service for the mesh in v1.** There is no LaunchAgent,
+  systemd unit or Windows service: the node runs only while `tethra mesh serve`
+  runs (and, from Increment 09, while the desktop app is open and unlocked). A
+  service would have to hold keys while the vault is locked, which ADR 0020
+  forbids. A device whose node is not running replicates only when someone runs
+  `tethra mesh replicate`.
+- **A node started from a vault session stops when the session does.** The
+  session's auto-lock counts time without `tethra` commands, and the node does
+  not reset it (MESH-SI-7), so such a node runs at most the auto-lock period
+  after the last command. Scripts use `TETHRA_PASSWORD` with an optional
+  `--max-runtime`.
+- **Ctrl-C ends the node abruptly.** Like `tethra gateway serve`, `mesh serve`
+  installs no signal handler: the process exits at once, without the explicit
+  key-drop sequence (the operating system reclaims its memory). Stored state is
+  safe: every write is one transaction and an interrupted exchange commits
+  nothing. `tethra mesh stop` is the graceful stop.
+- **Stopping waits for running exchanges.** After a stop request the node
+  starts nothing new, but an exchange in progress finishes first, bounded by the
+  30 s idle and 10 min session limits.
+- **Windows runtime is untested.** The node, its loopback-TCP control channel
+  and discovery compile and their unit tests run in Windows CI, but behaviour on
+  Windows has not been validated, as for the gateway (ADR 0019 D8). Its
+  single-instance check (a live node answering on the port recorded in the nonce
+  file) is weaker than the Unix socket lock: two nodes started in the same
+  instant could both start.
+- **Data directory paths are limited** to about 100 bytes on Unix, because the
+  control socket lives inside it (`<data-dir>/mesh/node.sock`), as for the
+  gateway's socket. A longer `TETHRA_DIR` makes `serve` fail with a clear error.
+- **No peer-credential check on the control socket.** As for the gateway, the
+  0600 socket in a 0700 directory and the 0600 nonce keep other local users out;
+  a process running as the same user can drive the node (status, replicate now,
+  stop), which is inside the local trust model. It cannot read keys through it.
+- **mDNS is link-local and best effort.** `--discover` finds devices on the same
+  LAN segment only: not across routers, VPNs or networks that filter multicast.
+  It was not exercised on a real network in the session that built it (CI never
+  multicasts; tests use an in-memory fake). Announcements are unauthenticated:
+  anyone on the LAN can announce a fake address carrying a stale or random tag;
+  that costs a dial, never admission (the handshake checks the roster).
+- **Gossiped addresses are dialled as published.** A member can publish any
+  address (at most 16), and other nodes will dial it with backoff. A malicious
+  member could point them at a host on their network; the dial sends only the
+  16-byte preamble and the first handshake message.
+- **A member can delay this device's writes with false rollback reports.** A
+  `RollbackNotice` makes this device hold every mint until it has its own items
+  back up to the reported seq (PROTOCOL.md §7.4). A member that reports items it
+  never sends holds this device's writes for the duration of each exchange with
+  it, and, if it keeps reporting, until it is removed (`mesh remove` lifts its
+  report).
+- **Lag is measured at the last exchange**, not continuously: a device not heard
+  from shows its last figures with their time.
 
 ## Usage and cost
 

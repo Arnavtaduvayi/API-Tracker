@@ -276,3 +276,85 @@ fn a_name_that_resolves_to_several_addresses_reaches_the_ipv4_listener() {
     let r = replicate_once(&nb, &format!("localhost:{}", server.addr.port())).unwrap();
     assert!(r.aborted.is_none(), "{r:?}");
 }
+
+/// PROTOCOL.md §7.4 (Increment 05): a device whose database lost its last
+/// few items (a rollback inside one marker block, which the marker cannot
+/// see) is told so by a peer that holds them, holds every mint until they
+/// are back, recovers them in the same exchange, and then mints after them:
+/// no fork.
+#[test]
+fn a_rolled_back_device_recovers_its_own_items_before_minting_again() {
+    let (a, server, b) = pair_of();
+    let nb = node(&b);
+    let na = &server.node;
+    set(na, "one", 1);
+    let before = na.store().vv().get(&id(&a));
+    set(na, "two", 2);
+    set(na, "three", 3);
+    let held = na.store().vv().get(&id(&a));
+    assert_eq!(held, before + 2);
+    assert!(replicate_once(&nb, &server.addr_string())
+        .unwrap()
+        .aborted
+        .is_none());
+    assert_eq!(nb.store().vv().get(&id(&a)), held);
+    drop(server);
+
+    // Roll A's own log back to `before`, as restoring an older copy of its
+    // database would.
+    let conn = api_tracker_core::db::open(&a.paths.db_path()).unwrap();
+    let a_hex = id(&a).to_hex();
+    let before_i = i64::try_from(before).unwrap();
+    conn.execute(
+        "DELETE FROM mesh_items WHERE origin = ?1 AND seq > ?2",
+        rusqlite::params![a_hex, before_i],
+    )
+    .unwrap();
+    conn.execute(
+        "DELETE FROM mesh_dots WHERE origin = ?1 AND seq > ?2",
+        rusqlite::params![a_hex, before_i],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE mesh_vv SET max_seq = ?2 WHERE origin = ?1",
+        rusqlite::params![a_hex, before_i],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE mesh_meta SET value = value + 1 WHERE key = 'write_gen'",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+    // Still inside the marker's block of 64: the marker vouches for it.
+    let a2 = node(&a);
+    assert_eq!(a2.store().vv().get(&id(&a)), before);
+
+    // B serves; A dials it. B holds A's log to `held` and says so.
+    let server_b = start(&b);
+    let r = replicate_once(&a2, &server_b.addr_string()).unwrap();
+    assert!(r.aborted.is_none(), "{r:?}");
+    let store = a2.store();
+    assert_eq!(store.vv().get(&id(&a)), held, "A recovered its own items");
+    let recorded: i64 = store
+        .connection()
+        .query_row(
+            "SELECT value FROM mesh_meta WHERE key = ?1",
+            [format!("rollback_hold/{}", id(&b).to_hex())],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(u64::try_from(recorded).unwrap(), held);
+    // Satisfied: minting resumes after the recovered seqs.
+    assert_eq!(store.rollback_hold(), None);
+    drop(store);
+    set(&a2, "four", 4);
+    assert_eq!(a2.store().vv().get(&id(&a)), held + 1);
+    assert!(replicate_once(&a2, &server_b.addr_string())
+        .unwrap()
+        .aborted
+        .is_none());
+    let sb = server_b.node.store();
+    assert_eq!(sb.vv().get(&id(&a)), held + 1);
+    assert!(sb.state().roster.forks().next().is_none(), "no fork");
+}
