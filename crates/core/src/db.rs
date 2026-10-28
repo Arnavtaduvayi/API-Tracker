@@ -1526,6 +1526,18 @@ ALTER TABLE gateway_config
     ADD COLUMN cap_enforcement INTEGER NOT NULL DEFAULT 0 CHECK (cap_enforcement IN (0, 1));
 "#,
     },
+    Migration {
+        version: 22,
+        name: "tethra mesh: encrypted pairing psk per invite",
+        sql: r#"
+-- Tethra Mesh pairing (ADR 0031, Increment 04). The pairing handshake's psk
+-- is derived from the invite TOKEN, and the inviter stores only the token's
+-- hash, so the psk itself is kept here, encrypted under the vault key with
+-- AAD naming the invite (crypto::aad::mesh_invite_psk). A node reading this
+-- row needs the unlocked vault; a copy of the database alone cannot pair.
+ALTER TABLE mesh_invites ADD COLUMN wrapped_psk BLOB;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

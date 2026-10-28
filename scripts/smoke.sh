@@ -510,6 +510,37 @@ check $? "a restored vault keeps no mesh identity (it must pair again)"
 API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh status 2>/dev/null | grep -q '"initialized": true'
 check $? "the original device is still in its mesh after the restore"
 
+echo "-- mesh pairing between two nodes on 127.0.0.1 --"
+MESH_B="$WORK/mesh-b"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh serve --listen 127.0.0.1:0 > "$WORK/serve-a.out" 2>/dev/null &
+SERVE_PID=$!
+MESH_ADDR=""
+for _ in $(seq 1 120); do
+  MESH_ADDR=$(sed -n 's/^Listening on //p' "$WORK/serve-a.out" 2>/dev/null | head -1)
+  [ -n "$MESH_ADDR" ] && break
+  sleep 0.25
+done
+[ -n "$MESH_ADDR" ]; check $? "mesh serve binds 127.0.0.1 and prints its port"
+INVITE=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh invite --addr "$MESH_ADDR" 2>/dev/null)
+echo "$INVITE" | grep -q '^tethra-mesh-invite:v1:'; check $? "mesh invite prints a one-time invite"
+API_TRACKER_DIR="$MESH_B" "$BIN" init >/dev/null 2>&1
+OUT=$(API_TRACKER_DIR="$MESH_B" "$BIN" mesh join "$INVITE" --name smoke-b 2>&1)
+check $? "a second device joins with the invite"
+A_DEVICES=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh devices 2>/dev/null | grep -c '"device_id"')
+B_DEVICES=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh devices 2>/dev/null | grep -c '"device_id"')
+[ "$A_DEVICES" = "2" ] && [ "$B_DEVICES" = "2" ]
+check $? "both devices list two members"
+API_TRACKER_DIR="$WORK/mesh-c" "$BIN" init >/dev/null 2>&1
+OUT_C=$(API_TRACKER_DIR="$WORK/mesh-c" "$BIN" mesh join "$INVITE" --name smoke-c 2>&1); RC=$?
+# A used invite no longer matches at the inviter, which closes without a reply.
+[ $RC -ne 0 ] && API_TRACKER_DIR="$WORK/mesh-c" "$BIN" mesh status 2>/dev/null | grep -q "not part of a mesh"
+check $? "a third device cannot reuse the invite (and joins nothing)"
+CODE=$(echo "$INVITE" | sed 's/^tethra-mesh-invite:v1://' | cut -c1-32)
+printf '%s' "$OUT$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh devices 2>&1)" | grep -qF "$CODE" \
+  && bad "the invite code was printed again" || ok "the invite code is shown only once"
+{ kill "$SERVE_PID" && wait "$SERVE_PID"; } >/dev/null 2>&1
+kill -0 "$SERVE_PID" 2>/dev/null; [ $? -ne 0 ]; check $? "mesh serve stops cleanly"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

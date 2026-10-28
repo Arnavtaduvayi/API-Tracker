@@ -4,8 +4,8 @@
 //! The protocol layer is **sans-IO**: `proto`, `views`, `store`, `memstore`,
 //! `chain` and the CRDTs open no sockets, files or threads, and read time
 //! only through the injected [`clock::Clock`]. Only the storage modules
-//! (`sqlite_store`, `marker`, `identity`) touch the disk; no module here
-//! touches the network. The network code
+//! (`sqlite_store`, `marker`, `identity`, `membership`) touch the disk; no
+//! module here touches the network. The network code
 //! lives in its own crate and drives these types; the simulator drives them
 //! over a simulated network. The normative specification is
 //! `docs/mesh/PROTOCOL.md`; where this code and that document disagree, it
@@ -26,7 +26,13 @@
 //!   device identity with its encrypted keys and the restore wipe
 //!   ([`identity`]), and the clone/rollback marker ([`marker`]).
 //!
-//! The network transport and the node follow in later increments; see
+//! - Increment 04: invites and pairing messages ([`invite`]), and membership
+//!   ([`membership`]): joining, the inviter's single-use claim, devices,
+//!   removal with access-key rotation, leave, the exchange log, and the
+//!   `MeshVault` capability a node holds. The network code that uses them is
+//!   the `api-tracker-mesh` crate.
+//!
+//! The node runtime follows in Increment 05; see
 //! `docs/mesh/increments/STATUS.md`.
 
 pub mod chain;
@@ -37,9 +43,11 @@ pub mod dot;
 pub mod error;
 pub mod hlc;
 pub mod identity;
+pub mod invite;
 pub mod item;
 pub mod kinds;
 pub mod marker;
+pub mod membership;
 pub mod memstore;
 pub mod proto;
 pub mod sign;

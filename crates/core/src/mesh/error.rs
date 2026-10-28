@@ -75,6 +75,25 @@ pub enum MeshError {
     #[error("a device name must be 1-64 characters without control characters")]
     InvalidDeviceName,
 
+    /// Static text only: an invite string holds a bearer token.
+    #[error("this is not a valid mesh invite: {0}")]
+    InvalidInvite(&'static str),
+
+    #[error("the invite was refused: {0}")]
+    InviteRefused(&'static str),
+
+    #[error("that device is not a member of this mesh")]
+    NotAMember,
+
+    #[error("a device can only rename itself; rename that device on the device")]
+    NotThisDevice,
+
+    #[error("this device is no longer an active member of its mesh")]
+    NotActive,
+
+    #[error("that device is already removed")]
+    AlreadyRemoved,
+
     #[error("this device's mesh identity has forked (another installation used the same identity); run `tethra mesh leave` and pair again")]
     Forked,
 }
@@ -103,6 +122,12 @@ impl MeshError {
             MeshError::AlreadyInMesh => "mesh_already_in_mesh",
             MeshError::IdentityMismatch(_) => "mesh_identity_mismatch",
             MeshError::InvalidDeviceName => "mesh_invalid_device_name",
+            MeshError::InvalidInvite(_) => "mesh_invalid_invite",
+            MeshError::InviteRefused(_) => "mesh_invite_refused",
+            MeshError::NotAMember => "mesh_not_a_member",
+            MeshError::NotThisDevice => "mesh_not_this_device",
+            MeshError::NotActive => "mesh_not_active",
+            MeshError::AlreadyRemoved => "mesh_already_removed",
             MeshError::Forked => "mesh_forked",
         }
     }

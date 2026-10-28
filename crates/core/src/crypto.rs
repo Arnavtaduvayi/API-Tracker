@@ -245,6 +245,11 @@ pub mod aad {
     pub fn mesh_access_key(vault_id: &str, mesh_id: &str, epoch: u32) -> String {
         format!("api-tracker:v1:mesh-access-key:{vault_id}:{mesh_id}:{epoch}")
     }
+    /// A mesh invite's pairing psk, bound to the invite (its token hash), so
+    /// a blob cannot be moved to another invite row.
+    pub fn mesh_invite_psk(vault_id: &str, token_hash_hex: &str) -> String {
+        format!("api-tracker:v1:mesh-invite-psk:{vault_id}:{token_hash_hex}")
+    }
     /// A retained prior credential value (version history), bound to its
     /// version number so rows cannot be swapped between versions.
     pub fn credential_version(

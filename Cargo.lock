@@ -124,6 +124,7 @@ dependencies = [
  "anyhow",
  "api-tracker-core",
  "api-tracker-gateway",
+ "api-tracker-mesh",
  "api-tracker-observe",
  "api-tracker-tracking",
  "assert_cmd",
@@ -145,7 +146,7 @@ dependencies = [
  "argon2",
  "base64 0.22.1",
  "blake3",
- "chacha20poly1305",
+ "chacha20poly1305 0.11.0",
  "crypto_box",
  "directories",
  "ed25519-dalek",
@@ -206,6 +207,20 @@ dependencies = [
  "tempfile",
  "time",
  "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "api-tracker-mesh"
+version = "0.1.1"
+dependencies = [
+ "api-tracker-core",
+ "blake3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "snow",
+ "tempfile",
  "zeroize",
 ]
 
@@ -821,6 +836,17 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if",
+ "cipher 0.4.4",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "chacha20"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
@@ -832,12 +858,25 @@ dependencies = [
 
 [[package]]
 name = "chacha20poly1305"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+dependencies = [
+ "aead 0.5.2",
+ "chacha20 0.9.1",
+ "cipher 0.4.4",
+ "poly1305 0.8.0",
+ "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b89e1c441e926b9c82a8d023f6e1b7ae0adcfaa7d621814e4d60789bac751cb"
 dependencies = [
  "aead 0.6.1",
- "chacha20",
+ "chacha20 0.10.1",
  "cipher 0.5.2",
  "poly1305 0.9.1",
 ]
@@ -4265,6 +4304,22 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "snow"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "599b506ccc4aff8cf7844bc42cf783009a434c1e26c964432560fb6d6ad02d82"
+dependencies = [
+ "blake2",
+ "chacha20poly1305 0.10.1",
+ "curve25519-dalek",
+ "getrandom 0.3.4",
+ "ring",
+ "rustc_version",
+ "sha2",
+ "subtle",
+]
 
 [[package]]
 name = "socket2"

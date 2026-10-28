@@ -317,3 +317,38 @@ fn restore_removes_the_marker_only_when_it_names_the_wiped_identity() {
     assert_eq!(wipe.marker, MarkerRemoval::LeftInPlace);
     assert_eq!(marker::read(&other.data_dir).unwrap(), Some(foreign));
 }
+
+#[test]
+fn v22_stores_each_invites_pairing_psk_only_encrypted() {
+    let (_dir, _paths, v) = new_vault();
+    v.mesh_init("dev-a").unwrap();
+    let inv = v.mesh_invite_create(&master_pw(), Some(5)).unwrap();
+    let (hash, wrapped): (Vec<u8>, Vec<u8>) = v
+        .connection()
+        .query_row(
+            "SELECT token_hash, wrapped_psk FROM mesh_invites",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(hash, inv.token.hash().to_vec(), "keyed by the token's hash");
+    let psk = inv.token.pairing_psk();
+    assert!(wrapped.len() > psk.len());
+    assert!(
+        !wrapped.windows(32).any(|w| w == &psk[..]),
+        "the psk is not stored in the clear"
+    );
+    // A wrong master password creates nothing.
+    let before: i64 = v
+        .connection()
+        .query_row("SELECT COUNT(*) FROM mesh_invites", [], |r| r.get(0))
+        .unwrap();
+    assert!(v
+        .mesh_invite_create(&SecretString::from("not-the-master-pw"), None)
+        .is_err());
+    let after: i64 = v
+        .connection()
+        .query_row("SELECT COUNT(*) FROM mesh_invites", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(before, after);
+}

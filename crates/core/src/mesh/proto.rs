@@ -129,6 +129,13 @@ pub enum DirectMsg {
     /// "I hold your history up to `held_seq`; do not mint until you have it
     /// back" (PROTOCOL.md §7.4).
     RollbackNotice { held_seq: u64 },
+    /// "The mesh access key is now `key` at `epoch`" (PROTOCOL.md §9): sent
+    /// by each side of every authenticated session, so a rotation spreads
+    /// through members; never to a device that failed the roster check.
+    AccessKeyUpdate {
+        epoch: u32,
+        key: super::invite::AccessKey,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -345,6 +352,15 @@ impl Session {
             CloseReason::Aborted("local storage error"),
         );
         out
+    }
+
+    /// Queue a point-to-point message for the peer. Valid after [`Self::start`]
+    /// (the peer reads our `Hello` first) and before the session closes.
+    pub fn direct(&mut self, msg: DirectMsg) -> Vec<Action> {
+        if self.closed || self.sent_bye || self.next_send == 0 {
+            return Vec::new();
+        }
+        vec![self.frame(Body::Direct(msg))]
     }
 
     /// The opening `Hello`.

@@ -45,7 +45,7 @@ use zeroize::Zeroizing;
 /// `roster.add`/`device.info` payload rules (at most 128 bytes, no control
 /// characters).
 pub const MAX_DEVICE_NAME_CHARS: usize = 64;
-const FIRST_EPOCH: u32 = 1;
+pub(crate) const FIRST_EPOCH: u32 = 1;
 
 /// Trim and check a device name. It is shown to every paired device.
 pub fn validate_device_name(name: &str) -> std::result::Result<String, MeshError> {
@@ -76,15 +76,15 @@ pub struct MeshSelfInfo {
 }
 
 /// The full `mesh_self` row (wrapped keys included; never serialized).
-struct SelfRow {
-    info: MeshSelfInfo,
-    nonce: MarkerNonce,
+pub(crate) struct SelfRow {
+    pub(crate) info: MeshSelfInfo,
+    pub(crate) nonce: MarkerNonce,
     wrapped_sign: Vec<u8>,
     wrapped_noise: Vec<u8>,
 }
 
 impl SelfRow {
-    fn params(&self, data_dir: &Path) -> StoreParams {
+    pub(crate) fn params(&self, data_dir: &Path) -> StoreParams {
         StoreParams {
             genesis: GenesisInfo {
                 mesh_id: self.info.mesh_id,
@@ -99,11 +99,11 @@ impl SelfRow {
     }
 }
 
-fn corrupt(what: &'static str) -> CoreError {
+pub(crate) fn corrupt(what: &'static str) -> CoreError {
     CoreError::VaultCorrupted(what)
 }
 
-fn read_self(conn: &Connection) -> Result<Option<SelfRow>> {
+pub(crate) fn read_self(conn: &Connection) -> Result<Option<SelfRow>> {
     let row = conn
         .query_row(
             "SELECT mesh_id, genesis_device, device_id, device_name, sign_pub, noise_pub,
@@ -182,7 +182,7 @@ pub fn x25519_public(secret: &[u8; 32]) -> PublicKeyBytes {
     )
 }
 
-fn x25519_generate() -> (Zeroizing<[u8; 32]>, PublicKeyBytes) {
+pub(crate) fn x25519_generate() -> (Zeroizing<[u8; 32]>, PublicKeyBytes) {
     let mut s = Zeroizing::new([0u8; 32]);
     getrandom::fill(s.as_mut()).expect("operating system RNG is unavailable");
     clamp(&mut s);
@@ -190,13 +190,13 @@ fn x25519_generate() -> (Zeroizing<[u8; 32]>, PublicKeyBytes) {
     (s, public)
 }
 
-fn random_key() -> Zeroizing<[u8; 32]> {
+pub(crate) fn random_key() -> Zeroizing<[u8; 32]> {
     let mut k = Zeroizing::new([0u8; 32]);
     getrandom::fill(k.as_mut()).expect("operating system RNG is unavailable");
     k
 }
 
-fn unwrap32(
+pub(crate) fn unwrap32(
     vault_key: &SecretBytes,
     aad: &str,
     wrapped: &[u8],
@@ -230,7 +230,7 @@ fn mesh_tables(conn: &Connection) -> Result<Vec<String>> {
     Ok(names)
 }
 
-fn delete_mesh_rows(conn: &Connection) -> Result<u64> {
+pub(crate) fn delete_mesh_rows(conn: &Connection) -> Result<u64> {
     let mut rows = 0u64;
     for t in mesh_tables(conn)? {
         rows += conn.execute(&format!("DELETE FROM \"{t}\""), [])? as u64;

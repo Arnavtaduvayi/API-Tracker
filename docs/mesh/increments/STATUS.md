@@ -13,7 +13,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | done | 2026-10-26 | 2026-10-26 | `e746a01`, `df3d8ec`, `f888eb1` | CI `40397253597` (success); macOS service `40397253640` (success) |
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
 | 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | done | 2026-10-27 | 2026-10-27 | `1b4c8a2`, `6a8213f` | CI `40554008854` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40554008811` (success) |
-| 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | pending | | | | |
+| 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | in-progress | 2026-10-27 | | | |
 | 05 | [Node runtime](05-node-runtime.md) | S | M | pending | | | | |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | pending | | | | |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | pending | | | | |
@@ -71,12 +71,107 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 03 | Marker rule made precise: rolled back ⇔ `seq_high_water > vv[self] + 64`; a store not `ok` refuses to mint and does not trust the old mark. | `next_seq` below the mark is the normal state with block allocation. | ADR 0031, PROTOCOL §7.5, DESIGN §D5 [Amended 03] |
 | 03 | AAD binds vault **and** device id (`mesh_*_key(vault_id, device_id)`) / mesh id and epoch (`mesh_access_key(vault_id, mesh_id, epoch)`). | Stronger than vault-only binding: a leftover blob of an earlier identity never opens. | ADR 0031 |
 | 03 | Small, this table only: `identity::init` (not `init_mesh`) behind `UnlockedVault::mesh_init`; `UnlockedVault::mesh_keys` added for 04/05; `MeshError::{Storage, NotInitialized, AlreadyInMesh, IdentityMismatch, InvalidDeviceName, Forked}`; `CoreError::Mesh` is `#[error(transparent)]` (it printed twice in CLI chains); new audit event `mesh_identity_wiped` on restore; `BackupInfo.mesh_wipe` (restore only); `projects_first_schema.rs` no longer pins v20 as current; PROTOCOL §8.4 clarified: rule (a) supersession applies to every kind, the never-deleted list is about rule (b). | Required by what was built or a bug fix. | — |
+| 04 | **R19** The pairing psk is stored encrypted under the vault key (`mesh_invites.wrapped_psk`, **migration v22**); the usage split of 06 becomes **v23**. | PROTOCOL §9 stored only `blake3(token)`, from which the inviter cannot derive the psk the handshake needs. | ADR 0031 R19, PROTOCOL §9.2, DESIGN §D10/§D14/§D17 [Amended 04], 06 file |
+| 04 | **R20** A 16-byte preamble picks the handshake; pairing carries the invite hint (`blake3(token)[..8]`); the inviter answers only a live invite's hint. | The responder must choose the handshake and the invite's psk before message 1. | ADR 0031 R20, PROTOCOL §9.1-9.3 |
+| 04 | **R21** `AccessKeyUpdate` in every session; applied after the exchange's commit, bounded by `1 + removals`, equal epochs resolved by the larger BLAKE3 hash; re-removal refused. | The review found epoch poisoning (`u32::MAX`), a split on concurrent rotations, and a key travelling ahead of its removal. | ADR 0031 R21, PROTOCOL §9.5 |
+| 04 | Small, this table only: the inviter's side is `membership::accept_pairing(store, …)` (not an `UnlockedVault` method; the serving thread holds the node); `mesh_device_rename(name)` renames self only; `remove`/`leave` confirm via `--yes` in non-interactive runs (the `backup restore` pattern) rather than `confirm_default_no`; `invite --addr HOST:PORT` (plus `--wait --listen`) supplies the invite's addresses (05 publishes listen addresses); `join -` reads the invite from stdin; two checksum characters, not one; `SqliteStore::refresh` added. | Required by what was built, or stronger. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 04 — Transport & pairing (2026-10-27)
+
+**What landed.**
+- `crates/mesh` (`api-tracker-mesh`, `#![forbid(unsafe_code)]`, std threads,
+  `snow` 0.10.0). Modules: `bind` (the only bind), `noise`, `wire` (preamble,
+  `u16` Noise messages, 1 MiB `u32` frames), `handshake`, `session` (one
+  exchange, with a writer thread), `pair`, `serve`, `replicate`, `directs`
+  and `node` (`MeshNode`, `TransportLimits`).
+- Core: `mesh::invite` (token, invite string with a 2-character checksum,
+  `PairRequest`/`PairAccept`, the redacting `AccessKey`) and `mesh::membership`
+  (`PendingIdentity`, `MeshVault`, `accept_pairing`, `devices`, `rename`,
+  `remove` with rotation, `mint_self_remove`, `log_exchange`,
+  `invite_is_live`, `max_access_epoch`).
+- Core API: `UnlockedVault::{mesh_vault, mesh_open_store, mesh_invite_create,
+  mesh_join, mesh_devices, mesh_device_rename, mesh_device_remove, mesh_leave}`
+  and `SqliteStore::refresh`. `Roster::added_by`. `DirectMsg::AccessKeyUpdate`
+  and `Session::direct`.
+- Migration v22 (`mesh_invites.wrapped_psk`).
+- CLI: `mesh invite|join|devices|rename|remove|leave|serve|replicate`.
+- CI lists include `-p api-tracker-mesh` (clippy, tests, Windows tests).
+- Tests: `crates/mesh/tests/{noise_spike,pairing,replication,bounds,bind_guard}.rs`,
+  `crates/gateway/tests/no_mesh_dependency.rs`,
+  `crates/core/tests/mesh_membership.rs`, `mesh_schema` (v22), and the
+  three-device CLI test.
+- Smoke: a two-node block on 127.0.0.1.
+
+**For 05 (load-bearing).**
+- **Where the outbound loop plugs in.** `serve::serve(node: Arc<MeshNode>,
+  listeners, stop)` is the inbound loop. The outbound loop should share the
+  same `Arc<MeshNode>` and call `replicate::replicate_once(&node, addr)` (it
+  logs to `mesh_exchange_log`, tries every resolved address and the previous
+  access key). Session concurrency lives only in `serve`'s
+  `active`/`max_sessions` counter today; the node should count outbound
+  sessions against the same 8.
+- **Building the node.** `MeshNode::open(&vault, clock, limits)` runs
+  `identity::preflight` (marker and fork) and holds `MeshKeys` + `MeshVault`.
+  `node.store()` locks *and refreshes* the store.
+- **`RollbackNotice`** is ignored in `directs::handle` (one-shot exchanges);
+  05 must make the node stop minting until `vv[self] ≥ held_seq`.
+- **`serve` prints `Listening on <addr>`** on stdout per listener (tests and
+  smoke parse it). It stops only when killed; graceful stop is the `stop`
+  closure (05: control socket `Stop`).
+
+**For 07.**
+- The `Direct` dispatch point is `crates/mesh/src/directs.rs::handle`. It
+  returns `Some(msg)` for messages to apply after the exchange's commit (as
+  `AccessKeyUpdate` is), or handles them in place. Add `RightsRequest` there
+  and to `proto::DirectMsg`.
+
+**Review (S+R).** `code-review` skill at `high` on the uncommitted increment
+diff. All 10 findings were confirmed and fixed with tests; none were rejected:
+1. Access-key epoch poisoning (`u32::MAX` blocks every later rotation) →
+   bound `epoch ≤ 1 + removals` (`mesh_membership::an_access_key_epoch_must_be_justified_by_removals`).
+2. Concurrent rotations split the mesh → equal epochs resolve to the larger
+   BLAKE3 hash (`two_keys_for_one_epoch_converge_on_the_larger_hash`).
+3. A key applied before the removal that justifies it, then handed to the
+   removed device → keys are held until after the exchange's commit
+   (`session.rs`, `directs::apply_access_key`) and bounded as in 1.
+4. The smoke check "the invite cannot be used again" was vacuous (the joiner
+   was already in a mesh) → a third, fresh vault whose join fails and leaves
+   it in no mesh. (A used invite no longer matches at the inviter, which closes
+   without replying; "already used" appears only when two joiners race while
+   the invite is live.)
+5. `invite --wait` re-implemented liveness in CLI SQL without the attempt
+   limit → `membership::invite_is_live` in core.
+6. Only the first resolved address was dialed (`localhost` → `::1`) → every
+   address (`replication::a_name_that_resolves_to_several_addresses_reaches_the_ipv4_listener`).
+7. `join` gave up after the first failing invite address → the next address on
+   transport errors (`pairing::an_invite_whose_first_address_is_dead_still_pairs_through_the_next`).
+8. Removing an already-removed device rotated again → `AlreadyRemoved`
+   (`replication::a_removed_device_is_refused…`).
+9. No previous key after skipping epochs → the newest stored epoch below the
+   current one (`the_previous_key_is_the_newest_below_the_current_even_after_a_skip`).
+10. A removed or forked device could still invite or accept pairings →
+    `NotActive` (`a_device_that_left_its_roster_cannot_invite…`).
+
+**Surprises.**
+- PROTOCOL §9's "store `blake3(token)`" could not work with a token-derived
+  psk (R19).
+- A serving node's mirror only reloaded on its own writes, so a removal made
+  by a CLI command was invisible to the handshake check. Fixed with
+  `SqliteStore::refresh` in `MeshNode::store()`.
+- `snow` does not zeroize its internal key copies (KNOWN_LIMITATIONS).
+
+**Gotchas.**
+- Every test connects from 127.0.0.1, so tests set
+  `handshakes_per_ip_per_minute: 1_000` (`tests/common::test_limits`). Only the
+  flood test uses a low limit.
+- Vaults are `Send` but not `Sync`: move a vault into a thread rather than
+  sharing a reference to it.
 
 ### Increment 03 — Persistence & identity (2026-10-27)
 

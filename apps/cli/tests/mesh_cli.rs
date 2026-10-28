@@ -207,3 +207,124 @@ fn a_restored_backup_leaves_the_mesh_and_can_start_a_new_one() {
         first["device_id"]
     );
 }
+
+/// `tethra mesh serve --listen 127.0.0.1:0` as a child; killed on drop.
+struct Serving {
+    child: std::process::Child,
+    addr: String,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn serve(tv: &TestVault) -> Serving {
+    use std::io::BufRead;
+    let mut child = tv
+        .raw()
+        .args(["mesh", "serve", "--listen", "127.0.0.1:0"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let addr = line
+        .trim()
+        .strip_prefix("Listening on ")
+        .unwrap_or_else(|| panic!("unexpected serve output: {line}"))
+        .to_owned();
+    Serving { child, addr }
+}
+
+fn devices(tv: &TestVault) -> Vec<Value> {
+    json(tv, &["mesh", "devices"]).as_array().unwrap().clone()
+}
+
+#[test]
+fn invite_join_devices_remove_and_leave_across_three_devices() {
+    let a = TestVault::new();
+    run(&a, &["mesh", "init", "--name", "dev-a"]);
+    let server = serve(&a);
+
+    // A invites B; the invite is printed once, with a warning.
+    let (ok, invite, warn) = run(&a, &["mesh", "invite", "--addr", &server.addr]);
+    assert!(ok, "{warn}");
+    let invite = invite.trim().to_owned();
+    assert!(invite.starts_with("tethra-mesh-invite:v1:"));
+    assert!(warn.contains("password"), "{warn}");
+    let code = invite["tethra-mesh-invite:v1:".len()..][..32].to_owned();
+    let mut later = String::new();
+
+    let b = TestVault::new();
+    let (ok, out, err) = run(&b, &["mesh", "join", &invite, "--name", "dev-b"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("Joined mesh"), "{out}");
+    later.push_str(&out);
+    later.push_str(&err);
+    // The same invite cannot be used twice.
+    let c = TestVault::new();
+    let (ok, out, err) = run(&c, &["mesh", "join", &invite, "--name", "dev-c"]);
+    assert!(!ok);
+    later.push_str(&out);
+    later.push_str(&err);
+
+    assert_eq!(devices(&a).len(), 2);
+    assert_eq!(devices(&b).len(), 2);
+
+    // A second invite, as JSON, admits C.
+    let inv = json(&a, &["mesh", "invite", "--addr", &server.addr]);
+    let invite2 = inv["invite"].as_str().unwrap().to_owned();
+    let (ok, out, err) = run(&c, &["mesh", "join", &invite2, "--name", "dev-c"]);
+    assert!(ok, "{err}");
+    later.push_str(&out);
+    later.push_str(&err);
+    // B learns of C through A.
+    let (ok, out, err) = run(&b, &["mesh", "replicate", "--peer", &server.addr]);
+    assert!(ok, "{err}");
+    later.push_str(&out);
+    assert_eq!(devices(&b).len(), 3);
+
+    // A removes C: C is refused from then on.
+    let c_id = json(&c, &["mesh", "status"])["device_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (ok, out, err) = run(&a, &["mesh", "remove", &c_id[..10], "--yes"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("epoch 2"), "{out}");
+    let (ok, _, err) = run(&c, &["mesh", "replicate", "--peer", &server.addr]);
+    assert!(!ok, "a removed device must be refused");
+    later.push_str(&err);
+    let on_a = devices(&a);
+    assert!(on_a
+        .iter()
+        .any(|d| d["device_id"] == c_id.as_str() && d["removed"] == true));
+
+    // B leaves, telling A on the way out.
+    let (ok, out, err) = run(
+        &b,
+        &["--json", "mesh", "leave", "--yes", "--peer", &server.addr],
+    );
+    assert!(ok, "{err}");
+    let left: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(left["delivered"], true);
+    assert_eq!(json(&b, &["mesh", "status"])["initialized"], false);
+    let b_removed = devices(&a).iter().filter(|d| d["removed"] == true).count();
+    assert_eq!(b_removed, 2, "A sees C removed and B gone");
+
+    // The invite code never appears again after it was shown.
+    for tv in [&a, &b, &c] {
+        let (_, out, err) = run(tv, &["--json", "mesh", "devices"]);
+        later.push_str(&out);
+        later.push_str(&err);
+    }
+    assert!(!later.contains(&code), "the invite code was printed again");
+    assert!(!has_hex64(&later), "key-shaped hex in the output");
+    drop(server);
+}

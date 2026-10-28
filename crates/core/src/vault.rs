@@ -9401,6 +9401,139 @@ impl UnlockedVault {
     pub fn mesh_keys(&self) -> Result<crate::mesh::identity::MeshKeys> {
         crate::mesh::identity::load_keys(&self.conn, &self.vault_key, &self.vault_id)
     }
+
+    /// The narrow vault-key capability a running mesh node holds: mesh
+    /// access keys and invite psks, nothing else (`mesh::membership`).
+    pub fn mesh_vault(&self) -> crate::mesh::membership::MeshVault {
+        crate::mesh::membership::MeshVault::new(self.vault_key.clone(), self.vault_id.clone())
+    }
+
+    /// This device's mesh store on its own connection.
+    pub fn mesh_open_store(&self) -> Result<crate::mesh::sqlite_store::SqliteStore> {
+        crate::mesh::identity::open_store(
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )?
+        .ok_or_else(|| crate::mesh::MeshError::NotInitialized.into())
+    }
+
+    /// Create a pairing invite (`tethra mesh invite`). Reauthenticated: the
+    /// token admits a new device to the mesh for its lifetime.
+    pub fn mesh_invite_create(
+        &self,
+        master_password: &SecretString,
+        ttl_minutes: Option<u32>,
+    ) -> Result<crate::mesh::membership::Invite> {
+        self.verify_master_password(master_password)?;
+        let store = self.mesh_open_store()?;
+        if !crate::mesh::store::MeshStore::state(&store)
+            .roster
+            .is_active(&crate::mesh::store::MeshStore::self_id(&store))
+        {
+            // A device that knows it was removed (or forked) admits no one.
+            return Err(crate::mesh::MeshError::NotActive.into());
+        }
+        drop(store);
+        crate::mesh::membership::invite_create(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            ttl_minutes,
+        )
+    }
+
+    /// Store this device's identity inside the mesh that accepted it
+    /// (`tethra mesh join`, after the pairing handshake).
+    pub fn mesh_join(
+        &self,
+        pending: &crate::mesh::membership::PendingIdentity,
+        accept: &crate::mesh::invite::PairAccept,
+    ) -> Result<crate::mesh::identity::MeshSelfInfo> {
+        crate::mesh::membership::join(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            &self.paths.data_dir,
+            pending,
+            accept,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )
+    }
+
+    /// The roster as this device sees it (`tethra mesh devices`).
+    pub fn mesh_devices(&self) -> Result<Vec<crate::mesh::membership::DeviceRow>> {
+        crate::mesh::membership::devices(&self.mesh_open_store()?)
+    }
+
+    /// Rename this device (a device can rename only itself).
+    pub fn mesh_device_rename(&self, name: &str) -> Result<()> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        crate::mesh::membership::rename(&self.conn, &mut store, keys.signing_key(), name)
+    }
+
+    /// Remove another device from the mesh and rotate the access key.
+    /// Reauthenticated; the caller asks for confirmation first. Returns the
+    /// removed id and the new access-key epoch.
+    pub fn mesh_device_remove(
+        &self,
+        master_password: &SecretString,
+        device: &str,
+    ) -> Result<(crate::mesh::DeviceId, u32)> {
+        self.verify_master_password(master_password)?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let target = crate::mesh::membership::resolve_device(&store, device)?;
+        let epoch = crate::mesh::membership::remove(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            &mut store,
+            keys.signing_key(),
+            target,
+        )?;
+        Ok((target, epoch))
+    }
+
+    /// Leave the mesh (`tethra mesh leave`). Reauthenticated; the caller
+    /// asks for confirmation first. Mints this device's self-removal, lets
+    /// `deliver` try to hand it to a peer (best effort), then wipes every
+    /// local mesh row and the identity marker.
+    pub fn mesh_leave(
+        &self,
+        master_password: &SecretString,
+        deliver: &mut dyn FnMut(&mut crate::mesh::sqlite_store::SqliteStore) -> bool,
+    ) -> Result<MeshLeaveReport> {
+        self.verify_master_password(master_password)?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        crate::mesh::membership::mint_self_remove(&mut store, keys.signing_key())?;
+        let delivered = deliver(&mut store);
+        drop(store);
+        drop(keys);
+        let wipe = crate::mesh::identity::leave_local_wipe(&self.conn, &self.paths.data_dir)?;
+        audit::record(
+            &self.conn,
+            "mesh_left",
+            None,
+            None,
+            if delivered {
+                "self-removal delivered to a peer"
+            } else {
+                "self-removal not delivered (no peer reachable)"
+            },
+        )?;
+        Ok(MeshLeaveReport { delivered, wipe })
+    }
+}
+
+/// What `mesh leave` did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MeshLeaveReport {
+    /// Whether a peer received the self-removal before the wipe.
+    pub delivered: bool,
+    pub wipe: crate::mesh::identity::WipeReport,
 }
 
 // ---------------------------------------------------------------------------

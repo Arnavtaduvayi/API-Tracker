@@ -238,6 +238,16 @@ impl Roster {
         self.resolved.cutoffs.iter()
     }
 
+    /// Who added `device`: the origin of the add [`Self::added_name`] reads.
+    pub fn added_by(&self, device: &DeviceId) -> Option<DeviceId> {
+        if !self.is_known(device) {
+            return None;
+        }
+        self.adds_of(*device)
+            .find(|(o, _)| *device != self.genesis || **o == self.genesis)
+            .map(|(o, _)| *o)
+    }
+
     /// The display name from the device's first add (in `(target, origin)`
     /// order; the genesis's from its self-add). `device.info` carries renames.
     pub fn added_name(&self, device: &DeviceId) -> Option<&str> {

@@ -795,6 +795,19 @@ impl SqliteStore {
             .map_err(sql("configuring durability"))
     }
 
+    /// Reload the mirror if another connection wrote since this one last
+    /// read or wrote (one `mesh_meta` read otherwise). A long-running node
+    /// calls this before it decides anything from `state()`, so a removal
+    /// made by a CLI command takes effect at its next handshake. Returns
+    /// whether it reloaded.
+    pub fn refresh(&mut self) -> Result<bool, MeshError> {
+        if meta_get(&self.conn, "write_gen")?.unwrap_or(0) == self.m.generation {
+            return Ok(false);
+        }
+        self.reload()?;
+        Ok(true)
+    }
+
     /// Reload the mirror from disk (after a failed write, or on demand).
     pub fn reload(&mut self) -> Result<(), MeshError> {
         let tx = begin(&self.conn, TransactionBehavior::Deferred)?;

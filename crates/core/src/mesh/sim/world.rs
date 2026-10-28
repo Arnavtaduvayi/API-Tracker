@@ -628,6 +628,9 @@ impl<F: StoreFactory> World<F> {
                     let node = &mut self.nodes[n];
                     node.mint_block = node.mint_block.max(held_seq);
                 }
+                // Access-key rotation is a transport concern (Increment 04);
+                // the simulated network has no keys.
+                Action::Direct(DirectMsg::AccessKeyUpdate { .. }) => {}
                 Action::Close(reason) => {
                     let Some(s) = self.sessions.get(&sid) else {
                         continue;
