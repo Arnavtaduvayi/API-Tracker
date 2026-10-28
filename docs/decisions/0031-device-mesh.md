@@ -415,6 +415,12 @@ Smaller usage decisions (Increment 06):
 - **The hourly budget is the publisher's own** (5 000 counters an hour, oldest
   days first): own mints are not counted against the per-origin ingest rate
   that peers enforce (10 000 an hour).
+- **LWW writes that carry unchanged fields are built inside the write
+  transaction** (`SqliteStore::mint_from`). A rename keeps the listen
+  addresses and an address publish keeps the name; built from a snapshot read
+  before the transaction, a node publishing its addresses could undo a rename a
+  CLI command made a moment earlier (Windows CI caught it in
+  `node::three_nodes_converge…`). `device.info` and `project.meta` edits use it.
 - **`local_month_spend_micros`** (`core::mesh::usage`) is the single function
   for "this device's spend this month on a mesh project", for 07 and 08.
 

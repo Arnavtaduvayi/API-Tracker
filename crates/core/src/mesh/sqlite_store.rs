@@ -958,6 +958,23 @@ impl SqliteStore {
         Ok(n)
     }
 
+    /// Mint a draft built from the state as it is inside the write
+    /// transaction, after reloading whatever another process wrote. For an
+    /// LWW write that carries fields it does not change (a rename keeps the
+    /// listen addresses; publishing addresses keeps the name), building the
+    /// payload from a snapshot read earlier could undo a concurrent write.
+    /// `build` returns `None` to mint nothing.
+    pub fn mint_from(
+        &mut self,
+        key: &SigningKeyPair,
+        build: impl FnOnce(&State) -> Result<Option<Draft>, MeshError>,
+    ) -> Result<Option<SignedItem>, MeshError> {
+        self.write(|tx, m, marker| match build(&m.state)? {
+            Some(d) => mint_in(tx, m, marker, key, d).map(Some),
+            None => Ok(None),
+        })
+    }
+
     /// Mint `drafts` in one durable transaction, then run `also` inside it
     /// (the publisher records what it attributed in the same commit, so a
     /// crash can neither publish twice nor lose a delta). All or nothing.

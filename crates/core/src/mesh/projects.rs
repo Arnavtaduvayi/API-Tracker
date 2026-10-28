@@ -149,15 +149,35 @@ fn require_unbound(conn: &Connection, local_project_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn mint_meta(store: &mut SqliteStore, signing: &SigningKeyPair, meta: ProjectMeta) -> Result<()> {
-    let winner = {
-        let state = store.state();
-        state
+/// An LWW change to mesh project `id`, built from its value as it is inside
+/// the write transaction (so a concurrent change to another field, by another
+/// process on this device, is kept).
+fn edit_meta(
+    store: &mut SqliteStore,
+    signing: &SigningKeyPair,
+    id: &MeshProjectId,
+    edit: impl FnOnce(&mut ProjectMeta),
+) -> Result<()> {
+    let id = *id;
+    store.mint_from(signing, |state| {
+        let Some(p) = state.projects.value(&id, &state.roster) else {
+            return Err(MeshError::InvalidOperation(
+                "the mesh project is not known here",
+            ));
+        };
+        let mut meta = ProjectMeta {
+            project: id,
+            name: p.name.clone(),
+            archived: p.archived,
+            merged_into: p.merged_into,
+        };
+        edit(&mut meta);
+        let winner = state
             .projects
-            .register(&meta.project)
-            .and_then(|r| r.winning_hlc(&state.roster))
-    };
-    store.mint(signing, Draft::of(&meta, HlcPolicy::After(winner)))?;
+            .register(&id)
+            .and_then(|r| r.winning_hlc(&state.roster));
+        Ok(Some(Draft::of(&meta, HlcPolicy::After(winner))))
+    })?;
     Ok(())
 }
 
@@ -215,17 +235,9 @@ pub fn rename(
     mesh: &MeshProjectId,
     name: &str,
 ) -> Result<()> {
-    let p = get(store, mesh).ok_or_else(|| not_found(&mesh.to_hex()))?;
-    mint_meta(
-        store,
-        signing,
-        ProjectMeta {
-            project: *mesh,
-            name: name.trim().to_owned(),
-            archived: p.archived,
-            merged_into: p.merged_into,
-        },
-    )
+    get(store, mesh).ok_or_else(|| not_found(&mesh.to_hex()))?;
+    let name = name.trim().to_owned();
+    edit_meta(store, signing, mesh, |m| m.name = name)
 }
 
 pub fn archive(
@@ -233,17 +245,8 @@ pub fn archive(
     signing: &SigningKeyPair,
     mesh: &MeshProjectId,
 ) -> Result<()> {
-    let p = get(store, mesh).ok_or_else(|| not_found(&mesh.to_hex()))?;
-    mint_meta(
-        store,
-        signing,
-        ProjectMeta {
-            project: *mesh,
-            name: p.name,
-            archived: true,
-            merged_into: p.merged_into,
-        },
-    )
+    get(store, mesh).ok_or_else(|| not_found(&mesh.to_hex()))?;
+    edit_meta(store, signing, mesh, |m| m.archived = true)
 }
 
 /// The caps defined on `mesh` (Increment 07 creates them).
@@ -280,17 +283,7 @@ pub fn merge(
         ));
     }
     let (root, child) = if ra < rb { (ra, rb) } else { (rb, ra) };
-    let p = get(store, &child).expect("checked");
-    mint_meta(
-        store,
-        signing,
-        ProjectMeta {
-            project: child,
-            name: p.name,
-            archived: p.archived,
-            merged_into: Some(root),
-        },
-    )?;
+    edit_meta(store, signing, &child, |m| m.merged_into = Some(root))?;
     Ok((root, child))
 }
 

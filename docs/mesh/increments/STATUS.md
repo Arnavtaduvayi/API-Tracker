@@ -40,7 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
-| 06 | **1,780 passed, 0 failed, 12 ignored** (1,779 before the unbind fix's test) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (16): core `--test mesh_usage` 13, `mesh_schema` 9 (+1 v23), gateway `--test mesh_publish_e2e` 1, `cli --test mesh_cli` 9 (+1) | unchanged (not touched) | **175 passed** (`bash scripts/smoke.sh`; 9 usage checks) |
+| 06 | **1,781 passed, 0 failed, 12 ignored** (1,779 in the last full run, plus the two tests added with the unbind and lost-update fixes, each run on its own; CI ran all) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (17): core `--test mesh_usage` 13, `mesh_membership` 6 (+1 lost update), `mesh_schema` 9 (+1 v23), gateway `--test mesh_publish_e2e` 1, `cli --test mesh_cli` 8 (+1) | unchanged (not touched) | **175 passed** (`bash scripts/smoke.sh`; 9 usage checks) |
 | 05 `beb3aa1` | **1,764 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (40): `-p api-tracker-mesh` unit 14 (`instance` 5, `peers` 3, `runtime` 4, `wire` 2), `--test node` 8, `--test discover` 5, `--test doctor` 5, `--test replication` 7 (+1 rollback); core `mesh::peers` 6 + `sqlite_store` 1 (rollback hold); `cli --test mesh_cli` 7 (+2) | unchanged (not touched) | **166 passed** (`bash scripts/smoke.sh`; 9 node checks replace 1) |
 
 | 04 `40bd38a` | **1,724 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New: `-p api-tracker-mesh` 30 (`wire` unit 2, `bind_guard` 2, `bounds` 9, `noise_spike` 3, `pairing` 8, `replication` 6); `--test mesh_membership` 5; `mesh_schema` 8; `gateway --test no_mesh_dependency` 1; `cli --test mesh_cli` 5 | unchanged (not touched) | **158 passed** (`bash scripts/smoke.sh`; 7 two-node checks) |
@@ -134,6 +134,16 @@ pending CI runs to check first.)_
   through `roster.is_admitted(origin, entry.seq)`.
 
 **Surprises.**
+- **Windows CI caught a lost update** (`40745888639`, Windows job of `dc6b110`:
+  `node::three_nodes_converge…` timed out waiting for "charlie"). A running
+  node published its addresses in `device.info` with the name it had read
+  before its write transaction, so a `mesh rename` made by another process in
+  between was overwritten by the node's later LWW write. Reproduced
+  deterministically (`mesh_membership::a_rename_and_an_address_publish…`,
+  failing first) and fixed with `SqliteStore::mint_from`: the draft is built
+  from the state inside the transaction, after reloading other processes'
+  writes. `project.meta` edits use it too. This was a 05 bug that 05's CI runs
+  did not hit.
 - **Self-review caught an unbind bug** after the first push: the publisher read
   only bound projects' rows, so an unbound project's rows looked deleted and its
   published usage was taken back. It now also reads every project with cursor

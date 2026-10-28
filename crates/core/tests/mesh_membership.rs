@@ -172,3 +172,42 @@ fn a_device_that_left_its_roster_cannot_invite_and_invites_report_liveness() {
         Err(CoreError::Mesh(MeshError::NotActive))
     ));
 }
+
+/// A node publishing its addresses and a CLI rename on the same database
+/// must not undo each other: each `device.info` is built from the state as
+/// it is inside the write transaction, not from a stale snapshot.
+#[test]
+fn a_rename_and_an_address_publish_from_two_processes_both_survive() {
+    let (_d, _p, v) = new_vault();
+    v.mesh_init("dev-a").unwrap();
+    let keys = v.mesh_keys().unwrap();
+    // The node's store, opened (and its state read) before the rename.
+    let mut node_store = v.mesh_open_store().unwrap();
+    // A CLI command renames this device through its own store.
+    v.mesh_device_rename("renamed").unwrap();
+    // The node then publishes its addresses from its (stale) store.
+    assert!(membership::publish_listen_addrs(
+        &mut node_store,
+        keys.signing_key(),
+        &["127.0.0.1:7420".to_owned()]
+    )
+    .unwrap());
+    let fresh = v.mesh_open_store().unwrap();
+    let me = api_tracker_core::mesh::store::MeshStore::self_id(&fresh);
+    let state = api_tracker_core::mesh::store::MeshStore::state(&fresh);
+    let info = state.device_info.value(&me, &state.roster).unwrap();
+    assert_eq!(info.name, "renamed", "the rename survived");
+    assert_eq!(info.listen_addrs, vec!["127.0.0.1:7420".to_owned()]);
+    // And the other order: addresses first (from a stale store), then a
+    // rename keeps them.
+    let mut cli_store = v.mesh_open_store().unwrap();
+    membership::publish_listen_addrs(&mut node_store, keys.signing_key(), &["10.0.0.9:1".into()])
+        .unwrap();
+    let _ = &mut cli_store;
+    v.mesh_device_rename("renamed-again").unwrap();
+    let fresh = v.mesh_open_store().unwrap();
+    let state = api_tracker_core::mesh::store::MeshStore::state(&fresh);
+    let info = state.device_info.value(&me, &state.roster).unwrap();
+    assert_eq!(info.name, "renamed-again");
+    assert_eq!(info.listen_addrs, vec!["10.0.0.9:1".to_owned()]);
+}
