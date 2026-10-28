@@ -311,9 +311,14 @@ fn publish_once(
 
     let gen = publish_gen(store.connection())?;
     let bound = projects::bindings(store.connection())?;
-    let locals: BTreeSet<String> = bound.keys().cloned().collect();
-    let now_rows = local_rows(store.connection(), &locals, since)?;
     let cursor = cursor_rows(store.connection())?;
+    // Rows of every bound project, and of every project with something
+    // attributed: an unbound project's rows must still be read, or they
+    // would look deleted and its published usage would be taken back
+    // (unbinding keeps what was published).
+    let mut locals: BTreeSet<String> = bound.keys().cloned().collect();
+    locals.extend(cursor.keys().map(|((l, ..), _)| l.clone()));
+    let now_rows = local_rows(store.connection(), &locals, since)?;
 
     // Every local key with a row now, or with something attributed.
     let mut keys: BTreeSet<LocalKey> = now_rows.keys().cloned().collect();

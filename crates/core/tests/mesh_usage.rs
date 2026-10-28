@@ -643,3 +643,19 @@ fn published_items_carry_no_path_endpoint_host_request_or_credential() {
     }
     assert!(seen >= 3, "{seen}");
 }
+
+#[test]
+fn unbinding_keeps_what_was_published_and_publishes_nothing_new() {
+    let a = dev("a");
+    a.v.mesh_init("dev-a").unwrap();
+    let (p, _) = a.v.mesh_project_share(&a.app).unwrap();
+    let d = today();
+    seed(&a, &a.app, &d, "gpt-x", 5, 0, 0, 50);
+    a.v.mesh_publish().unwrap();
+    assert!(a.v.mesh_project_unbind(&a.app).unwrap());
+    seed(&a, &a.app, &d, "gpt-x", 3, 0, 0, 30);
+    let r = a.v.mesh_publish().unwrap();
+    assert_eq!((r.minted, r.epoch_bumps), (0, 0), "{r:?}");
+    let (epoch, t) = counter(&store(&a), id(&a), &key(p, d, "gpt-x")).unwrap();
+    assert_eq!((epoch, t.requests), (0, 5));
+}
