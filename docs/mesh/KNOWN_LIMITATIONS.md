@@ -115,9 +115,11 @@ permanent design choice or something a later increment changes.
 - **Stopping waits for running exchanges.** After a stop request the node
   starts nothing new, but an exchange in progress finishes first, bounded by the
   30 s idle and 10 min session limits.
-- **Windows runtime is untested.** The node, its loopback-TCP control channel
-  and discovery compile and their unit tests run in Windows CI, but behaviour on
-  Windows has not been validated, as for the gateway (ADR 0019 D8). Its
+- **Windows runtime is untested by hand.** The node, its loopback-TCP control
+  channel and discovery compile on Windows, and Windows CI runs the node's
+  automated tests (real sockets on 127.0.0.1, the control channel, one node per
+  data directory, stopping on session end) and they pass. Nobody has run a node
+  on Windows by hand, as for the gateway (ADR 0019 D8). Its
   single-instance check (a live node answering on the port recorded in the nonce
   file) is weaker than the Unix socket lock: two nodes started in the same
   instant could both start.
