@@ -13,7 +13,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | done | 2026-10-26 | 2026-10-26 | `e746a01`, `df3d8ec`, `f888eb1` | CI `40397253597` (success); macOS service `40397253640` (success) |
 | 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
 | 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | done | 2026-10-27 | 2026-10-27 | `1b4c8a2`, `6a8213f` | CI `40554008854` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40554008811` (success) |
-| 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | in-progress | 2026-10-27 | | | |
+| 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | done | 2026-10-27 | 2026-10-28 | `bd6d89e`, `40bd38a` | CI `40630951922` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40630951920` (success). 03 record commit `21b4c70`: CI `40588124547`, service `40588124805` (both success) |
 | 05 | [Node runtime](05-node-runtime.md) | S | M | pending | | | | |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | pending | | | | |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | pending | | | | |
@@ -39,6 +39,8 @@ rule (README §1 step 12).
 | 02 `db52154` | **1,643 passed, 0 failed, 10 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`); includes `--test mesh_sim` (200 seeds in ~10 s, replay, per-adversary, 18 regression seeds; soak ignored), 10 `proto` session tests, 32 oracle tests | unchanged (not touched) | **140 passed** (`bash scripts/smoke.sh`) |
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
+
+| 04 `40bd38a` | **1,724 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New: `-p api-tracker-mesh` 30 (`wire` unit 2, `bind_guard` 2, `bounds` 9, `noise_spike` 3, `pairing` 8, `replication` 6); `--test mesh_membership` 5; `mesh_schema` 8; `gateway --test no_mesh_dependency` 1; `cli --test mesh_cli` 5 | unchanged (not touched) | **158 passed** (`bash scripts/smoke.sh`; 7 two-node checks) |
 
 ## Deviations from DESIGN.md
 
