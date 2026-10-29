@@ -1,0 +1,947 @@
+# Tethra Mesh: increment ledger
+
+Every session reads this file first and updates it at the end (README §1).
+
+**States:** `pending`, `in-progress`, `done`, `blocked` (give the reason).
+
+| Branch | Base | Draft PR |
+|---|---|---|
+| `feat/device-mesh` | `origin/main` @ `5ec8198` (2026-10-26) | [#19](https://github.com/Arnavtaduvayi/API-Tracker/pull/19) (draft) |
+
+| # | Increment | Mode | Size | State | Started | Finished | Commits | CI run (result) |
+|---|---|---|---|---|---|---|---|---|
+| 01 | [Foundations & decision](01-foundations-and-decision.md) | S | L | done | 2026-10-26 | 2026-10-26 | `e746a01`, `df3d8ec`, `f888eb1` | CI `40397253597` (success); macOS service `40397253640` (success) |
+| 02 | [Sans-IO protocol & simulator](02-protocol-and-simulator.md) | O | L | done | 2026-10-26 | 2026-10-27 | `bb651d0`, `a9fddeb`, `fed0b34`, `db52154` | CI `40541779107` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40541779109` (success); contract commit: CI `40418521889` (success), service `40418521735` (success) |
+| 03 | [Persistence & identity](03-persistence-and-identity.md) | S | L | done | 2026-10-27 | 2026-10-27 | `1b4c8a2`, `6a8213f` | CI `40554008854` (success: Rust core+CLI, Windows, frontend, desktop backend, packaged app); macOS service `40554008811` (success) |
+| 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | done | 2026-10-27 | 2026-10-28 | `bd6d89e`, `40bd38a` | CI `40630951922` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40630951920` (success). 03 record commit `21b4c70`: CI `40588124547`, service `40588124805` (both success) |
+| 05 | [Node runtime](05-node-runtime.md) | S | M | done | 2026-10-28 | 2026-10-28 | `5b37ae7`, `beb3aa1` | CI `40739758045` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40739757930` (success). First commit `5b37ae7`: CI `40737167919` **failed** on Linux (`node::three_nodes_converge…`, a pairing race, fixed in `beb3aa1`; its Windows job passed), service `40737167795` success |
+| 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | done | 2026-10-28 | 2026-10-28 | `dc6b110`, `c671d33`, `99df156` | CI `40749228074` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40749228069` (success). Earlier: `dc6b110` CI `40745888639` **failed** on Windows (the lost update fixed in `99df156`); `c671d33` CI `40746051787` and service `40746051748` success |
+| 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | done | 2026-10-28 | 2026-10-28 | `e2b9abd`, `6d06b15` | CI `40806698828` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (35 min; `6d06b15` removes the simulator's fsyncs), frontend, desktop backend, packaged app on macOS); macOS service `40806700080` (success). `6d06b15` + record `e7104c1`: CI `40810268430` (success), service `40810267760` (success) |
+| 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). This record: CI pending (next session) |
+| 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | pending | | | | |
+| 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | pending | | | | |
+| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | pending | | | | |
+| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | pending | | | | |
+
+Sizes are rough context cost for a 1M-token session:
+- **M** is about 15-25% of the session.
+- **L** is about 25-45%.
+
+A session that finishes an M with plenty left should usually continue; check the 40%
+rule (README §1 step 12).
+
+## Test counts (update every increment; always print the command next to the number)
+
+| After | Rust tests (command) | Frontend tests | Smoke |
+|---|---|---|---|
+| base 5ec8198 | ~1,486 (projects-first handoff) | ~261 | 140 |
+| 01 `df3d8ec` | **1,591 passed, 0 failed, 9 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`); of these, 100 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`, 1.7 s) and 5 in `--test mesh_foundations` | unchanged (not touched) | **140 passed** (`bash scripts/smoke.sh`) |
+| 02 `db52154` | **1,643 passed, 0 failed, 10 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`); includes `--test mesh_sim` (200 seeds in ~10 s, replay, per-adversary, 18 regression seeds; soak ignored), 10 `proto` session tests, 32 oracle tests | unchanged (not touched) | **140 passed** (`bash scripts/smoke.sh`) |
+
+| 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
+
+| 08 `cb91633` | **1,823 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (15): gateway `--test cap_enforcement` 14, core `--test mesh_caps` 16 (+1); ignored +1 (`perf::perf_cap_admission_overhead`). Perf: `bash scripts/gateway_perf.sh` 9 passed; admission within noise (PERFORMANCE_RESULTS) | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`) |
+| 07 `e2b9abd` | **1,808 passed, 0 failed, 13 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`; the affected suites were rerun after the last edits). New (27): core `--test mesh_caps` 15, `--test mesh_sim` `caps_*` 3 (+1 ignored `caps_family_long`), `caps::policy` unit 7, `caps::period` unit 1, `cli --test mesh_cli` 9 (+1). Caps CI seeds: 16 × 240 steps in ~11 s locally. **Release soak: 256 seeds × 240 steps, 0 failing** (`bash scripts/mesh_soak.sh --scenario caps --minutes 10`; four batches of 64 seeds, ~43 s of simulation each; 629 s wall because the idle machine was throttled — a 64-seed batch takes ~45 s wall when it is not), plus 64 + 64 + 8 seeds in earlier and timing runs, 0 failing | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`; 4 cap checks) |
+| 06 `99df156` | **1,781 passed, 0 failed, 12 ignored** (1,779 in the last full run, plus the two tests added with the unbind and lost-update fixes, each run on its own; CI ran all) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (17): core `--test mesh_usage` 13, `mesh_membership` 6 (+1 lost update), `mesh_schema` 9 (+1 v23), gateway `--test mesh_publish_e2e` 1, `cli --test mesh_cli` 8 (+1) | unchanged (not touched) | **175 passed** (`bash scripts/smoke.sh`; 9 usage checks) |
+| 05 `beb3aa1` | **1,764 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (40): `-p api-tracker-mesh` unit 14 (`instance` 5, `peers` 3, `runtime` 4, `wire` 2), `--test node` 8, `--test discover` 5, `--test doctor` 5, `--test replication` 7 (+1 rollback); core `mesh::peers` 6 + `sqlite_store` 1 (rollback hold); `cli --test mesh_cli` 7 (+2) | unchanged (not touched) | **166 passed** (`bash scripts/smoke.sh`; 9 node checks replace 1) |
+
+| 04 `40bd38a` | **1,724 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New: `-p api-tracker-mesh` 30 (`wire` unit 2, `bind_guard` 2, `bounds` 9, `noise_spike` 3, `pairing` 8, `replication` 6); `--test mesh_membership` 5; `mesh_schema` 8; `gateway --test no_mesh_dependency` 1; `cli --test mesh_cli` 5 | unchanged (not touched) | **158 passed** (`bash scripts/smoke.sh`; 7 two-node checks) |
+
+## Deviations from DESIGN.md
+
+_(Increment, what changed, why, where it's recorded: ADR or doc. Material deviations
+also update DESIGN.md and the affected increment files; README §7.)_
+
+| Inc. | What changed | Why | Recorded |
+|---|---|---|---|
+| 01 | **R1** An origin's order is its `seq` for every kind; D8's per-origin HLC join and epoch-lex counter join become honest-writer rules (a regression is flagged). | The store keeps one item per `(kind, key, origin)` and latest-only relaying needs seq supersession; any other per-origin order lets a misbehaving origin split devices, incremental views and rebuilds. | ADR 0031 R1, PROTOCOL §5.1, DESIGN D8 [Amended 01] |
+| 01 | **R2** A removed origin's items above its cutoff keep relaying (and are never garbage-collected); views exclude them. | D10's "never relayed again" leaves devices holding different latest entries for the removed origin forever. | ADR 0031 R2, PROTOCOL §8.3-8.4, DESIGN D9/D10 |
+| 01 | **R3** Bounded clamp: one hop, budget `minted + raw_in` (not minus used), burn first then ascending device id. | D8's rule was recursive; a transitive fixpoint is unbounded under hostile values; subtracting used claws rights back from innocent recipients after an honest overshoot. | ADR 0031 R3, PROTOCOL §5.5, DESIGN D8 |
+| 01 | **R4** A non-owner self-mint (`R[i][i]`) counts, labelled override. | Reconciles D8 "only the owner may mint" with D15's local override. | ADR 0031 R4, DESIGN D8 |
+| 01 | **R5** Roster resolution stratified (reach → conflicts → known → cutoffs → members); conflicting re-adds lock a device out. | Adds/removes/cutoffs were mutually recursive; prevents identity hijack by a re-add. | ADR 0031 R5, PROTOCOL §6.3, DESIGN D8 |
+| 01 | **R6** Genesis device id is a mesh parameter carried in `PairAccept`. | A self-add proves nothing alone. | ADR 0031 R6, PROTOCOL §9, DESIGN D10, increment 04 |
+| 01 | **R7** `local_write_ts` lifts the write but not the clock; simulator invariant 9 reworded. | Keeps a device's clock within `now + MAX_DRIFT` of observations. | ADR 0031 R7, PROTOCOL §4, increment 02 |
+| 01 | Small: payload structs live in `mesh/kinds.rs` (not `item.rs`); `encode_body` returns `Result` (floats/oversize/invalid fields are errors); `SignedItem::verify` plus `verify_with`/`decode_unverified`; `DeviceId::MIN/MAX`; extra id types (`MeshProjectId`, `CapId`, `ShareId`, `CredentialRef`). | Smaller modules; an infallible encoder would have to accept invalid bodies. | this table |
+| 02 | **R8** Device ids are derived from the three public keys (BLAKE3 derive-key, 16 bytes). | Random ids allowed key-conflict re-adds whose resolution (banning) cannot converge: whether a banned device's own adds were stored depends on timing. | ADR 0031 R8, PROTOCOL §6.1, DESIGN D5 |
+| 02 | **R9** Fork detection uses per-origin dot logs and hash chains compared at `Hello`, bisected with `ChainQuery`/`ChainReply`. Forks are recorded as replicated `fork.report` items (new kind), and a forked origin is repaired in full. | Latest-only storage makes dot-collision detection incomplete. | ADR 0031 R9, PROTOCOL §7, DESIGN D5/D6/D17 (`mesh_dots`) |
+| 02 | **R10** A known kind with an invalid payload is rejected at ingest; the valid prefix is kept. | Storing it unmaterialized lets it supersede valid entries on some devices only. | ADR R10, PROTOCOL §2.4/§3.3 |
+| 02 | **R11** Repair compares per-origin digests in `Hello`. `Want`, `RepairDigest` and `RepairWant` are unused. | Simpler; per-origin granularity is what fork repair needs. | ADR R11, PROTOCOL §8.5 |
+| 02 | **R12** Frames carry a per-direction sequence number `n`. | Reordered, duplicated or dropped frames end the session. | ADR R12, PROTOCOL §8.1 |
+| 02 | **R13** A suspected-forked origin is never streamed on the main path (simulator finding). | A session that died mid-bisection left mixed logs. | ADR R13, PROTOCOL §7.2 |
+| 02 | **R14** The dense-prefix validity rule applies only below an origin's fork point (oracle finding). | Repair delivers a forked device's items without a dot log. | ADR R14, PROTOCOL §5.6 |
+| 02 | **R15** A commit compares every overlapping hash, items and dots, with the dot log, and never extends a disagreeing log (soak finding). | Two concurrent sessions appended two branches. | ADR R15, PROTOCOL §7.2 |
+| 03 | **R16** `seq` ≤ 2^63 − 1 in the codec. | Every accepted seq must fit and sort as SQLite's signed INTEGER; repair skips the gap check, so a member could otherwise sign a seq that makes every SQLite commit fail. | ADR 0031 R16, PROTOCOL §2.1, DESIGN header |
+| 03 | **R17** No SQL view tables: the views are the in-memory `State`, rebuilt from `mesh_items` at open. | Every view value depends on the roster (cutoffs, forks); SQL copies would need full recomputation on each removal or fork, or would duplicate `mesh_items`. Readers fold rows by the `(kind, item_key)` index with `State::apply`. | ADR 0031 R17, PROTOCOL §8.6, DESIGN §D15/§D17 [Amended 03] |
+| 03 | **R18** `MeshStore::{dot_hash, dot_hashes, chain_at, held_items}` return `Result`; a failed read ends the session with `Bye(Unavailable)` (new `ByeReason`). | The dot log is unbounded and lives on disk; an empty read in place of a failed one would stream dots without items. | ADR 0031 R18, PROTOCOL §8.1/§8.6 |
+| 03 | Schema details: `mesh_items` PK `(origin, seq, hash)`, no `hlc` column, `received_at` integer ms, no separate `(kind, item_key)` index (the UNIQUE index serves it); `mesh_self` without `next_seq` (= `vv[self]+1`) and with `genesis_device`; access keys in `mesh_access_keys(epoch, …)`; `mesh_meta.value` is `ANY`; `mesh_publish_cursor` has no FK (06 decides deletion semantics). | Forks hold two items per dot; one source of truth for the next seq; rotation (04) without a migration. | ADR 0031 "Smaller storage decisions", DESIGN §D17 [Amended 03] |
+| 03 | Commits chunk by **whole origins** (never split one origin's range); one origin's range is one transaction. | A split range could log a superseded dot before the item that supersedes it. Measured: 2 000 / 10 000 items of one origin commit in ~12 / ~60 ms (release, FULL + F_FULLFSYNC); the 50 000 maximum extrapolates to ~0.3 s. | ADR 0031, PROTOCOL §8.6, DESIGN §D12 [Amended 03] |
+| 03 | Marker rule made precise: rolled back ⇔ `seq_high_water > vv[self] + 64`; a store not `ok` refuses to mint and does not trust the old mark. | `next_seq` below the mark is the normal state with block allocation. | ADR 0031, PROTOCOL §7.5, DESIGN §D5 [Amended 03] |
+| 03 | AAD binds vault **and** device id (`mesh_*_key(vault_id, device_id)`) / mesh id and epoch (`mesh_access_key(vault_id, mesh_id, epoch)`). | Stronger than vault-only binding: a leftover blob of an earlier identity never opens. | ADR 0031 |
+| 03 | Small, this table only: `identity::init` (not `init_mesh`) behind `UnlockedVault::mesh_init`; `UnlockedVault::mesh_keys` added for 04/05; `MeshError::{Storage, NotInitialized, AlreadyInMesh, IdentityMismatch, InvalidDeviceName, Forked}`; `CoreError::Mesh` is `#[error(transparent)]` (it printed twice in CLI chains); new audit event `mesh_identity_wiped` on restore; `BackupInfo.mesh_wipe` (restore only); `projects_first_schema.rs` no longer pins v20 as current; PROTOCOL §8.4 clarified: rule (a) supersession applies to every kind, the never-deleted list is about rule (b). | Required by what was built or a bug fix. | — |
+| 04 | **R19** The pairing psk is stored encrypted under the vault key (`mesh_invites.wrapped_psk`, **migration v22**); the usage split of 06 becomes **v23**. | PROTOCOL §9 stored only `blake3(token)`, from which the inviter cannot derive the psk the handshake needs. | ADR 0031 R19, PROTOCOL §9.2, DESIGN §D10/§D14/§D17 [Amended 04], 06 file |
+| 04 | **R20** A 16-byte preamble picks the handshake; pairing carries the invite hint (`blake3(token)[..8]`); the inviter answers only a live invite's hint. | The responder must choose the handshake and the invite's psk before message 1. | ADR 0031 R20, PROTOCOL §9.1-9.3 |
+| 04 | **R21** `AccessKeyUpdate` in every session; applied after the exchange's commit, bounded by `1 + removals`, equal epochs resolved by the larger BLAKE3 hash; re-removal refused. | The review found epoch poisoning (`u32::MAX`), a split on concurrent rotations, and a key travelling ahead of its removal. | ADR 0031 R21, PROTOCOL §9.5 |
+| 04 | Small, this table only: the inviter's side is `membership::accept_pairing(store, …)` (not an `UnlockedVault` method; the serving thread holds the node); `mesh_device_rename(name)` renames self only; `remove`/`leave` confirm via `--yes` in non-interactive runs (the `backup restore` pattern) rather than `confirm_default_no`; `invite --addr HOST:PORT` (plus `--wait --listen`) supplies the invite's addresses (05 publishes listen addresses); `join -` reads the invite from stdin; two checksum characters, not one; `SqliteStore::refresh` added. | Required by what was built, or stronger. | — |
+| 06 | **R23** Retention: below `horizon + 2 days` a store drops arriving `usage.counter`s at ingest (dot logged, not a rejection) and the publisher collects held ones; views stop at the horizon. | D14 said "garbage-collected on every device" and "dropped at ingest" without the clock-straddling case or where the floor lives. | ADR 0031 R23, PROTOCOL §8.4, DESIGN header [Amended 06] |
+| 06 | `model = ''` rows are published as model `(not reported)`, not skipped as "sentinels"; the split cut-over is a per-row `split_known` flag (v23), not a marker; v23 also rebuilds `mesh_publish_cursor` keyed by mesh project. | Only the writer inserts daily rows, and `''` is its "no model" value (real unpriced traffic); a migration-inserted marker row collides with restore; deletions after a rebind must go back to the right counter. | ADR 0031 "Smaller usage decisions", DESIGN §D14 [Amended 06] |
+| 06 | Small, this table only: `UsageClass` lives in `projectcost.rs` (the one classifier); `--by-device` hides the labelled total (rows are always per device); "no data from" lists active members without figures (other devices' bindings are private); `split_known_since` is derived from counters; publisher budget 5 000/hour of its own; `publish/gen` optimistic check; `mesh status` shows the publisher's last run; `Day::{next, from_unix_ms}` and `Serialize`; vault wrappers `mesh_project_*`, `mesh_publish`, `mesh_usage`, `mesh_settings`, `mesh_setting_set`; the 06 simulator item was already covered (`sim/world.rs` bumps epochs with lowered totals). | Simpler, or required by what was built. | — |
+| 05 | **R22** A `RollbackNotice` is stored per reporting device in `mesh_meta` (`rollback_hold/<reporter>`) and binds every minter on the database; it counts only while the reporter is active; a completed exchange without a repeated notice, or `mesh remove` of the reporter, clears it. | PROTOCOL §7.4 said "MUST NOT mint" without saying where the state lives or what ends it: an in-memory flag lets a CLI command fork the device; a hold with no release lets a lying member block its own removal (found by the unit test). | ADR 0031 R22, PROTOCOL §7.4, DESIGN §D5 [Amended 05] |
+| 05 | D9's "repair every 24 h" is a recorded **repair round** (`node/last_repair`), and `doctor --repair` runs one; D17's "corrupt view row" is checked as item-row corruption, and `doctor --rebuild` rewrites the item store's index columns and removes unusable rows. | Every exchange already repairs (R11); there are no view tables (R17). | ADR 0031 "Smaller node decisions", DESIGN §D13 [Amended 05] |
+| 05 | Small, this table only: the loop is `crates/mesh::runtime` (`RunningNode`), not `node.rs` (which keeps `MeshNode`); the peer table and lag/repair records are `core::mesh::peers` (shared with the desktop), backoff/targets are `crates/mesh::peers`; **Ctrl-C ends `serve` without a signal handler** (as `gateway serve`; `tethra mesh stop` is the graceful path); `--interval` (≥ 5 s) is a documented option so release binaries and smoke can use short rounds (the ms env override is debug-only); new `tethra mesh stop`; `Discovery::announce` takes the IPs too; `record_attempt` updates only existing `mesh_peers` rows; `mesh join` records the invite address that answered as a manual peer (CI found the race without it); `MeshError::{InvalidPeerAddress, RollbackHold}`, `NetError::Node`; `MeshStatusDetail.rollback_hold`; `Day::from_unix_ms`; `session::peek_session_id`; `membership::publish_listen_addrs`. | Simpler, or required by what was built. | — |
+| 07 | **Decide inside the transaction.** Every cap decision (mint, distribute, burn, grant, `used`) is computed inside the write transaction that publishes it (`SqliteStore::mint_with`); one that mints and writes nothing rolls back. | DESIGN described the reconciler as compute-then-publish; a node and a CLI command deciding from one snapshot could both give the same rights. | ADR 0032 D8, DESIGN header [Amended 07] |
+| 07 | **Policy made precise** (PROTOCOL §5.5.1): effective target = target + overrides; pending decrease = supply − max(effective target, used); a holder keeps `max(0, share − own used) + own overrides`; no ordinary requests or grants while a decrease is pending; `RightsRequest` carries `reclaim` (the owner's remainder reclaim; the 24-hour manual `cap reclaim`, during which the owner grants and distributes nothing to that device); an override lasts the month; a lower also lowers a next-month target already written. | D15 left the lower's arithmetic, the override's interaction with burns, and the owner's reclaim open; the simulator found the reclaim/grant ping-pong this closes. | ADR 0032 D3-D5, PROTOCOL §5.5.1, DESIGN [Amended 07] |
+| 07 | **Superseded caps.** Two non-frozen caps on one root project resolve to the first created (`created_hlc`, then id); the other is labelled superseded and never minted, distributed, changed or alerted on. `created_hlc` is `max(hlc_last + 1, now)`. | "One cap per project" can only be enforced locally; the test caught that `hlc_last + 1` alone tied across devices that could not see each other. | ADR 0032 D1, PROTOCOL §5.5.1 |
+| 07 | **Acks are published at the next round**, not within a 15 s in-round wait; rows waiting longer than 15 s are reported (`escrow_waiting`). | A round hook that blocks 15 s delays every exchange; the gateway polls every 5 s and rounds run every 30 s. | ADR 0032 D9, 08 file amendment |
+| 07 | Small, this table only: the module is `mesh::caps::{period, policy, view, escrow, ops, reconcile, alerts}` (the read model is `caps::view`, not `views::caps`); `projects::cap_count` counts non-frozen caps (merge guard); a forked owner freezes like a removed one; "active" also counts usage and cap figures seen; `cap.used` is published for the current and previous month and only by a device with a binding; `MeshError::{CapExists, CapFrozen}`; alert kind `mesh_spend_cap` compares with the effective target; `UnlockedVault::mesh_cap_*` take a `GatewayProbe` (core does no I/O; the CLI passes `api_tracker_mesh::node::GatewaySocket`); `TestHooks::record_mints`; `Month::{prev, first_day}` and serde; `mesh cap reclaim --from`; `mesh_cap_escrow` rows and rate-limit slots of ended months are pruned; at most 64 held `Direct`s per exchange. | Simpler, or required by what was built. | — |
+| 08 | **Accounting**: spend = `max(published, rollup + (charged − persisted at the snapshot))`, the writer confirming each charge after its commit; every in-flight request reserves the cap's p95 cost, and beside others admission needs the near-exhaustion margin after every reservation. | DESIGN described in-memory spend reset "by generation"; the read-before-DB order makes it exact without generations, and the review showed both the unbounded concurrency above the margin and the floor ordering bug. | ADR 0032 D11, DESIGN [Amended 08], gateway SI-22 |
+| 08 | **One cap in force per root**: a live cap supersedes a frozen one; a switch set on a superseded cap carries to the cap in force; `--all off` clears every switch. | A frozen cap and its replacement both covered the project (review finding). | ADR 0032 D11, PROTOCOL §5.5.1 |
+| 08 | The end-to-end runs in `crates/gateway/tests/cap_enforcement.rs`, not through the CLI; the gate's status reaches the CLI through `mesh_meta` `gate/status` (cross-platform), not the control socket; `gateway_config.cap_enforcement` follows "some cap is enforced"; the per-cap switch is `mesh_meta` `cap_enforce/<cap>`; the Windows probe is a loopback connection to the gateway's port. | The CLI cannot reach a plain-HTTP upstream (guarded TLS-only connector); the 08 file allowed either status path; one switch the node's fence reads. | DESIGN [Amended 08], 08 file |
+| 08 | Small, this table only: the refusal drains the unread body (bounded: 64 MiB, 5 s) after a half-close; `GateCapStatus.{unmetered_requests, refused_requests}`, `GateStatus.failing_open`; counter `cap_refused`; `CapReport.{gate, gate_fresh}`, `CapRow.enforced_here`; `CapGate::with_stale_after_for_test`. | Required by what was built. | — |
+| 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
+
+## Handoff notes (newest first)
+
+_(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
+pending CI runs to check first.)_
+
+### Increment 08 — Gateway cap enforcement (2026-10-28/29)
+
+**What landed.**
+- Core: `mesh::caps::gate` (`gate_snapshot` in one read transaction, folding
+  the cap/roster/fork/project items itself; `set_enforced`, `clear_enforced`,
+  `enforced_caps`; `GateStatus` persisted in `mesh_meta` `gate/status`;
+  `ack_counted`), `escrow::gateway_port`; `CapReport.{gate, gate_fresh}`,
+  `CapRow.enforced_here`; one cap in force per root (a live cap supersedes a
+  frozen one); enforcement inherited by the cap in force; alert text says
+  whether this device enforces; `UnlockedVault::mesh_cap_enforce`
+  (reauthenticated; audit `mesh_cap_enforcement_changed`).
+- Gateway: `capgate::CapGate` (Arc snapshot; charged/persisted counters;
+  per-request reservation of the p95 cost; near-exhaustion single request;
+  fail-open reasons and `failing_open`; unpriced/unmetered counts);
+  `ExchangeRecord.cap_charge` (writer confirms after commit, marks lost on a
+  dropped/failed/paused record); `forward.rs` admission before upstream, the
+  JSON 403 and the drain before close; the poller refreshes the gate every
+  poll; control `Status.{caps, caps_inactive_reason, caps_failing_open}`;
+  counter `cap_refused`.
+- Mesh crate: `GatewaySocket::new(dir, port)` (Windows: loopback connection
+  to the configured port).
+- CLI: `mesh cap enforce <cap>|--all on|off` with the explanation and reauth;
+  the gate lines in `mesh cap show` and `gateway status`.
+- Tests: `crates/gateway/tests/cap_enforcement.rs` (14), `perf.rs`
+  `perf_cap_admission_overhead`, core `mesh_caps` (+1, +1 assertion block),
+  `mesh_cli` caps test extended.
+- Docs: gateway SI-22, gateway USER_GUIDE "Spend caps (Tethra Mesh)",
+  PERFORMANCE_RESULTS; ADR 0032 D11; mesh USER_GUIDE §5, KNOWN_LIMITATIONS,
+  SECURITY_INVARIANTS (SI-9, SI-10, SI-13), TEST_PLAN, ARCHITECTURE, PROTOCOL
+  §5.5.1; DESIGN [Amended 08]; README; CHANGELOG.
+
+**Review (S+R).** `code-review` at high effort on the uncommitted diff (the
+first run hit the API rate limit; resumed). Seven findings, all confirmed and
+fixed; three were checked by undoing the fix and watching the test fail:
+1. The 403 closed the socket with the body unread → a TCP reset that SDKs
+   retry. Fixed: half-close and a bounded drain
+   (`a_refused_request_with_a_large_body_still_reads_a_clean_403_not_a_reset`,
+   fails without the drain).
+2. Requests admitted above the near-exhaustion margin ran concurrently
+   unbounded. Fixed: each in-flight request reserves the p95 cost; beside
+   others, admission needs the margin after every reservation
+   (`concurrent_requests_reserve_their_typical_cost_so_overshoot_stays_bounded`,
+   fails without the rule).
+3. Responses without usage were silently uncounted. Fixed: `unmetered`
+   counter, shown (`responses_without_usage_are_counted_as_unmetered`).
+4. Fail-open reasons were hidden when no caps were listed, and one error path
+   skipped persisting the status. Fixed: `failing_open`, printed in `gateway
+   status` and `cap show`; status persisted on the unreadable path
+   (`a_failing_gate_says_it_is_not_holding_and_an_idle_one_does_not`).
+5. `enforce --all off` left superseded caps' switches (and the global switch)
+   on, and a switch lapsed when its cap became superseded. Fixed:
+   `clear_enforced`, the cap in force inherits the switch, a superseded cap is
+   refused (`mesh_caps::caps_enforcement_follows_the_cap_in_force_and_all_off_clears_every_switch`).
+6. A frozen cap and its replacement both covered the project. Fixed: one cap
+   in force per root; a live cap supersedes a frozen one
+   (`mesh_caps::caps_removing_the_owner_freezes…`, new assertions).
+7. `max(published, local)` plus in-memory spend dropped a charge as it moved
+   into the database under a published floor. Fixed: the floor is taken after
+   the sum (`a_charge_moving_into_the_database_never_drops_out_under_a_published_floor`,
+   fails without the fix).
+
+Rejected cleanups, with reasons: computing the gate's figure apart from
+`Ledger::local_avail` (the gate adds in-memory spend the node never sees, so
+the two must differ); an early exit when no cap is enforced (status shows
+every cap's figure, and the read costs a few ms per 5 s poll). Not changed:
+near the cap a second concurrent request gets the serialized 403 even though
+rights remain; that is the specified behaviour.
+
+**For 09/10 (load-bearing).**
+- Tauri-facing core APIs: `UnlockedVault::{mesh_cap_create, mesh_cap_raise,
+  mesh_cap_lower, mesh_cap_reclaim, mesh_caps, mesh_cap_reconcile,
+  mesh_cap_enforce}`. Each that can transfer takes a `&dyn GatewayProbe`:
+  the desktop builds `api_tracker_mesh::node::GatewaySocket::new(data_dir,
+  caps::escrow::gateway_port(conn)?)`. `mesh_cap_enforce(master_password,
+  Some(cap) | None, on)` needs reauth, so it goes in the Tauri authz
+  inventory as reauth-gated.
+- The gate's status for the UI: `caps::gate::read_status(conn)` (fresh when
+  `at_ms` is within `view::GATE_STATUS_FRESH_MS`), or `CapReport.gate`.
+
+**Surprises.**
+- The review's first finding (a reset instead of the 403) is real for any
+  local refusal that leaves a body unread; only the cap refusal drains today.
+  The other `local_response` refusals (browser origin, bad host…) still close
+  with the body unread; they are protocol errors rather than SDK-facing
+  limits, so they were left as they were (note for 12's audit).
+- A CLI end-to-end against the mock upstream is impossible: the CLI's TLS-only
+  connector is a guarded production invariant. The two-device end-to-end
+  lives in the gateway crate.
+
+**Not done / honest list.**
+- Nothing in 08's scope was moved. The Windows probe and the Windows control
+  paths run in Windows CI only (never by hand).
+- The perf benchmark is ignored in CI (run by `scripts/gateway_perf.sh`).
+
+### Increment 07 — Spend caps, alerts only (2026-10-28)
+
+**What landed.**
+- `core::mesh::caps`: `period` (UTC months; agrees with
+  `budget::period_start`, never calls it), `policy` (every threshold as a
+  constant: 20% ask, 50% keep, day 20, 30-day activity, 5-minute rate limit,
+  15 s ack wait, 24 h reclaim, alerts 80/100), `view` (`caps_in`,
+  `month_figures`, `scheduled_target`, the `Ledger` with `local_avail`, the
+  `report`), `escrow` (fence, rows, `ack`), `ops` (`create`, `raise`, `lower`,
+  `reclaim`, `resolve`, `try_spend`), `reconcile` (used, escrow, mint,
+  distribute, burn; `rights_requests`, `grant`), `alerts` (`cap_alerts`).
+- `SqliteStore::mint_with` (decide and mint in one transaction; idle rolls
+  back). `TestHooks::record_mints`. `DirectMsg::RightsRequest {cap, month,
+  want, reclaim}`. `AlertKind::MeshSpendCap`. `MeshError::{CapExists,
+  CapFrozen}`. `projects::root_in`, `usage::local_month_spend_in`.
+- `crates/mesh`: `hooks::CapReconciler` after `UsagePublisher` in
+  `default_hooks()`; `session` sends `rights_requests` after the access key
+  and answers held requests after a completed exchange
+  (`directs::apply_rights_request`); `node::GatewaySocket` (the fence probe);
+  `MeshNode::{data_dir, gateway_probe}`; at most 64 held directs.
+- Vault: `mesh_cap_{create,raise,lower,reclaim,reconcile}`, `mesh_caps`
+  (each takes a `GatewayProbe`); audit `mesh_cap_created`,
+  `mesh_cap_changed`, `mesh_cap_alerts_error`; `run_monitor` raises cap alerts
+  (isolated; on failure the kind is not auto-resolved).
+- CLI: `mesh cap create|raise|lower|show|rights|reclaim` (`mesh_cap_cmd.rs`),
+  `--yes` for an override and for lower; `mesh replicate` reconciles first;
+  `mesh status` shows a caps line (`caps` in JSON).
+- Simulator: `mesh::sim::caps` + `mesh_sim::caps_*`;
+  `scripts/mesh_soak.sh --scenario caps`.
+- Docs: ADR 0032; PROTOCOL §5.5.1 and §8.1; USER_GUIDE §5; KNOWN_LIMITATIONS,
+  SECURITY_INVARIANTS (SI-10 node half, SI-13), TEST_PLAN, ARCHITECTURE,
+  THREAT_MODEL; DESIGN [Amended 07]; the 08 file's amendment; README;
+  CHANGELOG. Smoke: four cap checks.
+
+**Acceptance, each demonstrated.**
+- Cap safety over the scenario family on SQLite: `mesh_sim::caps_ci_seeds`
+  (16 seeds × 240 steps), `caps_each_injection_alone_is_exercised_and_defended`,
+  and the 10-minute release soak (test counts row).
+- Advance minting covers an owner offline across the boundary:
+  `mesh_caps::caps_advance_minting_covers_an_owner_offline_across_the_month_boundary`
+  and the simulator's boundary check (`CapsReport::boundary_checked`).
+- Lower and override semantics, explained by the CLI: `mesh_caps::caps_lower_*`,
+  `caps_two_concurrent_lowers_*`, `caps_raise_on_the_owner_mints_and_elsewhere_is_a_labelled_override`;
+  `mesh_cli::spend_caps_across_two_devices_with_a_rights_request_over_a_real_exchange`
+  (the confirmations).
+- Alerts through the existing alert system with the right labels:
+  `mesh_caps::caps_alerts_fire_at_80_and_100_percent_through_the_alert_system_without_budgets`,
+  and by hand through `tethra monitor` / `tethra alerts list`.
+- ADR 0032 written; MESH-SI-10's node half tested
+  (`mesh_caps::caps_escrow_publishes_at_once_unfenced_and_waits_for_the_gateway_ack_when_fenced`).
+- Check suite and smoke (four cap checks) green.
+
+**For 08 (load-bearing).**
+- **`gate_snapshot` inputs.** Per cap with `CapInfo::in_force()` (never a
+  superseded cap; a frozen cap keeps its current rights) for the current UTC
+  month: `view::month_figures(state, cap, month)` → this device's row
+  (`minted + received − sent − burned`), `escrow::open_amount(conn, cap,
+  month)` (pending + acked), and
+  `usage::local_month_spend_in(conn, state, project, month)` (the single
+  month-spend function). `Ledger::local_avail` composes exactly these
+  (`avail + U − max(U, local spend) − open escrow`); the gate's `avail` must
+  agree with it. Read the items (fold `mesh_items` cap/roster/fork rows, or
+  open a `SqliteStore`) and the escrow rows **in one read transaction**.
+- **The ack contract.** `mesh_cap_escrow(id, cap_id, month, to_device,
+  amount_micros, state, acked_generation, created_at, updated_at)`. The
+  gateway, after building a snapshot that deducted every `pending` and
+  `acked` row, calls `caps::escrow::ack(conn, &ids_it_counted, generation)`:
+  `pending → acked` with its snapshot generation (a gateway-local monotone
+  counter; the node only needs the state). The node publishes acked rows at
+  its next round (`settle_escrow`: re-checks the row still fits, else
+  `cancelled`), marking them `published` in the item's transaction. Closed
+  rows of ended months are pruned by the reconciler.
+- **The fence switch** is `escrow::enforcement_on(conn)`
+  (`gateway_config.cap_enforcement`, row `id = 'gateway'`). Nothing sets it yet;
+  08 adds the reauthenticated setter and the per-cap opt-in.
+- **Windows:** `GatewaySocket` answers "running" (no control channel), so with
+  enforcement on every transfer waits for the ack. Add the listener-identity
+  probe (`control::verify_listener`) in 08 (core cannot do I/O; the probe
+  lives in `crates/mesh` or the caller).
+- `caps::try_spend(store, cap, month, amount)` is the strict check the gate
+  mirrors in memory.
+
+**Surprises.**
+- **The simulator's first seed failed "lower settles"**: a member that never
+  runs the policy (the forger) was handed a share as an active device, and its
+  rights can never be burned or reclaimed by anyone else. That is the honest
+  real-world outcome (a broken or gone device keeps a lower from settling);
+  the check now requires settling only down to rights held by non-cooperating
+  devices, and KNOWN_LIMITATIONS says so.
+- **The integration tests found two real bugs**: distribution under a fence
+  reserved a share twice (it ignored a still-pending escrow row to the same
+  device), and two caps created on devices that could not see each other
+  could tie on `created_hlc` (it came from the last HLC seen), making "created
+  first" depend on random ids. Both fixed, with tests failing first. The
+  reclaim/grant interplay after a lower could ping-pong; no ordinary requests
+  or grants while a decrease is pending.
+- The simulator's month-boundary check tripped on clock skew (a device 2 s
+  behind was still in January); it waits for the largest skew now.
+- `tethra alerts list` prints "Run `tethra monitor run`" but the command is
+  `tethra monitor` (pre-existing text, not changed here).
+
+**Gotchas.**
+- The caps simulator runs real SQLite stores: `mesh::sim::caps` sets
+  `synchronous=OFF` (`SqliteStore::no_sync_for_sim`, sim builds only); with a
+  flush per commit the Windows CI job doubled (17 → 35 min).
+- `caps_family_long` is selected with `--exact` by `mesh_soak.sh`; the
+  protocol soak's `soak` filter does not pick it up.
+- Long waits on this machine throttle background processes: a soak's wall
+  time can be several times the simulation time it reports.
+
+**Not done / honest list.**
+- Nothing in 07's scope was moved.
+- The 64-direct bound per exchange has no dedicated test (it needs a crafted
+  peer flooding `Direct` frames; 12's audit can add one to `bounds.rs`).
+- The escrow waiting path runs only in tests (nothing can switch
+  enforcement on until 08).
+- The release soak's elapsed time includes building; see the test counts row
+  for the batch times.
+
+### Increment 06 — Shared projects & cross-device usage (2026-10-28)
+
+**What landed.**
+- Migration **v23**: `gateway_usage_daily.{unpriced_requests,
+  unextracted_requests, split_known}`; `mesh_publish_cursor` rebuilt with
+  `mesh_project_id` in its key (+ index). `migration_safety` still 9.
+- Gateway writer: `projectcost::UsageClass::of(usage_reported, estimate)` per
+  request → the split columns; new rows `split_known = 1`.
+- Core: `mesh::projects` (share, bind, unbind, rename, archive, merge, list,
+  resolve, root_of, bindings), `mesh::publish` (publisher, retention,
+  `apply_retention`, `publish_with_budget`, `last_report`), `mesh::usage`
+  (`usage_report`, `split_unknown`, `local_month_spend_micros`);
+  `SqliteStore::{mint_batch, set_usage_floor, usage_floor, gc_usage}`;
+  vault wrappers.
+- `crates/mesh::hooks::{UsagePublisher, default_hooks}`; `serve` runs it.
+- CLI: `mesh project share|bind|unbind|rename|archive|merge|list`,
+  `mesh usage [--project] [--month] [--day] [--by-device]`,
+  `mesh settings list|get|set`; `replicate` and `usage` publish first;
+  `status` shows `publish`; `tethra usage report` prints a stderr hint.
+- Docs: gateway SI-19 amendment and PRIVACY deletion note; USER_GUIDE §4;
+  ARCHITECTURE "Usage publishing"; KNOWN_LIMITATIONS "Usage and cost";
+  SECURITY_INVARIANTS SI-11/SI-13; ADR 0031 R23 + smaller decisions;
+  PROTOCOL §8.4; DESIGN [Amended 06]; TEST_PLAN; README; CHANGELOG.
+- Smoke: share on A, seed A's rollup with `sqlite3`, A's node, B replicates,
+  binds, and `mesh usage --json` shows A's labelled numbers (9 checks).
+
+**For 07 and 08 (load-bearing).**
+- **Local month spend:** `core::mesh::usage::local_month_spend_micros(store,
+  mesh_project, month)` sums this device's `gateway_usage_daily` estimate for
+  every local project bound to the mesh project's root. Use it; do not write a
+  second one.
+- **Round-hook order:** `hooks::default_hooks()` = `[UsagePublisher]`. Add the
+  cap reconciler **after** it, so caps see this round's usage. The CLI and the
+  desktop both take `default_hooks()`.
+- Cap fixtures: `mesh_usage::merge_folds…` mints `CapDef`s directly;
+  `projects::cap_count` is the merge guard 07 keeps working.
+- Own counters: `publish::own_counter(store, key)`; all counters:
+  `store.state().usage` (`OwnerCounterMap<UsageKey, UsageTotals>`), admitted
+  through `roster.is_admitted(origin, entry.seq)`.
+
+**Surprises.**
+- **Windows CI caught a lost update** (`40745888639`, Windows job of `dc6b110`:
+  `node::three_nodes_converge…` timed out waiting for "charlie"). A running
+  node published its addresses in `device.info` with the name it had read
+  before its write transaction, so a `mesh rename` made by another process in
+  between was overwritten by the node's later LWW write. Reproduced
+  deterministically (`mesh_membership::a_rename_and_an_address_publish…`,
+  failing first) and fixed with `SqliteStore::mint_from`: the draft is built
+  from the state inside the transaction, after reloading other processes'
+  writes. `project.meta` edits use it too. This was a 05 bug that 05's CI runs
+  did not hit.
+- **Self-review caught an unbind bug** after the first push: the publisher read
+  only bound projects' rows, so an unbound project's rows looked deleted and its
+  published usage was taken back. It now also reads every project with cursor
+  entries (`mesh_usage::unbinding_keeps_what_was_published…`, written failing
+  first).
+- `model = ''` in the rollup is real traffic (the writer's "no model"), not a
+  sentinel; skipping it as D14 said would have hidden unpriced usage.
+- A migration may not insert rows: `restore_v2` inserts every backed-up row
+  into a freshly migrated database (first attempt used `vault_meta`; the
+  restore tests failed with a UNIQUE violation).
+- `request_count − usage_event_count` already gives "not extracted" for every
+  row, including old ones; only priced vs unpriced was lost before v23.
+
+**Not done / honest list.**
+- Nothing in 06's scope was moved. The simulator item needed no change (epoch
+  bumps with lowered totals were already in the workload); the oracle and
+  simulator run with no usage floor, so R23's ingest drop is covered by
+  `mesh_usage::the_retention_sweep…` and the store unit paths, not by the
+  simulator.
+
+### Increment 05 — Node runtime (2026-10-28)
+
+**What landed.**
+- `crates/mesh`: `runtime` (`RunningNode`, `NodeConfig`, `RoundHook`,
+  `StopCondition` with `Never`/`SessionAlive`/`Deadline`/`StopFlag`/`AnyOf`,
+  `StopReport{reason, keys_dropped}`), `peers` (`Jitter`, `Scheduler`,
+  `gossip_addrs`, `targets`), `instance` (claim, nonce, `ControlServer`,
+  `Request`/`Response`/`NodeStatus`, `send`/`request`/`status`/`stop`/
+  `running_pid`), `discover` (`Discovery`, `MdnsDiscovery`, `FakeDiscovery`,
+  `tag`/`txt`/`recognises`), `doctor`. `MeshNode` gained shared session slots
+  (`try_session`, in + out ≤ 8); `serve` uses them. `bind.rs` binds the
+  control socket too.
+- Core: `mesh::peers` (peer table, lag and repair records, `backoff_ms`),
+  `mesh::doctor` (store-side checks, `--rebuild`), `SqliteStore::{hold_minting,
+  settle_rollback_holds, rollback_hold}` (R22), `membership::{publish_listen_addrs,
+  published_listen_addrs}`, `Session::peer_hello`, `UnlockedVault::{mesh_peer_add,
+  mesh_peer_remove, mesh_peers, mesh_doctor}`.
+- CLI: `serve` is the full node (`--discover`, `--advertise`, `--interval`,
+  `--max-runtime`), `stop`, `replicate` (through the node, else one-shot with
+  every known peer), `peer add|list|remove`, `status` (node, peers, lag,
+  address changes, rollback hold, skew lines), `doctor [--rebuild] [--repair]`.
+- Dependencies: `mdns-sd` 0.21.6 (no default features) and `if-addrs` 0.15;
+  new in the lockfile: `flume`, `if-addrs`, `mdns-sd`, `socket-pktinfo`,
+  `spin`; `libc` 0.2.186 → 0.2.191 (required by `socket-pktinfo`).
+- Docs: `docs/mesh/USER_GUIDE.md` (new), ARCHITECTURE "Runtime",
+  KNOWN_LIMITATIONS "Running the node", SECURITY_INVARIANTS (SI-1, 5, 7, 8,
+  12, 14, 15), ADR 0031 R22 + smaller decisions + dependencies, PROTOCOL §7.4,
+  TEST_PLAN, DESIGN [Amended 05], README, CHANGELOG.
+- Smoke: a two-node block where B's node brings A's rename over by itself
+  (5 s rounds), status/doctor checks, a second node refused, and both nodes
+  stopped through the control socket.
+
+**The round-hook API (for 06 and 07).**
+```rust
+pub trait RoundHook: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn before_round(&self, node: &MeshNode) -> NetResult<()>;
+}
+// NodeConfig.hooks: Vec<Arc<dyn RoundHook>>, run in order before every round
+// (scheduled, replicate-now and repair rounds alike).
+```
+- A hook mints through `node.store()` (a `MutexGuard<SqliteStore>`, refreshed)
+  and `node.keys().signing_key()`. Keep the guard short: exchanges lock the same
+  store between frames.
+- A mint may be refused with `MeshError::RollbackHold`, `IdentityMismatch` or
+  `Forked` (`session::is_mint_refusal(&e)`); treat that as "not now".
+- An error is shown as `status.node.last_hook_error` and logged through
+  `NodeConfig.log`; the round continues.
+- The CLI builds `NodeConfig` in `apps/cli/src/mesh_cmd.rs::serve_node`: add
+  hooks there (06: the usage publisher, which also runs at the start of
+  `mesh replicate`). The desktop (09) will build its own.
+- `Direct` messages are dispatched in `crates/mesh/src/directs.rs::handle`
+  (07: `RightsRequest`).
+
+**Running nodes with short intervals in tests.**
+- In-process: `tests/common::{node_config(ms), run_node(dev, cfg, clock, stop)}`
+  (127.0.0.1:0, fixed jitter seed). `RunningNode::{listen_addrs, status, stop,
+  replicate_now, wait}`; `wait()` returns `StopReport` and joins everything.
+- A `ManualClock` drives rounds and backoff: the loop polls every 100 ms of
+  real time and runs a round when the injected clock passes the next round
+  (see `node::an_unreachable_peer_is_retried_with_exponential_backoff`).
+- CLI tests: `TETHRA_MESH_INTERVAL_MS` (debug builds only, ≥ 50 ms); release
+  binaries: `--interval 5` (the minimum).
+- `FakeDiscovery::network()` + `.join()` per node; never `MdnsDiscovery::new`
+  in a test (a guard test scans every test source).
+
+**Surprises.**
+- **CI caught a pairing race.** `node::three_nodes_converge…` failed on Linux
+  CI (`40737167919`): a device that paired before its inviter's node had
+  published an address knew no one to dial. Fixed in product code (`join`
+  records the invite's answering address as a peer) and the test now waits for
+  each node's first round. Doctor also opened the store to read address
+  changes, so it failed on a store that no longer loads; it reads them from the
+  vault connection now (`doctor::a_corrupt_item_row…`).
+- **The rollback hold could deadlock removal.** A hold that only satisfaction
+  releases would block `mesh remove` of a member that reports falsely (a
+  removal is a mint). Found by the unit test; fixed by R22's release rules.
+- **Unix socket path limit.** The scratchpad directory of this session was
+  over 100 bytes, so `serve` refused with the long-path error. Smoke's work dir
+  is ~96 bytes on macOS (`$TMPDIR/api-tracker-smoke.XXXXXX/mesh-a/mesh/node.sock`)
+  — close to the limit; use `mktemp -d` dirs for manual runs.
+- Learned in the manual run: a node publishes its address and the other side
+  starts dialling it by gossip within a round, so a 2-device mesh needs only
+  one `peer add`.
+
+**Gotchas.**
+- The node's per-IP handshake budget (10/min) applies to its peers too: with
+  `--interval 5` two nodes on one IP stay within it only for short runs (smoke
+  is fine). Tests use `test_limits()` (1 000/min).
+- `serve`'s stdout carries only the `Listening on` lines (tests read them and
+  drop the pipe); everything later goes to stderr through write-and-ignore.
+- `mesh_meta` now also holds `node/peer/<device>` (JSON), `node/last_repair`
+  (JSON), `node/addr_changed/<addr>` (JSON) and `rollback_hold/<device>`
+  (integer). The store's loader ignores non-integer values; only
+  `rollback_hold/` is loaded into the mirror.
+
+**Not done / honest list.**
+- Nothing in 05's scope was moved.
+- mDNS was not exercised on a real network (the safety rules forbid multicast
+  on this machine; CI never multicasts). `MdnsDiscovery` compiles against
+  `mdns-sd` 0.21.6's API and is reviewed, not run. KNOWN_LIMITATIONS says so.
+- A removed device cannot learn of its own removal in practice (every member
+  that knows refuses it), so `StopReason::Removed` fires only in the rare case
+  it does; such a node keeps running, refused by everyone, until stopped.
+- The Windows control channel (loopback TCP) and node run in Windows CI's
+  automated tests (`-p api-tracker-mesh`; they passed in `40737167919`, about
+  19 minutes for the whole Windows job), but were never run by hand.
+
+### Increment 04 — Transport & pairing (2026-10-27)
+
+**What landed.**
+- `crates/mesh` (`api-tracker-mesh`, `#![forbid(unsafe_code)]`, std threads,
+  `snow` 0.10.0). Modules: `bind` (the only bind), `noise`, `wire` (preamble,
+  `u16` Noise messages, 1 MiB `u32` frames), `handshake`, `session` (one
+  exchange, with a writer thread), `pair`, `serve`, `replicate`, `directs`
+  and `node` (`MeshNode`, `TransportLimits`).
+- Core: `mesh::invite` (token, invite string with a 2-character checksum,
+  `PairRequest`/`PairAccept`, the redacting `AccessKey`) and `mesh::membership`
+  (`PendingIdentity`, `MeshVault`, `accept_pairing`, `devices`, `rename`,
+  `remove` with rotation, `mint_self_remove`, `log_exchange`,
+  `invite_is_live`, `max_access_epoch`).
+- Core API: `UnlockedVault::{mesh_vault, mesh_open_store, mesh_invite_create,
+  mesh_join, mesh_devices, mesh_device_rename, mesh_device_remove, mesh_leave}`
+  and `SqliteStore::refresh`. `Roster::added_by`. `DirectMsg::AccessKeyUpdate`
+  and `Session::direct`.
+- Migration v22 (`mesh_invites.wrapped_psk`).
+- CLI: `mesh invite|join|devices|rename|remove|leave|serve|replicate`.
+- CI lists include `-p api-tracker-mesh` (clippy, tests, Windows tests).
+- Tests: `crates/mesh/tests/{noise_spike,pairing,replication,bounds,bind_guard}.rs`,
+  `crates/gateway/tests/no_mesh_dependency.rs`,
+  `crates/core/tests/mesh_membership.rs`, `mesh_schema` (v22), and the
+  three-device CLI test.
+- Smoke: a two-node block on 127.0.0.1.
+
+**For 05 (load-bearing).**
+- **Where the outbound loop plugs in.** `serve::serve(node: Arc<MeshNode>,
+  listeners, stop)` is the inbound loop. The outbound loop should share the
+  same `Arc<MeshNode>` and call `replicate::replicate_once(&node, addr)` (it
+  logs to `mesh_exchange_log`, tries every resolved address and the previous
+  access key). Session concurrency lives only in `serve`'s
+  `active`/`max_sessions` counter today; the node should count outbound
+  sessions against the same 8.
+- **Building the node.** `MeshNode::open(&vault, clock, limits)` runs
+  `identity::preflight` (marker and fork) and holds `MeshKeys` + `MeshVault`.
+  `node.store()` locks *and refreshes* the store.
+- **`RollbackNotice`** is ignored in `directs::handle` (one-shot exchanges);
+  05 must make the node stop minting until `vv[self] ≥ held_seq`.
+- **`serve` prints `Listening on <addr>`** on stdout per listener (tests and
+  smoke parse it). It stops only when killed; graceful stop is the `stop`
+  closure (05: control socket `Stop`).
+
+**For 07.**
+- The `Direct` dispatch point is `crates/mesh/src/directs.rs::handle`. It
+  returns `Some(msg)` for messages to apply after the exchange's commit (as
+  `AccessKeyUpdate` is), or handles them in place. Add `RightsRequest` there
+  and to `proto::DirectMsg`.
+
+**Review (S+R).** `code-review` skill at `high` on the uncommitted increment
+diff. All 10 findings were confirmed and fixed with tests; none were rejected:
+1. Access-key epoch poisoning (`u32::MAX` blocks every later rotation) →
+   bound `epoch ≤ 1 + removals` (`mesh_membership::an_access_key_epoch_must_be_justified_by_removals`).
+2. Concurrent rotations split the mesh → equal epochs resolve to the larger
+   BLAKE3 hash (`two_keys_for_one_epoch_converge_on_the_larger_hash`).
+3. A key applied before the removal that justifies it, then handed to the
+   removed device → keys are held until after the exchange's commit
+   (`session.rs`, `directs::apply_access_key`) and bounded as in 1.
+4. The smoke check "the invite cannot be used again" was vacuous (the joiner
+   was already in a mesh) → a third, fresh vault whose join fails and leaves
+   it in no mesh. (A used invite no longer matches at the inviter, which closes
+   without replying; "already used" appears only when two joiners race while
+   the invite is live.)
+5. `invite --wait` re-implemented liveness in CLI SQL without the attempt
+   limit → `membership::invite_is_live` in core.
+6. Only the first resolved address was dialed (`localhost` → `::1`) → every
+   address (`replication::a_name_that_resolves_to_several_addresses_reaches_the_ipv4_listener`).
+7. `join` gave up after the first failing invite address → the next address on
+   transport errors (`pairing::an_invite_whose_first_address_is_dead_still_pairs_through_the_next`).
+8. Removing an already-removed device rotated again → `AlreadyRemoved`
+   (`replication::a_removed_device_is_refused…`).
+9. No previous key after skipping epochs → the newest stored epoch below the
+   current one (`the_previous_key_is_the_newest_below_the_current_even_after_a_skip`).
+10. A removed or forked device could still invite or accept pairings →
+    `NotActive` (`a_device_that_left_its_roster_cannot_invite…`).
+
+**Surprises.**
+- PROTOCOL §9's "store `blake3(token)`" could not work with a token-derived
+  psk (R19).
+- A serving node's mirror only reloaded on its own writes, so a removal made
+  by a CLI command was invisible to the handshake check. Fixed with
+  `SqliteStore::refresh` in `MeshNode::store()`.
+- `snow` does not zeroize its internal key copies (KNOWN_LIMITATIONS).
+
+**Gotchas.**
+- Every test connects from 127.0.0.1, so tests set
+  `handshakes_per_ip_per_minute: 1_000` (`tests/common::test_limits`). Only the
+  flood test uses a low limit.
+- Vaults are `Send` but not `Sync`: move a vault into a thread rather than
+  sharing a reference to it.
+
+### Increment 03 — Persistence & identity (2026-10-27)
+
+**What landed.**
+- Migration v21 (`db.rs`): 14 tables — `mesh_meta`, `mesh_self`, `mesh_access_keys`,
+  `mesh_items`, `mesh_vv`, `mesh_dots`, `mesh_fork_evidence`, `mesh_peers` (05),
+  `mesh_invites` (04), `mesh_project_bindings` (06), `mesh_publish_cursor` (06),
+  `mesh_cap_escrow` (07/08), `mesh_exchange_log` (04/05), `mesh_share_imports` (11) —
+  plus `gateway_config.cap_enforcement`. All STRICT with CHECKs.
+- `core::mesh::sqlite_store::SqliteStore`, `core::mesh::marker`, `core::mesh::identity`,
+  `core::mesh::sim::sqlite` (the conformance factory).
+- `UnlockedVault::{mesh_init, mesh_status, mesh_keys}`; the restore hook in
+  `backup::restore_backup`.
+- CLI `tethra mesh init [--name]` and `tethra mesh status` (both `--json`).
+- Tests: `tests/mesh_schema.rs`, `tests/mesh_store_conformance.rs`,
+  `apps/cli/tests/mesh_cli.rs`, and unit tests in `sqlite_store`, `identity`,
+  `marker` and `proto`.
+- Smoke has a `-- mesh --` block (11 checks).
+
+**How 04 gets what it needs (load-bearing).**
+- **Keys.** Call `vault.mesh_keys()?`, which returns `identity::MeshKeys`:
+  - `signing_key()` gives the item-signing `&SigningKeyPair`;
+  - `expose_noise_secret()` gives the X25519 static secret, already clamped, and
+    `noise_pub()` its public key;
+  - `expose_access_key()` and `access_epoch()` give the psk0 key and its epoch;
+  - `device_id()`, `mesh_id()` and `genesis_device()` give the ids.
+
+  There is no reauth (D5: the node runs only while unlocked), and the sealing key is
+  never in it. The public keys are derived with `crypto_box`'s X25519
+  (`identity::x25519_public`). **04 should assert that snow's public key for
+  `expose_noise_secret()` equals `noise_pub()`.**
+- **Noise public keys of the roster.** Use
+  `store.state().roster.keys(&device)` → `DeviceKeys { sign_pub, noise_pub, seal_pub }`.
+  They come from `roster.add` items, and `is_active(&d)` is the MESH-SI-2 check. This
+  device's own `noise_pub` is in `mesh_self.noise_pub` / `MeshSelfInfo.noise_pub`.
+- **Opening the store.** Call
+  `identity::open_store(&db_path, &data_dir, clock) -> Option<SqliteStore>`. It opens
+  its own connection via `open_at_current_version`. Run `identity::preflight(&store)`
+  before starting a node: it fails on a bad marker (`IdentityMismatch`) or a fork
+  report naming this device (`Forked`).
+- **The session must handle `ByeReason::Unavailable`** (R18). `proto` already does:
+  `Action::Close(CloseReason::Aborted("local storage error"))`.
+- **Joining** needs a new identity path inside an existing mesh: the keys like
+  `identity::init`, but with the received `mesh_id`/`genesis`/access key and **no**
+  genesis items.
+  - Write the marker (mark 0 is fine) **before** the joiner's first mint; without a
+    marker the store refuses to mint (`Missing`).
+  - Reuse the private helpers in `identity.rs`. They are `x25519_generate`, `random_key`,
+    `delete_mesh_rows` and the `mesh_self` insert, so factor them rather than copying.
+- **`mesh leave`.** `identity::leave_local_wipe(conn, data_dir)` does the local half.
+  The `AlreadyInMesh`, `IdentityMismatch` and `Forked` error texts already tell users to
+  run `tethra mesh leave`, **which 04 must add**.
+
+**Surprises and bugs found (all fixed):**
+1. **Marker trust at open (real bug).** `SqliteStore::open` cached the marker's mark
+   whenever the marker *named* this identity. A rolled-back database still names it,
+   so it would have minted seqs below the cached mark without re-checking — reusing
+   seqs. Now the mark is trusted only when the classification is `ok`. The rollback
+   test exercises the real path (`copies_and_rollbacks_are_detected_and_refuse_to_mint`).
+2. **Harness bug.** A simulated commit crash during the fault-free quiescence phase
+   left a device down for the rest of the run (seed 22 shrank to 457 steps). Now
+   `SimStore::calm()` turns store faults off before the calm rounds, after two
+   explicit crash-prone catch-up rounds (`CRASHY_CATCH_UP_ROUNDS`). Those two rounds
+   are where the large multi-origin commits happen; during the step phase, most
+   sessions abort under network faults.
+3. **`CoreError::Mesh` printed twice** in CLI error chains (`{0}` + `#[from]`); it is now
+   `#[error(transparent)]`.
+
+**Conformance facts.**
+- `SqliteFactory` defaults: chunk size 1 (every origin is its own transaction) and
+  250‰ of splittable commits crash.
+- With crashes off, a SQLite run has **the same trace hash** as a `MemStore` run
+  (`without_crashes_sqlite_runs_are_identical_to_memstore_runs`). The 02 replay hash
+  and the regression seeds are untouched, because the world's RNG stream is unchanged.
+- Release soak: **600 seeds × 2 000 steps with crashes, 0 failing, 172 s**
+  (`MESH_SIM_START=10000 MESH_SIM_COUNT=600 MESH_SIM_STEPS=2000 cargo test --release -p api-tracker-core --test mesh_store_conformance soak -- --ignored`).
+- `thirty_seeds_with_crashes_between_chunks` takes about 13 s locally. Windows CI ran
+  the whole suite green.
+
+**Measured (release, this Mac, `synchronous=FULL` + F_FULLFSYNC):**
+- Committing 500 / 2 000 / 10 000 items of one origin in one transaction takes
+  7.4 ms / 11.9 ms / 60 ms (`mesh_store_conformance::commit_timing`, ignored).
+- Extrapolated, the 50 000-row session maximum is about 0.3 s, a little over D12's
+  ~250 ms. That is the documented cost of never splitting one origin.
+- Each **mint** is its own fsynced transaction: about 5.5 ms each (12 500 mints in
+  about 69 s while setting up that test). If a later increment mints many items at
+  once (the 06 publisher), give it a batch-mint path that uses one `write`.
+
+**Environment gotchas.**
+- `scripts/smoke.sh` now runs 151 checks, and the `migration_safety` pin (`ok. 9`) holds.
+- **Flaky, unrelated test.** `git_execution_canaries::each_canary_is_armed_against_unhardened_git`
+  failed once ("clean/smudge filters" did not fire against unhardened git), then passed
+  5/5 on rerun. It drives real `git`, so it looks like a racy-git stat timing issue. It is
+  not mesh code; rerun it before treating it as a regression.
+- Python heredocs used to edit Rust swallow `\`-newline string continuations. Check
+  any multi-line Rust string after editing it that way.
+- A Bash call containing `rm -rf "$(…)"` is refused whole by the harness's safety
+  check, including any edits earlier in the same call. Remove temp dirs by literal path.
+- The CI-toolchain clippy target dir for this session was
+  `<scratchpad>/target199` (rebuilds from scratch in about 3 min).
+
+**Not done / honest list.**
+- Nothing in 03's scope was moved.
+- `mesh doctor` and `--rebuild` belong to 05. The building blocks exist:
+  `SqliteStore::{rebuild_views, verify_against_disk, rematerialize}` and
+  `identity::preflight`.
+- "A forked node refuses to run" exists as `preflight`. The node that calls it is 05.
+- The device name defaults to the `hostname` command (or `COMPUTERNAME`) and falls back
+  to `this-device`. 04 may want a prompt.
+
+### Increment 02 — Sans-IO protocol & simulator (2026-10-26/27)
+
+**What landed** (all in `crates/core/src/mesh/`, still pure and sans-IO):
+- `chain` (dot chains and origin digests).
+- `store` (the `MeshStore` trait, `GenesisInfo`, `CommitBatch`, `ForkEvidence`, `Draft`,
+  `HlcPolicy`, `Stats`).
+- `memstore` (the reference store).
+- `views` (the CRDT containers, `rebuild`, `State::expected`).
+- `proto` (the session).
+- `sim::{world, oracle, oracle_api}`.
+- `crates/core/tests/mesh_sim.rs` and `scripts/mesh_soak.sh`.
+- The contract changes: key-derived ids, `fork.report`, and the roster without
+  conflicts.
+
+**`MeshStore` surface that 03's `SqliteStore` must implement:**
+- `genesis()`, `self_id()`, `vv()`, `state() -> &views::State` (keep an in-memory
+  `State`, rebuilt at open), `stats()`;
+- `dot_hash(o, s)`, `chain_at(o, s)` (seq 0 = zero), `origin_digest(o)`;
+- `held_items(o, from_excl, to_incl)` (seq order; forks can hold two per dot);
+- `ingest_rate_used(o)`, `now_ms()`, `hlc_last()`;
+- `commit(CommitBatch) -> CommitOutcome`, `mint(&SigningKeyPair, Draft)`,
+  `record_rejected(n)`.
+
+`MemStore` is the reference. Copy its validate-then-apply commit, including the R15
+overlap comparison, exactly; the 03 file now spells this out.
+
+**The oracle** (`sim/oracle.rs`, 1 860 lines, 32 tests):
+- **Isolation.** It was written by an isolated subagent from PROTOCOL.md alone. Its
+  imports show it never used `crdt`, `views`, `proto`, `memstore` or `world`.
+- **Tooling quirk.** The agent's worktree was created from `main` (5ec8198), not this
+  branch. The agent therefore built from a read-only `git archive` export of `a9fddeb`
+  in the session scratchpad, and the file was copied in by the orchestrator.
+- **Ambiguity report** (13 items) and how each was resolved:
+  - 1, 4-8, 11 and 12: the oracle's literal reading equals the implementation's; no
+    change.
+  - 2: moot under the amended rule 4.
+  - 3 (genesis membership when its self-add is cut off): the spec was clarified to the
+    implementation's reading (the genesis is always a member once its self-add
+    exists), and the oracle was changed to match.
+  - 9: definitions of `clamped` and the totals were added to §5.5.
+  - 10: the collusion caveat was added to §5.5.
+  - 13: the stale `kinds.rs` doc comment was fixed.
+  - Its `oracle_api` note: the `Mutex` for its cache is fine.
+
+**Oracle/implementation disagreement log** (the evidence the oracle earned its keep):
+1. **29/200 seeds, harness bug.** The simulator's "lost item" filter dropped items
+   superseded before sending whose dot hashes did travel, so the oracle saw gaps.
+   *Fix:* an item is lost only if neither it nor its dot hash reached a device in
+   contact.
+2. **Seed 163, spec bug (R14).** A forked device's own `fork.report` arrives by repair,
+   and the dense-prefix rule discarded it in the oracle. *Fix:* rule 4 applies only
+   below the fork point; the oracle was changed, and a test was added
+   (`above_its_fork_point_a_forked_origin_needs_no_dense_prefix`).
+3. **5 soak seeds, contract gap.** The forked device's superseded items never reached
+   contact even as dots, so the oracle saw a gap below a report that devices held.
+   *Fix:* the contract gained `observe_unreached` (the item fills its dot for rule 4
+   and nothing else); the oracle implements it; PROTOCOL §5.6 "What converges" says
+   so.
+
+**Simulator-found bugs without the oracle:**
+- **Harness bugs:** the partition table was indexed by later joiners; the fork
+  "truth" was taken from lost items; the fork invariant wrongly owed detection for
+  out-of-contact devices.
+- **Protocol bugs:**
+  - **R13** (seeds 1000, 1004, 1178): a mid-bisection abort mixed logs.
+  - **R15** (soak seeds 1008759, 1011053, 1018365 and others): concurrent sessions
+    appended two branches.
+
+**The final fork invariant** is a range: true divergence ≤ recorded ≤ divergence
+visible among devices in contact. It is never early, never later than can be seen,
+and allows a valid earlier report from a device that has since been cut off. The
+increment file had "exactly the divergence"; the range is the provable property.
+
+**Regression seeds** (`mesh_sim::regression_seeds`):
+- 4, 15, 34, 163, 1000, 1004 and 1178 at 2 000 steps;
+- 1008114, 1008759, 1011053, 1012130, 1015682, 1016234, 1017206, 1017426, 1018365,
+  1019427 and 1021656 at 3 000 steps.
+
+**Each defence disabled → the simulator fails** (seeds 0-199 × 2 000 steps, first
+failure; not committed):
+| Mutation | First failure |
+|---|---|
+| M1: signature check in `proto::check` removed | `MESH_SIM_SEED=0`, invariant 6 (node committed a forged item) |
+| M2: supersession check in `MemStore::apply_entry` removed | `MESH_SIM_SEED=1`, the replay check (replaying an accepted item changed the store) |
+| M3: `Hello` chain comparison off | no failure in 200 seeds: the commit-time overlap check (R15) catches forks too |
+| M3b: chain comparison, commit overlap check and repair collision check all off | `MESH_SIM_SEED=4`, invariant 1 (a forked origin's item is held outside the log) |
+| M4: gap check, session completeness and store completeness off | `MESH_SIM_SEED=2`, invariant 8 (a session staged 50 001) |
+| M5: drift clamp in `HlcClock::observe` removed | `MESH_SIM_SEED=0`, invariant 9 (clock beyond now + drift) |
+
+The mid-session-crash defence (Commit-only application) is shown by
+`proto::tests::a_dead_sender_leaves_nothing_half_applied` and by crashes in every seed.
+
+**Purity** (acceptance):
+`grep -nE "std::net|std::fs|SystemTime|std::thread|thread::|Instant|TcpStream|File::"`
+over `proto.rs`, `views.rs`, `store.rs`, `memstore.rs`, `chain.rs` and `crdt/*.rs`
+gives no matches (exit 1).
+
+**Replay determinism.** `MESH_SIM_SEED=12345 MESH_SIM_STEPS=2000` gives trace hash
+`48ed5b75e81cb919…`, identical over two runs (the `replay` test asserts it).
+
+**Soaks** (`scripts/mesh_soak.sh`, release):
+1. 22 000 seeds × 3 000 steps from 1 000 000 in 1 403 s: 11 failing seeds, all fixed
+   (R15, the fork-invariant range and the `observe_unreached` contract) and now
+   regression tests.
+2. After the fixes, 10 minutes from 2 000 000: **58 000 seeds × 3 000 steps in 606 s, 0 failing** (`bash scripts/mesh_soak.sh --minutes 10 --start 2000000 --batch 2000`).
+
+**Environment notes.**
+- `ci_200_seeds` takes about 10 s on 10 cores; expect 25-40 s on CI's 4 cores.
+- The oracle's `expected()` takes about 8 ms over 2 000 items.
+- Debug sign/verify costs about 51/77 µs with the crypto-only `opt-level = 3` override
+  in the workspace `Cargo.toml`, against 205/315 µs without it.
+
+**Left for later increments:**
+- 03: the SQLite store, the clone marker, the restore wipe, "a forked node refuses to
+  run".
+- 04: transport, session concurrency and timeouts.
+- 07: cap-policy views (owner labels and overrides; who may mint).
+
+The `cap.def` conflict rule and the `share.*` ordering are specified and implemented
+(§5.6), not deferred.
+
+### Increment 01 — Foundations & decision (2026-10-26)
+
+**What landed.** ADR 0031; `docs/mesh/{ARCHITECTURE,PROTOCOL,SECURITY_INVARIANTS,THREAT_MODEL,KNOWN_LIMITATIONS,TEST_PLAN}.md`;
+the DESIGN §D2 amendments (CLAUDE.md, PRODUCT_SPEC, root THREAT_MODEL) plus a README
+pointer and a CHANGELOG entry; and `crates/core/src/mesh/` (pure, sans-IO) with its tests.
+There are no user-visible commands yet.
+
+**Public API of `core::mesh` that 02 builds on** (one line each):
+- `clock`: `Clock` (`now_ms`), `SystemClock`, `ManualClock::{new,set,advance}`. `Clock` is
+  implemented for `&C` and `Arc<C>`, so the simulator shares one `Arc<ManualClock>` per node.
+- `hlc`: `Hlc(u64)`, which is 48-bit ms plus a 16-bit logical counter
+  (`new/from_raw/raw/physical/logical/successor`, `ZERO`, `MAX`). `HlcClock<C>` provides
+  `now`, `observe -> Observation{clamped, skew_ms}`, `local_write_ts(Option<Hlc>)`,
+  `restore(high_water)`, `last` and `drift_bound`. `MAX_DRIFT_MS = 60_000`.
+- `dot`: `DeviceId`, `MeshId`, `MeshProjectId`, `CapId`, `ShareId`, `CredentialRef`. Each is
+  a 16-byte id with `random/parse/to_hex/from_bytes/as_bytes` and strict lowercase-hex
+  serde, plus `MIN`/`MAX` consts. `Dot{origin, seq}`.
+- `vv`: `VersionVector` with `get`, `contains(dot)`, `advance_to`, `join`, `dominates`,
+  `missing_from(&peer) -> Vec<(origin, from_excl, to_incl)>` and `iter`. Zero entries are
+  never stored.
+- `codec`: `ItemBody{v,mesh,origin,seq,hlc,kind,key,payload: Value}`, `ItemBody::new`,
+  `encode_body -> Result<Vec<u8>>` and `decode_body -> Result<ItemBody>`. Decoding
+  re-encodes and requires byte equality. Constants: `MAX_ITEM_BYTES` (65 536),
+  `MAX_BODY_BYTES`, `SIGNATURE_LEN`, `MAX_KIND_BYTES`, `MAX_KEY_BYTES`, `MAX_PAYLOAD_DEPTH`.
+- `sign`: `SigningKeyPair::{generate, from_secret_bytes, expose_secret_bytes, verifying_key,
+  public_key}`, which redacts in Debug/Display and zeroizes on drop. Also
+  `PublicKeyBytes::{parse,to_hex,to_verifying_key}` (rejects weak keys),
+  `verify_body_signature` and `ITEM_SIGNATURE_DOMAIN`.
+- `item`: `SignedItem::{sign, from_parts, from_wire, to_wire, body_bytes, sig, hash, wire_len,
+  decode_unverified, verify(body,sig,key,mesh), verify_with}`. The wire form is
+  `body || sig`. `ItemHash` = BLAKE3(wire).
+- `kinds`: the `ItemKind` trait (`KIND`, `item_key`, `payload`, `parse`, `to_body`) and one
+  typed struct per v1 kind, each with `TryFrom<&ItemBody>`. Also `TypedItem::parse`
+  (`Unknown` for unknown kinds), `UsageKey`, `UsageTotals`, `Day`, `Month`, `names::*` and
+  `KNOWN_KINDS`.
+- `crdt`: `SwEntry<T>{seq, hash, value}` (the higher `(seq, hash)` wins), the `Admit` trait
+  (implemented for closures and for `Roster`) and `AdmitAll`. Plus:
+  - `lww_map::{LwwRegister, LwwMap, LwwValue}` (`winner/value/winning_hlc`);
+  - `owner_counter::{OwnerCounterMap, CounterValue (lattice_join/lattice_le), Totals,
+    InsertOutcome{changed, regression}}`;
+  - `roster::{Roster (apply_add/apply_remove/record_fork/join; is_known/keys/is_member/
+    is_removed/cutoff/fork_seq/is_conflicted/is_active/is_admitted), DeviceKeys, AddRecord}`;
+  - `bounded::{BoundedCounter (apply_rights/apply_used/join/view/avail/can_spend/
+    prepare_{spend,transfer,burn,mint}), BoundedView, DeviceRights, Recipient}`.
+- `sim::rng::SplitMix64` sits behind `cfg(any(test, feature = "mesh-sim"))`. Core has a self
+  dev-dependency with `mesh-sim` on, so `tests/` can use it.
+- Errors: `MeshError`, surfaced as `CoreError::Mesh` with `code()` values of the form `mesh_*`.
+
+**PROTOCOL.md ambiguities resolved** (ADR 0031 R1-R7; DESIGN marks them [Amended 01]):
+- **R1.** An origin's order is its `seq`, for every kind. HLC and the epoch lattice are
+  honest-writer properties.
+- **R2.** A removed origin's items keep relaying, and views exclude them. Under the old
+  rule (never relay items above the cutoff), devices never converge. Garbage collection
+  must not delete them (PROTOCOL §8.4).
+- **R3.** The bounded clamp is one hop, from a budget of `minted + raw_in`. Burns come
+  first, then recipients by ascending id, and spend is not in the budget. A transitive
+  fixpoint would let hostile values force about 2^60 iterations.
+- **R4.** A non-owner self-mint counts, as a labelled override.
+- **R5.** Roster resolution is stratified: reach → conflicts → known → cutoffs → members.
+- **R6.** The genesis is a mesh parameter, and `PairAccept` carries it.
+- **R7.** `local_write_ts` does not move the clock.
+- Also settled:
+  - payload decoders ignore unknown payload fields, but the envelope is strict;
+  - a known kind with an invalid payload is stored and relayed but not materialized;
+  - ingest check 4 must re-check items whose roster.add arrives later in the same session;
+  - verification is `verify_strict`;
+  - item bytes inside frames are base64.
+
+**Left open for 02 (on purpose, flagged in PROTOCOL.md §7 and in the 02 file):**
+- **How fork evidence reaches every node.** With latest-only storage, two nodes can hold
+  different branches with no dot in common, so a VV comparison cannot see the fork. The
+  candidates are repair plus forwarding the self-certifying evidence.
+- **Two origins publishing a `cap.def` with the same id.** A suggestion: treat the cap as
+  conflicted and exclude it.
+- **How `share.sealed` and `share.revoke` order for one key.**
+- **The simulator's invariant 9** is reworded in the 02 file: "no observation moves the HLC
+  past now + MAX_DRIFT".
+
+**Dependency.** `ed25519-dalek` 2.2.0 (`fast`, `std`, `zeroize`). It reuses
+`curve25519-dalek` 4.1.3, `sha2`, `subtle` and `zeroize`, and compiles only `ed25519` 2.2.3
+and `signature` 2.2.0 as new crates. `pkcs8`/`der`/`spki`/`const-oid` appear in
+`Cargo.lock` as inactive optional dependencies and are not built.
+`cargo tree -d -p api-tracker-core` shows no new duplicate.
+
+**Environment notes.**
+- The mesh unit suite takes about 1.7 s in debug.
+- The exhaustive tamper test runs about 720 verifications in under 0.1 s, but most of them
+  fail at decode. For the 02 simulator, measure debug sign and verify cost before choosing
+  seeds and steps. If they are slow, add `[profile.dev.package.curve25519-dalek] opt-level = 3`
+  (plus `ed25519-dalek`, `sha2`) to the workspace `Cargo.toml`.
+- The PRNG reference test checks the published SplitMix64 constants (seed 1234567).
+
+**CI.**
+- The first run, `40394393640`, **failed** in "Rust (core + CLI)" and "Desktop backend
+  (macOS)" because of a toolchain gap:
+  - CI's `stable` is **rustc 1.99.1**, while this machine's default `stable` is 1.96.1.
+  - 1.99 deprecates `AtomicU64::fetch_update`, and its replacement `try_update` is newer
+    than the 1.85 MSRV.
+  - `f888eb1` fixes it with a CAS loop.
+- The first run's packaged macOS service lifecycle job, `40394393614`, **passed**.
+- After the fix: CI `40397253597` — **success** (Rust core+CLI, Rust core Windows, Desktop
+  frontend, Desktop backend macOS, Packaged app + validation macOS). macOS service
+  `40397253640` — **success**. Nothing is pending.
+
+**Toolchain gotcha (load-bearing).**
+- Toolchain 1.99.1 is now installed alongside the default (`rustup toolchain install 1.99.1
+  --profile minimal -c clippy -c rustfmt`). The default `stable` is unchanged. Before
+  pushing, run CI's clippy with it, using a separate target dir so the main `target/`
+  isn't rebuilt:
+  `CARGO_TARGET_DIR=<scratch>/target199 cargo +1.99.1 clippy -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking --all-targets -- -D warnings`
+  Add `cargo +1.99.1 clippy -p api-tracker-desktop -- -D warnings` too.
+- Recheck `gh run view <id> --log | grep -m1 "rustc "` when CI's stable moves.
+
+**Not done / honest list.** Nothing in 01's scope was moved. The DESIGN §D21 mutation
+tests are Increment 12's. The `TEST_PLAN` "Leakage" layer covers keys, signatures, sealed
+bytes and errors; CLI/`--json` canaries arrive with the CLI (03+).
+
+
+## Planning record
+
+- **2026-10-26.** Plan created in a planning session.
+  - The owner chose a P2P CRDT mesh; usage, metadata and caps first and credentials
+    last (opt-in); own devices only; 12 increments maximum.
+  - The design was reviewed by an independent planning agent before this was written.
+    Its P0 fixes are already folded into DESIGN.md: signed items, accept-and-flag HLC,
+    Commit-only VV, per-origin LWW maps, removal cutoffs, fork detection, the
+    bounded-counter month rules, the escrow fence, 403 instead of 429, and delta/epoch
+    publishing.

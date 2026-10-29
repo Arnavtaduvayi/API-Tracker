@@ -95,6 +95,13 @@ pub fn run(ctx: &Ctx, cmd: BackupCmd) -> Result<()> {
                 println!(
                     "Unlock with the master password that was set when this backup was created."
                 );
+                if let Some(wipe) = info.mesh_wipe.as_ref().filter(|w| w.identity.is_some()) {
+                    println!(
+                        "The backup's mesh identity was not restored: a restored vault is a \
+                         copy and must pair again ({} mesh row(s) removed).",
+                        wipe.rows_deleted
+                    );
+                }
             });
         }
     }

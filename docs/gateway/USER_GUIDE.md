@@ -219,6 +219,35 @@ Foreground mode (no service at all):
 tethra gateway serve      # `run` is an alias; Ctrl-C or `tethra gateway stop` ends it
 ```
 
+## Spend caps (Tethra Mesh)
+
+A project shared with your other devices can have a monthly spend cap
+(`tethra mesh cap`, see the [mesh user guide](../mesh/USER_GUIDE.md#5-spend-caps)).
+If you switch enforcement on for it on this device (`tethra mesh cap enforce
+<cap> on`, which asks for your master password), the gateway refuses that
+project's requests once this device's share of the cap for the month is used
+up. What your SDK sees:
+
+- HTTP **403** (not 429, so the OpenAI and Anthropic SDKs do not retry it),
+  `content-type: application/json`, and an `x-tethra-cap: exceeded; cap=<id>;
+  month=<YYYY-MM>` header;
+- an error body in the provider's shape — OpenAI-style routes:
+  `{"error":{"type":"tethra_spend_cap","code":"spend_cap_exceeded","message":"…"}}`;
+  Anthropic routes: `{"type":"error","error":{"type":"tethra_spend_cap","message":"…"}}`;
+- near the cap, one request at a time: a second request while one is in
+  flight gets the same 403 with `reason=cap_near_exhaustion_serialized` in
+  the header. Retry when the first completes.
+
+The request never reaches the provider. Cost is known only when a response
+completes, so the request that crosses the cap is allowed to finish (one
+request's worth of overshoot at most). A model with no price, or a response
+that reports no usage (an OpenAI stream without `stream_options:
+{"include_usage": true}`), is never blocked; it is counted as unpriced or
+unmetered, and `status` shows how many. If the gateway cannot read the caps (no
+mesh, a database it cannot open, a stuck poller), it forwards everything and
+`tethra gateway status` says why. `status` also shows what each enforced cap
+still admits. Anything that does not go through the gateway is not capped.
+
 ## Unlinking
 
 ```

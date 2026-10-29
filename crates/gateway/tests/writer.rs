@@ -345,6 +345,7 @@ fn a_full_queue_drops_and_counts_without_ever_blocking_the_relay() {
     let sink = writer.sink();
 
     let record = || api_tracker_gateway::record::ExchangeRecord {
+        cap_charge: None,
         at: api_tracker_core::clock::now_rfc3339(),
         route_prefix: "openai".into(),
         provider_id: "openai".into(),

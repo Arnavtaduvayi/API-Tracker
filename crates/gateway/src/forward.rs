@@ -8,7 +8,7 @@
 //! unknown prefixes and unknown link slugs return an IDENTICAL 404 for the
 //! same reason (SI-4, THREAT_MODEL GW-2).
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
@@ -277,6 +277,9 @@ pub struct Gateway {
     /// itself — it can only ANSWER challenges, never authorize anything —
     /// but present only when the service wired it at boot.
     pub probe_key: Arc<RwLock<Option<[u8; 32]>>>,
+    /// The spend-cap gate (Increment 08), when the service runs one. `None`
+    /// admits everything (forwarding-only tests).
+    pub capgate: Option<Arc<crate::capgate::CapGate>>,
 }
 
 impl Gateway {
@@ -294,6 +297,7 @@ impl Gateway {
             connector: Arc::new(TlsConnector),
             matching_key: Arc::new(RwLock::new(None)),
             probe_key: Arc::new(RwLock::new(None)),
+            capgate: None,
         }
     }
 
@@ -317,6 +321,10 @@ impl Gateway {
 
     fn emit(&self, record: ExchangeRecord) {
         if self.recording_paused.load(Ordering::Relaxed) {
+            // Not persisted: a spend-cap charge stays in memory only.
+            if let Some(c) = &record.cap_charge {
+                c.lost();
+            }
             return;
         }
         self.sink.record(record);
@@ -339,6 +347,114 @@ fn local_response(client: &mut TcpStream, status: u16, reason: &str, message: &s
     let _ = client.write_all(head.as_bytes());
     let _ = client.write_all(body.as_bytes());
     let _ = client.flush();
+}
+
+/// A local JSON response (the spend-cap refusal), with extra headers. The
+/// same rule as [`local_response`]: only before any upstream byte.
+fn local_response_json(
+    client: &mut TcpStream,
+    status: u16,
+    reason: &str,
+    body: &str,
+    extra_headers: &[(&str, String)],
+) {
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra_headers {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = client.write_all(head.as_bytes());
+    let _ = client.write_all(body.as_bytes());
+    let _ = client.flush();
+}
+
+/// The spend-cap refusal: a **non-retryable 403** (never 429, which the
+/// OpenAI and Anthropic SDKs retry) with a provider-shaped error body and an
+/// `x-tethra-cap` header, sent before any upstream connect. The body carries
+/// static text, the cap id and the month only.
+pub(crate) fn cap_refusal_body(provider_id: &str, r: &crate::capgate::Refusal) -> String {
+    let message = if r.serialized {
+        format!(
+            "Tethra spend cap {} is nearly used up for {} on this device, so one request \
+             runs at a time; another is in flight. Retry when it completes.",
+            &r.cap[..8.min(r.cap.len())],
+            r.month
+        )
+    } else {
+        format!(
+            "Tethra spend cap {} is used up for {} on this device. Raise it with `tethra \
+             mesh cap raise`, or wait for rights from your other devices.",
+            &r.cap[..8.min(r.cap.len())],
+            r.month
+        )
+    };
+    let body = if provider_id == "anthropic" {
+        serde_json::json!({
+            "type": "error",
+            "error": { "type": "tethra_spend_cap", "message": message }
+        })
+    } else {
+        serde_json::json!({
+            "error": {
+                "message": message,
+                "type": "tethra_spend_cap",
+                "code": "spend_cap_exceeded"
+            }
+        })
+    };
+    body.to_string()
+}
+
+fn respond_cap_refused(client: &mut TcpStream, provider_id: &str, r: &crate::capgate::Refusal) {
+    let mut cap = format!("exceeded; cap={}; month={}", r.cap, r.month);
+    if r.serialized {
+        cap.push_str("; reason=cap_near_exhaustion_serialized");
+    }
+    local_response_json(
+        client,
+        403,
+        "Forbidden",
+        &cap_refusal_body(provider_id, r),
+        &[("x-tethra-cap", cap)],
+    );
+    drain_before_close(client);
+}
+
+/// Bytes and time spent discarding a refused request's unread body.
+const DRAIN_LIMIT_BYTES: usize = 64 << 20;
+const DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Close a connection whose request body was never read without resetting
+/// it: closing a socket with unread input sends a TCP reset, which the
+/// client sees as a connection error (and the OpenAI and Anthropic SDKs
+/// retry), not as the response already written. Half-close, then discard
+/// what the client still sends, bounded in bytes and time.
+fn drain_before_close(client: &mut TcpStream) {
+    let _ = client.shutdown(std::net::Shutdown::Write);
+    let started = Instant::now();
+    let _ = client.set_read_timeout(Some(std::time::Duration::from_millis(250)));
+    let mut buf = [0u8; 16 * 1024];
+    let mut total = 0usize;
+    while total < DRAIN_LIMIT_BYTES && started.elapsed() < DRAIN_DEADLINE {
+        match client.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => total += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => break,
+        }
+    }
 }
 
 /// The identical answer for an unregistered prefix AND an unknown link slug,
@@ -818,6 +934,21 @@ fn handle_request(
         }
     };
 
+    // --- spend-cap gate (Increment 08): reads only an Arc and atomics, and
+    // refuses before any upstream connect ---
+
+    let ticket = match &gw.capgate {
+        Some(gate) => match gate.admit(res.link.map(|l| l.project_id.as_str())) {
+            crate::capgate::Admission::Admit(t) => t,
+            crate::capgate::Admission::Refuse(r) => {
+                gw.sink.count(&res.route.prefix, counters::CAP_REFUSED);
+                respond_cap_refused(client, &res.route.provider_id, &r);
+                return Next::Close;
+            }
+        },
+        None => None,
+    };
+
     // --- record scaffolding (metadata only; no wire strings) ---
 
     let at = clock::now_rfc3339();
@@ -856,6 +987,7 @@ fn handle_request(
         attribution_input,
         digest,
         usage: None,
+        cap_charge: None,
     };
     if res.link.is_none() {
         gw.sink
@@ -889,6 +1021,12 @@ fn handle_request(
     );
 
     record.latency_ms = Some(started.elapsed().as_millis() as i64);
+    // Charge the completed request (its cost is known only now); dropping the
+    // ticket releases a near-exhaustion slot on every path, early returns
+    // and unwinding included.
+    if let (Some(gate), Some(t)) = (&gw.capgate, ticket) {
+        gate.charge(t, &mut record);
+    }
     if let Some(usage) = &record.usage {
         if usage.dropped_events > 0 {
             gw.sink

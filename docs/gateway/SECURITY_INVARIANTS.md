@@ -137,6 +137,31 @@ reporting a blocker.
 - **SI-13 The vault is never required to complete an upstream request.** No
   forward path calls unlock, decrypt, or any vault-key operation. *Verified
   by:* §4 no-database forwarding test.
+- **SI-22 The spend-cap gate (Tethra Mesh, ADR 0032).** A request for a
+  project whose spend cap this device enforces is refused once this device's
+  rights for the month are used up. The decision reads only an in-memory
+  snapshot and atomics (`capgate::CapGate::admit`): no database, network or
+  vault access on the forward path, and no lock the writer takes. The refusal
+  is a non-retryable `403` (never `429`, which SDKs retry) with a
+  provider-shaped JSON body and an `x-tethra-cap` header, written before any
+  upstream connect; it carries static text, the cap id and the month only.
+  Every in-flight request reserves the cap's recent p95 cost; near
+  exhaustion one request at a time is admitted per cap (overshoot ≤ one
+  request's cost), and the reservation is released on every exit path. The
+  unread request body is drained (bounded) after the 403, so the client reads
+  the refusal rather than a connection reset.
+  The gate **fails open** and reports why (no mesh, an unreadable or newer
+  database, a snapshot older than 60 s). Enforcement is local and opt-in per
+  cap, set only by a reauthenticated command; nothing a peer replicates can
+  switch it. A cap is a self-limit, not a security boundary: traffic that
+  bypasses the gateway is not capped. *Verified by:*
+  `crates/gateway/tests/cap_enforcement.rs` (every case: 403 shape and zero
+  upstream connections, the Anthropic shape, one-at-a-time under 8
+  concurrent requests and the slot after success, an upstream failure and a
+  client disconnect, opt-in only, a replicated setting ignored, each
+  fail-open reason, spend counted once across the writer, a lost charge,
+  the escrow fence, a gateway started with escrow pending, two devices end
+  to end), `perf::perf_cap_admission_overhead`.
 
 ## Bounds
 
@@ -169,5 +194,13 @@ reporting a blocker.
   limitations (local machine only, base-URL-repointed traffic only, no
   remote/production) are stated wherever coverage is shown. Absence of
   recorded traffic is never presented as absence of traffic.
+  *Amended for Tethra Mesh (ADR 0031, Increment 06):* coverage may now include
+  the user's own paired devices' gateways (`tethra mesh usage`). Their figures
+  are labelled per device, with the time of the last exchange with that device
+  and "stale" after 24 hours; a device with no data is listed as unknown, never
+  counted as zero; a sum across devices is shown only with its label
+  ("estimated, gateway-observed, across N devices; M stale"); and these figures
+  are never summed with provider-reported cost. `tethra usage` (provider and
+  manual usage) is unchanged and only points to the mesh view.
 - **SI-20 No unsafe code in Tethra-owned Rust.** `#![forbid(unsafe_code)]`
   at the crate root.

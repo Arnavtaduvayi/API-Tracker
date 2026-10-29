@@ -95,6 +95,24 @@ the implementation evidence behind the change.
   unaffected by a locked/contended database; unpersistable events are
   dropped-and-counted, never blocking.
 
+## Spend-cap admission (Tethra Mesh, Increment 08)
+
+`perf_cap_admission_overhead`: the same linked route, keep-alive, n=400,
+through a gateway with no cap gate and one enforcing a cap with plenty of
+rights (the upstream reports no usage, so only admission differs). Darwin
+25.5.0 arm64, 2026-10-29, the whole suite 9 passed:
+
+| path | p50 | p95 | p99 |
+|---|---|---|---|
+| no gate | 125 µs | 243 µs | 253 µs |
+| enforced gate | 121 µs | 139 µs | 147 µs |
+
+The difference is inside the run-to-run noise (the second run benefits from
+a warmer machine): admission is an `Arc` read and a few atomics. The small
+JSON path in the same run was 86 / 199 / 204 µs through the gateway (p50 /
+p95 / p99), against 98 / 177 / 208 µs above: no regression beyond the noise
+this page describes.
+
 ## Process footprint (test-process upper bounds)
 
 RSS 4–96 MiB across scenarios (the high readings include the harness's

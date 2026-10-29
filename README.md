@@ -197,6 +197,20 @@ provided); and **signed/notarized** installers (the alpha artifacts are
 unsigned except for the manually signed and notarized macOS DMG served from
 the Tethra landing site — see [docs/PACKAGING.md](docs/PACKAGING.md)).
 
+In development, not yet a feature: **Tethra Mesh**, peer-to-peer replication of
+usage, shared projects and spend caps between your own paired devices, with no
+server. It is being built on the `feat/device-mesh` branch. So far devices can
+start a mesh, pair with a one-time invite, and run a node that keeps them in
+step on its own over your LAN or VPN
+(`tethra mesh init|invite|join|serve|stop|peer|replicate|status|doctor|devices|remove|leave`);
+share projects and see their gateway-observed usage across devices
+(`tethra mesh project|usage|settings`); and set monthly spend caps that hold
+across devices, raise alerts, and are enforced by a device's gateway where you
+switch that on (`tethra mesh cap`). See the
+[user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md),
+[ADR 0031](docs/decisions/0031-device-mesh.md) and
+[ADR 0032](docs/decisions/0032-spend-caps.md).
+
 ## Install and build
 
 Prerequisites:

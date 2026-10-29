@@ -485,6 +485,155 @@ check $? "the empty-folder message says what the user can do about it"
 ! printf '%s' "$EMPTY_OUT" | grep -qE "tethra provider list|tethra gateway route add"
 check $? "the empty-folder message points at no unexecutable CLI command"
 
+echo "-- mesh (identity, status, restore wipe; nothing listens) --"
+MESH_A="$WORK/mesh-a"
+API_TRACKER_DIR="$MESH_A" "$BIN" init >/dev/null 2>&1; check $? "mesh: a fresh vault for the mesh checks"
+OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh status 2>&1); RC=$?
+[ $RC -eq 0 ] && echo "$OUT" | grep -q "not part of a mesh"
+check $? "mesh status before init says so and exits 0"
+MESH_OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh init --name smoke-a 2>&1); check $? "mesh init --name smoke-a"
+OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh status 2>&1)
+echo "$OUT" | grep -q '"initialized": true' && echo "$OUT" | grep -q '"roster_size": 1' \
+  && echo "$OUT" | grep -q '"marker": "ok"'
+check $? "mesh status --json: initialized, a roster of 1, identity marker ok"
+MESH_OUT="$MESH_OUT$OUT"
+[ -f "$MESH_A/mesh/identity.marker" ]; check $? "mesh init writes the identity marker"
+printf '%s' "$MESH_OUT" | grep -Eq '[0-9a-f]{64}' && bad "mesh output prints key-shaped hex" || ok "mesh output prints no key material"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh init --name again >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "a second mesh init is refused"
+API_TRACKER_DIR="$MESH_A" "$BIN" backup create "$WORK/mesh.backup" >/dev/null 2>&1; check $? "mesh: backup created"
+API_TRACKER_DIR="$WORK/mesh-restored" "$BIN" backup restore "$WORK/mesh.backup" --yes >/dev/null 2>&1
+check $? "mesh: backup restores into a fresh directory"
+OUT=$(API_TRACKER_DIR="$WORK/mesh-restored" "$BIN" mesh status 2>&1)
+echo "$OUT" | grep -q "not part of a mesh" && [ ! -e "$WORK/mesh-restored/mesh/identity.marker" ]
+check $? "a restored vault keeps no mesh identity (it must pair again)"
+API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh status 2>/dev/null | grep -q '"initialized": true'
+check $? "the original device is still in its mesh after the restore"
+
+echo "-- mesh pairing between two nodes on 127.0.0.1 --"
+MESH_B="$WORK/mesh-b"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh serve --listen 127.0.0.1:0 --interval 5 > "$WORK/serve-a.out" 2>/dev/null &
+SERVE_PID=$!
+MESH_ADDR=""
+for _ in $(seq 1 120); do
+  MESH_ADDR=$(sed -n 's/^Listening on //p' "$WORK/serve-a.out" 2>/dev/null | head -1)
+  [ -n "$MESH_ADDR" ] && break
+  sleep 0.25
+done
+[ -n "$MESH_ADDR" ]; check $? "mesh serve binds 127.0.0.1 and prints its port"
+INVITE=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh invite --addr "$MESH_ADDR" 2>/dev/null)
+echo "$INVITE" | grep -q '^tethra-mesh-invite:v1:'; check $? "mesh invite prints a one-time invite"
+API_TRACKER_DIR="$MESH_B" "$BIN" init >/dev/null 2>&1
+OUT=$(API_TRACKER_DIR="$MESH_B" "$BIN" mesh join "$INVITE" --name smoke-b 2>&1)
+check $? "a second device joins with the invite"
+A_DEVICES=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh devices 2>/dev/null | grep -c '"device_id"')
+B_DEVICES=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh devices 2>/dev/null | grep -c '"device_id"')
+[ "$A_DEVICES" = "2" ] && [ "$B_DEVICES" = "2" ]
+check $? "both devices list two members"
+API_TRACKER_DIR="$WORK/mesh-c" "$BIN" init >/dev/null 2>&1
+OUT_C=$(API_TRACKER_DIR="$WORK/mesh-c" "$BIN" mesh join "$INVITE" --name smoke-c 2>&1); RC=$?
+# A used invite no longer matches at the inviter, which closes without a reply.
+[ $RC -ne 0 ] && API_TRACKER_DIR="$WORK/mesh-c" "$BIN" mesh status 2>/dev/null | grep -q "not part of a mesh"
+check $? "a third device cannot reuse the invite (and joins nothing)"
+CODE=$(echo "$INVITE" | sed 's/^tethra-mesh-invite:v1://' | cut -c1-32)
+printf '%s' "$OUT$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh devices 2>&1)" | grep -qF "$CODE" \
+  && bad "the invite code was printed again" || ok "the invite code is shown only once"
+
+echo "-- mesh node: two nodes converge on their own (5 s rounds) --"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh peer add "$MESH_ADDR" >/dev/null 2>&1; check $? "mesh peer add (B dials A)"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh serve --listen 127.0.0.1:0 --interval 5 > "$WORK/serve-b.out" 2>/dev/null &
+SERVE_B_PID=$!
+MESH_B_ADDR=""
+for _ in $(seq 1 120); do
+  MESH_B_ADDR=$(sed -n 's/^Listening on //p' "$WORK/serve-b.out" 2>/dev/null | head -1)
+  [ -n "$MESH_B_ADDR" ] && break
+  sleep 0.25
+done
+[ -n "$MESH_B_ADDR" ]; check $? "B's node binds 127.0.0.1 and prints its port"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh serve --listen 127.0.0.1:0 >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "a second node on B's data directory is refused"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh rename smoke-a-renamed >/dev/null 2>&1; check $? "A renames itself"
+SEEN=1
+for _ in $(seq 1 60); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh devices 2>/dev/null | grep -q '"smoke-a-renamed"' && { SEEN=0; break; }
+  sleep 0.5
+done
+check $SEEN "B's node brings A's rename over with no manual exchange (about 2 rounds)"
+OUT=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh status 2>/dev/null)
+echo "$OUT" | grep -q '"running": true' && echo "$OUT" | grep -q '"lag"'
+check $? "mesh status shows B's node running, its peers and lag"
+API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh doctor 2>/dev/null | grep -q '"severity": "problem"' \
+  && bad "mesh doctor reports a problem on B" || ok "mesh doctor finds no problem on B"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh stop >/dev/null 2>&1; RC_A=$?
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh stop >/dev/null 2>&1; RC_B=$?
+wait "$SERVE_PID" "$SERVE_B_PID" >/dev/null 2>&1
+[ $RC_A -eq 0 ] && [ $RC_B -eq 0 ] && ! kill -0 "$SERVE_PID" 2>/dev/null && ! kill -0 "$SERVE_B_PID" 2>/dev/null
+check $? "both nodes stop through the control socket's Stop"
+[ ! -e "$MESH_A/mesh/node.sock" ] && [ ! -e "$MESH_B/mesh/node.nonce" ]
+check $? "a stopped node leaves no control socket or nonce behind"
+
+echo "-- mesh shared project and cross-device usage --"
+API_TRACKER_DIR="$MESH_A" "$BIN" project create smoke-app >/dev/null 2>&1; check $? "A: a local project"
+API_TRACKER_DIR="$MESH_B" "$BIN" project create smoke-app >/dev/null 2>&1; check $? "B: a local project of its own"
+SHARE=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh project share smoke-app 2>/dev/null)
+MESH_P=$(printf '%s' "$SHARE" | sed -n 's/.*"mesh_project_id": "\([0-9a-f]*\)".*/\1/p')
+[ ${#MESH_P} -eq 32 ]; check $? "mesh project share creates a mesh project bound on A"
+# Seed A's gateway rollup directly (no gateway runs in smoke). The full path —
+# the real gateway writer, the publisher, replication, the report — is covered
+# by crates/gateway/tests/mesh_publish_e2e.rs, which drives the writer itself.
+APP_A=$(sqlite3 "$MESH_A/vault.db" "SELECT id FROM projects WHERE name = 'smoke-app'" 2>/dev/null)
+sqlite3 "$MESH_A/vault.db" "INSERT INTO gateway_usage_daily (day, provider_id, project_id,
+  model, request_count, usage_event_count, input_tokens, output_tokens, estimated_cost_micros,
+  updated_at, unpriced_requests, unextracted_requests, split_known)
+  VALUES (date('now'), 'openai', '$APP_A', 'gpt-smoke', 7, 7, 100, 50, 3000, 'x', 2, 0, 1)" 2>/dev/null
+check $? "seed A's gateway usage with sqlite3"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh serve --listen "$MESH_ADDR" --interval 5 > "$WORK/serve-a2.out" 2>/dev/null &
+SERVE_PID=$!
+for _ in $(seq 1 120); do grep -q '^Listening on' "$WORK/serve-a2.out" 2>/dev/null && break; sleep 0.25; done
+REPL=1
+for _ in $(seq 1 20); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1 \
+    && API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh project list 2>/dev/null | grep -q "$MESH_P" \
+    && { REPL=0; break; }
+  sleep 0.5
+done
+check $REPL "B receives the shared project (and is not bound to it)"
+API_TRACKER_DIR="$MESH_B" "$BIN" mesh project bind "$MESH_P" smoke-app >/dev/null 2>&1; check $? "B binds its own project to it"
+SEEN=1
+for _ in $(seq 1 30); do
+  USAGE=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh usage 2>/dev/null)
+  if printf '%s' "$USAGE" | grep -q '"device_name": "smoke-a-renamed"' \
+     && printf '%s' "$USAGE" | grep -q '"requests": 7' \
+     && printf '%s' "$USAGE" | grep -q '"unpriced_requests": 2' \
+     && printf '%s' "$USAGE" | grep -q '"as_of": "'; then SEEN=0; break; fi
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1
+  sleep 0.5
+done
+check $SEEN "mesh usage on B shows A's numbers, labelled with A's device and an as-of time"
+printf '%s' "$USAGE" | grep -q '"total_label": "estimated, gateway-observed'
+check $? "the cross-device total carries its honesty label"
+
+echo "-- mesh spend caps --"
+CAP=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh cap create "$MESH_P" --monthly 10 2>/dev/null)
+printf '%s' "$CAP" | grep -q '"monthly_micros": 10000000'
+check $? "mesh cap create: A owns a \$10 monthly cap on the shared project"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh cap create "$MESH_P" --monthly 5 >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "a second cap on the same project is refused"
+SHOW=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh cap show 2>/dev/null)
+printf '%s' "$SHOW" | grep -q 'of \$10.00' && printf '%s' "$SHOW" | grep -q 'not a security boundary'
+check $? "mesh cap show: this month's spend against the cap, with its honesty notes"
+CAPSEEN=1
+for _ in $(seq 1 20); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1
+  API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh cap show 2>/dev/null \
+    | grep -q '"owner_name": "smoke-a-renamed"' && { CAPSEEN=0; break; }
+  sleep 0.5
+done
+check $CAPSEEN "B sees the cap and its owner after an exchange"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh stop >/dev/null 2>&1
+wait "$SERVE_PID" >/dev/null 2>&1
+! kill -0 "$SERVE_PID" 2>/dev/null; check $? "A's node stops"
+
 echo "-- repository git-ignore protection --"
 GITIGNORE_OK=0
 for p in vault.db data/vault.db-wal x.sqlite3 secrets.vault y.backup z.bak .env .env.local app.log demo/vault.db; do

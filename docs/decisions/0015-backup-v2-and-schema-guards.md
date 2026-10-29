@@ -78,3 +78,19 @@ older build.
   already mandates this).
 - A backup written by a FUTURE build (format > 2 or schema > current) needs
   that future build to restore; the error says so.
+
+## Amended by ADR 0031 (Tethra Mesh, Increment 03)
+
+A v2 backup still copies every table, the `mesh_*` tables included (the mesh
+private keys in them stay encrypted under the vault key). But **a restore no
+longer brings every row back**. Right after the rows are imported,
+`mesh::identity::on_restore` deletes every row of every `mesh_*` table, turns
+`gateway_config.cap_enforcement` off, and removes `<data-dir>/mesh/identity.marker`
+if (and only if) it names the wiped identity. A restored vault is a copy, and
+a copy that kept acting as the device it was backed up from would reuse that
+device's item sequence numbers (DESIGN §D5, MESH-SI-5); the user pairs it
+again. Backups without mesh rows (format v1, or made before schema v21) are
+unaffected. `crates/core/tests/migration_safety.rs` exempts the `mesh_` prefix
+from its row-count equality and asserts those tables come back empty instead;
+`crates/core/tests/mesh_schema.rs` covers the wipe, the marker rule and the
+v1 no-op.

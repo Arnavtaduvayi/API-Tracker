@@ -70,6 +70,9 @@ pub enum AlertKind {
     RuntimeOldCredentialVersion,
     RuntimeRevokedCredentialInUse,
     RuntimeSharedCredential,
+    /// A Tethra Mesh spend cap crossed 80% or 100% of its monthly target in
+    /// this device's cross-device view (Increment 07; never a budget).
+    MeshSpendCap,
 }
 
 impl AlertKind {
@@ -118,6 +121,7 @@ impl AlertKind {
             AlertKind::RuntimeOldCredentialVersion => "runtime_old_credential_version",
             AlertKind::RuntimeRevokedCredentialInUse => "runtime_revoked_credential_in_use",
             AlertKind::RuntimeSharedCredential => "runtime_shared_credential",
+            AlertKind::MeshSpendCap => "mesh_spend_cap",
         }
     }
 }

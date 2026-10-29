@@ -969,6 +969,45 @@ fn status(ctx: &Ctx) -> Result<()> {
                 if let Some(err) = &g.last_error {
                     println!("  last error {}", render::sanitize(err));
                 }
+                // The spend-cap gate (Tethra Mesh): only when this device has
+                // caps, so a gateway without a mesh prints nothing new.
+                if !g.caps.is_empty() || g.caps_failing_open {
+                    if let Some(why) = &g.caps_inactive_reason {
+                        println!(
+                            "  spend caps {}: {}",
+                            if g.caps_failing_open {
+                                "NOT HOLDING (the gateway forwards everything)"
+                            } else {
+                                "not enforced"
+                            },
+                            render::sanitize(why)
+                        );
+                    }
+                    for c in g.caps.iter().filter(|c| c.enforced) {
+                        println!(
+                            "  spend cap {} ({}): admits ${:.2} more{}{}",
+                            &c.cap_id[..8.min(c.cap_id.len())],
+                            c.month,
+                            c.avail_micros as f64 / 1_000_000.0,
+                            if c.near_exhaustion {
+                                ", one request at a time"
+                            } else {
+                                ""
+                            },
+                            if c.accounting_incomplete {
+                                ", accounting incomplete"
+                            } else {
+                                ""
+                            }
+                        );
+                        if c.unpriced_requests + c.unmetered_requests > 0 {
+                            println!(
+                                "    not counted: {} unpriced, {} without usage in the response",
+                                c.unpriced_requests, c.unmetered_requests
+                            );
+                        }
+                    }
+                }
             }
             None => {
                 println!("gateway     not running");

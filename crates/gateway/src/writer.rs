@@ -53,6 +53,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use api_tracker_core::error::{CoreError, Result};
+use api_tracker_core::projectcost::UsageClass;
 use api_tracker_core::runtime::model::{
     HttpMethod, ObservationMode, ObservationSource, ObservedRequest,
 };
@@ -225,9 +226,16 @@ impl ObservationSink for WriterSink {
                 self.state.queued.fetch_add(1, Ordering::Relaxed);
                 self.in_flight.fetch_add(1, Ordering::Relaxed);
             }
-            Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
+            Err(mpsc::TrySendError::Full(m)) | Err(mpsc::TrySendError::Disconnected(m)) => {
                 // Honest coverage gap: counted, surfaced, never silent.
                 self.state.dropped.fetch_add(1, Ordering::Relaxed);
+                // A spend-cap charge that will never be persisted: the gate
+                // keeps it in memory and reports its accounting incomplete.
+                if let Message::Record(r) = m {
+                    if let Some(c) = &r.cap_charge {
+                        c.lost();
+                    }
+                }
             }
         }
     }
@@ -555,7 +563,15 @@ impl WriterThread {
         };
         if let Err(e) = result {
             self.note_failure(&e);
+            if let Some(c) = &record.cap_charge {
+                c.lost();
+            }
             return;
+        }
+        // The row (and its cost) is committed: the gate stops counting this
+        // charge in memory at its next snapshot.
+        if let Some(c) = &record.cap_charge {
+            c.persisted();
         }
         self.state.written.fetch_add(1, Ordering::Relaxed);
         self.state.degraded.store(false, Ordering::Relaxed);
@@ -786,12 +802,16 @@ impl WriterThread {
             ],
         )?;
 
+        // The same class `projectcost` reports (priced, unpriced or never
+        // extracted), so an unpriced request no longer reads as a free one
+        // in the rollup (migration v23).
+        let class = UsageClass::of(usage.available(), cost);
         conn.execute(
             "INSERT INTO gateway_usage_daily
                 (day, provider_id, project_id, model, request_count, usage_event_count,
                  input_tokens, output_tokens, cached_input_tokens, estimated_cost_micros,
-                 updated_at)
-             VALUES (?1,?2,?3,?4,1,?5,?6,?7,?8,?9,?10)
+                 updated_at, unpriced_requests, unextracted_requests, split_known)
+             VALUES (?1,?2,?3,?4,1,?5,?6,?7,?8,?9,?10,?11,?12,1)
              ON CONFLICT(day, provider_id, project_id, model) DO UPDATE SET
                 request_count = request_count + 1,
                 usage_event_count = usage_event_count + excluded.usage_event_count,
@@ -799,7 +819,10 @@ impl WriterThread {
                 output_tokens = output_tokens + excluded.output_tokens,
                 cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
                 estimated_cost_micros = estimated_cost_micros + excluded.estimated_cost_micros,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at,
+                unpriced_requests = unpriced_requests + excluded.unpriced_requests,
+                unextracted_requests = unextracted_requests + excluded.unextracted_requests,
+                split_known = split_known",
             rusqlite::params![
                 store::day_of(&record.at),
                 record.provider_id,
@@ -811,6 +834,8 @@ impl WriterThread {
                 clamp_i64(usage.cached_input_tokens.unwrap_or(0)),
                 cost.unwrap_or(0),
                 clock::now_rfc3339(),
+                i64::from(class == UsageClass::Unpriced),
+                i64::from(class == UsageClass::Unextracted),
             ],
         )?;
         Ok(())

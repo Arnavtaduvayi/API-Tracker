@@ -6,6 +6,249 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: the gateway enforces spend caps where you switch it on (in development)
+
+`tethra mesh cap enforce <cap> on` has this device's local gateway refuse a
+capped project's requests once this device's share of the cap for the month is
+used up ([ADR 0032](docs/decisions/0032-spend-caps.md),
+[what SDKs see](docs/gateway/USER_GUIDE.md#spend-caps-tethra-mesh)).
+
+- **A clear, non-retried refusal.** HTTP 403 (not 429, which SDKs retry) with
+  an error in the provider's own shape and an `x-tethra-cap` header, sent
+  before the request reaches the provider. No credential is ever echoed.
+- **Bounded overshoot.** Cost is known only when a response completes, so
+  near the cap one request runs at a time: a device goes over by at most one
+  request. Models without a price, and responses that report no usage, are
+  never blocked; they are counted and shown.
+- **Per device, behind your master password.** Each device decides for
+  itself; no other device can switch it on or off. If the gateway cannot read
+  the caps it forwards everything and `tethra gateway status` says why;
+  `status` and `tethra mesh cap show` show what each enforced cap still admits.
+- **No double spending across devices.** Rights a device gives away are held
+  back from its gateway first and published only after the gateway has
+  stopped counting them.
+- The admission check adds no measurable latency
+  ([measurements](docs/gateway/PERFORMANCE_RESULTS.md)). A cap is a
+  self-limit: traffic that does not go through the gateway is not capped.
+
+### Added — Tethra Mesh: spend caps across your devices, alerts only (in development)
+
+Set a monthly spend cap on a shared project that holds across all your
+devices, even while they cannot reach each other
+([ADR 0032](docs/decisions/0032-spend-caps.md),
+[user guide](docs/mesh/USER_GUIDE.md#5-spend-caps)).
+
+- **`tethra mesh cap create <project> --monthly <usd>`** makes this device the
+  cap's owner. Each device holds a share of the cap (its *rights*) and counts
+  its own gateway-estimated spend against it, which is what will let the
+  gateway hold the total to the cap on devices that are apart. Shares go to
+  every device active in the last 30
+  days; a device running low asks a device with spare rights during their next
+  exchange.
+- **The 1st of the month is covered.** From the 20th the owner hands out next
+  month's shares in advance, so a laptop offline on the 1st already holds its
+  share.
+- **`raise` adds; `lower` sets a lower cap.** A raise on any device other than
+  the owner is a labelled local override for that device, for the month, and
+  asks you to confirm. A lower also asks first; every device gives up what it
+  holds above its new share, and the owner takes back the rest.
+- **`show` and `rights`** give each device's figures with how fresh they are,
+  like `tethra mesh usage`. `reclaim` pulls a device's rights back to the
+  owner before you remove it. A cap whose owner device is removed is frozen;
+  create a new one.
+- **Alerts at 80% and 100%** through the existing alert system, labelled as
+  cross-device, estimated and as of the last exchange. A cap blocks requests
+  only on a device where you switch enforcement on (above). A cap is a
+  self-limit, not a security boundary, and it is never a budget.
+
+### Added — Tethra Mesh: shared projects and cross-device usage (in development)
+
+Share a project between your own devices and see its gateway-observed API
+usage from all of them in one place
+([ADR 0031](docs/decisions/0031-device-mesh.md), [user guide](docs/mesh/USER_GUIDE.md)).
+
+- **Share and bind.** `tethra mesh project share app` shares a local project.
+  On each other device, `tethra mesh project bind <project> app` connects that
+  device's own project to it. Nothing binds automatically. `rename`,
+  `archive`, `merge`, `unbind` and `list` manage shared projects.
+- **Honest cross-device usage.** `tethra mesh usage` shows each device's
+  requests, tokens and estimated cost on its own row. Each row says how fresh
+  it is ("as of" the last exchange with that device, stale after 24 hours) and
+  marks removed devices. Devices with no data are listed as unknown, not zero.
+  A total across devices always carries its label, and these figures are
+  never added to provider-reported cost.
+- **Unpriced is not free.** The gateway now records whether each request was
+  priced, unpriced (no pricing record, or no model reported) or had no usage
+  in the response. Only priced requests are in the estimate; the others are
+  counted beside it. Traffic recorded before this version shows as "split
+  unknown".
+- **Deletion follows.** Deleting gateway data, or letting it expire, removes
+  it from your other devices at their next exchange.
+- **Retention.** `tethra mesh settings set retention.usage_days <n>` (default
+  90) sets how long every device keeps the counters.
+- `tethra usage` is unchanged; when this device is in a mesh it points to
+  `tethra mesh usage`.
+
+### Added — Tethra Mesh node: devices stay in step on their own (in development)
+
+`tethra mesh serve` is now a long-running **node**
+([ADR 0031](docs/decisions/0031-device-mesh.md), [user guide](docs/mesh/USER_GUIDE.md)).
+It keeps your paired devices converged without anyone running `replicate`.
+
+- **Automatic exchanges.** Every 30 seconds (`--interval`, at least 5) the node
+  exchanges with each peer it knows. Joining makes the inviting device's
+  address the first peer, and `tethra mesh peer add HOST:PORT` adds others.
+  The node then learns the addresses your other devices publish.
+  A peer that doesn't answer is retried after 5 s, doubling up to every 15
+  minutes. `peer list` and `peer remove` manage the addresses.
+- **Optional LAN discovery.** `serve --discover` finds your devices with mDNS.
+  It is off unless you ask. The announcement carries no name, only a random
+  per-start label and a daily tag that only your mesh recognises. Discovery
+  only suggests addresses; every connection still has to authenticate.
+- **One node per data directory, controllable.** `tethra mesh stop` stops it.
+  `tethra mesh replicate` runs an exchange through it now. `status` shows
+  whether it runs, where it listens, and its rounds.
+- **Keys only while unlocked.** The node holds this device's mesh keys only
+  while it runs. Started from a vault session, it stops when the session locks
+  or expires. With `TETHRA_PASSWORD`, it runs until stopped or for
+  `--max-runtime` minutes. On stop it drops its keys. There is no background
+  service.
+- **`status` and `doctor`.** `tethra mesh status` adds each peer's last
+  success, failures, and how far each device was behind or ahead at the last
+  exchange. `tethra mesh doctor` checks the identity marker, keys, stored
+  items, version vector, views, clock skew, forks, repair, the node and its
+  listeners, and gives a fix for each finding. `--rebuild` repairs a damaged
+  item store, and `--repair` runs a repair round now.
+- **Safer recovery from an older copy.** If a peer holds this device's own
+  items that its database lost (restored from an older copy), the device waits
+  to create anything until it has them back, so it never reuses a position in
+  its history.
+
+### Added — Tethra Mesh pairing and replication between devices (in development)
+
+**Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md)) devices can now
+pair and exchange data directly, on your LAN or a VPN you run. No server,
+relay or Tethra service is involved.
+
+- **Pair with a one-time invite.** `tethra mesh invite --addr HOST:PORT` asks
+  for your master password and prints an invite, once. Treat it like a
+  password for the next 10 minutes: it works once, expires, and five wrong
+  attempts kill it. A built-in checksum catches typos. On the new device,
+  `tethra mesh join <invite>` (or `join -` to paste it from standard input,
+  out of your shell history) adds it to the mesh and runs a first exchange.
+- **Serve and replicate.** `tethra mesh serve --listen ADDR:PORT` accepts
+  connections from your paired devices; nothing listens unless you ask, and
+  listening on every interface needs `--all-interfaces`.
+  `tethra mesh replicate --peer HOST:PORT` runs one exchange now. Devices
+  relay for one another: what laptop A shares reaches desktop C through
+  server B, and C checks A's signature.
+- **Encrypted and authenticated.** Connections use the Noise protocol. A
+  device that doesn't hold your mesh's access key fails at the first message
+  and learns nothing about your devices. Only current members get past the
+  handshake.
+- **See, rename, remove and leave.** `tethra mesh devices` lists the roster
+  with each device's last exchange. `rename` renames this device. `remove`
+  (confirmation and master password) cuts a device off. Each device refuses it
+  as soon as it hears, and the mesh's access key rotates. The new key reaches
+  devices as they talk, and a device that stays away for more than 30 days
+  must pair again. `leave` hands this device's departure to a peer if one is
+  reachable, then deletes its mesh identity.
+- **Bounded.** At most 8 connections at once, 10 new ones a minute from one
+  address, 5-second handshakes, 30-second idle and 10-minute exchange limits,
+  and messages capped before authentication.
+- **Upgrading.** This adds database schema v22; an already-installed background
+  gateway built before it keeps forwarding but stops recording until updated.
+
+### Added — Tethra Mesh device identity and durable storage (in development)
+
+**Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md)) now stores
+its data in your vault and gives each device a real identity. Two commands
+exist: `tethra mesh init` starts a mesh with this device as its only member,
+and `tethra mesh status` shows the device, the roster and the health counters.
+`--json` works on both. Pairing other devices arrives next.
+
+- **Your device's mesh keys are stored encrypted.** `mesh init` creates a
+  signing key, a transport key and a separate sealing key, and encrypts them
+  under your vault key, bound to this vault and this device. Nothing the
+  commands print contains a key, public or private.
+- **Copies and restores of a vault are caught.** A small marker file in the
+  data directory ties the database to its directory. A
+  database copied without its marker, copied next to another device's marker,
+  or rolled back refuses to create mesh records until you leave and pair
+  again. Restoring a backup removes the mesh identity: a restored vault is a
+  copy, and it says so (`backup restore` tells you it must pair again). A full
+  copy of the data directory is caught when the two copies' histories meet.
+- **Crash-safe.** Received records are written in short transactions, one
+  device's records at a time. A crash part-way through keeps only whole
+  devices' records, never half of one, and the next exchange finishes the
+  rest. Every write is synced to disk before it counts.
+- **Tested against the same specification as before.** The simulator and the
+  independently written model from the previous step now run over the real
+  SQLite storage, with crashes between transactions and restarts from disk. A
+  600-run soak passed. Without crashes, a run over SQLite is step for step
+  identical to a run in memory.
+- **Upgrading.** This adds database schema v21. As with every schema change, an
+  already-installed background gateway built before it keeps forwarding but
+  stops recording until it is updated too.
+
+### Added — Tethra Mesh replication protocol and simulator (in development)
+
+The next layer of **Tethra Mesh** ([ADR 0031](docs/decisions/0031-device-mesh.md))
+is in the shared Rust core. Two devices can now run a complete replication
+exchange: they swap version vectors, stream only what the other lacks, and
+apply it in one all-or-nothing commit. A dropped connection, an out-of-order
+frame or a lying peer leaves nothing half-applied. Nothing is user-visible yet:
+storage on disk, the network transport and the commands come in the next
+increments.
+
+- **Cloned data directories are caught.** If a copied data directory (a Time
+  Machine restore, a copied folder) keeps running beside the original, the two
+  devices' histories diverge. Every device keeps a hash chain of each other
+  device's history. When two diverging histories meet, the first differing
+  record is found in a few round trips and a signed report spreads to every
+  device. The clone's later records then stop counting.
+- **Proved under failure.** A deterministic simulator runs real devices
+  through dropped, duplicated and reordered messages, partitions, crashes,
+  clock skew, joins, removals, forged records, replays and clones. After every
+  run it checks nine invariants, including that every device ends up with
+  exactly the state an **independently written model** of the specification
+  predicts, and that spend-cap rights are never overspent. 200 runs execute in
+  every CI build. Any failure prints a seed that replays it exactly, and
+  `scripts/mesh_soak.sh` runs long soaks.
+- Building the simulator and the independent model exposed four places where
+  the written protocol was incomplete or could not converge. Each is fixed in
+  the specification ([docs/mesh/PROTOCOL.md](docs/mesh/PROTOCOL.md) §13) and
+  recorded in the ADR.
+
+### Added — Tethra Mesh foundations (in development)
+
+Work has started on **Tethra Mesh**: replicating usage, shared projects and
+monthly spend caps between your own laptop, desktop and home server,
+peer-to-peer and end-to-end encrypted, with no server of any kind
+([ADR 0031](docs/decisions/0031-device-mesh.md)). Nothing is user-visible yet —
+this adds the tested foundation the feature is built on, inside the
+shared Rust core:
+
+- a normative protocol specification with worked examples
+  ([docs/mesh/PROTOCOL.md](docs/mesh/PROTOCOL.md)), plus the mesh architecture,
+  threat model, security invariants, known limitations and test plan in
+  [docs/mesh/](docs/mesh/ARCHITECTURE.md);
+- signed records: a canonical encoding with exactly one valid byte form, Ed25519
+  signatures over a domain-separated message (verified strictly), and
+  BLAKE3 record hashes — any flipped byte is rejected;
+- a hybrid logical clock that accepts a device with a wrong clock but flags it,
+  and never lets it drag your other devices' clocks into the future;
+- the four replicated data types the mesh is built from — last-writer-wins
+  values, per-device counters, the device roster (removal and fork rules, with device ids
+  derived from each device's keys) and a bounded counter for spend-cap rights that refuses to let one
+  device create rights out of nothing — each proved commutative, associative
+  and idempotent over at least 10 000 seeded cases.
+
+The product rules now say how this fits local-first: replication between your
+own paired devices is governed by ADR 0031 and is not cloud synchronization.
+One small new dependency, `ed25519-dalek` 2.2.0, reuses cryptography crates
+Tethra already ships.
+
 ### Changed — A card-based interface and a one-folder first run
 
 **First run.** Opening Tethra for the first time now asks for one thing: a

@@ -2378,7 +2378,37 @@ impl UnlockedVault {
             }
         }
 
+        // Tethra Mesh spend caps (Increment 07): this device's cross-device
+        // view of each cap against its target, at 80% and 100%. Isolated
+        // like the runtime pass: a failure is audited, and then the kind is
+        // not auto-resolved this run (an unreadable mesh store must not
+        // close real alerts). Never budgets (SI-19).
+        let mut mesh_caps_checked = false;
+        match self.mesh_cap_alerts() {
+            Ok(cap_alerts) => {
+                mesh_caps_checked = true;
+                for alert in cap_alerts {
+                    active_keys.push(alert.dedup_key.clone());
+                    if alerts::upsert(&self.conn, &alert)? {
+                        created += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = audit::record(
+                    &self.conn,
+                    "mesh_cap_alerts_error",
+                    None,
+                    None,
+                    &format!("spend-cap alert pass failed: {e}"),
+                );
+            }
+        }
+
         let mut managed = crate::monitor::managed_credential_kinds();
+        if mesh_caps_checked {
+            managed.push(alerts::AlertKind::MeshSpendCap);
+        }
         managed.extend(crate::activity::managed_kinds());
         managed.extend([
             alerts::AlertKind::ProviderDataStale,
@@ -9361,6 +9391,594 @@ pub fn projects_for_folder(conn: &Connection, folder: &std::path::Path) -> Resul
         }
     }
     Ok(ids)
+}
+
+// ---------------------------------------------------------------------------
+// Tethra Mesh (ADR 0031): this device's identity in a mesh of the user's own
+// devices. Key material is unwrapped here, under the vault key, and nowhere
+// else; `crate::mesh::identity` holds the logic.
+// ---------------------------------------------------------------------------
+impl UnlockedVault {
+    /// Start a mesh with this device as its first member (`tethra mesh
+    /// init`). `device_name` replicates to every device paired later.
+    pub fn mesh_init(&self, device_name: &str) -> Result<crate::mesh::identity::MeshSelfInfo> {
+        crate::mesh::identity::init(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            &self.paths.data_dir,
+            device_name,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )
+    }
+
+    /// This device's mesh identity, roster and replication counters
+    /// (`tethra mesh status`). Contains no key material.
+    pub fn mesh_status(&self) -> Result<crate::mesh::identity::MeshStatus> {
+        crate::mesh::identity::status(
+            &self.conn,
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )
+    }
+
+    /// The keys a running mesh node holds: the item-signing key, the Noise
+    /// key and the current access key, in zeroizing buffers. Never the
+    /// sealing key (MESH-SI-7). Like the gateway's route-MAC key, this needs
+    /// an unlocked vault but no reauthentication: the node runs only while
+    /// the vault is unlocked and drops the keys when it stops (ADR 0020).
+    pub fn mesh_keys(&self) -> Result<crate::mesh::identity::MeshKeys> {
+        crate::mesh::identity::load_keys(&self.conn, &self.vault_key, &self.vault_id)
+    }
+
+    /// The narrow vault-key capability a running mesh node holds: mesh
+    /// access keys and invite psks, nothing else (`mesh::membership`).
+    pub fn mesh_vault(&self) -> crate::mesh::membership::MeshVault {
+        crate::mesh::membership::MeshVault::new(self.vault_key.clone(), self.vault_id.clone())
+    }
+
+    /// This device's mesh store on its own connection.
+    pub fn mesh_open_store(&self) -> Result<crate::mesh::sqlite_store::SqliteStore> {
+        crate::mesh::identity::open_store(
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )?
+        .ok_or_else(|| crate::mesh::MeshError::NotInitialized.into())
+    }
+
+    /// Create a pairing invite (`tethra mesh invite`). Reauthenticated: the
+    /// token admits a new device to the mesh for its lifetime.
+    pub fn mesh_invite_create(
+        &self,
+        master_password: &SecretString,
+        ttl_minutes: Option<u32>,
+    ) -> Result<crate::mesh::membership::Invite> {
+        self.verify_master_password(master_password)?;
+        let store = self.mesh_open_store()?;
+        if !crate::mesh::store::MeshStore::state(&store)
+            .roster
+            .is_active(&crate::mesh::store::MeshStore::self_id(&store))
+        {
+            // A device that knows it was removed (or forked) admits no one.
+            return Err(crate::mesh::MeshError::NotActive.into());
+        }
+        drop(store);
+        crate::mesh::membership::invite_create(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            ttl_minutes,
+        )
+    }
+
+    /// Store this device's identity inside the mesh that accepted it
+    /// (`tethra mesh join`, after the pairing handshake).
+    pub fn mesh_join(
+        &self,
+        pending: &crate::mesh::membership::PendingIdentity,
+        accept: &crate::mesh::invite::PairAccept,
+    ) -> Result<crate::mesh::identity::MeshSelfInfo> {
+        crate::mesh::membership::join(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            &self.paths.data_dir,
+            pending,
+            accept,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )
+    }
+
+    /// The roster as this device sees it (`tethra mesh devices`).
+    pub fn mesh_devices(&self) -> Result<Vec<crate::mesh::membership::DeviceRow>> {
+        crate::mesh::membership::devices(&self.mesh_open_store()?)
+    }
+
+    /// Rename this device (a device can rename only itself).
+    pub fn mesh_device_rename(&self, name: &str) -> Result<()> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        crate::mesh::membership::rename(&self.conn, &mut store, keys.signing_key(), name)
+    }
+
+    /// Remove another device from the mesh and rotate the access key.
+    /// Reauthenticated; the caller asks for confirmation first. Returns the
+    /// removed id and the new access-key epoch.
+    pub fn mesh_device_remove(
+        &self,
+        master_password: &SecretString,
+        device: &str,
+    ) -> Result<(crate::mesh::DeviceId, u32)> {
+        self.verify_master_password(master_password)?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let target = crate::mesh::membership::resolve_device(&store, device)?;
+        let epoch = crate::mesh::membership::remove(
+            &self.conn,
+            &self.vault_key,
+            &self.vault_id,
+            &mut store,
+            keys.signing_key(),
+            target,
+        )?;
+        Ok((target, epoch))
+    }
+
+    /// Leave the mesh (`tethra mesh leave`). Reauthenticated; the caller
+    /// asks for confirmation first. Mints this device's self-removal, lets
+    /// `deliver` try to hand it to a peer (best effort), then wipes every
+    /// local mesh row and the identity marker.
+    pub fn mesh_leave(
+        &self,
+        master_password: &SecretString,
+        deliver: &mut dyn FnMut(&mut crate::mesh::sqlite_store::SqliteStore) -> bool,
+    ) -> Result<MeshLeaveReport> {
+        self.verify_master_password(master_password)?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        crate::mesh::membership::mint_self_remove(&mut store, keys.signing_key())?;
+        let delivered = deliver(&mut store);
+        drop(store);
+        drop(keys);
+        let wipe = crate::mesh::identity::leave_local_wipe(&self.conn, &self.paths.data_dir)?;
+        audit::record(
+            &self.conn,
+            "mesh_left",
+            None,
+            None,
+            if delivered {
+                "self-removal delivered to a peer"
+            } else {
+                "self-removal not delivered (no peer reachable)"
+            },
+        )?;
+        Ok(MeshLeaveReport { delivered, wipe })
+    }
+}
+
+impl UnlockedVault {
+    /// Add (or promote to manual) an address this device's node dials
+    /// (`tethra mesh peer add`). Returns the normalized address and whether
+    /// anything changed.
+    pub fn mesh_peer_add(&self, addr: &str) -> Result<(String, bool)> {
+        self.require_mesh()?;
+        crate::mesh::peers::add_manual(&self.conn, addr)
+    }
+
+    /// Forget a peer address (`tethra mesh peer remove`).
+    pub fn mesh_peer_remove(&self, addr: &str) -> Result<Option<crate::mesh::peers::PeerSource>> {
+        self.require_mesh()?;
+        crate::mesh::peers::remove(&self.conn, addr)
+    }
+
+    /// Every address the node dials, with its attempt history.
+    pub fn mesh_peers(&self) -> Result<Vec<crate::mesh::peers::PeerRow>> {
+        self.require_mesh()?;
+        crate::mesh::peers::list(&self.conn)
+    }
+
+    /// The store-side checks of `tethra mesh doctor` (and `--rebuild`).
+    /// Unwraps the node's keys only to check them; never the sealing key.
+    pub fn mesh_doctor(
+        &self,
+        opts: crate::mesh::doctor::DoctorOptions,
+    ) -> Result<crate::mesh::doctor::StoreDoctorReport> {
+        crate::mesh::doctor::run(
+            &self.conn,
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            &self.vault_key,
+            &self.vault_id,
+            opts,
+        )
+    }
+
+    /// Share a local project with the mesh (`tethra mesh project share`):
+    /// a new mesh project with its name, bound to it here.
+    pub fn mesh_project_share(&self, local: &str) -> Result<(crate::mesh::MeshProjectId, String)> {
+        let project = self.get_project(local)?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::share(
+            &mut store,
+            keys.signing_key(),
+            &project.id,
+            &project.name,
+        )?;
+        Ok((id, project.name))
+    }
+
+    /// Bind a local project to an existing mesh project, on this device.
+    /// Never automatic (MESH-SI-13).
+    pub fn mesh_project_bind(&self, mesh: &str, local: &str) -> Result<crate::mesh::MeshProjectId> {
+        let project = self.get_project(local)?;
+        let store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::resolve(&store, mesh)?;
+        crate::mesh::projects::bind(&store, &id, &project.id)?;
+        Ok(id)
+    }
+
+    /// Unbind a local project. Returns whether it was bound.
+    pub fn mesh_project_unbind(&self, local: &str) -> Result<bool> {
+        let project = self.get_project(local)?;
+        crate::mesh::projects::unbind(&self.conn, &project.id)
+    }
+
+    pub fn mesh_project_rename(
+        &self,
+        mesh: &str,
+        name: &str,
+    ) -> Result<crate::mesh::MeshProjectId> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::resolve(&store, mesh)?;
+        crate::mesh::projects::rename(&mut store, keys.signing_key(), &id, name)?;
+        Ok(id)
+    }
+
+    pub fn mesh_project_archive(&self, mesh: &str) -> Result<crate::mesh::MeshProjectId> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::projects::resolve(&store, mesh)?;
+        crate::mesh::projects::archive(&mut store, keys.signing_key(), &id)?;
+        Ok(id)
+    }
+
+    /// Merge two mesh projects; returns `(root, merged)`.
+    pub fn mesh_project_merge(
+        &self,
+        a: &str,
+        b: &str,
+    ) -> Result<(crate::mesh::MeshProjectId, crate::mesh::MeshProjectId)> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let a = crate::mesh::projects::resolve(&store, a)?;
+        let b = crate::mesh::projects::resolve(&store, b)?;
+        crate::mesh::projects::merge(&mut store, keys.signing_key(), &a, &b)
+    }
+
+    pub fn mesh_projects(&self) -> Result<Vec<crate::mesh::projects::MeshProjectRow>> {
+        crate::mesh::projects::list(&self.mesh_open_store()?)
+    }
+
+    /// Run the usage publisher once (`mesh replicate` and `mesh usage` do,
+    /// before they exchange or report).
+    pub fn mesh_publish(&self) -> Result<crate::mesh::publish::PublishReport> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let now = crate::mesh::clock::Clock::now_ms(&crate::mesh::clock::SystemClock);
+        crate::mesh::publish::publish(&mut store, keys.signing_key(), now)
+    }
+
+    /// Cross-device usage, labelled per device (`tethra mesh usage`).
+    pub fn mesh_usage(
+        &self,
+        filter: &crate::mesh::usage::UsageFilter,
+    ) -> Result<crate::mesh::usage::UsageReport> {
+        let store = self.mesh_open_store()?;
+        let now = crate::mesh::clock::Clock::now_ms(&crate::mesh::clock::SystemClock);
+        crate::mesh::usage::usage_report(&store, filter, now)
+    }
+
+    /// The mesh settings this build understands, with their values.
+    pub fn mesh_settings(&self) -> Result<Vec<(String, serde_json::Value, bool)>> {
+        let store = self.mesh_open_store()?;
+        let state = crate::mesh::store::MeshStore::state(&store);
+        let name = crate::mesh::publish::RETENTION_SETTING.to_owned();
+        let set = state.settings.value(&name, &state.roster).is_some();
+        let value = serde_json::json!(crate::mesh::publish::retention_days(&store));
+        Ok(vec![(name, value, set)])
+    }
+
+    /// Set a mesh setting (LWW, replicated). Only `retention.usage_days`
+    /// (1-3650) exists today.
+    pub fn mesh_setting_set(&self, name: &str, value: &str) -> Result<serde_json::Value> {
+        if name != crate::mesh::publish::RETENTION_SETTING {
+            return Err(CoreError::InvalidInput(format!(
+                "unknown mesh setting '{name}'; the only one is {}",
+                crate::mesh::publish::RETENTION_SETTING
+            )));
+        }
+        let days: u64 = value
+            .trim()
+            .parse()
+            .ok()
+            .filter(|d| (1..=crate::mesh::publish::MAX_RETENTION_DAYS).contains(d))
+            .ok_or_else(|| {
+                CoreError::InvalidInput(
+                    "retention.usage_days must be a whole number of days from 1 to 3650".into(),
+                )
+            })?;
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let winner = {
+            let state = crate::mesh::store::MeshStore::state(&store);
+            state
+                .settings
+                .register(&name.to_owned())
+                .and_then(|r| r.winning_hlc(&state.roster))
+        };
+        let v = serde_json::json!(days);
+        crate::mesh::store::MeshStore::mint(
+            &mut store,
+            keys.signing_key(),
+            crate::mesh::store::Draft::of(
+                &crate::mesh::kinds::MeshSetting {
+                    name: name.to_owned(),
+                    value: v.clone(),
+                },
+                crate::mesh::store::HlcPolicy::After(winner),
+            ),
+        )?;
+        Ok(v)
+    }
+
+    /// Create a monthly spend cap on a mesh project, owned by this device
+    /// (`tethra mesh cap create`). It replicates; rights go out to the
+    /// active devices at once.
+    pub fn mesh_cap_create(
+        &self,
+        mesh: &str,
+        monthly_micros: u64,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::CapCreated> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let project = crate::mesh::projects::resolve(&store, mesh)?;
+        let out = crate::mesh::caps::create(
+            &mut store,
+            keys.signing_key(),
+            probe,
+            &project,
+            monthly_micros,
+        )?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_created",
+            None,
+            None,
+            &format!(
+                "spend cap {} on mesh project {}: {} micro-USD a month",
+                out.cap_id, out.mesh_project_id, out.monthly_micros
+            ),
+        )?;
+        Ok(out)
+    }
+
+    /// Raise a spend cap: on its owner it mints more; elsewhere it is a
+    /// labelled local override for this month (the caller confirms that).
+    pub fn mesh_cap_raise(
+        &self,
+        cap: &str,
+        amount_micros: u64,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::ops::CapChanged> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::caps::resolve(&store, cap)?;
+        let out =
+            crate::mesh::caps::raise(&mut store, keys.signing_key(), probe, &id, amount_micros)?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_changed",
+            None,
+            None,
+            &format!(
+                "spend cap {id} raised by {amount_micros} micro-USD{}",
+                if out.is_override {
+                    " (local override)"
+                } else {
+                    ""
+                }
+            ),
+        )?;
+        Ok(out)
+    }
+
+    /// Lower a spend cap's target (last writer wins; the caller confirms).
+    pub fn mesh_cap_lower(
+        &self,
+        cap: &str,
+        target_micros: u64,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::ops::CapChanged> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::caps::resolve(&store, cap)?;
+        let out =
+            crate::mesh::caps::lower(&mut store, keys.signing_key(), probe, &id, target_micros)?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_changed",
+            None,
+            None,
+            &format!("spend cap {id} lowered to {target_micros} micro-USD"),
+        )?;
+        Ok(out)
+    }
+
+    /// Ask devices to hand a cap's unspent rights back to this device, the
+    /// owner (`tethra mesh cap reclaim`). Returns the devices asked.
+    pub fn mesh_cap_reclaim(
+        &self,
+        cap: &str,
+        from: Option<&str>,
+    ) -> Result<(crate::mesh::dot::CapId, Vec<crate::mesh::DeviceId>)> {
+        let store = self.mesh_open_store()?;
+        let id = crate::mesh::caps::resolve(&store, cap)?;
+        let from = match from {
+            Some(d) => Some(crate::mesh::membership::resolve_device(&store, d)?),
+            None => None,
+        };
+        let devices = crate::mesh::caps::reclaim(&store, &id, from)?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_changed",
+            None,
+            None,
+            &format!("spend cap {id}: reclaim from {} device(s)", devices.len()),
+        )?;
+        Ok((id, devices))
+    }
+
+    /// The spend caps this device knows, per device (`tethra mesh cap show`
+    /// and `rights`). Runs the reconciler first, so this device's own
+    /// figures are current.
+    pub fn mesh_caps(
+        &self,
+        cap: Option<&str>,
+        month: Option<crate::mesh::kinds::Month>,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::CapReport> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        if let Err(e) = crate::mesh::caps::reconcile(&mut store, keys.signing_key(), probe) {
+            // A refused mint (a rollback hold) still leaves a report to show.
+            if !matches!(
+                e,
+                CoreError::Mesh(
+                    crate::mesh::MeshError::RollbackHold | crate::mesh::MeshError::Forked
+                )
+            ) {
+                return Err(e);
+            }
+        }
+        let id = match cap {
+            Some(c) => Some(crate::mesh::caps::resolve(&store, c)?),
+            None => None,
+        };
+        crate::mesh::caps::report(&store, id, month)
+    }
+
+    /// The spend-cap alerts that hold now (none when this device is in no
+    /// mesh). Read only: it needs no keys.
+    fn mesh_cap_alerts(&self) -> Result<Vec<alerts::NewAlert>> {
+        let Some(store) = crate::mesh::identity::open_store(
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        crate::mesh::caps::alerts::cap_alerts(&store)
+    }
+
+    /// Switch enforcement of one cap (or every cap in force) on or off on this
+    /// device's gateway (`tethra mesh cap enforce`). Reauthenticated: with it
+    /// on, the gateway refuses requests (MESH-SI-9). Local only; no peer can
+    /// change it. Returns the caps changed.
+    pub fn mesh_cap_enforce(
+        &self,
+        master_password: &SecretString,
+        cap: Option<&str>,
+        on: bool,
+    ) -> Result<Vec<crate::mesh::dot::CapId>> {
+        self.verify_master_password(master_password)?;
+        let store = self.mesh_open_store()?;
+        let state = crate::mesh::store::MeshStore::state(&store);
+        if cap.is_none() && !on {
+            // Every switch, superseded and forgotten caps' included.
+            let cleared = crate::mesh::caps::gate::clear_enforced(&self.conn)?;
+            audit::record(
+                &self.conn,
+                "mesh_cap_enforcement_changed",
+                None,
+                None,
+                &format!("spend-cap enforcement off for {} cap(s)", cleared.len()),
+            )?;
+            return Ok(cleared);
+        }
+        let caps = match cap {
+            Some(c) => {
+                let id = crate::mesh::caps::resolve(&store, c)?;
+                if on
+                    && crate::mesh::caps::view::cap_in(state, &id)
+                        .is_some_and(|i| i.superseded_by.is_some())
+                {
+                    return Err(CoreError::InvalidInput(
+                        "another cap is in force on that project; enforce that one (`tethra mesh cap show`)"
+                            .into(),
+                    ));
+                }
+                vec![id]
+            }
+            None => crate::mesh::caps::view::caps_in(state)
+                .into_iter()
+                .filter(crate::mesh::caps::CapInfo::in_force)
+                .map(|c| c.cap_id)
+                .collect(),
+        };
+        if caps.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "there is no spend cap to enforce; create one with `tethra mesh cap create`".into(),
+            ));
+        }
+        for c in &caps {
+            crate::mesh::caps::gate::set_enforced(&self.conn, c, on)?;
+        }
+        audit::record(
+            &self.conn,
+            "mesh_cap_enforcement_changed",
+            None,
+            None,
+            &format!(
+                "spend-cap enforcement {} for {} cap(s)",
+                if on { "on" } else { "off" },
+                caps.len()
+            ),
+        )?;
+        Ok(caps)
+    }
+
+    /// Run the cap reconciler once (`mesh replicate` does, before it
+    /// exchanges). `probe` says whether this data directory's gateway runs
+    /// (the escrow fence; core does no I/O to find out).
+    pub fn mesh_cap_reconcile(
+        &self,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::ReconcileReport> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        crate::mesh::caps::reconcile(&mut store, keys.signing_key(), probe)
+    }
+
+    fn require_mesh(&self) -> Result<()> {
+        match crate::mesh::membership::mesh_of(&self.conn)? {
+            Some(_) => Ok(()),
+            None => Err(crate::mesh::MeshError::NotInitialized.into()),
+        }
+    }
+}
+
+/// What `mesh leave` did.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MeshLeaveReport {
+    /// Whether a peer received the self-removal before the wipe.
+    pub delivered: bool,
+    pub wipe: crate::mesh::identity::WipeReport,
 }
 
 // ---------------------------------------------------------------------------

@@ -207,6 +207,9 @@ pub struct ExchangeRecord {
     pub attribution_input: AttributionInput,
     pub digest: Option<CredentialDigest>,
     pub usage: Option<UsageObservation>,
+    /// The spend-cap charge of this request (`capgate`): the writer
+    /// confirms it once the row is committed, or reports it lost.
+    pub cap_charge: Option<crate::capgate::CapCharge>,
 }
 
 /// Counters the forwarding path may bump. Each is content-free.
@@ -228,6 +231,8 @@ pub mod counters {
     pub const DROPPED_EVENTS: &str = "dropped_events";
     /// Model strings rejected by the length/charset filter.
     pub const MODEL_REJECTED: &str = "model_rejected";
+    /// Requests refused by a spend cap (`capgate`).
+    pub const CAP_REFUSED: &str = "cap_refused";
     /// Oversized streaming events discarded by the bounded extractor.
     pub const USAGE_EVENTS_DROPPED: &str = "usage_events_dropped";
     /// Connections still running when a clean stop hit its drain deadline.
