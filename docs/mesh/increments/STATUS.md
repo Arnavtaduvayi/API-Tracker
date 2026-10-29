@@ -17,7 +17,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 05 | [Node runtime](05-node-runtime.md) | S | M | done | 2026-10-28 | 2026-10-28 | `5b37ae7`, `beb3aa1` | CI `40739758045` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40739757930` (success). First commit `5b37ae7`: CI `40737167919` **failed** on Linux (`node::three_nodes_converge…`, a pairing race, fixed in `beb3aa1`; its Windows job passed), service `40737167795` success |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | done | 2026-10-28 | 2026-10-28 | `dc6b110`, `c671d33`, `99df156` | CI `40749228074` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40749228069` (success). Earlier: `dc6b110` CI `40745888639` **failed** on Windows (the lost update fixed in `99df156`); `c671d33` CI `40746051787` and service `40746051748` success |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | done | 2026-10-28 | 2026-10-28 | `e2b9abd`, `6d06b15` | CI `40806698828` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (35 min; `6d06b15` removes the simulator's fsyncs), frontend, desktop backend, packaged app on macOS); macOS service `40806700080` (success). `6d06b15` + this record: CI **pending** (the next session checks it first) |
-| 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | pending | | | | |
+| 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | in-progress | 2026-10-28 | | | |
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | pending | | | | |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | pending | | | | |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | pending | | | | |
@@ -98,6 +98,47 @@ also update DESIGN.md and the affected increment files; README §7.)_
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 08 — Gateway cap enforcement (IN PROGRESS, stopped at the usage limit)
+
+**State: code written and passing its own tests, NOT committed.** The work is
+in this worktree's uncommitted changes (`git status`). Nothing of 08 is on
+the branch yet; `e7104c1` (record 07) is the last commit.
+
+**Done (uncommitted):** `core::mesh::caps::gate` (snapshot input in one read
+transaction, `set_enforced`/`enforced_caps`, `GateStatus` persisted in
+`mesh_meta` `gate/status`, `ack_counted`); `escrow::gateway_port`;
+`crates/gateway/src/capgate.rs` (`CapGate`: Arc snapshot, charged/persisted
+counters read-persisted-before-DB, one-in-flight `Ticket`, fail-open
+reasons); `ExchangeRecord.cap_charge` (writer confirms after commit, marks
+lost on drop/failure/paused); forward.rs admission before upstream + JSON
+403 (`x-tethra-cap`, OpenAI/Anthropic shapes); service poller refresh +
+`Status.caps`; `GatewaySocket::new(dir, port)` (Windows: loopback TCP probe);
+`UnlockedVault::mesh_cap_enforce` (reauth, audit
+`mesh_cap_enforcement_changed`); CLI `mesh cap enforce <cap>|--all on|off`,
+gate lines in `cap show` and `gateway status`; tests
+`crates/gateway/tests/cap_enforcement.rs` (9 pass, 3× stable),
+`perf::perf_cap_admission_overhead`, `mesh_cli` caps test extended (passes);
+docs: gateway SI-22, gateway USER_GUIDE "Spend caps", PERFORMANCE_RESULTS
+(admission within noise; no regression).
+
+**Left, in order:** (1) run the full check suite (clippy on both
+toolchains was clean before the last doc edits; the full `cargo test` was
+NOT run after 08's changes) and smoke; (2) the S+R review — the
+`code-review` run at high effort failed on the API rate limit before
+reporting; rerun it on the uncommitted diff with the 08 file's focus list;
+(3) mesh docs: USER_GUIDE §5 enforcement, KNOWN_LIMITATIONS (no longer
+"alerts only"), SECURITY_INVARIANTS SI-9/SI-10 implemented, TEST_PLAN
+gateway row, ARCHITECTURE, ADR 0032 enforcement section, DESIGN [Amended 08],
+CHANGELOG, the `caps/mod.rs` and `mesh_cap_cmd.rs` headers; (4) commit,
+push, CI; (5) also check CI for `6d06b15`/`e7104c1` (pending).
+
+**Deviations to record:** the CLI end-to-end (two nodes, foreground gateway
+against the mock upstream) cannot run, because the CLI's TLS-only connector
+is a guarded production invariant; the end-to-end lives in
+`cap_enforcement.rs` (real gateway, writer and gate, two vaults). Gate status
+reaches the CLI through `mesh_meta` (cross-platform), not the control socket.
+`gateway_config.cap_enforcement` is on exactly while some cap is enforced.
 
 ### Increment 07 — Spend caps, alerts only (2026-10-28)
 
