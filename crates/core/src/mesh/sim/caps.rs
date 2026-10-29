@@ -261,7 +261,7 @@ impl CapsWorld {
         for (i, (key, noise_pub, seal_pub, skew_ms)) in keys.into_iter().enumerate() {
             let clock = Arc::new(ManualClock::new(T0.saturating_add_signed(skew_ms)));
             let mut store = factory.create(genesis, ids[i], clock.clone());
-            store.sqlite().relax_fsync_for_tests().expect("relax fsync");
+            store.sqlite().no_sync_for_sim().expect("no sync");
             store.sqlite_mut().hooks().record_mints = true;
             devs.push(Dev {
                 id: ids[i],

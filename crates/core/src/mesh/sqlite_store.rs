@@ -845,6 +845,17 @@ impl SqliteStore {
             .map_err(sql("configuring durability"))
     }
 
+    /// No fsync at all, for the caps scenario family only: it injects no
+    /// crashes and checks no durability (the conformance suite does), and
+    /// every step writes real databases, which on CI's Windows disks makes a
+    /// flush per commit the whole cost of the run.
+    #[cfg(any(test, feature = "mesh-sim"))]
+    pub fn no_sync_for_sim(&self) -> Result<(), MeshError> {
+        self.conn
+            .pragma_update(None, "synchronous", "OFF")
+            .map_err(sql("configuring durability"))
+    }
+
     /// Reload the mirror if another connection wrote since this one last
     /// read or wrote (one `mesh_meta` read otherwise). A long-running node
     /// calls this before it decides anything from `state()`, so a removal
