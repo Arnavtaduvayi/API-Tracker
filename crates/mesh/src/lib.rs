@@ -20,6 +20,8 @@
 //!   [`instance`]: one node per data directory and its control channel;
 //!   [`discover`]: opt-in mDNS discovery and its in-memory fake;
 //!   [`doctor`]: `tethra mesh doctor`.
+//! - [`supervisor`]: the desktop's in-process node (Increment 09), started
+//!   and stopped with the vault.
 
 #![forbid(unsafe_code)]
 
@@ -39,6 +41,7 @@ pub mod replicate;
 pub mod runtime;
 pub mod serve;
 pub mod session;
+pub mod supervisor;
 pub mod wire;
 
 pub use error::{NetError, NetResult};

@@ -1960,3 +1960,240 @@ export interface ProjectRestoreEntry {
   project_id: string;
   tracking: boolean;
 }
+
+// --- Tethra Mesh (ADR 0031, Increment 09): mirrors apps/desktop/src-tauri/src/mesh_cmds.rs.
+// Device and mesh ids are lowercase hex strings. Nothing here is key material;
+// `MeshInvite.invite` is the only bearer secret and is shown once.
+
+export type MeshMarkerStatus = "ok" | "missing" | "mismatch" | "rolled_back";
+
+export interface MeshDeviceSummary {
+  device_id: string;
+  name: string | null;
+  is_self: boolean;
+  member: boolean;
+  active: boolean;
+  removed: boolean;
+  cutoff_seq: number | null;
+  fork_seq: number | null;
+}
+
+export interface MeshStatusDetail {
+  mesh_id: string;
+  mesh_id_short: string;
+  genesis_device: string;
+  device_id: string;
+  device_name: string;
+  state: string;
+  next_seq: number;
+  marker: MeshMarkerStatus;
+  /** Why the identity marker check failed; the node refuses to run then. */
+  marker_problem: string | null;
+  self_forked: boolean;
+  roster_size: number;
+  devices: MeshDeviceSummary[];
+  vv: Record<string, number>;
+  items_by_kind: Record<string, number>;
+  rejected_items: number;
+  clock_skew: Record<string, number>;
+  fork_evidence: number;
+  forked_devices: number;
+  regressions: number;
+  repairs_changed: number;
+  rollback_hold: number | null;
+}
+
+/** What a running node reports about itself (`api_tracker_mesh::instance::NodeStatus`). */
+export interface MeshNodeStatus {
+  pid: number;
+  device_id: string;
+  started_at: string;
+  /** The addresses its listeners are bound to. */
+  listen: string[];
+  /** The addresses it publishes to the other devices (and names in invites). */
+  advertised: string[];
+  interval_ms: number;
+  discovery: boolean;
+  rounds: number;
+  last_round_at: string | null;
+  active_sessions: number;
+  hooks: string[];
+  last_hook_error: string | null;
+  last_publish_error: string | null;
+  stopping: boolean;
+}
+
+export type MeshStopReason =
+  | "requested"
+  | "session_ended"
+  | "session_expired"
+  | "deadline"
+  | "locked"
+  | "forked"
+  | "removed"
+  | "left";
+
+export interface MeshStopInfo {
+  reason: MeshStopReason;
+  description: string;
+  keys_dropped: boolean;
+  at: string;
+}
+
+export interface MeshNodeState {
+  /** This app's in-process node, while it runs. */
+  running: MeshNodeStatus | null;
+  /** A node is still finishing its exchanges after a stop. */
+  stopping: boolean;
+  /** Why the last start failed. */
+  last_error: string | null;
+  last_stop: MeshStopInfo | null;
+  /** A node another process runs for this data directory (`tethra mesh serve`), when this app runs none. */
+  external: MeshNodeStatus | null;
+}
+
+export type MeshStatus = (
+  { initialized: false } | ({ initialized: true } & MeshStatusDetail)
+) & {
+  node: MeshNodeState;
+};
+
+export interface MeshInitResult {
+  mesh_id: string;
+  device_id: string;
+  device_name: string;
+  created_at: string;
+}
+
+/** Shown once; a bearer secret for its lifetime. Drop it when the dialog closes. */
+export interface MeshInvite {
+  invite: string;
+  expires_at: string;
+  ttl_minutes: number;
+  addresses: string[];
+}
+
+export interface MeshJoinResult {
+  mesh_id: string;
+  device_id: string;
+  device_name: string;
+  items_in: number;
+  first_exchange_completed: boolean;
+  /** False: the inviter's key did not match its roster entry (tell the user to leave and pair again). */
+  inviter_verified: boolean;
+}
+
+export interface MeshPeerLag {
+  at: string;
+  completed: boolean;
+  at_hello: Record<string, number>;
+  peer_behind: number;
+  peer_ahead: number;
+  /** Items this device holds that the peer still lacks, as far as this device knows. */
+  peer_behind_now: number;
+  digest_mismatches: number;
+}
+
+export interface MeshDevice {
+  device_id: string;
+  short_id: string;
+  name: string | null;
+  is_self: boolean;
+  added_by: string | null;
+  member: boolean;
+  active: boolean;
+  removed: boolean;
+  cutoff_seq: number | null;
+  fork_seq: number | null;
+  /** The last successful exchange with it (RFC 3339), if any. */
+  last_exchange: string | null;
+  /** Active, not this device, and no exchange for over 24 h (or never). */
+  stale: boolean;
+  lag: MeshPeerLag | null;
+}
+
+export interface MeshRemoveResult {
+  removed: string;
+  access_key_epoch: number;
+}
+
+export interface MeshLeaveResult {
+  /** A peer received this device's departure before the local wipe. */
+  delivered: boolean;
+  wipe: { identity: string | null; rows_deleted: number; marker: string };
+}
+
+export type MeshPeerSource = "manual" | "gossip" | "mdns";
+
+export interface MeshPeer {
+  addr: string;
+  device_id: string | null;
+  source: MeshPeerSource;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  failures: number;
+  unreachable_since: string | null;
+  last_error: string | null;
+  device_name: string | null;
+  /** Approximate end of the current retry backoff, when one applies. */
+  backoff_until: string | null;
+}
+
+export interface MeshPeerAddResult {
+  addr: string;
+  added: boolean;
+}
+
+export interface MeshPeerRemoveResult {
+  removed: boolean;
+  source: MeshPeerSource | null;
+}
+
+export interface MeshExchangeSummary {
+  addr: string;
+  device: string | null;
+  items_in: number;
+  items_out: number;
+  duration_ms: number;
+  error: string | null;
+}
+
+export interface MeshReplicateResult {
+  via: "app_node" | "external_node" | "one_shot";
+  exchanges: MeshExchangeSummary[];
+  repairs_changed: number;
+  notes: string[];
+}
+
+export type MeshSeverity = "ok" | "info" | "warning" | "problem";
+
+export interface MeshDoctorFinding {
+  check: string;
+  severity: MeshSeverity;
+  summary: string;
+  fix?: string;
+}
+
+export interface MeshDoctorReport {
+  worst: MeshSeverity;
+  initialized: boolean;
+  findings: MeshDoctorFinding[];
+}
+
+/** Local-only node settings. Widening the LAN surface needs the master password (enforced in core). */
+export interface MeshNodeSettings {
+  run_while_open: boolean;
+  /** IP:PORT literals, such as 127.0.0.1:7700 or 100.64.1.2:7700. */
+  listen: string[];
+  /** Allow 0.0.0.0 / [::] in `listen`. */
+  all_interfaces: boolean;
+  /** Announce and find this mesh's devices with mDNS. */
+  discover: boolean;
+}
+
+export interface MeshNodeSettingsResult {
+  settings: MeshNodeSettings;
+  outcome: "started" | "already_running" | "off" | null;
+  /** Why the node did not start; the settings are saved either way. */
+  start_error: string | null;
+}

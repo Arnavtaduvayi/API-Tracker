@@ -520,6 +520,12 @@ impl RunningNode {
         self.shared.status()
     }
 
+    /// The node's shared state as a control target (status, replicate-now,
+    /// stop): what the desktop's supervisor keeps. Holds no keys.
+    pub fn control(&self) -> Arc<dyn ControlTarget> {
+        self.shared.clone()
+    }
+
     /// Ask the node to stop; [`Self::wait`] returns once it has.
     pub fn stop(&self) {
         self.shared.stopping.store(true, Ordering::SeqCst);

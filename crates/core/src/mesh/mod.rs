@@ -44,6 +44,10 @@
 //! - Increment 07: spend caps ([`caps`]): the policy over the bounded
 //!   counter, the escrow fence, the reconciler and rights requests, views
 //!   and alerts.
+//!
+//! - Increment 09: how the desktop runs its in-process node
+//!   ([`node_settings`]; local-only, reauthenticated to widen the LAN
+//!   surface).
 
 pub mod caps;
 pub mod chain;
@@ -61,6 +65,7 @@ pub mod kinds;
 pub mod marker;
 pub mod membership;
 pub mod memstore;
+pub mod node_settings;
 pub mod peers;
 pub mod projects;
 pub mod proto;

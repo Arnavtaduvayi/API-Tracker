@@ -110,6 +110,15 @@ pub enum MeshError {
 
     /// The cap's owner device was removed: nobody may mint for it again
     /// (DESIGN §D15).
+    /// The change widens who on the network can reach this device; it needs
+    /// the master password (`node_settings::needs_reauth`).
+    #[error("this change lets other machines on your network reach this device; confirm your master password to make it")]
+    ReauthRequired,
+
+    /// Static text: the desktop's node settings were refused.
+    #[error("invalid mesh node settings: {0}")]
+    InvalidNodeSettings(&'static str),
+
     #[error("this spend cap is frozen because its owner device was removed; no new rights can be added to it. Create a new cap for the project with `tethra mesh cap create`")]
     CapFrozen,
 }
@@ -149,6 +158,8 @@ impl MeshError {
             MeshError::RollbackHold => "mesh_rollback_hold",
             MeshError::CapExists => "mesh_cap_exists",
             MeshError::CapFrozen => "mesh_cap_frozen",
+            MeshError::InvalidNodeSettings(_) => "mesh_invalid_node_settings",
+            MeshError::ReauthRequired => "mesh_reauth_required",
         }
     }
 }

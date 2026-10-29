@@ -20,7 +20,6 @@ use api_tracker_core::mesh::store::MeshStore;
 use api_tracker_core::mesh::{DeviceId, MeshId};
 use api_tracker_mesh::discover::MdnsDiscovery;
 use api_tracker_mesh::instance::{self, ExchangeSummary, NodeStatus, Response};
-use api_tracker_mesh::replicate::replicate_once;
 use api_tracker_mesh::runtime::{
     AnyOf, Deadline, NodeConfig, RunningNode, SessionAlive, StopCondition,
 };
@@ -534,46 +533,18 @@ fn replicate(ctx: &Ctx, peer: Option<String>) -> Result<()> {
         }
     } else {
         let (vault, _token) = ctx.unlocked()?;
-        // Publish fresh usage and spend-cap figures first, so this exchange
-        // carries them.
-        if let Err(e) = vault.mesh_publish() {
-            note(&format!("mesh: usage was not published: {e}"));
+        // Publishes fresh usage and spend-cap figures first, so the
+        // exchanges carry them.
+        let report = api_tracker_mesh::replicate::replicate_known_peers(&vault, dir, peer)?;
+        for n in &report.notes {
+            note(&format!("mesh: {n}"));
         }
-        let probe = crate::mesh_cap_cmd::gateway_probe(ctx, &vault);
-        if let Err(e) = vault.mesh_cap_reconcile(&probe) {
-            note(&format!("mesh: spend caps were not reconciled: {e}"));
-        }
-        let addrs = match &peer {
-            Some(p) => vec![p.clone()],
-            None => vault.mesh_peers()?.into_iter().map(|r| r.addr).collect(),
-        };
-        if addrs.is_empty() {
+        if report.exchanges.is_empty() {
             bail!(
                 "no peer is known: give --peer HOST:PORT, or add one with `tethra mesh peer add`"
             );
         }
-        let node = MeshNode::open(&vault, Arc::new(SystemClock), TransportLimits::default())?;
-        let exchanges = addrs
-            .into_iter()
-            .map(|addr| match replicate_once(&node, &addr) {
-                Ok(r) => ExchangeSummary {
-                    addr,
-                    device: Some(r.peer),
-                    items_in: r.items_in,
-                    items_out: r.items_out,
-                    duration_ms: r.duration_ms,
-                    error: r.aborted.map(str::to_owned),
-                },
-                Err(e) => ExchangeSummary {
-                    addr,
-                    device: None,
-                    items_in: 0,
-                    items_out: 0,
-                    duration_ms: 0,
-                    error: Some(e.to_string()),
-                },
-            })
-            .collect();
+        let exchanges = report.exchanges;
         ReplicateOut {
             via_node: false,
             exchanges,
@@ -1257,7 +1228,7 @@ fn join(ctx: &Ctx, invite: &str, name: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn leave(ctx: &Ctx, mut peers: Vec<String>, yes: bool) -> Result<()> {
+fn leave(ctx: &Ctx, peers: Vec<String>, yes: bool) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
     if !ctx::confirm(
         "Leave the mesh? This deletes this device's mesh identity, keys and records here; \
@@ -1266,30 +1237,9 @@ fn leave(ctx: &Ctx, mut peers: Vec<String>, yes: bool) -> Result<()> {
     )? {
         bail!("aborted");
     }
-    // Addresses the other devices published, after any given explicitly.
-    {
-        let store = vault.mesh_open_store()?;
-        let state = store.state();
-        for (d, _) in state.roster.known() {
-            if *d == store.self_id() || !state.roster.is_active(d) {
-                continue;
-            }
-            if let Some(info) = state.device_info.value(d, &state.roster) {
-                peers.extend(info.listen_addrs.iter().cloned());
-            }
-        }
-    }
     eprintln!("Reauthentication required to leave the mesh.");
     let master = ctx::master_password()?;
-    let report = vault.mesh_leave(&master, &mut |_store| {
-        let Ok(node) = MeshNode::open(&vault, Arc::new(SystemClock), TransportLimits::default())
-        else {
-            return false;
-        };
-        peers
-            .iter()
-            .any(|p| replicate_once(&node, p).is_ok_and(|r| r.aborted.is_none()))
-    })?;
+    let report = api_tracker_mesh::replicate::leave_mesh(&vault, &master, peers)?;
     render::emit(ctx.json, &report, || {
         if report.delivered {
             println!("Left the mesh; a peer received this device's departure.");

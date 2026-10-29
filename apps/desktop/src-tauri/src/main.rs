@@ -8,6 +8,8 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod mesh_cmds;
+
 use api_tracker_core::backup;
 use api_tracker_core::docwatch::{DocWatch, HttpFetcher};
 use api_tracker_core::error::CoreError;
@@ -4980,6 +4982,22 @@ fn main() {
             gateway_activity,
             gateway_activity_by_project,
             credential_activity_sources,
+            // Tethra Mesh (Increment 09): mesh_cmds.rs.
+            mesh_cmds::mesh_status,
+            mesh_cmds::mesh_init,
+            mesh_cmds::mesh_invite_create,
+            mesh_cmds::mesh_join,
+            mesh_cmds::mesh_devices,
+            mesh_cmds::mesh_device_rename,
+            mesh_cmds::mesh_device_remove,
+            mesh_cmds::mesh_leave,
+            mesh_cmds::mesh_peers_list,
+            mesh_cmds::mesh_peer_add,
+            mesh_cmds::mesh_peer_remove,
+            mesh_cmds::mesh_replicate_now,
+            mesh_cmds::mesh_doctor,
+            mesh_cmds::mesh_node_get_settings,
+            mesh_cmds::mesh_node_set_settings,
         ])
         .build(tauri::generate_context!())
         .expect("error while running the Tethra desktop app")

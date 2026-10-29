@@ -622,6 +622,18 @@ pub fn devices(store: &SqliteStore) -> Result<Vec<DeviceRow>> {
     Ok(out)
 }
 
+/// Whether `row` is stale at `now_ms`: an active device other than this one
+/// that this device has not exchanged with for longer than
+/// [`super::usage::STALE_AFTER_MS`], or never. The same rule the usage views
+/// label figures with; the desktop shows it as a badge.
+pub fn is_stale(row: &DeviceRow, now_ms: u64) -> bool {
+    !row.is_self
+        && row.active
+        && row.last_exchange.as_deref().is_none_or(|at| {
+            now_ms.saturating_sub(super::peers::rfc3339_to_ms(at)) > super::usage::STALE_AFTER_MS
+        })
+}
+
 /// Resolve a device by its full id or a unique prefix of at least 8 hex
 /// characters, among the devices this one knows.
 pub fn resolve_device(

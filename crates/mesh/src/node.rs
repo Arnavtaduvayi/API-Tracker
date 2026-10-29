@@ -198,6 +198,18 @@ impl GatewaySocket {
     pub fn new(dir: PathBuf, port: Option<u16>) -> Self {
         Self { dir, port }
     }
+
+    /// The probe for `vault`'s gateway: its data directory and the port in
+    /// its gateway configuration.
+    pub fn for_vault(
+        vault: &api_tracker_core::vault::UnlockedVault,
+        data_dir: &std::path::Path,
+    ) -> Self {
+        let port = api_tracker_core::mesh::caps::escrow::gateway_port(vault.connection())
+            .ok()
+            .flatten();
+        Self::new(data_dir.to_path_buf(), port)
+    }
 }
 
 impl api_tracker_core::mesh::caps::GatewayProbe for GatewaySocket {

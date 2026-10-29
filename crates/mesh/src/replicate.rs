@@ -87,3 +87,110 @@ pub fn replicate_once(node: &MeshNode, addr: &str) -> NetResult<ExchangeReport> 
     }
     Err(last)
 }
+
+/// What [`replicate_known_peers`] did.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct OneShotReport {
+    pub exchanges: Vec<crate::instance::ExchangeSummary>,
+    /// Problems before the exchanges (usage not published, caps not
+    /// reconciled); static text and error messages, never values.
+    pub notes: Vec<String>,
+}
+
+/// Exchange once with `peer`, or with every known peer address, without a
+/// running node (`tethra mesh replicate` and the desktop's "Replicate now"
+/// when no node runs for the data directory). Usage is published and spend
+/// caps reconciled first, so the exchanges carry fresh figures; a failure
+/// there is a note, not an error. With no peer to dial nothing is done and
+/// `exchanges` is empty.
+pub fn replicate_known_peers(
+    vault: &api_tracker_core::vault::UnlockedVault,
+    data_dir: &std::path::Path,
+    peer: Option<String>,
+) -> NetResult<OneShotReport> {
+    let addrs = match peer {
+        Some(p) => vec![p],
+        None => vault.mesh_peers()?.into_iter().map(|r| r.addr).collect(),
+    };
+    let mut notes = Vec::new();
+    if addrs.is_empty() {
+        return Ok(OneShotReport {
+            exchanges: Vec::new(),
+            notes,
+        });
+    }
+    if let Err(e) = vault.mesh_publish() {
+        notes.push(format!("usage was not published: {e}"));
+    }
+    let probe = crate::node::GatewaySocket::for_vault(vault, data_dir);
+    if let Err(e) = vault.mesh_cap_reconcile(&probe) {
+        notes.push(format!("spend caps were not reconciled: {e}"));
+    }
+    let node = MeshNode::open(
+        vault,
+        std::sync::Arc::new(api_tracker_core::mesh::clock::SystemClock),
+        crate::node::TransportLimits::default(),
+    )?;
+    let exchanges = addrs
+        .into_iter()
+        .map(|addr| match replicate_once(&node, &addr) {
+            Ok(r) => crate::instance::ExchangeSummary {
+                addr,
+                device: Some(r.peer),
+                items_in: r.items_in,
+                items_out: r.items_out,
+                duration_ms: r.duration_ms,
+                error: r.aborted.map(str::to_owned),
+            },
+            Err(e) => crate::instance::ExchangeSummary {
+                addr,
+                device: None,
+                items_in: 0,
+                items_out: 0,
+                duration_ms: 0,
+                error: Some(e.to_string()),
+            },
+        })
+        .collect();
+    Ok(OneShotReport { exchanges, notes })
+}
+
+/// Leave the mesh (`tethra mesh leave`, the desktop's "Leave mesh"), after
+/// the caller's confirmation. Reauthenticated in core
+/// (`UnlockedVault::mesh_leave`). Tries to hand this device's self-removal
+/// to a peer first: `extra_peers` (given explicitly), then the addresses the
+/// other active devices published, one exchange each until one completes;
+/// then wipes every local mesh row and the identity marker. Stop any node
+/// running for this data directory first.
+pub fn leave_mesh(
+    vault: &api_tracker_core::vault::UnlockedVault,
+    master_password: &api_tracker_core::secret::SecretString,
+    extra_peers: Vec<String>,
+) -> NetResult<api_tracker_core::vault::MeshLeaveReport> {
+    use api_tracker_core::mesh::store::MeshStore;
+    let mut peers = extra_peers;
+    {
+        let store = vault.mesh_open_store()?;
+        let state = store.state();
+        for (d, _) in state.roster.known() {
+            if *d == store.self_id() || !state.roster.is_active(d) {
+                continue;
+            }
+            if let Some(info) = state.device_info.value(d, &state.roster) {
+                peers.extend(info.listen_addrs.iter().cloned());
+            }
+        }
+    }
+    Ok(vault.mesh_leave(master_password, &mut |_store| {
+        let Ok(node) = MeshNode::open(
+            vault,
+            std::sync::Arc::new(api_tracker_core::mesh::clock::SystemClock),
+            crate::node::TransportLimits::default(),
+        ) else {
+            return false;
+        };
+        peers
+            .iter()
+            .any(|p| replicate_once(&node, p).is_ok_and(|r| r.aborted.is_none()))
+    })?)
+}

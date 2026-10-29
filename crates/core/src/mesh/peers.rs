@@ -472,6 +472,18 @@ pub fn last_repair_ms(conn: &Connection) -> u64 {
     last_repair(conn).ok().flatten().map_or(0, |r| r.at_ms)
 }
 
+/// Until when a node holds off dialling `row` after its failures (the last
+/// attempt plus [`backoff_ms`]), if that is after `now_ms`. The running
+/// node adds up to ±20% jitter, so this is approximate.
+pub fn backoff_until(row: &PeerRow, now_ms: u64) -> Option<String> {
+    if row.failures == 0 {
+        return None;
+    }
+    let last = rfc3339_to_ms(row.last_attempt_at.as_deref()?);
+    let until = last.saturating_add(backoff_ms(row.failures));
+    (until > now_ms).then(|| ms_rfc3339(until))
+}
+
 pub fn ms_rfc3339(ms: u64) -> String {
     ms_to_rfc3339(ms)
 }

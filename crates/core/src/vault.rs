@@ -9595,6 +9595,52 @@ impl UnlockedVault {
         )
     }
 
+    /// How the desktop runs this device's node (`mesh_meta`
+    /// `node/settings`, local-only). The defaults (nothing runs, nothing
+    /// listens) when this device is not in a mesh or never set them.
+    pub fn mesh_node_settings(&self) -> Result<crate::mesh::node_settings::NodeSettings> {
+        if crate::mesh::membership::mesh_of(&self.conn)?.is_none() {
+            return Ok(Default::default());
+        }
+        crate::mesh::node_settings::get(&self.conn)
+    }
+
+    /// Change how the desktop runs this device's node; returns the stored,
+    /// normalized settings. Widening who on the network can reach this
+    /// device (all interfaces, mDNS discovery, a listen address that is not
+    /// loopback) is reauthenticated here, so neither the Tauri wrapper nor
+    /// React can skip it (`node_settings::needs_reauth`): no password is
+    /// `MeshError::ReauthRequired`, a wrong one `WrongPassword`. Narrowing
+    /// needs none.
+    pub fn mesh_node_settings_set(
+        &self,
+        master_password: Option<&SecretString>,
+        settings: &crate::mesh::node_settings::NodeSettings,
+    ) -> Result<crate::mesh::node_settings::NodeSettings> {
+        use crate::mesh::node_settings;
+        self.require_mesh()?;
+        let new = node_settings::validate(settings)?;
+        let old = node_settings::get(&self.conn)?;
+        let widened = node_settings::widenings(&old, &new);
+        if !widened.is_empty() {
+            match master_password {
+                Some(pw) => self.verify_master_password(pw)?,
+                None => return Err(crate::mesh::MeshError::ReauthRequired.into()),
+            }
+        }
+        node_settings::put(&self.conn, &new)?;
+        if !widened.is_empty() {
+            audit::record(
+                &self.conn,
+                "mesh_node_exposure_widened",
+                None,
+                None,
+                &widened.join(", "),
+            )?;
+        }
+        Ok(new)
+    }
+
     /// Share a local project with the mesh (`tethra mesh project share`):
     /// a new mesh project with its name, bound to it here.
     pub fn mesh_project_share(&self, local: &str) -> Result<(crate::mesh::MeshProjectId, String)> {

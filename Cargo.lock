@@ -176,6 +176,7 @@ version = "0.1.1"
 dependencies = [
  "api-tracker-core",
  "api-tracker-gateway",
+ "api-tracker-mesh",
  "api-tracker-observe",
  "api-tracker-tracking",
  "arboard",
