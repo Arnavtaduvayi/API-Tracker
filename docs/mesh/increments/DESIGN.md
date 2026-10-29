@@ -10,6 +10,16 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 08 (2026-10-29).** Enforcement as built (ADR 0032
+> D11, gateway SI-22): the per-cap opt-in is `mesh_meta` `cap_enforce/<cap>`
+> and `gateway_config.cap_enforcement` follows "some cap is enforced"; the
+> gateway's spend is `persisted + (charged − persisted at the snapshot)` with
+> the writer confirming each charge after its commit; the gate's status
+> reaches `mesh cap show` through `mesh_meta` (`gate/status`), not the
+> control socket; the Windows probe is a loopback connection to the gateway's
+> port; the two-device end-to-end test lives in the gateway crate (the CLI
+> cannot reach a plain-HTTP mock upstream). Passages marked **[Amended 08]**.
+>
 > **Amended by Increment 07 (2026-10-28).** Building spend caps settled the
 > policy in ADR 0032 and PROTOCOL.md §5.5.1: every decision is made inside the
 > transaction that publishes it (`SqliteStore::mint_with`; an idle one rolls
@@ -712,6 +722,9 @@ used. The list below is the original brief:
 
 ## D15. Spend caps and enforcement (ADR 0032)
 
+> **[Amended 08]** Enforcement is built as ADR 0032 D11 describes (the
+> header note lists what differs from the brief below).
+>
 > **[Amended 07]** As built, the policy below is specified exactly in
 > PROTOCOL.md §5.5.1 and ADR 0032 (see the header note): decisions inside the
 > publishing transaction, superseded caps, `reclaim` requests, the effective

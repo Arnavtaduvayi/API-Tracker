@@ -539,7 +539,7 @@ fn replicate(ctx: &Ctx, peer: Option<String>) -> Result<()> {
         if let Err(e) = vault.mesh_publish() {
             note(&format!("mesh: usage was not published: {e}"));
         }
-        let probe = api_tracker_mesh::node::GatewaySocket(dir.clone());
+        let probe = crate::mesh_cap_cmd::gateway_probe(ctx, &vault);
         if let Err(e) = vault.mesh_cap_reconcile(&probe) {
             note(&format!("mesh: spend caps were not reconciled: {e}"));
         }

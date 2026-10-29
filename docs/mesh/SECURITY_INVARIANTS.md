@@ -205,10 +205,21 @@ NN)** otherwise.
 - **MESH-SI-9 Enforcement.** Cap enforcement is local and opt-in, peers cannot
   toggle it, the forward path never waits on the database or network for a cap
   decision, and overshoot is ≤ one in-flight request's cost per cap per device.
-  *Status:* specified (lands in 08). *Tests:* none yet.
+  *Status:* implemented (08): `crates/gateway::capgate` decides from an `Arc`
+  snapshot and atomics only, admits one request at a time per cap near
+  exhaustion, refuses with a pre-upstream 403, fails open with a reason; the
+  switch is `mesh_meta` `cap_enforce/<cap>` (local, set only by the
+  reauthenticated `UnlockedVault::mesh_cap_enforce`), never a replicated item
+  (gateway SI-22). *Tests:* `cap_enforcement::at_exhaustion_a_non_retryable_403_is_sent_before_any_upstream_byte`,
+  `near_exhaustion_one_request_at_a_time_and_the_slot_clears_on_every_exit`,
+  `only_caps_switched_on_here_are_enforced_and_a_peer_cannot_switch_one_on`,
+  `the_gate_fails_open_and_says_why`, `perf::perf_cap_admission_overhead`.
 - **MESH-SI-10 No double spending.** Rights are never spent twice; transfers are
-  fenced against the running gateway's snapshot (escrow). *Status:* the node's
-  half implemented (07); the gateway's acknowledgement lands in 08. The bounded
+  fenced against the running gateway's snapshot (escrow). *Status:* implemented
+  (07 node half, 08 gateway half: each snapshot deducts every open escrow row,
+  then acknowledges the pending ones it counted, `caps::gate::ack_counted`;
+  spend is `persisted + (charged − persisted at the snapshot)`, so a request is
+  never missed and never counted twice across the writer). The bounded
   counter refuses spends and transfers beyond `avail`, and its view clamps a
   device's outgoing rows to what it held (01). Every transfer, burn and grant
   is decided inside the write transaction that publishes it, against this
@@ -225,7 +236,10 @@ NN)** otherwise.
   `mesh_caps::caps_advance_minting_covers_an_owner_offline_across_the_month_boundary`
   (unpublished spend counts at once), `mesh_sim::caps_ci_seeds` (cap safety,
   own avail ≥ 0, conservation and the clamp at every step on SQLite, the
-  oracle at quiescence).
+  oracle at quiescence),
+  `cap_enforcement::the_fence_reserves_before_a_transfer_publishes_and_never_subtracts_twice`,
+  `cap_enforcement::under_the_cap_requests_forward_and_spend_is_counted_once_across_the_writer`,
+  `cap_enforcement::a_charge_the_writer_never_persists_stays_counted_and_marks_accounting_incomplete`.
 
 ## Honesty and scope
 
@@ -246,8 +260,9 @@ NN)** otherwise.
   auto-enforcement. *Status:* implemented (06) for binding: sharing binds only
   the sharer's own project; every other device binds by an explicit command,
   never by name or local id; spend caps (07) are created and changed only by
-  explicit commands, and raise alerts only, so nothing is enforced until the
-  user switches enforcement on (08); imports (11) follow. *Tests:*
+  explicit commands; nothing is enforced until the user switches enforcement
+  on, per cap, on that device, with reauthentication (08); imports (11)
+  follow. *Tests:*
   `mesh_usage::binding_is_never_automatic_cascades_on_delete_and_is_refused_twice`,
   `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the

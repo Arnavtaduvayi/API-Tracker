@@ -20,6 +20,7 @@ pub fn cap_alerts(store: &SqliteStore) -> Result<Vec<NewAlert>> {
     let l = Ledger::of(store);
     let month = l.month();
     let observed_at = crate::clock::now_rfc3339();
+    let enforced = super::gate::enforced_caps(l.conn)?;
     let mut out = Vec::new();
     for cap in l.caps().into_iter().filter(|c| c.in_force()) {
         let f = l.figures(&cap, month);
@@ -59,10 +60,17 @@ pub fn cap_alerts(store: &SqliteStore) -> Result<Vec<NewAlert>> {
                      this month ({} device(s), {stale} not heard from in 24 hours). It is \
                      this device's view as of the last exchange with each device, priced by \
                      each device's own pricing table; a device not heard from may have spent \
-                     more. In this version the cap raises alerts only; requests are not blocked.",
+                     more. {}",
                     crate::usage::format_micros(i64::try_from(used).unwrap_or(i64::MAX)),
                     crate::usage::format_micros(i64::try_from(effective).unwrap_or(i64::MAX)),
                     f.view.devices.len(),
+                    if enforced.contains(&cap.cap_id) {
+                        "This device's gateway enforces the cap: it refuses requests once this \
+                         device's rights are used up."
+                    } else {
+                        "This device's gateway does not enforce it (alerts only); switch that \
+                         on with `tethra mesh cap enforce`."
+                    }
                 ),
                 evidence: format!(
                     "cap={} month={month} used_micros={used} cap_micros={effective} \

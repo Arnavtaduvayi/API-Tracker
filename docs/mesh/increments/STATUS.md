@@ -40,6 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
+| 08 (uncommitted → feature commit) | **1,823 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (15): gateway `--test cap_enforcement` 14, core `--test mesh_caps` 16 (+1); ignored +1 (`perf::perf_cap_admission_overhead`). Perf: `bash scripts/gateway_perf.sh` 9 passed; admission within noise (PERFORMANCE_RESULTS) | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`) |
 | 07 `e2b9abd` | **1,808 passed, 0 failed, 13 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`; the affected suites were rerun after the last edits). New (27): core `--test mesh_caps` 15, `--test mesh_sim` `caps_*` 3 (+1 ignored `caps_family_long`), `caps::policy` unit 7, `caps::period` unit 1, `cli --test mesh_cli` 9 (+1). Caps CI seeds: 16 × 240 steps in ~11 s locally. **Release soak: 256 seeds × 240 steps, 0 failing** (`bash scripts/mesh_soak.sh --scenario caps --minutes 10`; four batches of 64 seeds, ~43 s of simulation each; 629 s wall because the idle machine was throttled — a 64-seed batch takes ~45 s wall when it is not), plus 64 + 64 + 8 seeds in earlier and timing runs, 0 failing | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`; 4 cap checks) |
 | 06 `99df156` | **1,781 passed, 0 failed, 12 ignored** (1,779 in the last full run, plus the two tests added with the unbind and lost-update fixes, each run on its own; CI ran all) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (17): core `--test mesh_usage` 13, `mesh_membership` 6 (+1 lost update), `mesh_schema` 9 (+1 v23), gateway `--test mesh_publish_e2e` 1, `cli --test mesh_cli` 8 (+1) | unchanged (not touched) | **175 passed** (`bash scripts/smoke.sh`; 9 usage checks) |
 | 05 `beb3aa1` | **1,764 passed, 0 failed, 12 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (40): `-p api-tracker-mesh` unit 14 (`instance` 5, `peers` 3, `runtime` 4, `wire` 2), `--test node` 8, `--test discover` 5, `--test doctor` 5, `--test replication` 7 (+1 rollback); core `mesh::peers` 6 + `sqlite_store` 1 (rollback hold); `cli --test mesh_cli` 7 (+2) | unchanged (not touched) | **166 passed** (`bash scripts/smoke.sh`; 9 node checks replace 1) |
@@ -92,6 +93,10 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 07 | **Superseded caps.** Two non-frozen caps on one root project resolve to the first created (`created_hlc`, then id); the other is labelled superseded and never minted, distributed, changed or alerted on. `created_hlc` is `max(hlc_last + 1, now)`. | "One cap per project" can only be enforced locally; the test caught that `hlc_last + 1` alone tied across devices that could not see each other. | ADR 0032 D1, PROTOCOL §5.5.1 |
 | 07 | **Acks are published at the next round**, not within a 15 s in-round wait; rows waiting longer than 15 s are reported (`escrow_waiting`). | A round hook that blocks 15 s delays every exchange; the gateway polls every 5 s and rounds run every 30 s. | ADR 0032 D9, 08 file amendment |
 | 07 | Small, this table only: the module is `mesh::caps::{period, policy, view, escrow, ops, reconcile, alerts}` (the read model is `caps::view`, not `views::caps`); `projects::cap_count` counts non-frozen caps (merge guard); a forked owner freezes like a removed one; "active" also counts usage and cap figures seen; `cap.used` is published for the current and previous month and only by a device with a binding; `MeshError::{CapExists, CapFrozen}`; alert kind `mesh_spend_cap` compares with the effective target; `UnlockedVault::mesh_cap_*` take a `GatewayProbe` (core does no I/O; the CLI passes `api_tracker_mesh::node::GatewaySocket`); `TestHooks::record_mints`; `Month::{prev, first_day}` and serde; `mesh cap reclaim --from`; `mesh_cap_escrow` rows and rate-limit slots of ended months are pruned; at most 64 held `Direct`s per exchange. | Simpler, or required by what was built. | — |
+| 08 | **Accounting**: spend = `max(published, rollup + (charged − persisted at the snapshot))`, the writer confirming each charge after its commit; every in-flight request reserves the cap's p95 cost, and beside others admission needs the near-exhaustion margin after every reservation. | DESIGN described in-memory spend reset "by generation"; the read-before-DB order makes it exact without generations, and the review showed both the unbounded concurrency above the margin and the floor ordering bug. | ADR 0032 D11, DESIGN [Amended 08], gateway SI-22 |
+| 08 | **One cap in force per root**: a live cap supersedes a frozen one; a switch set on a superseded cap carries to the cap in force; `--all off` clears every switch. | A frozen cap and its replacement both covered the project (review finding). | ADR 0032 D11, PROTOCOL §5.5.1 |
+| 08 | The end-to-end runs in `crates/gateway/tests/cap_enforcement.rs`, not through the CLI; the gate's status reaches the CLI through `mesh_meta` `gate/status` (cross-platform), not the control socket; `gateway_config.cap_enforcement` follows "some cap is enforced"; the per-cap switch is `mesh_meta` `cap_enforce/<cap>`; the Windows probe is a loopback connection to the gateway's port. | The CLI cannot reach a plain-HTTP upstream (guarded TLS-only connector); the 08 file allowed either status path; one switch the node's fence reads. | DESIGN [Amended 08], 08 file |
+| 08 | Small, this table only: the refusal drains the unread body (bounded: 64 MiB, 5 s) after a half-close; `GateCapStatus.{unmetered_requests, refused_requests}`, `GateStatus.failing_open`; counter `cap_refused`; `CapReport.{gate, gate_fresh}`, `CapRow.enforced_here`; `CapGate::with_stale_after_for_test`. | Required by what was built. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
@@ -99,46 +104,99 @@ also update DESIGN.md and the affected increment files; README §7.)_
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
 
-### Increment 08 — Gateway cap enforcement (IN PROGRESS, stopped at the usage limit)
+### Increment 08 — Gateway cap enforcement (2026-10-28/29)
 
-**State: code written and passing its own tests, NOT committed.** The work is
-in this worktree's uncommitted changes (`git status`). Nothing of 08 is on
-the branch yet; `e7104c1` (record 07) is the last commit.
+**What landed.**
+- Core: `mesh::caps::gate` (`gate_snapshot` in one read transaction, folding
+  the cap/roster/fork/project items itself; `set_enforced`, `clear_enforced`,
+  `enforced_caps`; `GateStatus` persisted in `mesh_meta` `gate/status`;
+  `ack_counted`), `escrow::gateway_port`; `CapReport.{gate, gate_fresh}`,
+  `CapRow.enforced_here`; one cap in force per root (a live cap supersedes a
+  frozen one); enforcement inherited by the cap in force; alert text says
+  whether this device enforces; `UnlockedVault::mesh_cap_enforce`
+  (reauthenticated; audit `mesh_cap_enforcement_changed`).
+- Gateway: `capgate::CapGate` (Arc snapshot; charged/persisted counters;
+  per-request reservation of the p95 cost; near-exhaustion single request;
+  fail-open reasons and `failing_open`; unpriced/unmetered counts);
+  `ExchangeRecord.cap_charge` (writer confirms after commit, marks lost on a
+  dropped/failed/paused record); `forward.rs` admission before upstream, the
+  JSON 403 and the drain before close; the poller refreshes the gate every
+  poll; control `Status.{caps, caps_inactive_reason, caps_failing_open}`;
+  counter `cap_refused`.
+- Mesh crate: `GatewaySocket::new(dir, port)` (Windows: loopback connection
+  to the configured port).
+- CLI: `mesh cap enforce <cap>|--all on|off` with the explanation and reauth;
+  the gate lines in `mesh cap show` and `gateway status`.
+- Tests: `crates/gateway/tests/cap_enforcement.rs` (14), `perf.rs`
+  `perf_cap_admission_overhead`, core `mesh_caps` (+1, +1 assertion block),
+  `mesh_cli` caps test extended.
+- Docs: gateway SI-22, gateway USER_GUIDE "Spend caps (Tethra Mesh)",
+  PERFORMANCE_RESULTS; ADR 0032 D11; mesh USER_GUIDE §5, KNOWN_LIMITATIONS,
+  SECURITY_INVARIANTS (SI-9, SI-10, SI-13), TEST_PLAN, ARCHITECTURE, PROTOCOL
+  §5.5.1; DESIGN [Amended 08]; README; CHANGELOG.
 
-**Done (uncommitted):** `core::mesh::caps::gate` (snapshot input in one read
-transaction, `set_enforced`/`enforced_caps`, `GateStatus` persisted in
-`mesh_meta` `gate/status`, `ack_counted`); `escrow::gateway_port`;
-`crates/gateway/src/capgate.rs` (`CapGate`: Arc snapshot, charged/persisted
-counters read-persisted-before-DB, one-in-flight `Ticket`, fail-open
-reasons); `ExchangeRecord.cap_charge` (writer confirms after commit, marks
-lost on drop/failure/paused); forward.rs admission before upstream + JSON
-403 (`x-tethra-cap`, OpenAI/Anthropic shapes); service poller refresh +
-`Status.caps`; `GatewaySocket::new(dir, port)` (Windows: loopback TCP probe);
-`UnlockedVault::mesh_cap_enforce` (reauth, audit
-`mesh_cap_enforcement_changed`); CLI `mesh cap enforce <cap>|--all on|off`,
-gate lines in `cap show` and `gateway status`; tests
-`crates/gateway/tests/cap_enforcement.rs` (9 pass, 3× stable),
-`perf::perf_cap_admission_overhead`, `mesh_cli` caps test extended (passes);
-docs: gateway SI-22, gateway USER_GUIDE "Spend caps", PERFORMANCE_RESULTS
-(admission within noise; no regression).
+**Review (S+R).** `code-review` at high effort on the uncommitted diff (the
+first run hit the API rate limit; resumed). Seven findings, all confirmed and
+fixed; three were checked by undoing the fix and watching the test fail:
+1. The 403 closed the socket with the body unread → a TCP reset that SDKs
+   retry. Fixed: half-close and a bounded drain
+   (`a_refused_request_with_a_large_body_still_reads_a_clean_403_not_a_reset`,
+   fails without the drain).
+2. Requests admitted above the near-exhaustion margin ran concurrently
+   unbounded. Fixed: each in-flight request reserves the p95 cost; beside
+   others, admission needs the margin after every reservation
+   (`concurrent_requests_reserve_their_typical_cost_so_overshoot_stays_bounded`,
+   fails without the rule).
+3. Responses without usage were silently uncounted. Fixed: `unmetered`
+   counter, shown (`responses_without_usage_are_counted_as_unmetered`).
+4. Fail-open reasons were hidden when no caps were listed, and one error path
+   skipped persisting the status. Fixed: `failing_open`, printed in `gateway
+   status` and `cap show`; status persisted on the unreadable path
+   (`a_failing_gate_says_it_is_not_holding_and_an_idle_one_does_not`).
+5. `enforce --all off` left superseded caps' switches (and the global switch)
+   on, and a switch lapsed when its cap became superseded. Fixed:
+   `clear_enforced`, the cap in force inherits the switch, a superseded cap is
+   refused (`mesh_caps::caps_enforcement_follows_the_cap_in_force_and_all_off_clears_every_switch`).
+6. A frozen cap and its replacement both covered the project. Fixed: one cap
+   in force per root; a live cap supersedes a frozen one
+   (`mesh_caps::caps_removing_the_owner_freezes…`, new assertions).
+7. `max(published, local)` plus in-memory spend dropped a charge as it moved
+   into the database under a published floor. Fixed: the floor is taken after
+   the sum (`a_charge_moving_into_the_database_never_drops_out_under_a_published_floor`,
+   fails without the fix).
 
-**Left, in order:** (1) run the full check suite (clippy on both
-toolchains was clean before the last doc edits; the full `cargo test` was
-NOT run after 08's changes) and smoke; (2) the S+R review — the
-`code-review` run at high effort failed on the API rate limit before
-reporting; rerun it on the uncommitted diff with the 08 file's focus list;
-(3) mesh docs: USER_GUIDE §5 enforcement, KNOWN_LIMITATIONS (no longer
-"alerts only"), SECURITY_INVARIANTS SI-9/SI-10 implemented, TEST_PLAN
-gateway row, ARCHITECTURE, ADR 0032 enforcement section, DESIGN [Amended 08],
-CHANGELOG, the `caps/mod.rs` and `mesh_cap_cmd.rs` headers; (4) commit,
-push, CI; (5) also check CI for `6d06b15`/`e7104c1` (pending).
+Rejected cleanups, with reasons: computing the gate's figure apart from
+`Ledger::local_avail` (the gate adds in-memory spend the node never sees, so
+the two must differ); an early exit when no cap is enforced (status shows
+every cap's figure, and the read costs a few ms per 5 s poll). Not changed:
+near the cap a second concurrent request gets the serialized 403 even though
+rights remain; that is the specified behaviour.
 
-**Deviations to record:** the CLI end-to-end (two nodes, foreground gateway
-against the mock upstream) cannot run, because the CLI's TLS-only connector
-is a guarded production invariant; the end-to-end lives in
-`cap_enforcement.rs` (real gateway, writer and gate, two vaults). Gate status
-reaches the CLI through `mesh_meta` (cross-platform), not the control socket.
-`gateway_config.cap_enforcement` is on exactly while some cap is enforced.
+**For 09/10 (load-bearing).**
+- Tauri-facing core APIs: `UnlockedVault::{mesh_cap_create, mesh_cap_raise,
+  mesh_cap_lower, mesh_cap_reclaim, mesh_caps, mesh_cap_reconcile,
+  mesh_cap_enforce}`. Each that can transfer takes a `&dyn GatewayProbe`:
+  the desktop builds `api_tracker_mesh::node::GatewaySocket::new(data_dir,
+  caps::escrow::gateway_port(conn)?)`. `mesh_cap_enforce(master_password,
+  Some(cap) | None, on)` needs reauth, so it goes in the Tauri authz
+  inventory as reauth-gated.
+- The gate's status for the UI: `caps::gate::read_status(conn)` (fresh when
+  `at_ms` is within `view::GATE_STATUS_FRESH_MS`), or `CapReport.gate`.
+
+**Surprises.**
+- The review's first finding (a reset instead of the 403) is real for any
+  local refusal that leaves a body unread; only the cap refusal drains today.
+  The other `local_response` refusals (browser origin, bad host…) still close
+  with the body unread; they are protocol errors rather than SDK-facing
+  limits, so they were left as they were (note for 12's audit).
+- A CLI end-to-end against the mock upstream is impossible: the CLI's TLS-only
+  connector is a guarded production invariant. The two-device end-to-end
+  lives in the gateway crate.
+
+**Not done / honest list.**
+- Nothing in 08's scope was moved. The Windows probe and the Windows control
+  paths run in Windows CI only (never by hand).
+- The perf benchmark is ignored in CI (run by `scripts/gateway_perf.sh`).
 
 ### Increment 07 — Spend caps, alerts only (2026-10-28)
 

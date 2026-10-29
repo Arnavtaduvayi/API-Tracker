@@ -9886,6 +9886,73 @@ impl UnlockedVault {
         crate::mesh::caps::alerts::cap_alerts(&store)
     }
 
+    /// Switch enforcement of one cap (or every cap in force) on or off on this
+    /// device's gateway (`tethra mesh cap enforce`). Reauthenticated: with it
+    /// on, the gateway refuses requests (MESH-SI-9). Local only; no peer can
+    /// change it. Returns the caps changed.
+    pub fn mesh_cap_enforce(
+        &self,
+        master_password: &SecretString,
+        cap: Option<&str>,
+        on: bool,
+    ) -> Result<Vec<crate::mesh::dot::CapId>> {
+        self.verify_master_password(master_password)?;
+        let store = self.mesh_open_store()?;
+        let state = crate::mesh::store::MeshStore::state(&store);
+        if cap.is_none() && !on {
+            // Every switch, superseded and forgotten caps' included.
+            let cleared = crate::mesh::caps::gate::clear_enforced(&self.conn)?;
+            audit::record(
+                &self.conn,
+                "mesh_cap_enforcement_changed",
+                None,
+                None,
+                &format!("spend-cap enforcement off for {} cap(s)", cleared.len()),
+            )?;
+            return Ok(cleared);
+        }
+        let caps = match cap {
+            Some(c) => {
+                let id = crate::mesh::caps::resolve(&store, c)?;
+                if on
+                    && crate::mesh::caps::view::cap_in(state, &id)
+                        .is_some_and(|i| i.superseded_by.is_some())
+                {
+                    return Err(CoreError::InvalidInput(
+                        "another cap is in force on that project; enforce that one (`tethra mesh cap show`)"
+                            .into(),
+                    ));
+                }
+                vec![id]
+            }
+            None => crate::mesh::caps::view::caps_in(state)
+                .into_iter()
+                .filter(crate::mesh::caps::CapInfo::in_force)
+                .map(|c| c.cap_id)
+                .collect(),
+        };
+        if caps.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "there is no spend cap to enforce; create one with `tethra mesh cap create`".into(),
+            ));
+        }
+        for c in &caps {
+            crate::mesh::caps::gate::set_enforced(&self.conn, c, on)?;
+        }
+        audit::record(
+            &self.conn,
+            "mesh_cap_enforcement_changed",
+            None,
+            None,
+            &format!(
+                "spend-cap enforcement {} for {} cap(s)",
+                if on { "on" } else { "off" },
+                caps.len()
+            ),
+        )?;
+        Ok(caps)
+    }
+
     /// Run the cap reconciler once (`mesh replicate` does, before it
     /// exchanges). `probe` says whether this data directory's gateway runs
     /// (the escrow fence; core does no I/O to find out).

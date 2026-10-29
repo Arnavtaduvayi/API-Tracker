@@ -226,9 +226,16 @@ impl ObservationSink for WriterSink {
                 self.state.queued.fetch_add(1, Ordering::Relaxed);
                 self.in_flight.fetch_add(1, Ordering::Relaxed);
             }
-            Err(mpsc::TrySendError::Full(_)) | Err(mpsc::TrySendError::Disconnected(_)) => {
+            Err(mpsc::TrySendError::Full(m)) | Err(mpsc::TrySendError::Disconnected(m)) => {
                 // Honest coverage gap: counted, surfaced, never silent.
                 self.state.dropped.fetch_add(1, Ordering::Relaxed);
+                // A spend-cap charge that will never be persisted: the gate
+                // keeps it in memory and reports its accounting incomplete.
+                if let Message::Record(r) = m {
+                    if let Some(c) = &r.cap_charge {
+                        c.lost();
+                    }
+                }
             }
         }
     }
@@ -556,7 +563,15 @@ impl WriterThread {
         };
         if let Err(e) = result {
             self.note_failure(&e);
+            if let Some(c) = &record.cap_charge {
+                c.lost();
+            }
             return;
+        }
+        // The row (and its cost) is committed: the gate stops counting this
+        // charge in memory at its next snapshot.
+        if let Some(c) = &record.cap_charge {
+            c.persisted();
         }
         self.state.written.fetch_add(1, Ordering::Relaxed);
         self.state.degraded.store(false, Ordering::Relaxed);

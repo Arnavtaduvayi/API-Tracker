@@ -247,7 +247,7 @@ migration v23, the gateway writer's split, the node's `UsagePublisher` hook.
 
 ## Spend caps
 
-**Status: implemented (07), alerts only; gateway enforcement in 08**
+**Status: implemented (07 caps and alerts, 08 gateway enforcement)**
 ([ADR 0032](../decisions/0032-spend-caps.md)).
 
 - **Owner and months.** `caps::create` makes this device the owner and mints
@@ -273,6 +273,16 @@ migration v23, the gateway writer's split, the node's `UsagePublisher` hook.
   the gateway's control socket, `crates/mesh::node::GatewaySocket`) publishes
   in the same transaction; `Fence::AwaitAck` reserves until the gateway's
   `escrow::ack`.
+- **The gateway gate (08).** `crates/gateway::capgate::CapGate`: the route
+  poller rebuilds its snapshot every 5 s from `caps::gate::gate_snapshot` (one
+  read transaction: cap items folded from `mesh_items`, this device's rights,
+  open escrow, the rollup's month spend, pricing), acknowledges the pending
+  escrow rows it counted, and persists `caps::gate::GateStatus` in `mesh_meta`
+  for `mesh cap show`. `admit` (the hot path) reads only the snapshot and
+  atomics; a completed request's cost is charged in memory and confirmed by
+  the writer after its row commits (`ExchangeRecord::cap_charge`).
+  Enforcement is per cap and local (`caps::gate::set_enforced`, behind the
+  reauthenticated `mesh_cap_enforce`).
 - **Alerts.** `caps::alerts::cap_alerts`, called by `run_monitor`: kind
   `mesh_spend_cap`, dedup `mesh_cap:<cap>:<month>:{80,100}`.
 - **Views.** `caps::report` gives each cap and month per device, labelled with
@@ -280,7 +290,7 @@ migration v23, the gateway writer's split, the node's `UsagePublisher` hook.
 
 ## Data flow
 
-**Status: implemented (06-07)** up to the views; the gateway reads caps in 08. Text
+**Status: implemented (06-08)**. Text
 diagram of one usage figure's path:
 
 ```text
@@ -303,8 +313,8 @@ diagram of one usage figure's path:
 ```
 
 Spend caps follow the same path (`cap.*` items, minted by the reconciler);
-each device's gateway will read its own cap view from its local database
-(Increment 08).
+each device's gateway reads its own cap view from its local database
+(`capgate`, 08).
 
 ## Item lifecycle
 

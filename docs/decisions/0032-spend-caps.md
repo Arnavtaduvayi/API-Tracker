@@ -1,7 +1,7 @@
 # ADR 0032 — Spend caps: a replicated monthly ceiling kept without coordination
 
-Status: accepted (Increment 07 on `feat/device-mesh`: alerts only; gateway
-enforcement is Increment 08)
+Status: accepted (Increment 07 on `feat/device-mesh`: caps and alerts;
+Increment 08: gateway enforcement, D11)
 Date: 2026-10-28
 Builds on: ADR 0031 (Tethra Mesh), PROTOCOL.md §5.5 (the bounded counter)
 Preserves: gateway SI-19 (caps and budgets never share figures), ADR 0020 (the
@@ -141,14 +141,64 @@ a row whose month ended or that no longer fits is `cancelled`. Without the
 fence, the node could give away rights the running gateway's snapshot (up to
 5 s old) still counts as available, and both would spend them.
 
-**D10 — Alerts, not budgets.** In this increment caps raise local alerts
-only, through the existing alert system: kind `mesh_spend_cap`, dedup keys
+**D10 — Alerts, not budgets.** Caps raise local alerts through the existing
+alert system on every device, enforced or not: kind `mesh_spend_cap`, dedup keys
 `mesh_cap:<cap>:<YYYY-MM>:80` and `:100`, raised by the monitor while the
 vault is unlocked when this device's view of the month's total (its own
 unpublished spend included) crosses 80% and 100% of the effective target. The
 text says the figure is cross-device, estimated and only as fresh as the last
 exchange with each device. Caps never read or write `budget.rs`, and budgets
 never see cap figures (SI-19).
+
+**D11 — Enforcement by the local gateway (Increment 08, gateway SI-22).**
+- **Opt-in, per cap, per device.** `tethra mesh cap enforce <cap>|--all on|off`
+  (reauthenticated, audited `mesh_cap_enforcement_changed`) writes the local
+  `mesh_meta` key `cap_enforce/<cap>`; `gateway_config.cap_enforcement` is on
+  exactly while some cap is (it is what the node's escrow fence reads).
+  Neither replicates: no peer can switch enforcement on or off.
+- **The snapshot.** The gateway's route poller rebuilds a `CapGate` snapshot
+  every 5 s from one read transaction (`caps::gate::gate_snapshot`): the cap,
+  roster, fork and project items folded from `mesh_items` (no node, no keys),
+  this device's rights (`minted + received − sent − burned`), its open escrow,
+  and its rollup's month spend (`max(published used, local month spend)`).
+  After installing it, the poller acknowledges the pending escrow rows it
+  counted, then persists the gate's status in `mesh_meta` (`gate/status`), so
+  `mesh cap show` reads it on every platform.
+- **Admission** reads only the snapshot and atomics: `avail = rights − escrow
+  − max(published used, rollup spend + (charged − persisted at the
+  snapshot))` (the published figure is a floor taken after the sum, so a
+  charge moving from memory to the database never drops out). `avail ≤ 0`
+  refuses. Every admitted request reserves the cap's p95 request cost until
+  it completes; a request alone in flight is admitted while rights remain,
+  one beside others only while the rights left after every reservation stay
+  above `max(2 × p95, $0.50)`. Near the cap that is one request at a time. A
+  ticket holds the reservation, and its drop releases it on every exit path.
+  The 403 is followed by a half-close and a bounded drain of the unread body,
+  so the client reads it instead of a connection reset. A snapshot older than 60 s, no mesh, or an unreadable or
+  newer database: everything is admitted and the reason reported (fail open).
+- **Accounting.** A completed request's cost is estimated where the response
+  ends, with the snapshot's pricing and the writer's rule (cached-read tokens
+  excluded), and charged in memory at once; the writer confirms the charge
+  after the record's transaction commits. The snapshot reads the confirmed
+  total before the database, so a request is counted once (or, for the
+  moment between the two reads, twice: refusing earlier, never later). A
+  charge the writer drops, fails to persist, or never receives (recording
+  paused) stays counted in memory and marks the cap's accounting incomplete.
+  An unpriced model, or a response that reported no usage (a stream without
+  usage, a route without extraction), is admitted and counted (unpriced,
+  unmetered), never charged.
+- **One cap in force per project.** A live cap created to replace a frozen
+  one supersedes it, and a switch set on a superseded cap carries over to the
+  cap in force; `enforce --all off` clears every switch.
+- **The refusal** is a non-retryable `403` (never `429`, which the SDKs retry)
+  with the provider's error shape (`tethra_spend_cap`, `spend_cap_exceeded`)
+  and `x-tethra-cap: exceeded; cap=<id>; month=<YYYY-MM>[; reason=
+  cap_near_exhaustion_serialized]`, sent before any upstream connect.
+- **The node's probe** of the running gateway: the control socket on Unix; on
+  Windows (no control channel) a loopback connection to the configured port,
+  where anything listening counts as running.
+- **Measured:** the admission check is inside run-to-run noise
+  (`docs/gateway/PERFORMANCE_RESULTS.md`).
 
 ## Alternatives considered
 
@@ -189,11 +239,17 @@ never see cap figures (SI-19).
   sent. A device that holds rights and never cooperates (malicious, broken or
   gone) keeps a lower from fully settling: its rights are counted as pending
   until it burns them or is removed.
-- **Bounded overshoot (Increment 08).** Cost is known only after a response,
-  so the gateway will admit at most one in-flight request per cap when rights
+- **Bounded overshoot.** Cost is known only after a response, so an
+  enforcing gateway admits at most one in-flight request per cap when rights
   are nearly exhausted; `Σ used` may exceed supply by at most one request's
-  cost per cap per device (MESH-SI-9). In Increment 07 nothing blocks: spend
-  beyond a device's rights shows as a negative available amount and an alert.
+  cost per cap per device (MESH-SI-9). A device that does not enforce blocks
+  nothing: spend beyond its rights shows as a negative available amount and
+  an alert.
+- **Spend not yet persisted.** The node reserves a transfer against the
+  writer's persisted spend and re-checks at publication; spend still in the
+  writer's queue then (seconds) is not covered, and after a gateway restart
+  spend that never reached the database is forgotten (reported as
+  accounting incomplete).
 - **Removal.** A removed device's rights entries count up to its cutoff
   (ADR 0031 R2). A removal whose cutoff is below items the removed device
   already handed out drops those transfers from views; recipients that spent

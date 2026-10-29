@@ -630,3 +630,89 @@ fn perf_queue_and_database_pressure() {
     );
     process_sample("queue_db_pressure");
 }
+
+/// The spend-cap gate's admission check on the hot path (Increment 08): the
+/// same linked route through a gateway with no gate and one enforcing a cap
+/// with plenty of rights. The upstream reports no usage, so the difference
+/// is admission alone (an `Arc` read and a few atomics).
+#[test]
+#[ignore = "performance measurement; run via scripts/gateway_perf.sh"]
+fn perf_cap_admission_overhead() {
+    use api_tracker_core::mesh::caps::AssumeNotRunning;
+    use api_tracker_core::secret::SecretString;
+    use api_tracker_core::vault::{self, NewProject, VaultPaths};
+    use api_tracker_gateway::routes::{
+        LinkInfo, Route, RouteState, RouteTable, RouteTarget, UpstreamOrigin,
+    };
+    const N: usize = 400;
+    const SLUG: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let dir = tempfile::tempdir().unwrap();
+    let paths = VaultPaths::new(dir.path().join("data"));
+    let pw = SecretString::from("perf-cap-master-password-1");
+    let mut v = vault::create_vault(&paths, &pw).unwrap();
+    let app = v
+        .create_project(NewProject {
+            name: "app".into(),
+            ..Default::default()
+        })
+        .unwrap()
+        .id;
+    v.mesh_init("perf").unwrap();
+    let (p, _) = v.mesh_project_share(&app).unwrap();
+    v.mesh_cap_create(&p.to_hex(), 1_000_000_000_000, &AssumeNotRunning)
+        .unwrap();
+    v.mesh_cap_enforce(&pw, None, true).unwrap();
+
+    let up = MockUpstream::start(keepalive_upstream(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"ok\":true,\"n\":1}",
+        2,
+    ));
+    let routes = || {
+        let mut table = RouteTable::default();
+        table.insert_for_test(Route {
+            prefix: "openai".into(),
+            provider_id: "openai".into(),
+            target: RouteTarget::Ready(UpstreamOrigin {
+                host: "127.0.0.1".into(),
+                port: up.port,
+            }),
+            custom: false,
+            usage_shape: "openai".into(),
+        });
+        table.insert_link_for_test(LinkInfo {
+            project_id: app.clone(),
+            route_prefix: "openai".into(),
+            link_slug: SLUG.into(),
+        });
+        Arc::new(RouteState::from_table_for_test(table))
+    };
+    let gate = Arc::new(api_tracker_gateway::capgate::CapGate::new(&paths.db_path()));
+    gate.refresh(&["openai".to_owned()]);
+    assert!(gate.status().caps[0].enforced, "{:?}", gate.status());
+    let taps = api_tracker_gateway::server::usage_tap_factory;
+    let plain = RunningGateway::start_configured(routes(), taps(), |_| {});
+    let gated =
+        RunningGateway::start_configured(routes(), taps(), |g| g.capgate = Some(gate.clone()));
+    let path = format!("/p/{SLUG}/openai/v1/chat/completions");
+    let without = timed_roundtrips(
+        || plain.connect(),
+        &small_request(&plain.authority(), &path),
+        N,
+        "{\"ok\":true,\"n\":1}",
+    );
+    let with = timed_roundtrips(
+        || gated.connect(),
+        &small_request(&gated.authority(), &path),
+        N,
+        "{\"ok\":true,\"n\":1}",
+    );
+    let (a50, a95, a99) = stats(without);
+    let (b50, b95, b99) = stats(with);
+    println!("PERF cap_admission n={N} no_gate_us p50={a50} p95={a95} p99={a99}");
+    println!("PERF cap_admission n={N} enforced_gate_us p50={b50} p95={b95} p99={b99}");
+    println!(
+        "PERF cap_admission added_us p50={} p99={}",
+        b50 as i128 - a50 as i128,
+        b99 as i128 - a99 as i128
+    );
+}

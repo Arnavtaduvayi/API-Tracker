@@ -138,7 +138,10 @@ impl MeshNode {
     /// Whether this data directory's gateway is running, for the spend-cap
     /// escrow fence (MESH-SI-10).
     pub fn gateway_probe(&self) -> GatewaySocket {
-        GatewaySocket(self.data_dir.clone())
+        let port = api_tracker_core::mesh::caps::escrow::gateway_port(self.store().connection())
+            .ok()
+            .flatten();
+        GatewaySocket::new(self.data_dir.clone(), port)
     }
 
     pub fn vault(&self) -> &MeshVault {
@@ -178,24 +181,42 @@ impl MeshNode {
     }
 }
 
-/// The gateway's liveness, decided the way the gateway decides it
-/// (`gateway::control::instance_is_live`): by connecting to its control
-/// socket, `<data-dir>/gateway.sock`, rather than trusting a pid file. On
-/// Windows there is no control channel yet, so the answer is the
-/// conservative "running": a fenced transfer then waits for the gateway's
-/// acknowledgement (Increment 08 adds the listener-identity probe there).
-/// Consulted only when cap enforcement is on.
-pub struct GatewaySocket(pub PathBuf);
+/// The gateway's liveness for the escrow fence, consulted only while cap
+/// enforcement is on. On Unix, the way the gateway decides it
+/// (`gateway::control::instance_is_live`): a connection to its control
+/// socket, `<data-dir>/gateway.sock`, rather than a pid file. Elsewhere (no
+/// control channel), a loopback connection to its configured port: nothing
+/// listening proves it is not running; anything listening counts as
+/// running, the conservative answer (a transfer then waits for the
+/// gateway's acknowledgement).
+pub struct GatewaySocket {
+    dir: PathBuf,
+    port: Option<u16>,
+}
+
+impl GatewaySocket {
+    pub fn new(dir: PathBuf, port: Option<u16>) -> Self {
+        Self { dir, port }
+    }
+}
 
 impl api_tracker_core::mesh::caps::GatewayProbe for GatewaySocket {
     fn gateway_running(&self) -> bool {
         #[cfg(unix)]
         {
-            std::os::unix::net::UnixStream::connect(self.0.join("gateway.sock")).is_ok()
+            let _ = self.port;
+            std::os::unix::net::UnixStream::connect(self.dir.join("gateway.sock")).is_ok()
         }
         #[cfg(not(unix))]
         {
-            true
+            let _ = &self.dir;
+            self.port.is_some_and(|p| {
+                std::net::TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
+                    Duration::from_millis(300),
+                )
+                .is_ok()
+            })
         }
     }
 }

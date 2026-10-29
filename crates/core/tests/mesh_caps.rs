@@ -799,6 +799,20 @@ fn caps_removing_the_owner_freezes_the_cap_and_a_new_one_can_replace_it() {
     let fresh = create(b, &p, 50);
     assert_ne!(fresh, cap);
     assert_eq!(caps::resolve(&store(b), "app").unwrap(), fresh);
+    // The new cap replaces the frozen one: exactly one cap is in force on
+    // the project (for alerts, rebalancing and the gateway).
+    let s = store(b);
+    assert_eq!(
+        view::cap_in(s.state(), &cap).unwrap().superseded_by,
+        Some(fresh)
+    );
+    assert_eq!(
+        view::caps_in(s.state())
+            .iter()
+            .filter(|c| c.in_force())
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1050,4 +1064,39 @@ fn caps_alerts_fire_at_80_and_100_percent_through_the_alert_system_without_budge
     .unwrap();
     a.v.run_monitor().unwrap();
     assert!(open("mesh_spend_cap").is_empty());
+}
+
+#[test]
+fn caps_enforcement_follows_the_cap_in_force_and_all_off_clears_every_switch() {
+    use api_tracker_core::mesh::caps::gate::{self, GateRead};
+    let (devs, p) = mesh(2, MARCH_10);
+    let (a, b) = (&devs[0], &devs[1]);
+    let first = create(a, &p, 100);
+    b.clock.advance(5_000);
+    let second = create(b, &p, 70);
+    // B switches its own (still unchallenged) cap on.
+    b.v.mesh_cap_enforce(&master_pw(), Some(&second.to_hex()), true)
+        .unwrap();
+    exchange(a, b);
+    // A's cap was first: B's is superseded, and the switch carries over to
+    // the cap now in force there.
+    let snap = |d: &Dev| match gate::gate_snapshot(d.v.connection(), MARCH_10, &[]).unwrap() {
+        GateRead::Ready(i) => i,
+        GateRead::NoMesh => panic!("no mesh"),
+    };
+    let caps_b = snap(b).caps;
+    assert_eq!(caps_b.len(), 1);
+    assert_eq!(caps_b[0].cap_id, first);
+    assert!(caps_b[0].enforced, "inherited from the superseded cap");
+    assert!(!snap(a).caps[0].enforced, "A never switched it on");
+    // A superseded cap cannot be switched on directly.
+    let err =
+        b.v.mesh_cap_enforce(&master_pw(), Some(&second.to_hex()), true)
+            .unwrap_err();
+    assert!(err.to_string().contains("another cap is in force"), "{err}");
+    // `--all off` clears every switch, the superseded cap's included.
+    b.v.mesh_cap_enforce(&master_pw(), None, false).unwrap();
+    assert!(gate::enforced_caps(b.v.connection()).unwrap().is_empty());
+    assert!(!escrow::enforcement_on(b.v.connection()).unwrap());
+    assert!(!snap(b).caps[0].enforced);
 }

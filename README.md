@@ -205,8 +205,8 @@ step on its own over your LAN or VPN
 (`tethra mesh init|invite|join|serve|stop|peer|replicate|status|doctor|devices|remove|leave`);
 share projects and see their gateway-observed usage across devices
 (`tethra mesh project|usage|settings`); and set monthly spend caps that hold
-across devices and raise alerts (`tethra mesh cap`; the gateway blocks requests
-only from a later increment). See the
+across devices, raise alerts, and are enforced by a device's gateway where you
+switch that on (`tethra mesh cap`). See the
 [user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md),
 [ADR 0031](docs/decisions/0031-device-mesh.md) and
 [ADR 0032](docs/decisions/0032-spend-caps.md).

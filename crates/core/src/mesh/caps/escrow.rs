@@ -85,6 +85,21 @@ pub fn enforcement_on(conn: &Connection) -> Result<bool> {
         .is_some_and(|v| v == 1))
 }
 
+/// The port this data directory's gateway serves on, if one was ever
+/// configured (the node's liveness probe on platforms without the control
+/// socket).
+pub fn gateway_port(conn: &Connection) -> Result<Option<u16>> {
+    Ok(conn
+        .query_row(
+            "SELECT port FROM gateway_config WHERE id = 'gateway'",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten()
+        .and_then(|p| u16::try_from(p).ok()))
+}
+
 pub fn fence(conn: &Connection, probe: &dyn GatewayProbe) -> Result<Fence> {
     Ok(if enforcement_on(conn)? && probe.gateway_running() {
         Fence::AwaitAck

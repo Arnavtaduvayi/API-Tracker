@@ -179,16 +179,36 @@ permanent design choice or something a later increment changes.
 
 ## Spend caps
 
-- **Alerts only, for now.** In Increment 07 a cap raises alerts at 80% and
-  100%; the gateway does not block requests until Increment 08. A device can
-  therefore spend past its rights; its available amount then shows below zero.
+- **Enforcement is per device and opt-in.** A device's gateway refuses requests
+  over a cap only after `tethra mesh cap enforce` there; elsewhere the cap
+  raises alerts and a device can spend past its rights (its available amount
+  then shows below zero).
 - **Caps are a self-limit, not a security boundary.** Anything that bypasses
   the gateway bypasses the cap. The figure is the gateway's estimate (priced
   requests only, cached-read tokens excluded), priced on each device with its
   own pricing table.
-- **Overshoot is bounded, not zero (Increment 08).** Cost is known only after a
-  response, so a device may exceed its rights by at most one in-flight
-  request's cost per cap.
+- **Overshoot is bounded, not zero.** Cost is known only after a response, so
+  an enforcing device may exceed its rights by at most one in-flight request's
+  cost per cap (near the cap one request runs at a time).
+- **Unpriced or unmetered traffic is never blocked.** A model with no pricing
+  record, or a response that reported no usage (an OpenAI stream without
+  `stream_options.include_usage`, a route without usage extraction), is
+  admitted and counted as unpriced or unmetered, not against the cap; `cap
+  show` and `gateway status` show the counts.
+- **Concurrency is bounded by the typical request.** Requests in flight each
+  reserve the cap's recent 95th-percentile cost; ones much larger than that
+  can together exceed what the reservations covered.
+- **The gate fails open.** No mesh, a database the gateway cannot open or that
+  is newer than it, or a poller stuck for a minute: the gateway forwards
+  everything and reports why.
+- **A restart can forget recent spend.** Spend the writer had not persisted
+  (records dropped under load, or recording paused) is counted in memory only;
+  after a gateway restart it is gone. `gateway status` flags it as accounting
+  incomplete.
+- **A transfer can slip past spend not yet persisted.** The node reserves
+  rights it gives away against the spend the gateway's writer has persisted;
+  it re-checks at publication, but spend persisted after that (writer lag of
+  seconds) is not covered.
 - **A disconnected device can hit its cap early.** It can spend only the
   rights it holds; spare rights on other devices reach it only through an
   exchange (safety over liveness). Rebalancing asks one peer at most every 5
@@ -215,9 +235,9 @@ permanent design choice or something a later increment changes.
 - **Two caps created at once** on devices that cannot see each other: the one
   created first is the cap and the other is shown as superseded; it is never
   minted again but stays listed.
-- **Windows:** the node cannot yet tell whether the gateway is running (no
-  control channel), so with enforcement on (Increment 08) every transfer waits
-  for the gateway's acknowledgement.
+- **Windows:** the node has no control channel to ask; it treats anything
+  listening on the gateway's configured port as a running gateway, so with
+  enforcement on a transfer waits for the gateway's acknowledgement then.
 
 ## Credential sharing (Increment 11)
 

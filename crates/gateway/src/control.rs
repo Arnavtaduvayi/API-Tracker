@@ -219,6 +219,15 @@ pub struct Status {
     /// "off".
     #[serde(default)]
     pub matching_key_expired: bool,
+    /// The spend-cap gate (Increment 08): each cap in force on this device
+    /// for the month, and why the gate admits everything, if it does.
+    #[serde(default)]
+    pub caps: Vec<api_tracker_core::mesh::caps::gate::GateCapStatus>,
+    #[serde(default)]
+    pub caps_inactive_reason: Option<String>,
+    /// The reason is a failure: caps the user switched on are not holding.
+    #[serde(default)]
+    pub caps_failing_open: bool,
 }
 
 /// What the control plane is allowed to do to a running gateway.

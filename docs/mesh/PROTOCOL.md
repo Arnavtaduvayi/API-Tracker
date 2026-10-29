@@ -438,10 +438,11 @@ deciding device plus every active member it exchanged with, or saw publish a
 the last 30 days.
 
 - **Caps.** A cap is *in force* when its `cap.def` is admitted from one origin;
-  it is *frozen* when its owner is removed or forked (nobody mints for it), and
-  *superseded* when another non-frozen cap on the same root project has a
-  smaller `(created_hlc, cap_id)` (it is not minted, distributed, changed or
-  alerted on).
+  it is *frozen* when its owner is removed or forked (nobody mints for it).
+  One cap is in force per root project: the live cap with the smallest
+  `(created_hlc, cap_id)`, else the newest frozen one; every other cap on the
+  root is *superseded* (not minted, distributed, changed, enforced or alerted
+  on), including a frozen cap once a live one replaces it.
 - **Mint (owner).** At creation: `cap.def`, `cap.target(m) = monthly`,
   `R[o][o](m) = monthly`. For month `m`, and from UTC day 20 for `m + 1`: if
   `R[o][o](month) = 0`, mint the scheduled target (the month's own `cap.target`,

@@ -796,5 +796,34 @@ fn spend_caps_across_two_devices_with_a_rights_request_over_a_real_exchange() {
     assert_eq!(show["caps"][0]["months"][0]["target"], 4_000_000);
     let st = json(&a, &["mesh", "status"]);
     assert_eq!(st["caps"]["count"], 1, "{st}");
+
+    // Enforcement (Increment 08): reauthenticated, explained, local.
+    let (ok, _, err) = run(&a, &["mesh", "cap", "enforce", "app"]);
+    assert!(!ok && err.contains("on|off"), "{err}");
+    let (ok, _, err) = run(&a, &["mesh", "cap", "enforce", "app", "maybe"]);
+    assert!(!ok && err.contains("on or off"), "{err}");
+    let (ok, _, err) = run(&a, &["mesh", "cap", "enforce", "app", "on"]);
+    assert!(ok, "{err}");
+    assert!(err.contains("Reauthentication required"), "{err}");
+    assert!(err.contains("not go through Tethra's gateway"), "{err}");
+    let (_, text, _) = run(&a, &["mesh", "cap", "show"]);
+    assert!(
+        text.contains("Enforced here, but this device's gateway is not running"),
+        "{text}"
+    );
+    let shown = json(&a, &["mesh", "cap", "show"]);
+    assert_eq!(shown["caps"][0]["enforced_here"], true);
+    // B never switched it on: not enforced there.
+    let (_, text, _) = run(&b, &["mesh", "cap", "show"]);
+    assert!(
+        text.contains("Not enforced on this device's gateway"),
+        "{text}"
+    );
+    let off = json(&a, &["mesh", "cap", "enforce", "--all", "off"]);
+    assert_eq!(off["enforced"], false);
+    assert_eq!(
+        json(&a, &["mesh", "cap", "show"])["caps"][0]["enforced_here"],
+        false
+    );
     drop(node_a);
 }

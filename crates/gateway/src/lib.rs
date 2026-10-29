@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 pub mod attribution;
+pub mod capgate;
 pub mod control;
 pub mod doctor;
 pub mod envlink;

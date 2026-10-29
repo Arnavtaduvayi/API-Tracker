@@ -8,9 +8,9 @@ encrypted Noise channel that only your paired devices can open
 ([ADR 0031](../decisions/0031-device-mesh.md)).
 
 This guide covers what exists today: pairing, the node that keeps devices
-converged, shared projects and cross-device usage, monthly spend caps (which
-raise alerts; the gateway does not block requests yet), and the `status` and
-`doctor` views.
+converged, shared projects and cross-device usage, monthly spend caps (alerts,
+and a gateway that refuses requests over a cap where you switch that on), and
+the `status` and `doctor` views.
 
 ## What replicates
 
@@ -205,9 +205,10 @@ cost across all your devices — "the app may spend at most $50 a month, on ever
 machine together". It counts only traffic through Tethra's gateway, priced by
 each device with its own pricing table, so it is a self-limit, not a security
 boundary: anything that does not go through the gateway is not counted. It is
-not a budget either (`tethra budget` is separate and never mixed with it). **In
-this version a cap raises alerts at 80% and 100%; the gateway does not block
-requests yet.** ([ADR 0032](../decisions/0032-spend-caps.md))
+not a budget either (`tethra budget` is separate and never mixed with it). A
+cap raises alerts at 80% and 100% on every device; a device's gateway refuses
+requests over it only where you switch enforcement on (below).
+([ADR 0032](../decisions/0032-spend-caps.md))
 
 ```bash
 tethra mesh cap create app --monthly 50   # this device owns the cap
@@ -216,14 +217,15 @@ tethra mesh cap rights app                # who holds what, per device
 tethra mesh cap raise app 10              # add $10 this month (see below)
 tethra mesh cap lower app 30              # lower to $30 a month (asks first)
 tethra mesh cap reclaim app --from old-laptop   # before you remove a device
+tethra mesh cap enforce app on            # this device's gateway refuses over the cap
 ```
 
 **How it works, without a server.** The cap is split into *rights*: each
-device holds some and counts its spend against its own. Once the gateway
-enforces caps (a later increment), a device spends only its own rights, so the
-total stays within the cap even while your devices cannot reach each other
-(each device may go over by at most one request, whose cost is known only when
-it completes). Today the same figures drive the alerts. The device that created
+device holds some and counts its spend against its own. On a device whose
+gateway enforces the cap, requests are refused once that device's rights are
+used up, so where every device enforces it the total stays within the cap even
+while your devices cannot reach each other (each device may go over by at most
+one request, whose cost is known only when it completes). The device that created
 the cap is its **owner**: at the start of each month it hands every device that
 was active in the last 30 days an equal share and keeps the rest. A device that
 runs low (below a fifth of its share) asks a device with spare rights for some
@@ -256,7 +258,8 @@ the 20th and the end of the month.
 the owner first: at their next exchanges the device hands its unspent rights
 back. **If the owner device itself is removed, its caps are frozen**: this
 month's rights stay usable, but nobody adds rights again, so next month has
-none. Create a new cap for the project (`tethra mesh cap create`).
+none. Create a new cap for the project (`tethra mesh cap create`); it replaces
+the frozen one at once.
 
 **How to read `show` and `rights`.** Every figure is per device, "as of" the
 last exchange with it, and **stale** after 24 hours; a device not heard from may
@@ -269,6 +272,20 @@ a lower, and an **override** row is a device's local raise.
 device's view of the month's total reaches 80% and again at 100% of the cap
 (`tethra alerts`). The alert says the figure is estimated and only as fresh as
 the last exchange with each device.
+
+**Enforcement on this device.** `tethra mesh cap enforce <cap> on` (or
+`--all on`) asks for your master password, then this device's gateway refuses
+the cap's project once this device's rights for the month are used up: a 403
+your SDK reports and does not retry, before the request reaches the provider
+([what SDKs see](../gateway/USER_GUIDE.md#spend-caps-tethra-mesh)). It applies
+within 5 seconds. Each device decides for itself: your other devices enforce
+only if you switch it on there too, and no device can switch it on for
+another. Near the cap the gateway lets one request through at a time, because
+a request's cost is known only when it completes; a model with no price is
+never blocked (it is counted as unpriced). If the gateway cannot read the caps
+it forwards everything and says why. `tethra mesh cap show` and `tethra
+gateway status` show what each enforced cap still admits. Requests that do not
+go through Tethra's gateway are not capped; `off` switches it off again.
 
 ## 6. `tethra mesh status`
 

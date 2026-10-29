@@ -24,14 +24,17 @@
 //! CLI command can never both act on one snapshot. Every transfer and burn
 //! goes through the escrow fence ([`escrow`], MESH-SI-10).
 //!
-//! In Increment 07 caps raise **alerts only** ([`alerts`]). The gateway
-//! enforces them from Increment 08. Caps are a self-limit, not a security
+//! Caps raise alerts on every device ([`alerts`]). Where the user switches
+//! enforcement on (reauthenticated, per cap, per device), the local gateway
+//! refuses requests over the cap from the snapshot [`gate`] provides
+//! (Increment 08). Caps are a self-limit, not a security
 //! boundary: anything that does not pass through the gateway is not capped.
 //! They are never budgets: `crate::budget` is the separate provider and
 //! manual-usage alert feature, and the two never share figures (SI-19).
 
 pub mod alerts;
 pub mod escrow;
+pub mod gate;
 pub mod ops;
 pub mod period;
 pub mod policy;

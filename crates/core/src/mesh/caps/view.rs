@@ -38,9 +38,10 @@ pub struct CapInfo {
     /// The owner device was removed (or forked): nobody mints for the cap
     /// again. The rights already handed out for the month stay usable.
     pub frozen: bool,
-    /// Another cap on the same project was created first (two devices that
-    /// could not see each other each created one): this one is not minted,
-    /// distributed or alerted on again.
+    /// Another cap is in force on the same project: one created first (two
+    /// devices that could not see each other each created one), or the live
+    /// cap that replaced this frozen one. This one is not minted,
+    /// distributed, enforced or alerted on again.
     pub superseded_by: Option<CapId>,
 }
 
@@ -83,18 +84,31 @@ pub fn caps_in(state: &State) -> Vec<CapInfo> {
             superseded_by: None,
         });
     }
-    let mut first: BTreeMap<MeshProjectId, (Hlc, CapId)> = BTreeMap::new();
-    for c in out.iter().filter(|c| !c.frozen) {
-        let k = (c.created_hlc, c.cap_id);
-        first
+    // One cap is in force per root project: the first-created live one; if
+    // none is live, the newest frozen one (its month's rights stay usable).
+    // A cap created to replace a frozen one supersedes it.
+    let mut primary: BTreeMap<MeshProjectId, (bool, Hlc, CapId)> = BTreeMap::new();
+    for c in &out {
+        // Live sorts before frozen; among live the earliest, among frozen
+        // the newest.
+        let k = if c.frozen {
+            (
+                true,
+                Hlc::from_raw(u64::MAX - c.created_hlc.raw()),
+                c.cap_id,
+            )
+        } else {
+            (false, c.created_hlc, c.cap_id)
+        };
+        primary
             .entry(c.root)
             .and_modify(|f| *f = (*f).min(k))
             .or_insert(k);
     }
-    for c in out.iter_mut().filter(|c| !c.frozen) {
-        let (_, primary) = first[&c.root];
-        if primary != c.cap_id {
-            c.superseded_by = Some(primary);
+    for c in out.iter_mut() {
+        let (_, _, p) = primary[&c.root];
+        if p != c.cap_id {
+            c.superseded_by = Some(p);
         }
     }
     out.sort_by_key(|c| (c.created_hlc, c.cap_id));
@@ -336,6 +350,8 @@ pub struct CapMonthRow {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CapRow {
+    /// This device's gateway enforces this cap (switched on here).
+    pub enforced_here: bool,
     pub cap_id: CapId,
     pub mesh_project_id: MeshProjectId,
     pub project_name: Option<String>,
@@ -352,14 +368,22 @@ pub struct CapRow {
 pub struct CapReport {
     pub month: Month,
     pub caps: Vec<CapRow>,
+    /// The gateway's last report of its spend-cap gate (`caps::gate`), and
+    /// whether it is recent enough to mean the gateway is running.
+    pub gate: Option<super::gate::GateStatus>,
+    pub gate_fresh: bool,
     pub notes: Vec<&'static str>,
 }
+
+/// A gate status this old means the gateway is not running (it rewrites
+/// it at least every 30 s while it runs).
+pub const GATE_STATUS_FRESH_MS: u64 = 45_000;
 
 /// The fixed honesty notes every cap report carries.
 pub const NOTES: &[&str] = &[
     "Spend caps count gateway-estimated cost (priced requests only), per device as of the last exchange with it; a device not heard from is unknown, not zero.",
     "A spend cap is a self-limit on traffic through Tethra's gateway, not a security boundary, and never a provider budget.",
-    "In this version spend caps raise alerts only; the gateway does not block requests.",
+    "This device's gateway refuses requests over a cap only where you switched enforcement on (`tethra mesh cap enforce`); otherwise a cap raises alerts.",
 ];
 
 /// Percentage of `used` in `of`, rounded down (100 when `of` is zero and
@@ -381,6 +405,7 @@ pub fn report(store: &SqliteStore, only: Option<CapId>, month: Option<Month>) ->
     let now = ledger.now_ms;
     let current = ledger.month();
     let month = month.unwrap_or(current);
+    let enforced = super::gate::enforced_caps(store.connection())?;
     let mut caps = Vec::new();
     for cap in ledger.caps() {
         if only.is_some_and(|c| c != cap.cap_id) {
@@ -467,6 +492,7 @@ pub fn report(store: &SqliteStore, only: Option<CapId>, month: Option<Month>) ->
             });
         }
         caps.push(CapRow {
+            enforced_here: enforced.contains(&cap.cap_id),
             cap_id: cap.cap_id,
             mesh_project_id: cap.mesh_project_id,
             project_name: projects::get(store, &cap.mesh_project_id).map(|p| p.name),
@@ -479,9 +505,15 @@ pub fn report(store: &SqliteStore, only: Option<CapId>, month: Option<Month>) ->
             months: rows,
         });
     }
+    let gate = super::gate::read_status(store.connection())?;
+    let gate_fresh = gate
+        .as_ref()
+        .is_some_and(|g| now.saturating_sub(g.at_ms) < GATE_STATUS_FRESH_MS);
     Ok(CapReport {
         month,
         caps,
+        gate,
+        gate_fresh,
         notes: NOTES.to_vec(),
     })
 }

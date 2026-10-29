@@ -6,6 +6,31 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: the gateway enforces spend caps where you switch it on (in development)
+
+`tethra mesh cap enforce <cap> on` has this device's local gateway refuse a
+capped project's requests once this device's share of the cap for the month is
+used up ([ADR 0032](docs/decisions/0032-spend-caps.md),
+[what SDKs see](docs/gateway/USER_GUIDE.md#spend-caps-tethra-mesh)).
+
+- **A clear, non-retried refusal.** HTTP 403 (not 429, which SDKs retry) with
+  an error in the provider's own shape and an `x-tethra-cap` header, sent
+  before the request reaches the provider. No credential is ever echoed.
+- **Bounded overshoot.** Cost is known only when a response completes, so
+  near the cap one request runs at a time: a device goes over by at most one
+  request. Models without a price, and responses that report no usage, are
+  never blocked; they are counted and shown.
+- **Per device, behind your master password.** Each device decides for
+  itself; no other device can switch it on or off. If the gateway cannot read
+  the caps it forwards everything and `tethra gateway status` says why;
+  `status` and `tethra mesh cap show` show what each enforced cap still admits.
+- **No double spending across devices.** Rights a device gives away are held
+  back from its gateway first and published only after the gateway has
+  stopped counting them.
+- The admission check adds no measurable latency
+  ([measurements](docs/gateway/PERFORMANCE_RESULTS.md)). A cap is a
+  self-limit: traffic that does not go through the gateway is not capped.
+
 ### Added — Tethra Mesh: spend caps across your devices, alerts only (in development)
 
 Set a monthly spend cap on a shared project that holds across all your
@@ -32,9 +57,9 @@ devices, even while they cannot reach each other
   owner before you remove it. A cap whose owner device is removed is frozen;
   create a new one.
 - **Alerts at 80% and 100%** through the existing alert system, labelled as
-  cross-device, estimated and as of the last exchange. In this version caps
-  never block a request; the gateway enforces them in a later increment. A
-  cap is a self-limit, not a security boundary, and it is never a budget.
+  cross-device, estimated and as of the last exchange. A cap blocks requests
+  only on a device where you switch enforcement on (above). A cap is a
+  self-limit, not a security boundary, and it is never a budget.
 
 ### Added — Tethra Mesh: shared projects and cross-device usage (in development)
 

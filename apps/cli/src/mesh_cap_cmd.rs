@@ -1,6 +1,6 @@
 //! `tethra mesh cap …`: replicated monthly spend caps on mesh projects
-//! (Increment 07, ADR 0032). In this version caps raise alerts only; the
-//! gateway enforces them from Increment 08.
+//! (Increments 07-08, ADR 0032). Caps raise alerts; `enforce` has this
+//! device's gateway refuse requests over a cap (reauthenticated, local).
 //!
 //! Amounts are given in US dollars and kept as micro-USD. Every figure is
 //! gateway-estimated cost, labelled per device as of the last exchange with
@@ -56,6 +56,16 @@ pub enum CapCmd {
         #[arg(long)]
         month: Option<String>,
     },
+    /// Have this device's gateway refuse requests over a cap once this
+    /// device's rights for the month are used up, or stop (requires
+    /// reauthentication). Give a cap and on|off, or --all and on|off.
+    Enforce {
+        #[arg(num_args = 1..=2, value_name = "CAP ON|OFF")]
+        args: Vec<String>,
+        /// Every cap in force.
+        #[arg(long)]
+        all: bool,
+    },
     /// On the cap's owner: ask devices to hand their unspent rights back,
     /// before you remove a device. The requests travel in the node's next
     /// exchanges with them, for 24 hours.
@@ -98,13 +108,21 @@ fn month_arg(m: Option<String>) -> Result<Option<Month>> {
     }
 }
 
+/// Whether this data directory's gateway runs, for the escrow fence.
+pub fn gateway_probe(ctx: &Ctx, vault: &api_tracker_core::vault::UnlockedVault) -> GatewaySocket {
+    let port = api_tracker_core::mesh::caps::escrow::gateway_port(vault.connection())
+        .ok()
+        .flatten();
+    GatewaySocket::new(ctx.paths.data_dir.clone(), port)
+}
+
 fn short(hex: &str) -> &str {
     &hex[..8.min(hex.len())]
 }
 
 pub fn run(ctx: &Ctx, cmd: CapCmd) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
-    let probe = GatewaySocket(ctx.paths.data_dir.clone());
+    let probe = gateway_probe(ctx, &vault);
     match cmd {
         CapCmd::Create { mesh, monthly } => {
             let amount = micros(&monthly)?;
@@ -123,8 +141,9 @@ pub fn run(ctx: &Ctx, cmd: CapCmd) -> Result<()> {
                     usd(u128::from(out.distributed_micros))
                 );
                 println!(
-                    "In this version the cap raises alerts only (at 80% and 100%); the gateway \
-                     does not block requests yet."
+                    "It raises alerts at 80% and 100%. To have this device's gateway refuse \
+                     requests over it: tethra mesh cap enforce {} on",
+                    short(&out.cap_id.to_hex())
                 );
             });
         }
@@ -238,6 +257,40 @@ pub fn run(ctx: &Ctx, cmd: CapCmd) -> Result<()> {
                         print_rights(m);
                     }
                 }
+            });
+        }
+        CapCmd::Enforce { args, all } => {
+            let (cap, state) = match (all, args.as_slice()) {
+                (true, [s]) => (None, s.as_str()),
+                (false, [c, s]) => (Some(c.as_str()), s.as_str()),
+                _ => bail!("give a cap and on|off, or --all and on|off"),
+            };
+            let on = match state.to_ascii_lowercase().as_str() {
+                "on" => true,
+                "off" => false,
+                _ => bail!("the last argument must be on or off"),
+            };
+            if on {
+                eprintln!(
+                    "With enforcement on, this device's gateway refuses requests for the \
+                     capped project once this device's rights for the month are used up: a \
+                     403 your SDK reports, never retried automatically. A request in flight \
+                     can go over by its own cost. Your other devices enforce only if you \
+                     switch it on there too, and anything that does not go through Tethra's \
+                     gateway is not capped."
+                );
+            }
+            eprintln!("Reauthentication required to change cap enforcement.");
+            let master = ctx::master_password()?;
+            let changed = vault.mesh_cap_enforce(&master, cap, on)?;
+            let out = serde_json::json!({ "enforced": on, "caps": changed });
+            render::emit(ctx.json, &out, || {
+                println!(
+                    "Enforcement {} for {} cap(s) on this device's gateway. A running gateway \
+                     applies it within 5 seconds.",
+                    if on { "on" } else { "off" },
+                    changed.len()
+                );
             });
         }
         CapCmd::Reclaim { cap, from } => {
@@ -395,6 +448,55 @@ fn print_rights(m: &CapMonthRow) {
     }
 }
 
+fn print_gate(report: &CapReport, c: &CapRow) {
+    if !c.enforced_here {
+        println!("  Not enforced on this device's gateway (alerts only).");
+        return;
+    }
+    let status = report.gate.as_ref().filter(|_| report.gate_fresh);
+    let Some(g) = status else {
+        println!("  Enforced here, but this device's gateway is not running (or not reporting).");
+        return;
+    };
+    if let Some(why) = &g.inactive_reason {
+        println!(
+            "  Enforcement {}: {}.",
+            if g.failing_open {
+                "NOT HOLDING (the gateway forwards everything)"
+            } else {
+                "inactive"
+            },
+            render::sanitize(why)
+        );
+        return;
+    }
+    match g.caps.iter().find(|s| s.cap_id == c.cap_id.to_hex()) {
+        Some(s) => println!(
+            "  Enforced by this device's gateway: it admits {} more{}{}{}.",
+            usd_signed(i128::from(s.avail_micros)),
+            if s.near_exhaustion {
+                "; one request at a time (near the cap)"
+            } else {
+                ""
+            },
+            if s.accounting_incomplete {
+                "; some spend was not recorded (accounting incomplete)"
+            } else {
+                ""
+            },
+            if s.unpriced_requests + s.unmetered_requests > 0 {
+                format!(
+                    "; not counted: {} unpriced, {} without usage in the response",
+                    s.unpriced_requests, s.unmetered_requests
+                )
+            } else {
+                String::new()
+            }
+        ),
+        None => println!("  Enforced here; the gateway has not counted this cap yet."),
+    }
+}
+
 fn print_show(report: &CapReport) {
     for n in &report.notes {
         println!("{n}");
@@ -408,6 +510,7 @@ fn print_show(report: &CapReport) {
     for c in &report.caps {
         println!();
         print_header(c);
+        print_gate(report, c);
         for m in &c.months {
             print_month(m);
         }
