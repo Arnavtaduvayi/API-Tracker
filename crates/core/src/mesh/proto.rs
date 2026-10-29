@@ -136,6 +136,16 @@ pub enum DirectMsg {
         epoch: u32,
         key: super::invite::AccessKey,
     },
+    /// "I hold few rights for this cap and month; give me up to `want`
+    /// micro-USD" — or, from the cap's owner with `reclaim`, "give yours
+    /// back" (Increment 07, DESIGN §D15). The receiver decides on its own
+    /// view after the exchange commits, and grants by minting `cap.rights`.
+    RightsRequest {
+        cap: super::dot::CapId,
+        month: super::kinds::Month,
+        want: u64,
+        reclaim: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

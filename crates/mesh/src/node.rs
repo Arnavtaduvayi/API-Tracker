@@ -15,6 +15,7 @@ use api_tracker_core::mesh::sqlite_store::SqliteStore;
 use api_tracker_core::mesh::store::MeshStore;
 use api_tracker_core::mesh::{DeviceId, MeshId};
 use api_tracker_core::vault::UnlockedVault;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -43,6 +44,7 @@ impl Default for TransportLimits {
 
 pub struct MeshNode {
     store: Mutex<SqliteStore>,
+    data_dir: PathBuf,
     keys: MeshKeys,
     vault: MeshVault,
     clock: Arc<dyn Clock>,
@@ -72,6 +74,7 @@ impl MeshNode {
         identity::preflight(&store)?;
         Ok(Self {
             store: Mutex::new(store),
+            data_dir: vault.paths().data_dir.clone(),
             keys: vault.mesh_keys()?,
             vault: vault.mesh_vault(),
             clock,
@@ -127,6 +130,17 @@ impl MeshNode {
         &self.keys
     }
 
+    /// The data directory this node's identity belongs to.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Whether this data directory's gateway is running, for the spend-cap
+    /// escrow fence (MESH-SI-10).
+    pub fn gateway_probe(&self) -> GatewaySocket {
+        GatewaySocket(self.data_dir.clone())
+    }
+
     pub fn vault(&self) -> &MeshVault {
         &self.vault
     }
@@ -161,5 +175,27 @@ impl MeshNode {
             .find(|(d, k)| k.noise_pub.0.as_slice() == remote && roster.is_active(d))
             .map(|(d, _)| *d);
         found.filter(|d| *d != self.self_id())
+    }
+}
+
+/// The gateway's liveness, decided the way the gateway decides it
+/// (`gateway::control::instance_is_live`): by connecting to its control
+/// socket, `<data-dir>/gateway.sock`, rather than trusting a pid file. On
+/// Windows there is no control channel yet, so the answer is the
+/// conservative "running": a fenced transfer then waits for the gateway's
+/// acknowledgement (Increment 08 adds the listener-identity probe there).
+/// Consulted only when cap enforcement is on.
+pub struct GatewaySocket(pub PathBuf);
+
+impl api_tracker_core::mesh::caps::GatewayProbe for GatewaySocket {
+    fn gateway_running(&self) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::net::UnixStream::connect(self.0.join("gateway.sock")).is_ok()
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
     }
 }

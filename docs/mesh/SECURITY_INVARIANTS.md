@@ -207,12 +207,25 @@ NN)** otherwise.
   decision, and overshoot is ≤ one in-flight request's cost per cap per device.
   *Status:* specified (lands in 08). *Tests:* none yet.
 - **MESH-SI-10 No double spending.** Rights are never spent twice; transfers are
-  fenced against the running gateway's snapshot (escrow). *Status:* partial
-  (01): the bounded counter refuses spends and transfers beyond `avail`, and its
-  view clamps a device's outgoing rows to what it held. The escrow fence lands in
-  07/08. *Tests:* `crdt::bounded::tests::spend_beyond_avail_is_refused`,
+  fenced against the running gateway's snapshot (escrow). *Status:* the node's
+  half implemented (07); the gateway's acknowledgement lands in 08. The bounded
+  counter refuses spends and transfers beyond `avail`, and its view clamps a
+  device's outgoing rows to what it held (01). Every transfer, burn and grant
+  is decided inside the write transaction that publishes it, against this
+  device's own spendable figure (its view, minus its gateway's unpublished
+  spend and its open escrow), so two processes cannot both give the same
+  rights. Every give is a `mesh_cap_escrow` row first: published in the same
+  transaction when enforcement is off or no gateway runs; otherwise reserved
+  (`pending`) until the gateway acknowledges it (`caps::escrow::ack`), and
+  only then published. *Tests:* `crdt::bounded::tests::spend_beyond_avail_is_refused`,
   `the_clamped_view_ignores_a_forged_over_transfer`, `cycles_create_nothing`,
-  `cap_safety_holds_for_10k_honest_operation_sequences`.
+  `cap_safety_holds_for_10k_honest_operation_sequences`,
+  `mesh_caps::caps_escrow_publishes_at_once_unfenced_and_waits_for_the_gateway_ack_when_fenced`,
+  `mesh_caps::caps_rebalancing_asks_below_20_percent_grants_above_half_and_is_rate_limited`,
+  `mesh_caps::caps_advance_minting_covers_an_owner_offline_across_the_month_boundary`
+  (unpublished spend counts at once), `mesh_sim::caps_ci_seeds` (cap safety,
+  own avail ≥ 0, conservation and the clamp at every step on SQLite, the
+  oracle at quiescence).
 
 ## Honesty and scope
 
@@ -232,7 +245,9 @@ NN)** otherwise.
 - **MESH-SI-13 Nothing automatic.** No auto-binding, auto-import or
   auto-enforcement. *Status:* implemented (06) for binding: sharing binds only
   the sharer's own project; every other device binds by an explicit command,
-  never by name or local id; caps (08) and imports (11) follow. *Tests:*
+  never by name or local id; spend caps (07) are created and changed only by
+  explicit commands, and raise alerts only, so nothing is enforced until the
+  user switches enforcement on (08); imports (11) follow. *Tests:*
   `mesh_usage::binding_is_never_automatic_cascades_on_delete_and_is_refused_twice`,
   `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the

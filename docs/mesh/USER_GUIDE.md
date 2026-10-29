@@ -8,16 +8,18 @@ encrypted Noise channel that only your paired devices can open
 ([ADR 0031](../decisions/0031-device-mesh.md)).
 
 This guide covers what exists today: pairing, the node that keeps devices
-converged, shared projects and cross-device usage, and the `status` and
-`doctor` views. Spend caps are a later increment.
+converged, shared projects and cross-device usage, monthly spend caps (which
+raise alerts; the gateway does not block requests yet), and the `status` and
+`doctor` views.
 
 ## What replicates
 
 Only what [ARCHITECTURE.md "What replicates"](ARCHITECTURE.md#what-replicates)
 lists: today, the device roster (ids, names, public keys, removals), each
 device's published listen addresses, the projects you share (id, name,
-archived, merged), the daily usage counters of those projects, and the mesh
-settings. Credential values never replicate.
+archived, merged), the daily usage counters of those projects, spend caps
+(their target, each device's rights and spend), and the mesh settings.
+Credential values never replicate.
 
 ## 1. Pair your devices
 
@@ -196,7 +198,79 @@ tethra mesh settings set retention.usage_days 30
 Older days are not published, and two days past the horizon every device
 drops them.
 
-## 5. `tethra mesh status`
+## 5. Spend caps
+
+A spend cap is a monthly ceiling on a shared project's **gateway-estimated**
+cost across all your devices — "the app may spend at most $50 a month, on every
+machine together". It counts only traffic through Tethra's gateway, priced by
+each device with its own pricing table, so it is a self-limit, not a security
+boundary: anything that does not go through the gateway is not counted. It is
+not a budget either (`tethra budget` is separate and never mixed with it). **In
+this version a cap raises alerts at 80% and 100%; the gateway does not block
+requests yet.** ([ADR 0032](../decisions/0032-spend-caps.md))
+
+```bash
+tethra mesh cap create app --monthly 50   # this device owns the cap
+tethra mesh cap show                      # this month's spend against each cap
+tethra mesh cap rights app                # who holds what, per device
+tethra mesh cap raise app 10              # add $10 this month (see below)
+tethra mesh cap lower app 30              # lower to $30 a month (asks first)
+tethra mesh cap reclaim app --from old-laptop   # before you remove a device
+```
+
+**How it works, without a server.** The cap is split into *rights*: each
+device holds some and counts its spend against its own. Once the gateway
+enforces caps (a later increment), a device spends only its own rights, so the
+total stays within the cap even while your devices cannot reach each other
+(each device may go over by at most one request, whose cost is known only when
+it completes). Today the same figures drive the alerts. The device that created
+the cap is its **owner**: at the start of each month it hands every device that
+was active in the last 30 days an equal share and keeps the rest. A device that
+runs low (below a fifth of its share) asks a device with spare rights for some
+during their next exchange, and gets part of the spare (the giver keeps at
+least half its share, so rights do not bounce back and forth).
+
+**Why a disconnected device can hit its cap early.** A device that cannot reach
+your other devices can spend only the rights it holds. If it uses them up, it is
+at its cap even when the others have spare: safety comes first. It gets more as
+soon as it exchanges with a device that has some.
+
+**The 1st of the month.** From the 20th, the owner hands out next month's
+shares in advance, so a laptop that is offline on the 1st already holds its
+share — as long as the owner was on, and the laptop exchanged with it, between
+the 20th and the end of the month.
+
+**Raise and lower.**
+- `raise` **adds**. On the owner it adds to the cap for every device. On any
+  other device it is a **local override**: extra rights for that device only,
+  until the end of the month. It asks you to confirm, and every device sees it
+  labelled as an override. (There is no "set to": two devices that cannot see
+  each other both setting it would add twice.)
+- `lower` sets a new, lower cap (the latest change wins). It asks you to
+  confirm. Each device gives up the rights it holds above its new share as it
+  hears of the change, and the owner takes back the rest; `show` says "pending
+  decrease" until that is done. Spend already made stays counted: lowering
+  below it caps every device for the rest of the month.
+
+**Removing a device.** Run `tethra mesh cap reclaim <cap> --from <device>` on
+the owner first: at their next exchanges the device hands its unspent rights
+back. **If the owner device itself is removed, its caps are frozen**: this
+month's rights stay usable, but nobody adds rights again, so next month has
+none. Create a new cap for the project (`tethra mesh cap create`).
+
+**How to read `show` and `rights`.** Every figure is per device, "as of" the
+last exchange with it, and **stale** after 24 hours; a device not heard from may
+have spent more than you see. AVAILABLE is what a device can still spend; your
+own line also counts spend your gateway recorded but has not published yet.
+SENT/RECEIVED are rights moved between devices, BURNED are rights given up after
+a lower, and an **override** row is a device's local raise.
+
+**Alerts.** While the vault is unlocked, the monitor raises an alert when this
+device's view of the month's total reaches 80% and again at 100% of the cap
+(`tethra alerts`). The alert says the figure is estimated and only as fresh as
+the last exchange with each device.
+
+## 6. `tethra mesh status`
 
 Everything `status` shows is local; nothing in it is secret. `--json` gives the
 same fields.
@@ -221,7 +295,7 @@ same fields.
 | `address_changes` | Addresses at which a different device answered than before. |
 | `publish` | The usage publisher's last run: when, counters published, counters waiting for the next hour's budget (at most 5 000 an hour), counters collected past the retention horizon. |
 
-## 6. `tethra mesh doctor`
+## 7. `tethra mesh doctor`
 
 `doctor` runs every check below and prints each finding with a plain-language
 fix. `--json` gives `findings: [{check, severity, summary, fix}]` and `worst`.

@@ -104,6 +104,14 @@ pub enum MeshError {
     /// remembers (PROTOCOL.md §7.4): minting waits until they come back.
     #[error("this device is recovering its own mesh items from a peer after a rollback; it creates new items again once they are back")]
     RollbackHold,
+
+    #[error("that mesh project already has a spend cap; raise or lower it instead")]
+    CapExists,
+
+    /// The cap's owner device was removed: nobody may mint for it again
+    /// (DESIGN §D15).
+    #[error("this spend cap is frozen because its owner device was removed; no new rights can be added to it. Create a new cap for the project with `tethra mesh cap create`")]
+    CapFrozen,
 }
 
 impl MeshError {
@@ -139,6 +147,8 @@ impl MeshError {
             MeshError::Forked => "mesh_forked",
             MeshError::InvalidPeerAddress => "mesh_invalid_peer_address",
             MeshError::RollbackHold => "mesh_rollback_hold",
+            MeshError::CapExists => "mesh_cap_exists",
+            MeshError::CapFrozen => "mesh_cap_frozen",
         }
     }
 }

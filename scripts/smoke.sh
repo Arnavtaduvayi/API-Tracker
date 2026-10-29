@@ -612,6 +612,24 @@ done
 check $SEEN "mesh usage on B shows A's numbers, labelled with A's device and an as-of time"
 printf '%s' "$USAGE" | grep -q '"total_label": "estimated, gateway-observed'
 check $? "the cross-device total carries its honesty label"
+
+echo "-- mesh spend caps --"
+CAP=$(API_TRACKER_DIR="$MESH_A" "$BIN" --json mesh cap create "$MESH_P" --monthly 10 2>/dev/null)
+printf '%s' "$CAP" | grep -q '"monthly_micros": 10000000'
+check $? "mesh cap create: A owns a \$10 monthly cap on the shared project"
+API_TRACKER_DIR="$MESH_A" "$BIN" mesh cap create "$MESH_P" --monthly 5 >/dev/null 2>&1; [ $? -ne 0 ]
+check $? "a second cap on the same project is refused"
+SHOW=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh cap show 2>/dev/null)
+printf '%s' "$SHOW" | grep -q 'of \$10.00' && printf '%s' "$SHOW" | grep -q 'not a security boundary'
+check $? "mesh cap show: this month's spend against the cap, with its honesty notes"
+CAPSEEN=1
+for _ in $(seq 1 20); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1
+  API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh cap show 2>/dev/null \
+    | grep -q '"owner_name": "smoke-a-renamed"' && { CAPSEEN=0; break; }
+  sleep 0.5
+done
+check $CAPSEEN "B sees the cap and its owner after an exchange"
 API_TRACKER_DIR="$MESH_A" "$BIN" mesh stop >/dev/null 2>&1
 wait "$SERVE_PID" >/dev/null 2>&1
 ! kill -0 "$SERVE_PID" 2>/dev/null; check $? "A's node stops"

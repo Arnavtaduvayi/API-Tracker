@@ -90,7 +90,7 @@ pub const NOTES: &[&str] = &[
     "A device with no data is unknown, not zero.",
 ];
 
-fn last_exchange(store: &SqliteStore, d: &DeviceId) -> Result<Option<String>> {
+pub(crate) fn last_exchange(store: &SqliteStore, d: &DeviceId) -> Result<Option<String>> {
     Ok(store
         .connection()
         .query_row(
@@ -109,7 +109,7 @@ fn in_period(day: &Day, f: &UsageFilter, month: Month) -> bool {
     }
 }
 
-fn device_name(store: &SqliteStore, d: &DeviceId) -> Option<String> {
+pub(crate) fn device_name(store: &SqliteStore, d: &DeviceId) -> Option<String> {
     let state = store.state();
     state
         .device_info
@@ -240,16 +240,27 @@ pub fn local_month_spend_micros(
     mesh: &MeshProjectId,
     month: Month,
 ) -> Result<u64> {
-    let root = projects::root_of(store, mesh);
-    let locals: Vec<String> = projects::bindings(store.connection())?
+    local_month_spend_in(store.connection(), store.state(), mesh, month)
+}
+
+/// [`local_month_spend_micros`] over a connection and a state (inside a
+/// write transaction, where spend-cap decisions are made).
+pub fn local_month_spend_in(
+    conn: &rusqlite::Connection,
+    state: &super::views::State,
+    mesh: &MeshProjectId,
+    month: Month,
+) -> Result<u64> {
+    let root = projects::root_in(state, mesh);
+    let locals: Vec<String> = projects::bindings(conn)?
         .into_iter()
-        .filter(|(_, m)| projects::root_of(store, m) == root)
+        .filter(|(_, m)| projects::root_in(state, m) == root)
         .map(|(l, _)| l)
         .collect();
     let mut sum: u64 = 0;
     let prefix = format!("{month}-%");
     for l in locals {
-        let v: i64 = store.connection().query_row(
+        let v: i64 = conn.query_row(
             "SELECT COALESCE(SUM(estimated_cost_micros), 0) FROM gateway_usage_daily
              WHERE project_id = ?1 AND day LIKE ?2",
             rusqlite::params![l, prefix],

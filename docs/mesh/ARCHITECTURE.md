@@ -95,7 +95,9 @@ Nothing outside this table ever replicates.
 | `mesh::peers`, `mesh::doctor` | implemented (05) | the peer table (`mesh_peers`), lag and repair records; the store-side checks of `mesh doctor` and `--rebuild` |
 | `mesh::projects`, `mesh::publish`, `mesh::usage` | implemented (06) | shared projects and local bindings; the usage publisher (cursor, deltas, epoch bumps, hourly budget, retention); the per-device usage report and `local_month_spend_micros` |
 | `crates/mesh` `runtime`, `peers`, `instance`, `discover`, `doctor` | implemented (05) | the node loop (rounds, hooks, stop conditions), backoff and targets, one node per data directory with its control socket, opt-in mDNS and its in-memory fake, `mesh doctor` |
-| `mesh::caps`, `share` | specified, lands in 07-08, 11 | spend caps, credential shares |
+| `mesh::caps` | implemented (07) | spend caps: month helpers, the policy thresholds, the read model and this device's `Ledger` (unpublished spend, open escrow), the escrow fence and the gateway's ack contract, create/raise/lower/reclaim/`try_spend`, the reconciler and rights requests/grants, alerts |
+| `mesh::sim::caps` | implemented (07) | the spend-cap scenario family on SQLite |
+| `share` | specified, lands in 11 | credential shares |
 
 **Rules.** Core performs no network I/O (`crates/core/src/lib.rs`), and
 `core::mesh` keeps it that way: it reads time only through `Clock` and draws
@@ -243,9 +245,42 @@ migration v23, the gateway writer's split, the node's `UsagePublisher` hook.
   month)` sums this device's own rollup for the local projects bound to a mesh
   project: the one function Increments 07 and 08 use.
 
+## Spend caps
+
+**Status: implemented (07), alerts only; gateway enforcement in 08**
+([ADR 0032](../decisions/0032-spend-caps.md)).
+
+- **Owner and months.** `caps::create` makes this device the owner and mints
+  the month (UTC, `caps::period`). From day 20 the owner mints next month in
+  advance. One `(cap, month)` is one bounded counter (PROTOCOL.md §5.5).
+- **The reconciler** (`caps::reconcile`, the round hook after the usage
+  publisher; `mesh replicate` and `mesh cap show` run it too): publish
+  `cap.used` from `usage::local_month_spend_micros`; settle escrow; mint;
+  distribute equal shares to devices active in the last 30 days; burn after a
+  lower. Each step decides inside its write transaction
+  (`SqliteStore::mint_with`), so a node and a CLI command never act on one
+  snapshot; an idle step rolls back.
+- **Rebalancing.** `caps::rights_requests` adds `Direct RightsRequest`s at the
+  start of an exchange (`crates/mesh::session`); `caps::grant` answers the
+  peer's after the exchange committed (`crates/mesh::directs`). Thresholds are
+  in `caps::policy`.
+- **This device's figure.** `caps::view::Ledger::local_avail`: the view's
+  available amount, minus the gateway's spend not yet published and the open
+  escrow. `try_spend` is the strict check on it (Increment 08's gate makes the
+  same one in memory).
+- **The escrow fence.** `caps::escrow`: every give is a `mesh_cap_escrow` row;
+  `Fence::Immediate` (enforcement off, or no gateway running — the node probes
+  the gateway's control socket, `crates/mesh::node::GatewaySocket`) publishes
+  in the same transaction; `Fence::AwaitAck` reserves until the gateway's
+  `escrow::ack`.
+- **Alerts.** `caps::alerts::cap_alerts`, called by `run_monitor`: kind
+  `mesh_spend_cap`, dedup `mesh_cap:<cap>:<month>:{80,100}`.
+- **Views.** `caps::report` gives each cap and month per device, labelled with
+  freshness like usage; frozen and superseded caps are labelled.
+
 ## Data flow
 
-**Status: implemented (06)** up to the views; caps follow in 07-08. Text
+**Status: implemented (06-07)** up to the views; the gateway reads caps in 08. Text
 diagram of one usage figure's path:
 
 ```text
@@ -267,8 +302,9 @@ diagram of one usage figure's path:
                                                   B's own figure
 ```
 
-Spend caps follow the same path (`cap.*` items), and each device's gateway
-reads its own cap view from its local database (Increment 08).
+Spend caps follow the same path (`cap.*` items, minted by the reconciler);
+each device's gateway will read its own cap view from its local database
+(Increment 08).
 
 ## Item lifecycle
 

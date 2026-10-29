@@ -199,3 +199,147 @@ fn soak() {
     }
     assert!(failures.is_empty(), "{}", report(&failures));
 }
+
+// ------------------------------------------------- spend caps (Increment 07)
+//
+// The caps scenario family (`mesh::sim::caps`): 3-5 SQLite devices running
+// the real cap policy. Fewer seeds than the protocol simulator: every step
+// writes to real databases. Long runs: `scripts/mesh_soak.sh --scenario caps`.
+
+use api_tracker_core::mesh::sim::caps::{
+    run_caps, CapsConfig, CapsFailure, CapsInjections, CapsReport,
+};
+
+fn caps_run(cfg: &CapsConfig) -> Result<CapsReport, CapsFailure> {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    run_caps(cfg, dir.path())
+}
+
+fn caps_run_all(configs: Vec<CapsConfig>) -> (Vec<CapsReport>, Vec<CapsFailure>) {
+    let next = AtomicU64::new(0);
+    let out = Mutex::new((Vec::new(), Vec::new()));
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst) as usize;
+                let Some(cfg) = configs.get(i) else { break };
+                let r = caps_run(cfg);
+                let mut o = out.lock().expect("no poisoned lock");
+                match r {
+                    Ok(rep) => o.0.push(rep),
+                    Err(f) => o.1.push(f),
+                }
+            });
+        }
+    });
+    let (reports, mut failures) = out.into_inner().expect("no poisoned lock");
+    failures.sort_by_key(|f| f.seed);
+    (reports, failures)
+}
+
+fn caps_report(failures: &[CapsFailure]) -> String {
+    failures
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// CI: 16 seeds × 240 two-hour steps (2027-01-18 to 2027-02-07, across day
+/// 20 and the month boundary), every injection mix.
+#[test]
+fn caps_ci_seeds() {
+    let started = Instant::now();
+    let configs: Vec<CapsConfig> = (0..16).map(|s| CapsConfig::from_seed(s, 240)).collect();
+    let (reports, failures) = caps_run_all(configs);
+    eprintln!("mesh_sim caps: 16 seeds in {:?}", started.elapsed());
+    assert!(failures.is_empty(), "{}", caps_report(&failures));
+    let refused: u64 = reports.iter().map(|r| r.spends_refused).sum();
+    let grants: u64 = reports.iter().map(|r| r.grants).sum();
+    assert!(refused > 0, "the workload never reached a cap");
+    assert!(grants > 0, "no rights request was ever granted");
+}
+
+/// One injection: its name, how to switch it on, and how a report shows it
+/// ran.
+type InjectionCase = (
+    &'static str,
+    fn(&mut CapsInjections),
+    fn(&CapsReport) -> bool,
+);
+
+/// Each injection on its own, on a few seeds, does what it says.
+#[test]
+fn caps_each_injection_alone_is_exercised_and_defended() {
+    let only = |f: fn(&mut CapsInjections)| {
+        (100..103u64)
+            .map(|seed| {
+                let mut cfg = CapsConfig::from_seed(seed, 240);
+                cfg.inject = CapsInjections::default();
+                f(&mut cfg.inject);
+                cfg
+            })
+            .collect::<Vec<_>>()
+    };
+    let cases: [InjectionCase; 5] = [
+        (
+            "owner offline across the boundary",
+            |i| i.owner_offline_across_boundary = true,
+            |r| r.boundary_checked,
+        ),
+        (
+            "concurrent lowers",
+            |i| i.concurrent_lowers = true,
+            |r| r.lowers >= 2,
+        ),
+        (
+            "partitioned override",
+            |i| i.partitioned_override = true,
+            |r| r.overrides == 1,
+        ),
+        ("owner removal", |i| i.owner_removal = true, |r| r.frozen),
+        ("forged transfer", |i| i.forged_transfer = true, |_| true),
+    ];
+    for (name, set, exercised) in cases {
+        let (reports, failures) = caps_run_all(only(set));
+        assert!(failures.is_empty(), "{name}: {}", caps_report(&failures));
+        assert!(reports.iter().all(exercised), "{name} was not exercised");
+    }
+}
+
+/// The same seed gives the same decisions: `MESH_SIM_SEED` (default 7).
+#[test]
+fn caps_replay_is_deterministic() {
+    let seed = env_u64("MESH_SIM_SEED").unwrap_or(7);
+    let steps = env_u64("MESH_SIM_STEPS").unwrap_or(240);
+    let cfg = CapsConfig::from_seed(seed, steps);
+    let a = caps_run(&cfg).unwrap_or_else(|f| panic!("{f}"));
+    let b = caps_run(&cfg).unwrap_or_else(|f| panic!("{f}"));
+    assert_eq!(a.trace_hash, b.trace_hash);
+    assert_eq!(a, b);
+}
+
+/// Long run (ignored in CI; `scripts/mesh_soak.sh --scenario caps`):
+/// `MESH_SIM_SEEDS` seeds from `MESH_SIM_START`, `MESH_SIM_STEPS` steps.
+#[test]
+#[ignore]
+fn caps_family_long() {
+    let count = env_u64("MESH_SIM_SEEDS").unwrap_or(100);
+    let start = env_u64("MESH_SIM_START").unwrap_or(5_000_000);
+    let steps = env_u64("MESH_SIM_STEPS").unwrap_or(240);
+    let began = Instant::now();
+    let configs: Vec<CapsConfig> = (start..start + count)
+        .map(|s| CapsConfig::from_seed(s, steps))
+        .collect();
+    let (_, failures) = caps_run_all(configs);
+    eprintln!(
+        "mesh soak: {count} caps seeds from {start} ({steps} steps) in {:?}, {} failing",
+        began.elapsed(),
+        failures.len()
+    );
+    for f in &failures {
+        eprintln!("SOAK-FAIL {f}");
+    }
+    assert!(failures.is_empty(), "{}", caps_report(&failures));
+}

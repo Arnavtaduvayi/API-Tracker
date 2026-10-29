@@ -16,7 +16,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 04 | [Transport & pairing](04-transport-and-pairing.md) | S+R | L | done | 2026-10-27 | 2026-10-28 | `bd6d89e`, `40bd38a` | CI `40630951922` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40630951920` (success). 03 record commit `21b4c70`: CI `40588124547`, service `40588124805` (both success) |
 | 05 | [Node runtime](05-node-runtime.md) | S | M | done | 2026-10-28 | 2026-10-28 | `5b37ae7`, `beb3aa1` | CI `40739758045` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40739757930` (success). First commit `5b37ae7`: CI `40737167919` **failed** on Linux (`node::three_nodes_converge…`, a pairing race, fixed in `beb3aa1`; its Windows job passed), service `40737167795` success |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | done | 2026-10-28 | 2026-10-28 | `dc6b110`, `c671d33`, `99df156` | CI `40749228074` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40749228069` (success). Earlier: `dc6b110` CI `40745888639` **failed** on Windows (the lost update fixed in `99df156`); `c671d33` CI `40746051787` and service `40746051748` success |
-| 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | pending | | | | |
+| 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | in-progress | 2026-10-28 | | | |
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | pending | | | | |
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | pending | | | | |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | pending | | | | |
@@ -86,12 +86,127 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 05 | **R22** A `RollbackNotice` is stored per reporting device in `mesh_meta` (`rollback_hold/<reporter>`) and binds every minter on the database; it counts only while the reporter is active; a completed exchange without a repeated notice, or `mesh remove` of the reporter, clears it. | PROTOCOL §7.4 said "MUST NOT mint" without saying where the state lives or what ends it: an in-memory flag lets a CLI command fork the device; a hold with no release lets a lying member block its own removal (found by the unit test). | ADR 0031 R22, PROTOCOL §7.4, DESIGN §D5 [Amended 05] |
 | 05 | D9's "repair every 24 h" is a recorded **repair round** (`node/last_repair`), and `doctor --repair` runs one; D17's "corrupt view row" is checked as item-row corruption, and `doctor --rebuild` rewrites the item store's index columns and removes unusable rows. | Every exchange already repairs (R11); there are no view tables (R17). | ADR 0031 "Smaller node decisions", DESIGN §D13 [Amended 05] |
 | 05 | Small, this table only: the loop is `crates/mesh::runtime` (`RunningNode`), not `node.rs` (which keeps `MeshNode`); the peer table and lag/repair records are `core::mesh::peers` (shared with the desktop), backoff/targets are `crates/mesh::peers`; **Ctrl-C ends `serve` without a signal handler** (as `gateway serve`; `tethra mesh stop` is the graceful path); `--interval` (≥ 5 s) is a documented option so release binaries and smoke can use short rounds (the ms env override is debug-only); new `tethra mesh stop`; `Discovery::announce` takes the IPs too; `record_attempt` updates only existing `mesh_peers` rows; `mesh join` records the invite address that answered as a manual peer (CI found the race without it); `MeshError::{InvalidPeerAddress, RollbackHold}`, `NetError::Node`; `MeshStatusDetail.rollback_hold`; `Day::from_unix_ms`; `session::peek_session_id`; `membership::publish_listen_addrs`. | Simpler, or required by what was built. | — |
+| 07 | **Decide inside the transaction.** Every cap decision (mint, distribute, burn, grant, `used`) is computed inside the write transaction that publishes it (`SqliteStore::mint_with`); one that mints and writes nothing rolls back. | DESIGN described the reconciler as compute-then-publish; a node and a CLI command deciding from one snapshot could both give the same rights. | ADR 0032 D8, DESIGN header [Amended 07] |
+| 07 | **Policy made precise** (PROTOCOL §5.5.1): effective target = target + overrides; pending decrease = supply − max(effective target, used); a holder keeps `max(0, share − own used) + own overrides`; no ordinary requests or grants while a decrease is pending; `RightsRequest` carries `reclaim` (the owner's remainder reclaim; the 24-hour manual `cap reclaim`, during which the owner grants and distributes nothing to that device); an override lasts the month; a lower also lowers a next-month target already written. | D15 left the lower's arithmetic, the override's interaction with burns, and the owner's reclaim open; the simulator found the reclaim/grant ping-pong this closes. | ADR 0032 D3-D5, PROTOCOL §5.5.1, DESIGN [Amended 07] |
+| 07 | **Superseded caps.** Two non-frozen caps on one root project resolve to the first created (`created_hlc`, then id); the other is labelled superseded and never minted, distributed, changed or alerted on. `created_hlc` is `max(hlc_last + 1, now)`. | "One cap per project" can only be enforced locally; the test caught that `hlc_last + 1` alone tied across devices that could not see each other. | ADR 0032 D1, PROTOCOL §5.5.1 |
+| 07 | **Acks are published at the next round**, not within a 15 s in-round wait; rows waiting longer than 15 s are reported (`escrow_waiting`). | A round hook that blocks 15 s delays every exchange; the gateway polls every 5 s and rounds run every 30 s. | ADR 0032 D9, 08 file amendment |
+| 07 | Small, this table only: the module is `mesh::caps::{period, policy, view, escrow, ops, reconcile, alerts}` (the read model is `caps::view`, not `views::caps`); `projects::cap_count` counts non-frozen caps (merge guard); a forked owner freezes like a removed one; "active" also counts usage and cap figures seen; `cap.used` is published for the current and previous month and only by a device with a binding; `MeshError::{CapExists, CapFrozen}`; alert kind `mesh_spend_cap` compares with the effective target; `UnlockedVault::mesh_cap_*` take a `GatewayProbe` (core does no I/O; the CLI passes `api_tracker_mesh::node::GatewaySocket`); `TestHooks::record_mints`; `Month::{prev, first_day}` and serde; `mesh cap reclaim --from`; `mesh_cap_escrow` rows and rate-limit slots of ended months are pruned; at most 64 held `Direct`s per exchange. | Simpler, or required by what was built. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 07 — Spend caps, alerts only (2026-10-28)
+
+**What landed.**
+- `core::mesh::caps`: `period` (UTC months; agrees with
+  `budget::period_start`, never calls it), `policy` (every threshold as a
+  constant: 20% ask, 50% keep, day 20, 30-day activity, 5-minute rate limit,
+  15 s ack wait, 24 h reclaim, alerts 80/100), `view` (`caps_in`,
+  `month_figures`, `scheduled_target`, the `Ledger` with `local_avail`, the
+  `report`), `escrow` (fence, rows, `ack`), `ops` (`create`, `raise`, `lower`,
+  `reclaim`, `resolve`, `try_spend`), `reconcile` (used, escrow, mint,
+  distribute, burn; `rights_requests`, `grant`), `alerts` (`cap_alerts`).
+- `SqliteStore::mint_with` (decide and mint in one transaction; idle rolls
+  back). `TestHooks::record_mints`. `DirectMsg::RightsRequest {cap, month,
+  want, reclaim}`. `AlertKind::MeshSpendCap`. `MeshError::{CapExists,
+  CapFrozen}`. `projects::root_in`, `usage::local_month_spend_in`.
+- `crates/mesh`: `hooks::CapReconciler` after `UsagePublisher` in
+  `default_hooks()`; `session` sends `rights_requests` after the access key
+  and answers held requests after a completed exchange
+  (`directs::apply_rights_request`); `node::GatewaySocket` (the fence probe);
+  `MeshNode::{data_dir, gateway_probe}`; at most 64 held directs.
+- Vault: `mesh_cap_{create,raise,lower,reclaim,reconcile}`, `mesh_caps`
+  (each takes a `GatewayProbe`); audit `mesh_cap_created`,
+  `mesh_cap_changed`, `mesh_cap_alerts_error`; `run_monitor` raises cap alerts
+  (isolated; on failure the kind is not auto-resolved).
+- CLI: `mesh cap create|raise|lower|show|rights|reclaim` (`mesh_cap_cmd.rs`),
+  `--yes` for an override and for lower; `mesh replicate` reconciles first;
+  `mesh status` shows a caps line (`caps` in JSON).
+- Simulator: `mesh::sim::caps` + `mesh_sim::caps_*`;
+  `scripts/mesh_soak.sh --scenario caps`.
+- Docs: ADR 0032; PROTOCOL §5.5.1 and §8.1; USER_GUIDE §5; KNOWN_LIMITATIONS,
+  SECURITY_INVARIANTS (SI-10 node half, SI-13), TEST_PLAN, ARCHITECTURE,
+  THREAT_MODEL; DESIGN [Amended 07]; the 08 file's amendment; README;
+  CHANGELOG. Smoke: four cap checks.
+
+**Acceptance, each demonstrated.**
+- Cap safety over the scenario family on SQLite: `mesh_sim::caps_ci_seeds`
+  (16 seeds × 240 steps), `caps_each_injection_alone_is_exercised_and_defended`,
+  and the 10-minute release soak (test counts row).
+- Advance minting covers an owner offline across the boundary:
+  `mesh_caps::caps_advance_minting_covers_an_owner_offline_across_the_month_boundary`
+  and the simulator's boundary check (`CapsReport::boundary_checked`).
+- Lower and override semantics, explained by the CLI: `mesh_caps::caps_lower_*`,
+  `caps_two_concurrent_lowers_*`, `caps_raise_on_the_owner_mints_and_elsewhere_is_a_labelled_override`;
+  `mesh_cli::spend_caps_across_two_devices_with_a_rights_request_over_a_real_exchange`
+  (the confirmations).
+- Alerts through the existing alert system with the right labels:
+  `mesh_caps::caps_alerts_fire_at_80_and_100_percent_through_the_alert_system_without_budgets`,
+  and by hand through `tethra monitor` / `tethra alerts list`.
+- ADR 0032 written; MESH-SI-10's node half tested
+  (`mesh_caps::caps_escrow_publishes_at_once_unfenced_and_waits_for_the_gateway_ack_when_fenced`).
+- Check suite and smoke (four cap checks) green.
+
+**For 08 (load-bearing).**
+- **`gate_snapshot` inputs.** Per cap with `CapInfo::in_force()` (never a
+  superseded cap; a frozen cap keeps its current rights) for the current UTC
+  month: `view::month_figures(state, cap, month)` → this device's row
+  (`minted + received − sent − burned`), `escrow::open_amount(conn, cap,
+  month)` (pending + acked), and
+  `usage::local_month_spend_in(conn, state, project, month)` (the single
+  month-spend function). `Ledger::local_avail` composes exactly these
+  (`avail + U − max(U, local spend) − open escrow`); the gate's `avail` must
+  agree with it. Read the items (fold `mesh_items` cap/roster/fork rows, or
+  open a `SqliteStore`) and the escrow rows **in one read transaction**.
+- **The ack contract.** `mesh_cap_escrow(id, cap_id, month, to_device,
+  amount_micros, state, acked_generation, created_at, updated_at)`. The
+  gateway, after building a snapshot that deducted every `pending` and
+  `acked` row, calls `caps::escrow::ack(conn, &ids_it_counted, generation)`:
+  `pending → acked` with its snapshot generation (a gateway-local monotone
+  counter; the node only needs the state). The node publishes acked rows at
+  its next round (`settle_escrow`: re-checks the row still fits, else
+  `cancelled`), marking them `published` in the item's transaction. Closed
+  rows of ended months are pruned by the reconciler.
+- **The fence switch** is `escrow::enforcement_on(conn)`
+  (`gateway_config.cap_enforcement`, row `id = 'gateway'`). Nothing sets it yet;
+  08 adds the reauthenticated setter and the per-cap opt-in.
+- **Windows:** `GatewaySocket` answers "running" (no control channel), so with
+  enforcement on every transfer waits for the ack. Add the listener-identity
+  probe (`control::verify_listener`) in 08 (core cannot do I/O; the probe
+  lives in `crates/mesh` or the caller).
+- `caps::try_spend(store, cap, month, amount)` is the strict check the gate
+  mirrors in memory.
+
+**Surprises.**
+- **The simulator's first seed failed "lower settles"**: a member that never
+  runs the policy (the forger) was handed a share as an active device, and its
+  rights can never be burned or reclaimed by anyone else. That is the honest
+  real-world outcome (a broken or gone device keeps a lower from settling);
+  the check now requires settling only down to rights held by non-cooperating
+  devices, and KNOWN_LIMITATIONS says so.
+- **The integration tests found two real bugs**: distribution under a fence
+  reserved a share twice (it ignored a still-pending escrow row to the same
+  device), and two caps created on devices that could not see each other
+  could tie on `created_hlc` (it came from the last HLC seen), making "created
+  first" depend on random ids. Both fixed, with tests failing first. The
+  reclaim/grant interplay after a lower could ping-pong; no ordinary requests
+  or grants while a decrease is pending.
+- The simulator's month-boundary check tripped on clock skew (a device 2 s
+  behind was still in January); it waits for the largest skew now.
+- `tethra alerts list` prints "Run `tethra monitor run`" but the command is
+  `tethra monitor` (pre-existing text, not changed here).
+
+**Not done / honest list.**
+- Nothing in 07's scope was moved.
+- The 64-direct bound per exchange has no dedicated test (it needs a crafted
+  peer flooding `Direct` frames; 12's audit can add one to `bounds.rs`).
+- The escrow waiting path runs only in tests (nothing can switch
+  enforcement on until 08).
+- The release soak's elapsed time includes building; see the test counts row
+  for the batch times.
 
 ### Increment 06 — Shared projects & cross-device usage (2026-10-28)
 

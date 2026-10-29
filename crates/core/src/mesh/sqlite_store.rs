@@ -101,6 +101,10 @@ pub struct TestHooks {
     /// Fail the next mint just before its transaction commits (after the
     /// marker was advanced, if it had to be).
     pub fail_mint_commit: bool,
+    /// Keep every item this store mints in [`Self::minted`] (the caps
+    /// simulator hands them to its oracle, superseded ones included).
+    pub record_mints: bool,
+    pub minted: Vec<SignedItem>,
 }
 
 /// The in-memory mirror of the database.
@@ -822,6 +826,16 @@ impl SqliteStore {
         &mut self.hooks
     }
 
+    /// Record committed mints for the simulator (`TestHooks::record_mints`).
+    fn recorded(&mut self, items: &[SignedItem]) {
+        #[cfg(any(test, feature = "mesh-sim"))]
+        if self.hooks.record_mints {
+            self.hooks.minted.extend(items.iter().cloned());
+        }
+        #[cfg(not(any(test, feature = "mesh-sim")))]
+        let _ = items;
+    }
+
     /// Speed over power-loss durability, for the simulator only: keeps
     /// `synchronous=FULL` but drops macOS's F_FULLFSYNC.
     #[cfg(any(test, feature = "mesh-sim"))]
@@ -969,10 +983,12 @@ impl SqliteStore {
         key: &SigningKeyPair,
         build: impl FnOnce(&State) -> Result<Option<Draft>, MeshError>,
     ) -> Result<Option<SignedItem>, MeshError> {
-        self.write(|tx, m, marker| match build(&m.state)? {
+        let out = self.write(|tx, m, marker| match build(&m.state)? {
             Some(d) => mint_in(tx, m, marker, key, d).map(Some),
             None => Ok(None),
-        })
+        })?;
+        self.recorded(out.as_slice());
+        Ok(out)
     }
 
     /// Mint `drafts` in one durable transaction, then run `also` inside it
@@ -984,14 +1000,47 @@ impl SqliteStore {
         drafts: Vec<Draft>,
         also: impl FnOnce(&Connection) -> Result<(), MeshError>,
     ) -> Result<Vec<SignedItem>, MeshError> {
-        self.write(|tx, m, marker| {
+        let out = self.write(|tx, m, marker| {
             let mut out = Vec::with_capacity(drafts.len());
             for d in drafts {
                 out.push(mint_in(tx, m, marker, key, d)?);
             }
             also(tx)?;
             Ok(out)
-        })
+        })?;
+        self.recorded(&out);
+        Ok(out)
+    }
+
+    /// Decide and mint in one durable transaction: `build` sees the
+    /// transaction's connection and the state as it is inside it (after
+    /// reloading whatever another process wrote), may write local rows
+    /// through the connection, and returns the drafts to mint. Spend-cap
+    /// decisions use it so that two processes (a node and a CLI command)
+    /// deciding from one snapshot can never both act on it. All or nothing.
+    pub fn mint_with(
+        &mut self,
+        key: &SigningKeyPair,
+        build: impl FnOnce(&Connection, &State) -> Result<Vec<Draft>, MeshError>,
+    ) -> Result<Vec<SignedItem>, MeshError> {
+        let out = self
+            .write_or_idle(|tx, m, marker| {
+                let before = tx.total_changes();
+                let drafts = build(tx, &m.state)?;
+                if drafts.is_empty() && tx.total_changes() == before {
+                    // Nothing decided: roll back, so an idle round costs no
+                    // fsync and no generation bump for other processes.
+                    return Ok(None);
+                }
+                let mut out = Vec::with_capacity(drafts.len());
+                for d in drafts {
+                    out.push(mint_in(tx, m, marker, key, d)?);
+                }
+                Ok(Some(out))
+            })?
+            .unwrap_or_default();
+        self.recorded(&out);
+        Ok(out)
     }
 
     /// The views recomputed from `mesh_items` alone (`doctor --rebuild`,
@@ -1171,6 +1220,28 @@ impl SqliteStore {
         })();
         if result.is_err() {
             // The mirror may hold changes the database rolled back.
+            let _ = self.reload();
+        }
+        result
+    }
+
+    /// [`Self::write`], except that `f` returning `None` rolls the
+    /// transaction back: nothing is written, not even the generation.
+    fn write_or_idle<T>(
+        &mut self,
+        f: impl FnOnce(&Connection, &mut Mirror, &mut MarkerState) -> Result<Option<T>, MeshError>,
+    ) -> Result<Option<T>, MeshError> {
+        let result = (|| {
+            let tx = begin(&self.conn, TransactionBehavior::Immediate)?;
+            sync_generation(&tx, &mut self.m)?;
+            let Some(out) = f(&tx, &mut self.m, &mut self.marker)? else {
+                return Ok(None); // dropping `tx` rolls it back
+            };
+            finish(&tx, &mut self.m)?;
+            tx.commit().map_err(sql("committing"))?;
+            Ok(Some(out))
+        })();
+        if result.is_err() {
             let _ = self.reload();
         }
         result
@@ -1408,7 +1479,7 @@ impl MeshStore for SqliteStore {
         let fail = std::mem::take(&mut self.hooks.fail_mint_commit);
         #[cfg(not(any(test, feature = "mesh-sim")))]
         let fail = false;
-        self.write(|tx, m, marker| {
+        let item = self.write(|tx, m, marker| {
             let item = mint_in(tx, m, marker, key, draft)?;
             if fail {
                 return Err(MeshError::Storage(
@@ -1416,7 +1487,9 @@ impl MeshStore for SqliteStore {
                 ));
             }
             Ok(item)
-        })
+        })?;
+        self.recorded(std::slice::from_ref(&item));
+        Ok(item)
     }
 
     fn record_rejected(&mut self, n: u64) {

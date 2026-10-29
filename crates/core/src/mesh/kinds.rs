@@ -262,6 +262,20 @@ impl Month {
         }
     }
 
+    pub fn prev(&self) -> Option<Self> {
+        if self.month == 1 {
+            Self::new(self.year - 1, 12)
+        } else {
+            Self::new(self.year, self.month - 1)
+        }
+    }
+
+    /// The first day of the month.
+    pub fn first_day(&self) -> Day {
+        let month = time::Month::try_from(self.month).expect("validated in new");
+        Day(time::Date::from_calendar_date(self.year, month, 1).expect("day 1 is valid"))
+    }
+
     pub fn parse(s: &str) -> Option<Self> {
         let b = s.as_bytes();
         let shaped = b.len() == 7
@@ -279,6 +293,19 @@ impl Month {
 impl fmt::Display for Month {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}", self.year, self.month)
+    }
+}
+
+impl Serialize for Month {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Month {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Month::parse(&s).ok_or_else(|| serde::de::Error::custom("a month is YYYY-MM"))
     }
 }
 

@@ -204,9 +204,12 @@ start a mesh, pair with a one-time invite, and run a node that keeps them in
 step on its own over your LAN or VPN
 (`tethra mesh init|invite|join|serve|stop|peer|replicate|status|doctor|devices|remove|leave`);
 share projects and see their gateway-observed usage across devices
-(`tethra mesh project|usage|settings`); spend caps come next. See the
-[user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md) and
-[ADR 0031](docs/decisions/0031-device-mesh.md).
+(`tethra mesh project|usage|settings`); and set monthly spend caps that hold
+across devices and raise alerts (`tethra mesh cap`; the gateway blocks requests
+only from a later increment). See the
+[user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md),
+[ADR 0031](docs/decisions/0031-device-mesh.md) and
+[ADR 0032](docs/decisions/0032-spend-caps.md).
 
 ## Install and build
 

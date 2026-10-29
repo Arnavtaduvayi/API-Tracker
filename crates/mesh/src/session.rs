@@ -60,6 +60,10 @@ pub struct ExchangeReport {
     pub hello: Option<HelloRecord>,
 }
 
+/// Direct messages one exchange keeps for after its commit (access keys and
+/// rights requests); any beyond are ignored.
+const MAX_HELD_DIRECTS: usize = 64;
+
 /// Mint a `fork.report` unless the roster already records the fork at this
 /// seq or lower (PROTOCOL.md §7.2). While this device waits to recover its
 /// own items (a rollback hold), the report is left for a later exchange,
@@ -121,7 +125,9 @@ pub fn exchange(
         }
         writer.shutdown();
     });
-    let mut held_keys: Vec<DirectMsg> = Vec::new();
+    // Messages applied once the exchange committed: access keys and
+    // rights requests.
+    let mut held: Vec<DirectMsg> = Vec::new();
     let mut rollback_notice = false;
     let result = (|| -> NetResult<()> {
         reader.set_read_timeout(Some(limits.idle_timeout))?;
@@ -142,6 +148,12 @@ pub fn exchange(
         // rotation reaches every member through whoever it talks to.
         let (epoch, key) = node.access_keys()?.current;
         actions.extend(session.direct(DirectMsg::AccessKeyUpdate { epoch, key }));
+        // Spend-cap rebalancing: ask this peer for rights where this device
+        // is short (rate-limited per peer and cap). A failure to work out
+        // what to ask never fails the exchange.
+        for msg in directs::rights_requests(node, peer).unwrap_or_default() {
+            actions.extend(session.direct(msg));
+        }
         loop {
             let mut done = false;
             for act in actions {
@@ -167,7 +179,12 @@ pub fn exchange(
                     Action::ForkDetected(ev) => report_fork(node, ev)?,
                     Action::Direct(msg) => {
                         rollback_notice |= matches!(msg, DirectMsg::RollbackNotice { .. });
-                        held_keys.extend(directs::handle(node, peer, msg)?);
+                        let keep = directs::handle(node, peer, msg)?;
+                        // Bounded (MESH-SI-8): an honest peer sends one key
+                        // and a request or two per cap; the rest is dropped.
+                        if held.len() < MAX_HELD_DIRECTS {
+                            held.extend(keep);
+                        }
                     }
                     Action::Close(CloseReason::Done) => done = true,
                     Action::Close(CloseReason::PeerBye(_)) => {
@@ -205,9 +222,19 @@ pub fn exchange(
     drop(tx);
     let _ = writer_thread.join();
     // Now that whatever the peer sent is committed, the roster knows the
-    // removals that justify a rotated key (or the key stays unapplied).
-    for msg in held_keys {
-        let _ = directs::apply_access_key(node, msg);
+    // removals that justify a rotated key (or the key stays unapplied), and
+    // a donor answers rights requests on the freshest view. Only a
+    // completed exchange's requests are answered.
+    for msg in held {
+        match msg {
+            DirectMsg::AccessKeyUpdate { .. } => {
+                let _ = directs::apply_access_key(node, msg);
+            }
+            DirectMsg::RightsRequest { .. } if result.is_ok() => {
+                let _ = directs::apply_rights_request(node, peer, msg);
+            }
+            _ => {}
+        }
     }
     report.duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match result {

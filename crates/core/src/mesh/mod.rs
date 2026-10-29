@@ -37,7 +37,15 @@
 //!   (`membership::publish_listen_addrs`), and the store-side checks of
 //!   `tethra mesh doctor` ([`doctor`]). The node itself (its loop, control
 //!   socket and discovery) is in the `api-tracker-mesh` crate.
+//!
+//! - Increment 06: shared projects and bindings ([`projects`]), the usage
+//!   publisher ([`publish`]) and cross-device usage views ([`usage`]).
+//!
+//! - Increment 07: spend caps ([`caps`]): the policy over the bounded
+//!   counter, the escrow fence, the reconciler and rights requests, views
+//!   and alerts.
 
+pub mod caps;
 pub mod chain;
 pub mod clock;
 pub mod codec;

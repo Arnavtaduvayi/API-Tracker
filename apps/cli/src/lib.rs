@@ -17,6 +17,7 @@ mod destination_cmd;
 mod env_cmd;
 mod gateway_cmd;
 mod key_cmd;
+mod mesh_cap_cmd;
 mod mesh_cmd;
 mod observe_cmd;
 mod pricing_cmd;

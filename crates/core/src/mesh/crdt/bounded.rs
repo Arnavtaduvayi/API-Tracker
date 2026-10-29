@@ -113,6 +113,15 @@ impl BoundedCounter {
         self.used.get(device).map_or(0, |e| e.value)
     }
 
+    /// Every device that wrote an entry (admitted or not).
+    pub fn writers(&self) -> std::collections::BTreeSet<DeviceId> {
+        self.rights
+            .keys()
+            .map(|(from, _)| *from)
+            .chain(self.used.keys().copied())
+            .collect()
+    }
+
     /// The clamped view over admitted entries.
     pub fn view(&self, admit: &impl Admit) -> BoundedView {
         let mut devs: BTreeMap<DeviceId, DeviceRights> = BTreeMap::new();

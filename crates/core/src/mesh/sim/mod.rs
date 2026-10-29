@@ -9,7 +9,9 @@
 //! - [`oracle`]: the independent oracle.
 //! - [`world`]: the deterministic network simulator.
 //! - [`sqlite`]: SQLite-backed devices for the store conformance suite.
+//! - [`caps`]: the spend-cap scenario family on SQLite (Increment 07).
 
+pub mod caps;
 pub mod oracle;
 pub mod oracle_api;
 pub mod rng;

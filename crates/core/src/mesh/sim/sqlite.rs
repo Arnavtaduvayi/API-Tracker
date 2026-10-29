@@ -130,6 +130,16 @@ pub struct SimSqlite {
 }
 
 impl SimSqlite {
+    /// The SQLite store itself (the caps scenario family runs the real
+    /// spend-cap policy on it).
+    pub fn sqlite(&self) -> &SqliteStore {
+        &self.store
+    }
+
+    pub fn sqlite_mut(&mut self) -> &mut SqliteStore {
+        &mut self.store
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn open(
         dir: PathBuf,

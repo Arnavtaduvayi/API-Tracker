@@ -686,3 +686,115 @@ fn share_bind_and_read_usage_across_two_devices_from_the_cli() {
     assert_eq!(unbound["unbound"], true);
     drop(node_a);
 }
+
+/// The device row named `name` in `mesh cap rights --json`, current month.
+fn cap_row(tv: &TestVault, name: &str) -> Value {
+    let r = json(tv, &["mesh", "cap", "rights", "app"]);
+    r["caps"][0]["months"][0]["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["device_name"] == name)
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+#[test]
+fn spend_caps_across_two_devices_with_a_rights_request_over_a_real_exchange() {
+    let a = TestVault::new();
+    run(&a, &["mesh", "init", "--name", "dev-a"]);
+    let (ok, _, err) = run(&a, &["project", "create", "app"]);
+    assert!(ok, "{err}");
+    let node_a = serve(&a);
+    let inv = json(&a, &["mesh", "invite", "--addr", &node_a.addr]);
+    let b = TestVault::new();
+    run(
+        &b,
+        &[
+            "mesh",
+            "join",
+            inv["invite"].as_str().unwrap(),
+            "--name",
+            "dev-b",
+        ],
+    );
+    let (ok, _, err) = run(&b, &["project", "create", "app"]);
+    assert!(ok, "{err}");
+    let shared = json(&a, &["mesh", "project", "share", "app"]);
+    let p = shared["mesh_project_id"].as_str().unwrap().to_owned();
+    let r = json(&b, &["mesh", "replicate"]);
+    assert!(r["exchanges"][0]["error"].is_null(), "{r}");
+    json(&b, &["mesh", "project", "bind", &p[..10], "app"]);
+    // B replicates once more, so A's node has logged an exchange with it
+    // (B is then an active device and gets a share at creation).
+    json(&b, &["mesh", "replicate"]);
+
+    // Create on A: A owns the cap.
+    let created = json(&a, &["mesh", "cap", "create", "app", "--monthly", "10"]);
+    assert_eq!(created["monthly_micros"], 10_000_000);
+    let (ok, _, err) = run(&a, &["mesh", "cap", "create", "app", "--monthly", "5"]);
+    assert!(!ok && err.contains("already has a spend cap"), "{err}");
+    let (_, text, _) = run(&a, &["mesh", "cap", "show"]);
+    assert!(text.contains("not a security boundary"), "{text}");
+    assert!(text.contains("alerts only"), "{text}");
+    assert!(text.contains("of $10.00"), "{text}");
+    assert!(!has_hex64(&text));
+
+    // B learns of it and of its share.
+    json(&b, &["mesh", "replicate"]);
+    let before = cap_row(&b, "dev-b");
+    let received = before["received"].as_u64().unwrap();
+    assert!(received > 0, "B got a share: {before}");
+
+    // B spends almost all of it; its next exchange carries a rights request
+    // to A's node, which grants after the exchange; the one after delivers.
+    seed_usage(&b, "app", 1, 0, received as i64 - 100_000);
+    json(&b, &["mesh", "replicate"]);
+    json(&b, &["mesh", "replicate"]);
+    let after = cap_row(&b, "dev-b");
+    assert!(
+        after["received"].as_u64().unwrap() > received,
+        "A granted B more rights: {before} -> {after}"
+    );
+    assert!(after["avail"].as_i64().unwrap() > 100_000, "{after}");
+    let a_row = cap_row(&a, "dev-a");
+    assert!(a_row["is_owner"] == true && a_row["sent"].as_u64().unwrap() > received);
+    // A's gives went through the escrow fence, published at once
+    // (enforcement is off).
+    let states: Vec<String> = a
+        .conn()
+        .prepare("SELECT state FROM mesh_cap_escrow")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        states.len() >= 2 && states.iter().all(|s| s == "published"),
+        "{states:?}"
+    );
+
+    // On B (not the owner) a raise is a local override, confirmed first.
+    let (ok, _, err) = run(&b, &["mesh", "cap", "raise", "app", "1"]);
+    assert!(!ok && err.contains("--yes"), "{err}");
+    let raised = json(&b, &["mesh", "cap", "raise", "app", "1", "--yes"]);
+    assert_eq!(raised["is_override"], true);
+    let (_, text, _) = run(&b, &["mesh", "cap", "rights", "app"]);
+    assert!(text.contains("override"), "{text}");
+    // Only the owner reclaims.
+    let (ok, _, err) = run(&b, &["mesh", "cap", "reclaim", "app"]);
+    assert!(!ok && err.contains("owner"), "{err}");
+
+    // Lower needs confirmation, and is not a raise.
+    let (ok, _, err) = run(&a, &["mesh", "cap", "lower", "app", "4"]);
+    assert!(!ok && err.contains("--yes"), "{err}");
+    let (ok, _, err) = run(&a, &["mesh", "cap", "lower", "app", "40", "--yes"]);
+    assert!(!ok && err.contains("not lower"), "{err}");
+    let lowered = json(&a, &["mesh", "cap", "lower", "app", "4", "--yes"]);
+    assert!(lowered["burned_micros"].as_u64().unwrap() > 0, "{lowered}");
+    let show = json(&a, &["mesh", "cap", "show"]);
+    assert_eq!(show["caps"][0]["months"][0]["target"], 4_000_000);
+    let st = json(&a, &["mesh", "status"]);
+    assert_eq!(st["caps"]["count"], 1, "{st}");
+    drop(node_a);
+}

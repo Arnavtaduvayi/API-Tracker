@@ -10,6 +10,20 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 07 (2026-10-28).** Building spend caps settled the
+> policy in ADR 0032 and PROTOCOL.md §5.5.1: every decision is made inside the
+> transaction that publishes it (`SqliteStore::mint_with`; an idle one rolls
+> back); the effective target is `target + overrides` and the pending decrease
+> is `supply − max(effective target, used)`; no rebalancing while a decrease
+> is pending; a lower also lowers a next-month target already written; an
+> override lasts the month; `RightsRequest` carries `reclaim` (the owner's
+> remainder reclaim and the 24-hour manual reclaim, during which the owner
+> grants that device nothing); two caps on one project resolve to the first
+> created (the other is *superseded*); a forked owner freezes like a removed
+> one; acknowledged escrow rows are published at the node's next round (no
+> in-round 15 s wait); `active` also counts usage and cap figures seen.
+> Passages marked **[Amended 07]**.
+>
 > **Amended by Increment 06 (2026-10-28).** Usage publishing settled R23
 > (retention drops counters two days past the horizon, PROTOCOL.md §8.4). The
 > usage-split cut-over is a per-row `split_known` flag (v23) rather than a
@@ -697,6 +711,12 @@ used. The list below is the original brief:
     cost.
 
 ## D15. Spend caps and enforcement (ADR 0032)
+
+> **[Amended 07]** As built, the policy below is specified exactly in
+> PROTOCOL.md §5.5.1 and ADR 0032 (see the header note): decisions inside the
+> publishing transaction, superseded caps, `reclaim` requests, the effective
+> target, no rebalancing during a pending decrease, acks published at the
+> next round.
 
 - **Cap.** `cap.def { cap_id, mesh_project_id, owner_device }` is immutable, and the
   owner is the device that created the cap.

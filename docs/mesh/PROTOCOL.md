@@ -428,6 +428,57 @@ sent 10 by O (`R[O][M] = 10`, budget 10), A receives 10 and 999 990 is clamped.
 And if M wrote `R[M][burn] = 40`, `R[M][Z] = 50`, `R[M][A] = 50` with a budget of
 100: burn 40, A 50 (A < Z), Z 10, clamped 40.
 
+#### 5.5.1 Policy: who mints, distributes, asks and burns
+
+**Status: implemented (07)** — `mesh::caps` ([ADR 0032](../decisions/0032-spend-caps.md)).
+The view above is the protocol; this is what honest devices write. Amounts are
+micro-USD; `fair = target / active` (integer division) where `active` is the
+deciding device plus every active member it exchanged with, or saw publish a
+`usage.counter` (last 30 days) or a `cap.*` entry (this or last month), in
+the last 30 days.
+
+- **Caps.** A cap is *in force* when its `cap.def` is admitted from one origin;
+  it is *frozen* when its owner is removed or forked (nobody mints for it), and
+  *superseded* when another non-frozen cap on the same root project has a
+  smaller `(created_hlc, cap_id)` (it is not minted, distributed, changed or
+  alerted on).
+- **Mint (owner).** At creation: `cap.def`, `cap.target(m) = monthly`,
+  `R[o][o](m) = monthly`. For month `m`, and from UTC day 20 for `m + 1`: if
+  `R[o][o](month) = 0`, mint the scheduled target (the month's own `cap.target`,
+  else the latest earlier month's), writing `cap.target(month)` if absent.
+- **Distribute (owner).** For each minted month and each active `d ≠ o`:
+  give `max(0, fair − (R[o][d] + open escrow to d))`.
+- **Raise.** Owner: `R[o][o] += x` and `cap.target := current + x` for `m`
+  (and `m + 1` once minted). Elsewhere: `R[i][i] += x` with `override = true`,
+  month `m` only. The effective target is `target + Σ overrides`.
+- **Lower.** `cap.target := x` (LWW) for `m`, and for `m + 1` when a larger
+  target is already written there. `pending = supply − max(effective target,
+  total used)` (never negative). A holder with `pending > 0` burns
+  `min(local_avail − keep, pending)`, `keep = max(0, fair − own used) + own
+  overrides`.
+- **Spendable figure.** `local_avail = avail + U − max(U, local spend) −
+  open escrow`: a device counts its gateway's spend before publishing it, and
+  never gives what it reserved.
+- **Rebalance (`RightsRequest`, §8.1).** At the start of an exchange, for the
+  current month and only when `pending = 0`: a device with `local_avail <
+  20% · fair` asks a peer whose view shows `avail > 50% · fair + its
+  overrides`, for `fair − local_avail`. The peer answers after the exchange
+  commits, with `min(want, local_avail − ⌈50% · fair⌉ − own overrides)`, never
+  while `pending > 0`. At most one request per peer, cap and month, and one
+  grant per requester, cap and month, per 5 minutes.
+- **Reclaim (`reclaim = true`, owner only).** A lower's remainder: once the
+  owner's own `local_avail ≤ keep`, it asks a holder for `min(pending, its
+  avail)`; a holder honours `reclaim` only from the cap's owner, giving
+  `min(want, local_avail)` to it. A manual `cap reclaim` asks for everything
+  for 24 hours (current and next month), and the owner grants those devices
+  nothing meanwhile.
+- **`cap.used`.** A device with a binding to the cap's root publishes, for the
+  current and previous month, its local month spend whenever it differs from
+  what it published; a decrease bumps the epoch.
+- **Every give** (distribution, grant, burn, reclaim) is a local escrow row
+  first and is decided inside the transaction that publishes it (ADR 0032 D8,
+  D9).
+
 ### 5.6 Views: the comparable state
 
 **Status: implemented (02)** — `mesh::views`, `mesh::sim::oracle_api::ExpectedState`; checked against the independent oracle (`mesh::sim::oracle`) by the simulator
@@ -721,7 +772,7 @@ inside frames are standard base64; hashes and chains are 64 lowercase hex.
 | `Commit` | `upto` (the sender's VV for exactly the origins it served on the main path), `count` (items sent in all `Items` frames), `batch_hash` (BLAKE3 of the concatenated hashes of those items, in send order) |
 | `ChainQuery` | `origin`, `seqs` (≤ 64) |
 | `ChainReply` | `origin`, `entries` (`[seq, chain, hash]` for each queried seq the sender's dot log covers) |
-| `Direct` | `kind` ∈ {`AccessKeyUpdate`, `RightsRequest`, `RollbackNotice`}, `payload` — point to point, never stored or relayed as items |
+| `Direct` | `kind` ∈ {`AccessKeyUpdate`, `RightsRequest`, `RollbackNotice`}, `payload` — point to point, never stored or relayed as items. `RightsRequest` (07): `cap` (cap id), `month` (`YYYY-MM`), `want` (u64 micro-USD), `reclaim` (bool); see §5.5.1 |
 | `Bye` | `reason`: `Done`, `MeshMismatch`, `NoCommonVersion`, `NotThePeer`, `Protocol`, `TooLarge`, or `Unavailable` (the sender could not read its own store; nothing it sent in the session may be relied on, §8.6) |
 
 Protocol version 1. Peers negotiate the highest version in both

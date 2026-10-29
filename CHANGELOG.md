@@ -6,6 +6,36 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: spend caps across your devices, alerts only (in development)
+
+Set a monthly spend cap on a shared project that holds across all your
+devices, even while they cannot reach each other
+([ADR 0032](docs/decisions/0032-spend-caps.md),
+[user guide](docs/mesh/USER_GUIDE.md#5-spend-caps)).
+
+- **`tethra mesh cap create <project> --monthly <usd>`** makes this device the
+  cap's owner. Each device holds a share of the cap (its *rights*) and counts
+  its own gateway-estimated spend against it, which is what will let the
+  gateway hold the total to the cap on devices that are apart. Shares go to
+  every device active in the last 30
+  days; a device running low asks a device with spare rights during their next
+  exchange.
+- **The 1st of the month is covered.** From the 20th the owner hands out next
+  month's shares in advance, so a laptop offline on the 1st already holds its
+  share.
+- **`raise` adds; `lower` sets a lower cap.** A raise on any device other than
+  the owner is a labelled local override for that device, for the month, and
+  asks you to confirm. A lower also asks first; every device gives up what it
+  holds above its new share, and the owner takes back the rest.
+- **`show` and `rights`** give each device's figures with how fresh they are,
+  like `tethra mesh usage`. `reclaim` pulls a device's rights back to the
+  owner before you remove it. A cap whose owner device is removed is frozen;
+  create a new one.
+- **Alerts at 80% and 100%** through the existing alert system, labelled as
+  cross-device, estimated and as of the last exchange. In this version caps
+  never block a request; the gateway enforces them in a later increment. A
+  cap is a self-limit, not a security boundary, and it is never a budget.
+
 ### Added — Tethra Mesh: shared projects and cross-device usage (in development)
 
 Share a project between your own devices and see its gateway-observed API

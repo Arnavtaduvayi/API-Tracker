@@ -179,12 +179,45 @@ permanent design choice or something a later increment changes.
 
 ## Spend caps
 
+- **Alerts only, for now.** In Increment 07 a cap raises alerts at 80% and
+  100%; the gateway does not block requests until Increment 08. A device can
+  therefore spend past its rights; its available amount then shows below zero.
 - **Caps are a self-limit, not a security boundary.** Anything that bypasses
-  the gateway bypasses the cap.
-- **Overshoot is bounded, not zero.** Cost is known only after a response, so a
-  device may exceed its rights by at most one in-flight request's cost per cap.
-- **A cap whose owner device is removed is frozen**: no new minting; create a new
-  cap.
+  the gateway bypasses the cap. The figure is the gateway's estimate (priced
+  requests only, cached-read tokens excluded), priced on each device with its
+  own pricing table.
+- **Overshoot is bounded, not zero (Increment 08).** Cost is known only after a
+  response, so a device may exceed its rights by at most one in-flight
+  request's cost per cap.
+- **A disconnected device can hit its cap early.** It can spend only the
+  rights it holds; spare rights on other devices reach it only through an
+  exchange (safety over liveness). Rebalancing asks one peer at most every 5
+  minutes per cap.
+- **Advance minting needs the owner online after the 20th.** A device offline
+  on the 1st holds next month's share only if the owner was on, and the share
+  reached the device, between the 20th and the end of the month. Otherwise the
+  device has no rights for the new month until it exchanges with someone who
+  does.
+- **Shares are equal**, not weighted by each device's usage; rebalancing moves
+  rights to where they are spent, a request at a time.
+- **A lower can leave the cap tighter than its target.** Devices burn on their
+  own view; with stale views they can burn more than needed. That is safe; the
+  owner raises the cap to recover.
+- **A device that never cooperates keeps a lower from settling.** Rights held
+  by a device that is gone, broken or malicious are counted until it burns them
+  or is removed; `show` keeps reporting the pending decrease.
+- **A cap whose owner device is removed is frozen**: its current rights stay
+  usable, nobody adds rights again (not even an override), and next month has
+  none. Ownership cannot move; create a new cap.
+- **Removing a device that still holds rights** drops whatever it handed out
+  after the remover's last exchange with it; run `tethra mesh cap reclaim`
+  first.
+- **Two caps created at once** on devices that cannot see each other: the one
+  created first is the cap and the other is shown as superseded; it is never
+  minted again but stays listed.
+- **Windows:** the node cannot yet tell whether the gateway is running (no
+  control channel), so with enforcement on (Increment 08) every transfer waits
+  for the gateway's acknowledgement.
 
 ## Credential sharing (Increment 11)
 

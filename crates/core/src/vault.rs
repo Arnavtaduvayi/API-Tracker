@@ -2378,7 +2378,37 @@ impl UnlockedVault {
             }
         }
 
+        // Tethra Mesh spend caps (Increment 07): this device's cross-device
+        // view of each cap against its target, at 80% and 100%. Isolated
+        // like the runtime pass: a failure is audited, and then the kind is
+        // not auto-resolved this run (an unreadable mesh store must not
+        // close real alerts). Never budgets (SI-19).
+        let mut mesh_caps_checked = false;
+        match self.mesh_cap_alerts() {
+            Ok(cap_alerts) => {
+                mesh_caps_checked = true;
+                for alert in cap_alerts {
+                    active_keys.push(alert.dedup_key.clone());
+                    if alerts::upsert(&self.conn, &alert)? {
+                        created += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = audit::record(
+                    &self.conn,
+                    "mesh_cap_alerts_error",
+                    None,
+                    None,
+                    &format!("spend-cap alert pass failed: {e}"),
+                );
+            }
+        }
+
         let mut managed = crate::monitor::managed_credential_kinds();
+        if mesh_caps_checked {
+            managed.push(alerts::AlertKind::MeshSpendCap);
+        }
         managed.extend(crate::activity::managed_kinds());
         managed.extend([
             alerts::AlertKind::ProviderDataStale,
@@ -9703,6 +9733,169 @@ impl UnlockedVault {
             ),
         )?;
         Ok(v)
+    }
+
+    /// Create a monthly spend cap on a mesh project, owned by this device
+    /// (`tethra mesh cap create`). It replicates; rights go out to the
+    /// active devices at once.
+    pub fn mesh_cap_create(
+        &self,
+        mesh: &str,
+        monthly_micros: u64,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::CapCreated> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let project = crate::mesh::projects::resolve(&store, mesh)?;
+        let out = crate::mesh::caps::create(
+            &mut store,
+            keys.signing_key(),
+            probe,
+            &project,
+            monthly_micros,
+        )?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_created",
+            None,
+            None,
+            &format!(
+                "spend cap {} on mesh project {}: {} micro-USD a month",
+                out.cap_id, out.mesh_project_id, out.monthly_micros
+            ),
+        )?;
+        Ok(out)
+    }
+
+    /// Raise a spend cap: on its owner it mints more; elsewhere it is a
+    /// labelled local override for this month (the caller confirms that).
+    pub fn mesh_cap_raise(
+        &self,
+        cap: &str,
+        amount_micros: u64,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::ops::CapChanged> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::caps::resolve(&store, cap)?;
+        let out =
+            crate::mesh::caps::raise(&mut store, keys.signing_key(), probe, &id, amount_micros)?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_changed",
+            None,
+            None,
+            &format!(
+                "spend cap {id} raised by {amount_micros} micro-USD{}",
+                if out.is_override {
+                    " (local override)"
+                } else {
+                    ""
+                }
+            ),
+        )?;
+        Ok(out)
+    }
+
+    /// Lower a spend cap's target (last writer wins; the caller confirms).
+    pub fn mesh_cap_lower(
+        &self,
+        cap: &str,
+        target_micros: u64,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::ops::CapChanged> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        let id = crate::mesh::caps::resolve(&store, cap)?;
+        let out =
+            crate::mesh::caps::lower(&mut store, keys.signing_key(), probe, &id, target_micros)?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_changed",
+            None,
+            None,
+            &format!("spend cap {id} lowered to {target_micros} micro-USD"),
+        )?;
+        Ok(out)
+    }
+
+    /// Ask devices to hand a cap's unspent rights back to this device, the
+    /// owner (`tethra mesh cap reclaim`). Returns the devices asked.
+    pub fn mesh_cap_reclaim(
+        &self,
+        cap: &str,
+        from: Option<&str>,
+    ) -> Result<(crate::mesh::dot::CapId, Vec<crate::mesh::DeviceId>)> {
+        let store = self.mesh_open_store()?;
+        let id = crate::mesh::caps::resolve(&store, cap)?;
+        let from = match from {
+            Some(d) => Some(crate::mesh::membership::resolve_device(&store, d)?),
+            None => None,
+        };
+        let devices = crate::mesh::caps::reclaim(&store, &id, from)?;
+        audit::record(
+            &self.conn,
+            "mesh_cap_changed",
+            None,
+            None,
+            &format!("spend cap {id}: reclaim from {} device(s)", devices.len()),
+        )?;
+        Ok((id, devices))
+    }
+
+    /// The spend caps this device knows, per device (`tethra mesh cap show`
+    /// and `rights`). Runs the reconciler first, so this device's own
+    /// figures are current.
+    pub fn mesh_caps(
+        &self,
+        cap: Option<&str>,
+        month: Option<crate::mesh::kinds::Month>,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::CapReport> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        if let Err(e) = crate::mesh::caps::reconcile(&mut store, keys.signing_key(), probe) {
+            // A refused mint (a rollback hold) still leaves a report to show.
+            if !matches!(
+                e,
+                CoreError::Mesh(
+                    crate::mesh::MeshError::RollbackHold | crate::mesh::MeshError::Forked
+                )
+            ) {
+                return Err(e);
+            }
+        }
+        let id = match cap {
+            Some(c) => Some(crate::mesh::caps::resolve(&store, c)?),
+            None => None,
+        };
+        crate::mesh::caps::report(&store, id, month)
+    }
+
+    /// The spend-cap alerts that hold now (none when this device is in no
+    /// mesh). Read only: it needs no keys.
+    fn mesh_cap_alerts(&self) -> Result<Vec<alerts::NewAlert>> {
+        let Some(store) = crate::mesh::identity::open_store(
+            &self.paths.db_path(),
+            &self.paths.data_dir,
+            std::sync::Arc::new(crate::mesh::clock::SystemClock),
+        )?
+        else {
+            return Ok(Vec::new());
+        };
+        crate::mesh::caps::alerts::cap_alerts(&store)
+    }
+
+    /// Run the cap reconciler once (`mesh replicate` does, before it
+    /// exchanges). `probe` says whether this data directory's gateway runs
+    /// (the escrow fence; core does no I/O to find out).
+    pub fn mesh_cap_reconcile(
+        &self,
+        probe: &dyn crate::mesh::caps::GatewayProbe,
+    ) -> Result<crate::mesh::caps::ReconcileReport> {
+        let keys = self.mesh_keys()?;
+        let mut store = self.mesh_open_store()?;
+        crate::mesh::caps::reconcile(&mut store, keys.signing_key(), probe)
     }
 
     fn require_mesh(&self) -> Result<()> {

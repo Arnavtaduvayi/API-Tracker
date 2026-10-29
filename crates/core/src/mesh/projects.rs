@@ -16,7 +16,7 @@ use super::kinds::ProjectMeta;
 use super::sign::SigningKeyPair;
 use super::sqlite_store::SqliteStore;
 use super::store::{Draft, HlcPolicy, MeshStore};
-use super::views::ProjectValue;
+use super::views::{ProjectValue, State};
 use crate::error::{CoreError, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
@@ -62,9 +62,18 @@ pub fn get(store: &SqliteStore, id: &MeshProjectId) -> Option<ProjectValue> {
 
 /// Follow `merged_into` to the root.
 pub fn root_of(store: &SqliteStore, id: &MeshProjectId) -> MeshProjectId {
+    root_in(store.state(), id)
+}
+
+/// [`root_of`] over a state (inside a write transaction).
+pub fn root_in(state: &State, id: &MeshProjectId) -> MeshProjectId {
     let mut cur = *id;
     for _ in 0..MAX_MERGE_DEPTH {
-        match get(store, &cur).and_then(|p| p.merged_into) {
+        match state
+            .projects
+            .value(&cur, &state.roster)
+            .and_then(|p| p.merged_into)
+        {
             Some(next) if next < cur => cur = next,
             _ => break,
         }
@@ -249,13 +258,13 @@ pub fn archive(
     edit_meta(store, signing, mesh, |m| m.archived = true)
 }
 
-/// The caps defined on `mesh` (Increment 07 creates them).
+/// The caps in force on `mesh` (merged projects included): not frozen,
+/// which a project keeps forever once its owner device is removed.
 pub fn cap_count(store: &SqliteStore, mesh: &MeshProjectId) -> usize {
-    let state = store.state();
-    state
-        .cap_defs
-        .values(&state.roster)
-        .filter(|(_, d)| d.mesh_project_id == *mesh)
+    let root = root_of(store, mesh);
+    super::caps::view::caps_in(store.state())
+        .iter()
+        .filter(|c| c.root == root && !c.frozen)
         .count()
 }
 

@@ -2,6 +2,28 @@
 
 **Mode:** S+R, single session plus a hot-path reviewer before the final commit · **Size:** M · **Prerequisites:** 07 done
 
+> **Amended by Increment 07 (2026-10-28).** What 07 built for this
+> increment (STATUS.md, 07 handoff, has the details):
+> - **The ack contract** is `core::mesh::caps::escrow::ack(conn, ids,
+>   generation)`: it moves `pending` rows to `acked` with the snapshot's
+>   generation. Open rows are `pending` + `acked`
+>   (`escrow::open_amount`); read them in the **same read transaction** as the
+>   cap items. The node publishes acked rows at its next round, not within the
+>   round.
+> - **`gate_snapshot` is not built yet**: build it from
+>   `caps::view::{caps_in, month_figures}` (enforce only caps that are
+>   `in_force()`: a *superseded* cap is never enforced; a *frozen* cap keeps
+>   its current rights), `caps::escrow::open_amount` and
+>   `usage::local_month_spend_in`. `caps::view::Ledger::local_avail` is the
+>   node-side figure the gate's `avail` must agree with (it already counts
+>   unpublished spend and open escrow); `caps::try_spend` is the strict check.
+> - **Liveness probe:** the node uses `crates/mesh::node::GatewaySocket`
+>   (Unix: the control socket; Windows: always "running", so transfers wait
+>   for the ack). Add the Windows listener-identity probe here.
+> - Enforcement is consulted through `caps::escrow::enforcement_on(conn)`
+>   (`gateway_config.cap_enforcement`); keep the per-cap opt-in consistent
+>   with it.
+
 ## Goal
 
 Let a user opt in, per cap and per device, to having the local gateway **refuse**

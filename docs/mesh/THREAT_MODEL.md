@@ -17,6 +17,8 @@ come with it.
 >
 > - the Noise transport, pairing, removal at the transport and access-key
 >   rotation (04).
+> - the spend-cap policy, decided inside the publishing transaction, and the
+>   node's half of the escrow fence (07; the gateway enforces from 08).
 >
 > mDNS discovery and the node loop are specified (05). See
 > `SECURITY_INVARIANTS.md` for per-invariant status.

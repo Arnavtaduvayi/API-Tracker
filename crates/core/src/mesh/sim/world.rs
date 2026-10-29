@@ -631,6 +631,10 @@ impl<F: StoreFactory> World<F> {
                 // Access-key rotation is a transport concern (Increment 04);
                 // the simulated network has no keys.
                 Action::Direct(DirectMsg::AccessKeyUpdate { .. }) => {}
+                // This world's cap workload writes the CRDT entries
+                // directly; the caps scenario family (`sim::caps`) runs the
+                // policy, rights requests included.
+                Action::Direct(DirectMsg::RightsRequest { .. }) => {}
                 Action::Close(reason) => {
                     let Some(s) = self.sessions.get(&sid) else {
                         continue;
@@ -1757,7 +1761,7 @@ impl<F: StoreFactory> World<F> {
     }
 }
 
-fn cap_safety(v: &ExpectedState) -> Result<(), String> {
+pub(crate) fn cap_safety(v: &ExpectedState) -> Result<(), String> {
     for ((cap, month), m) in &v.cap_months {
         let supply = i128::try_from(m.total_minted).unwrap_or(i128::MAX)
             - i128::try_from(m.total_burned).unwrap_or(i128::MAX);
@@ -1777,7 +1781,7 @@ fn cap_safety(v: &ExpectedState) -> Result<(), String> {
 }
 
 /// A short description of the first difference between two states.
-fn diff(a: &ExpectedState, b: &ExpectedState) -> String {
+pub(crate) fn diff(a: &ExpectedState, b: &ExpectedState) -> String {
     macro_rules! field {
         ($f:ident) => {
             if a.$f != b.$f {

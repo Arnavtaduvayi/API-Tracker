@@ -10,17 +10,24 @@
 # Usage:
 #   scripts/mesh_soak.sh --seeds 5000           # a fixed number of seeds
 #   scripts/mesh_soak.sh --minutes 10           # as many batches as fit
-#   options: --start <first seed> (default 1000000), --steps <n> (default 3000),
-#            --batch <seeds per batch> (default 1000)
+#   scripts/mesh_soak.sh --scenario caps --minutes 10
+#                                               # the spend-cap family (SQLite)
+#   options: --start <first seed> (default 1000000; caps 5000000),
+#            --steps <n> (default 3000; caps 240 two-hour steps),
+#            --batch <seeds per batch> (default 1000; caps 64)
+#
+# `--scenario caps` runs the ignored `caps_family_long` test instead: real
+# SQLite stores in temporary directories, removed when each seed ends.
 #
 # Pure computation: no network, no data directory, nothing outside target/.
 set -euo pipefail
 
 seeds=""
 minutes=""
-start=1000000
-steps=3000
-batch=1000
+scenario="protocol"
+start=""
+steps=""
+batch=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -29,7 +36,8 @@ while [ $# -gt 0 ]; do
     --start) start="$2"; shift 2 ;;
     --steps) steps="$2"; shift 2 ;;
     --batch) batch="$2"; shift 2 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --scenario) scenario="$2"; shift 2 ;;
+    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -39,6 +47,12 @@ if [ -z "$seeds" ] && [ -z "$minutes" ]; then
   exit 2
 fi
 
+case "$scenario" in
+  protocol) test_name="soak"; start="${start:-1000000}"; steps="${steps:-3000}"; batch="${batch:-1000}" ;;
+  caps) test_name="caps_family_long"; start="${start:-5000000}"; steps="${steps:-240}"; batch="${batch:-64}" ;;
+  *) echo "unknown scenario: $scenario (protocol or caps)" >&2; exit 2 ;;
+esac
+
 cd "$(dirname "$0")/.."
 echo "building the simulator (release)..."
 cargo test --release -p api-tracker-core --test mesh_sim --no-run >/dev/null
@@ -46,7 +60,7 @@ cargo test --release -p api-tracker-core --test mesh_sim --no-run >/dev/null
 run_batch() {
   local first="$1" count="$2"
   MESH_SIM_SEEDS="$count" MESH_SIM_START="$first" MESH_SIM_STEPS="$steps" \
-    cargo test --release -p api-tracker-core --test mesh_sim soak -- --ignored --nocapture 2>&1 \
+    cargo test --release -p api-tracker-core --test mesh_sim "$test_name" -- --ignored --exact --nocapture 2>&1 \
     | grep -E "mesh soak:|SOAK-FAIL" || true
 }
 
@@ -74,5 +88,5 @@ while :; do
 done
 
 elapsed=$(( $(date +%s) - began ))
-echo "mesh soak done: $total seeds ($steps steps each) from $start in ${elapsed}s; failing seeds: $failed"
+echo "mesh soak ($scenario) done: $total seeds ($steps steps each) from $start in ${elapsed}s; failing seeds: $failed"
 [ "$failed" -eq 0 ]

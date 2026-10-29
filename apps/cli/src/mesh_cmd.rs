@@ -159,6 +159,10 @@ pub enum MeshCmd {
     /// Mesh-wide settings (replicated to every device).
     #[command(subcommand)]
     Settings(SettingsCmd),
+    /// Monthly spend caps on mesh projects, kept across your devices
+    /// (alerts only in this version).
+    #[command(subcommand)]
+    Cap(crate::mesh_cap_cmd::CapCmd),
     /// Check this device's mesh: identity, keys, stored items, the node,
     /// its listeners and peers. Every finding comes with a fix.
     Doctor {
@@ -371,6 +375,7 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
             by_device,
         } => usage(ctx, project, month, day, by_device)?,
         MeshCmd::Settings(cmd) => settings_cmd(ctx, cmd)?,
+        MeshCmd::Cap(cmd) => crate::mesh_cap_cmd::run(ctx, cmd)?,
         MeshCmd::Doctor { rebuild, repair } => doctor(ctx, rebuild, repair)?,
     }
     Ok(())
@@ -529,9 +534,14 @@ fn replicate(ctx: &Ctx, peer: Option<String>) -> Result<()> {
         }
     } else {
         let (vault, _token) = ctx.unlocked()?;
-        // Publish fresh usage first, so this exchange carries it.
+        // Publish fresh usage and spend-cap figures first, so this exchange
+        // carries them.
         if let Err(e) = vault.mesh_publish() {
             note(&format!("mesh: usage was not published: {e}"));
+        }
+        let probe = api_tracker_mesh::node::GatewaySocket(dir.clone());
+        if let Err(e) = vault.mesh_cap_reconcile(&probe) {
+            note(&format!("mesh: spend caps were not reconciled: {e}"));
         }
         let addrs = match &peer {
             Some(p) => vec![p.clone()],
@@ -1020,6 +1030,18 @@ struct StatusOut {
     /// The usage publisher's last run (Increment 06).
     #[serde(skip_serializing_if = "Option::is_none")]
     publish: Option<api_tracker_core::mesh::publish::PublishReport>,
+    /// Spend caps known here and the reconciler's last run (Increment 07).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caps: Option<CapsStatus>,
+}
+
+#[derive(Serialize)]
+struct CapsStatus {
+    count: usize,
+    frozen: usize,
+    /// This device's transfers waiting for the gateway's acknowledgement.
+    escrow_open: usize,
+    last_run: Option<api_tracker_core::mesh::caps::ReconcileReport>,
 }
 
 fn status(ctx: &Ctx) -> Result<()> {
@@ -1032,6 +1054,7 @@ fn status(ctx: &Ctx) -> Result<()> {
         lag: None,
         address_changes: None,
         publish: None,
+        caps: None,
     };
     if out.status.initialized {
         let node = instance::status(&ctx.paths.data_dir);
@@ -1055,6 +1078,13 @@ fn status(ctx: &Ctx) -> Result<()> {
         );
         out.address_changes = Some(peers::device_changes(store.connection())?);
         out.publish = api_tracker_core::mesh::publish::last_report(store.connection())?;
+        let caps = api_tracker_core::mesh::caps::view::caps_in(store.state());
+        out.caps = Some(CapsStatus {
+            count: caps.len(),
+            frozen: caps.iter().filter(|c| c.frozen).count(),
+            escrow_open: api_tracker_core::mesh::caps::escrow::open_rows(store.connection())?.len(),
+            last_run: api_tracker_core::mesh::caps::reconcile::last_report(store.connection())?,
+        });
     }
     render::emit(ctx.json, &out, || print_status(&out));
     Ok(())
@@ -1355,6 +1385,21 @@ fn print_status(out: &StatusOut) {
             },
             p.collected,
             p.retention_days
+        );
+    }
+    if let Some(c) = out.caps.as_ref().filter(|c| c.count > 0) {
+        println!(
+            "Spend caps:   {} ({} frozen); `tethra mesh cap show` for spend and rights{}",
+            c.count,
+            c.frozen,
+            if c.escrow_open > 0 {
+                format!(
+                    "; {} transfer(s) waiting for the gateway's acknowledgement",
+                    c.escrow_open
+                )
+            } else {
+                String::new()
+            }
         );
     }
     for c in out.address_changes.iter().flatten() {
