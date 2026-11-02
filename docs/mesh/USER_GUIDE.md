@@ -351,8 +351,8 @@ or directly from `doctor` when no node runs.
 ## 8. In the desktop app
 
 Open **Devices** in the sidebar. It covers sections 1 to 3 and the device side
-of 6 and 7 without a terminal; shared projects, usage and spend caps are still
-CLI-only in the app.
+of 6 and 7 without a terminal; a project's page covers sections 4 and 5
+([below](#shared-projects-usage-and-spend-caps-in-the-app)).
 
 - **Start or join a mesh.** A device outside a mesh offers **Create mesh**
   (name the device: the other devices see the name) and **Join a mesh** (paste
@@ -403,6 +403,43 @@ CLI-only in the app.
   enforcement you switched on.
 
 The app sends no analytics about any of this.
+
+### Shared projects, usage and spend caps in the app
+
+- **Share a project.** On a project's page, the **Devices** panel offers
+  **Share with my devices**. What replicates is that project's daily usage
+  counters (requests, tokens, estimated cost), never individual requests,
+  their content, routes or credentials. Nothing is shared or bound
+  automatically.
+- **Bind it on another device.** On that device, **Devices → Available from
+  your devices** lists mesh projects that have no local project here;
+  **Bind to…** picks an existing project or creates one. Unbinding (on the
+  project's page) stops this device publishing new usage for it; what it
+  published stays. Rename, archive and merge are under **Manage**; a merge is
+  refused while both projects have spend caps.
+- **Usage across your devices.** A separate card, on the project's page and
+  on **Usage**, with the same rules as `tethra mesh usage`: one row per
+  device with its requests, tokens, estimated cost, unpriced and
+  not-extracted counts, and "as of" (the last exchange with it); **stale**
+  and **removed** labels; "No data from …" for a device that has published
+  nothing for it (unknown, not zero); and a total labelled as estimated and
+  gateway-observed across the devices it counts. It is never added to the
+  provider-reported figures shown elsewhere.
+- **Spend caps.** On a shared project's page: create a monthly cap, see its
+  target, what the devices used, what this device may still spend, any
+  pending decrease, and each device's rights. **Raise** on the device that
+  created the cap adds to it; on any other device it is a **local override**
+  for this month, and the app explains that before it does it. **Lower** asks
+  first. **Reclaim** is on the owner only. A frozen cap (its owner was
+  removed) can only be replaced.
+- **Enforce on this device** asks for your master password and explains what
+  it does: this device's gateway answers requests to the project with HTTP
+  403 (not 429, so SDKs do not retry) once this device's share for the month
+  is used; near the cap one request runs at a time, so it goes over by at
+  most one request; unpriced models and responses without usage are never
+  blocked. It is a self-limit on traffic through Tethra's gateway, not a
+  security boundary. When the gateway cannot enforce (it is not running, or
+  it reports a reason), the panel says "Enforcement inactive" and why.
 
 ## Troubleshooting
 

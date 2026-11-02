@@ -22,6 +22,7 @@ import { MeshThisDevice } from "./MeshThisDevice";
 import { MeshDeviceList } from "./MeshDeviceList";
 import { MeshPeers } from "./MeshPeers";
 import { MeshHealth } from "./MeshHealth";
+import { MeshAvailableProjects } from "./MeshAvailableProjects";
 import { meshErrText, scrubbed } from "./MeshCommon";
 
 /** How often the open view re-reads the mesh status, devices and peers. */
@@ -121,6 +122,12 @@ export function DevicesView() {
         <>
           <MeshThisDevice status={status} onChanged={changed} />
           <MeshDeviceList refreshKey={refreshKey} onChanged={changed} />
+          {/* Tethra Mesh (Increment 10): shared projects not bound here. */}
+          <MeshAvailableProjects
+            refreshKey={refreshKey}
+            devices={status.devices}
+            onChanged={changed}
+          />
           <MeshPeers refreshKey={refreshKey} onChanged={changed} />
           <MeshHealth onChanged={changed} />
 

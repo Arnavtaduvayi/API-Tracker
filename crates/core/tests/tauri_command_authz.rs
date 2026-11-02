@@ -20,11 +20,12 @@
 //! machine-readable command inventory in
 //! `docs/remediation-phase-2/tauri_command_inventory.json` records, for
 //! each command it lists, whether enforcement is in core (tested here) or in
-//! the wrapper: the 137 commands of the Phase 2 inventory, plus the 15
-//! Tethra Mesh commands Increment 09 appended (`mesh_cmds.rs`; their
-//! reauth-gated core methods are covered at the end of this file). It is not
-//! a full re-inventory: main.rs registers commands added since Phase 2 that
-//! it does not list.
+//! the wrapper: the 137 commands of the Phase 2 inventory, plus the 30
+//! Tethra Mesh commands Increments 09 and 10 appended (`mesh_cmds.rs` and
+//! `mesh_project_cmds.rs`; their reauth-gated core methods, `mesh_cap_enforce`
+//! included, are covered at the end of this file). It is not a full
+//! re-inventory: main.rs registers commands added since Phase 2 that it does
+//! not list.
 
 mod common;
 
@@ -871,5 +872,123 @@ mod mesh {
             ..narrow.clone()
         };
         assert_eq!(v.mesh_node_settings_set(None, &off).unwrap(), off);
+    }
+
+    #[test]
+    fn mesh_cap_enforce_requires_correct_reauth() {
+        // Command: mesh_cap_enforce (Increment 10). With it on, this device's
+        // gateway refuses requests over the cap (MESH-SI-9), so the switch
+        // needs the master password both ways, and only that.
+        use api_tracker_core::mesh::caps::{self, escrow, gate, AssumeNotRunning};
+        const CHANGED: &str = "mesh_cap_enforcement_changed";
+        let (_d, _p, mut v) = new_vault();
+        crate::common::add_project(&mut v, "app");
+        v.mesh_init("dev-a").unwrap();
+        let (project, _) = v.mesh_project_share("app").unwrap();
+        let cap = v
+            .mesh_cap_create(&project.to_hex(), 25_000_000, &AssumeNotRunning)
+            .unwrap()
+            .cap_id;
+        let cap_hex = cap.to_hex();
+        // Off everywhere it can be read: the gate's switches, the global
+        // switch, and the report the desktop shows (`enforced_here`).
+        let switched = |v: &UnlockedVault| {
+            let set = gate::enforced_caps(v.connection()).unwrap();
+            let global = escrow::enforcement_on(v.connection()).unwrap();
+            let report = caps::report(&v.mesh_open_store().unwrap(), None, None).unwrap();
+            assert_eq!(report.caps.len(), 1);
+            let here = report.caps[0].enforced_here;
+            assert_eq!(set.contains(&cap), here);
+            assert_eq!(global, here, "the global switch follows the caps");
+            here
+        };
+        assert!(!switched(&v));
+
+        // A wrong password changes nothing, for one cap or every cap, on or
+        // off, and is checked before the cap is even resolved.
+        for (which, on) in [
+            (Some(cap_hex.as_str()), true),
+            (None, true),
+            (None, false),
+            (Some("no-such-cap"), true),
+        ] {
+            let err = v.mesh_cap_enforce(&wrong(), which, on).unwrap_err();
+            assert!(
+                matches!(err, CoreError::WrongPassword),
+                "{which:?} {on}: {err:?}"
+            );
+            assert_clean(&err);
+            assert!(!switched(&v));
+        }
+        assert_eq!(audit_count(&v, CHANGED), 0);
+
+        // The right password with an unknown cap: a clean refusal.
+        let err = v
+            .mesh_cap_enforce(&master_pw(), Some("no-such-cap"), true)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::NotFound { .. }), "{err:?}");
+        assert_clean(&err);
+        assert!(!switched(&v));
+        assert_eq!(audit_count(&v, CHANGED), 0);
+
+        // The right password switches it on, here only.
+        assert_eq!(
+            v.mesh_cap_enforce(&master_pw(), Some(&cap_hex), true)
+                .unwrap(),
+            vec![cap]
+        );
+        assert!(switched(&v));
+        assert_eq!(audit_count(&v, CHANGED), 1);
+
+        // Switching it off needs the password too.
+        for which in [Some(cap_hex.as_str()), None] {
+            let err = v.mesh_cap_enforce(&wrong(), which, false).unwrap_err();
+            assert!(
+                matches!(err, CoreError::WrongPassword),
+                "{which:?}: {err:?}"
+            );
+            assert_clean(&err);
+            assert!(switched(&v), "a refused off leaves it on");
+        }
+        assert_eq!(audit_count(&v, CHANGED), 1);
+
+        // `--all off` with the right password clears it.
+        assert_eq!(
+            v.mesh_cap_enforce(&master_pw(), None, false).unwrap(),
+            vec![cap]
+        );
+        assert!(!switched(&v));
+        assert_eq!(audit_count(&v, CHANGED), 2);
+        // `--all on` reaches every cap in force.
+        assert_eq!(
+            v.mesh_cap_enforce(&master_pw(), None, true).unwrap(),
+            vec![cap]
+        );
+        assert!(switched(&v));
+        assert_eq!(audit_count(&v, CHANGED), 3);
+
+        // Audited only for the calls that changed something, and the detail
+        // never carries a password.
+        let details: Vec<String> = {
+            let mut st = v
+                .connection()
+                .prepare("SELECT detail FROM audit_events WHERE event = ?1 ORDER BY id")
+                .unwrap();
+            st.query_map([CHANGED], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            details,
+            vec![
+                "spend-cap enforcement on for 1 cap(s)",
+                "spend-cap enforcement off for 1 cap(s)",
+                "spend-cap enforcement on for 1 cap(s)",
+            ]
+        );
+        assert!(details
+            .iter()
+            .all(|d| !d.contains(MASTER_PW) && !d.contains(WRONG_PW)));
     }
 }

@@ -6,6 +6,29 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: shared projects, cross-device usage and spend caps in the desktop app (in development)
+
+A project's page can now share the project with your other devices, show its
+usage across them, and hold a monthly spend cap, without a terminal
+([ADR 0031](docs/decisions/0031-device-mesh.md),
+[ADR 0032](docs/decisions/0032-spend-caps.md),
+[user guide](docs/mesh/USER_GUIDE.md#shared-projects-usage-and-spend-caps-in-the-app)).
+
+- **Share and bind, never automatically.** Share a project from its page; on
+  another device, bind it to a project from **Devices → Available from your
+  devices**. Only daily usage counters replicate, never requests or
+  credentials.
+- **Honest cross-device usage.** One row per device with "as of", stale and
+  removed labels, "no data from" for devices that published nothing, unpriced
+  and not-extracted requests counted separately, and a total that says what
+  it is. Kept apart from provider-reported cost.
+- **Spend caps from the app.** Create, raise (a labelled local override on a
+  device that does not own the cap), lower, reclaim, and see each device's
+  rights. **Enforce on this device** asks for your master password and
+  explains the 403, the bounded overshoot, and that a cap is a self-limit,
+  not a security boundary; the panel says when enforcement is inactive and
+  why.
+
 ### Added — Tethra Mesh: pair and manage your devices from the desktop app (in development)
 
 A new **Devices** view does the whole device workflow without a terminal

@@ -234,9 +234,13 @@ listen addresses, all interfaces, discovery):
 - Start failures (an address in use, another process's node holding the data
   directory, an identity problem) never fail the unlock: they are kept and
   shown by `mesh_status`, with how the last node stopped.
-- The desktop's commands (`apps/desktop/src-tauri/src/mesh_cmds.rs`) are thin
-  wrappers over core and this crate; reauthentication (invite, remove, leave,
-  widening the node's network exposure) is enforced in core.
+- The desktop's commands (`apps/desktop/src-tauri/src/mesh_cmds.rs` for
+  devices and the node, `mesh_project_cmds.rs` for shared projects, usage and
+  spend caps, Increment 10) are thin wrappers over core and this crate;
+  reauthentication (invite, remove, leave, widening the node's network
+  exposure, cap enforcement) is enforced in core. Reads the UI polls write
+  nothing; publishing usage and reconciling caps happen on open, on refresh
+  and after an action.
 
 **Rollback hold (PROTOCOL.md §7.4).** A peer's `RollbackNotice` is stored per
 reporting device in `mesh_meta` (`rollback_hold/<device>`), so every process

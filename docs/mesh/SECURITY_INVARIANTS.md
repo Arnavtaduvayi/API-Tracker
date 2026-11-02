@@ -238,6 +238,13 @@ NN)** otherwise.
   `near_exhaustion_one_request_at_a_time_and_the_slot_clears_on_every_exit`,
   `only_caps_switched_on_here_are_enforced_and_a_peer_cannot_switch_one_on`,
   `the_gate_fails_open_and_says_why`, `perf::perf_cap_admission_overhead`.
+  *Implemented (10), the desktop:* the cap panel's **Enforce on this device**
+  goes through the same reauthenticated core method (`mesh_cap_enforce`); the
+  dialog explains the 403, the one-request overshoot and the self-limit before
+  it asks; the panel says when enforcement is inactive and why. *Tests:*
+  `tauri_command_authz::mesh::mesh_cap_enforce_requires_correct_reauth`,
+  `desktop_flow::a_project_shared_in_the_app_shows_the_cli_devices_usage_and_its_cap`
+  (a switch on one device stays off on the other), `CapsPanel.test.tsx`.
 - **MESH-SI-10 No double spending.** Rights are never spent twice; transfers are
   fenced against the running gateway's snapshot (escrow). *Status:* implemented
   (07 node half, 08 gateway half: each snapshot deducts every open escrow row,
@@ -280,14 +287,23 @@ NN)** otherwise.
   `mesh_usage::rows_from_before_the_split_publish_an_honest_unknown_remainder`,
   `mesh_publish_e2e::gateway_usage_reaches_a_paired_device_split_and_labelled`,
   `mesh_cli::share_bind_and_read_usage_across_two_devices_from_the_cli`.
+  *Implemented (10), the desktop:* the usage card shows core's report as is
+  (per device, "as of", stale/removed, "No data from …: unknown, not zero",
+  core's `total_label` and notes) in its own card on the project page and on
+  Usage, apart from the provider-reported figures and never added to them.
+  *Tests:* `desktop_flow::a_project_shared_in_the_app_shows_the_cli_devices_usage_and_its_cap`,
+  `MeshUsageCard.test.tsx`.
 - **MESH-SI-13 Nothing automatic.** No auto-binding, auto-import or
   auto-enforcement. *Status:* implemented (06) for binding: sharing binds only
   the sharer's own project; every other device binds by an explicit command,
   never by name or local id; spend caps (07) are created and changed only by
   explicit commands; nothing is enforced until the user switches enforcement
   on, per cap, on that device, with reauthentication (08); imports (11)
-  follow. *Tests:*
+  follow. The desktop (10) shares and binds only on an explicit click
+  (rendering the project panel or "Available from your devices" calls
+  neither). *Tests:*
   `mesh_usage::binding_is_never_automatic_cascades_on_delete_and_is_refused_twice`,
+  `MeshProjectPanel.test.tsx`, `MeshAvailableProjects.test.tsx`,
   `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the
   `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01, 05,

@@ -28,6 +28,8 @@ import {
   snapshotTokenAvailability,
 } from "../usage";
 import { formatMicros } from "../utils";
+// Tethra Mesh (Increment 10)
+import { MeshUsageCard } from "./MeshUsageCard";
 
 type Target = { kind: "project"; id: string } | { kind: "credential"; id: string };
 type SourceChoice = "all" | "provider" | "manual";
@@ -401,6 +403,13 @@ export function UsageView() {
           </tbody>
         </table>
       )}
+
+      {/* Tethra Mesh (Increment 10): cross-device, gateway-observed estimates
+          for every shared project. Its own card with its own wording, apart
+          from the provider figures above and never added to them (SI-19).
+          Renders nothing outside a mesh. */}
+      <MeshUsageCard />
+      {/* End Tethra Mesh (Increment 10) */}
     </div>
   );
 }

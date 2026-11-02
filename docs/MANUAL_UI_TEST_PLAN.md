@@ -2939,3 +2939,29 @@ fake `TETHRA_PASSWORD`. Listen on `127.0.0.1` only on a development machine.
 | D11 | Quit the app; `tethra mesh status` against its data dir | Not running |
 | D12 | **Leave mesh** | Confirmation, then the password; back to the not-in-a-mesh screen |
 | D13 | Stale and errors | A device not exchanged with for over 24 h shows **stale**; every error shows a plain message, never an invite or a password |
+
+### D-P — Shared projects, cross-device usage and spend caps (Increment 10)
+
+Continue from §D with the app (scratch dir A) and a CLI device (scratch dir B,
+`tethra mesh serve --listen 127.0.0.1:0` running) paired. Seed B's usage the
+way `scripts/smoke.sh` does (its "mesh usage" block inserts
+`gateway_usage_daily` rows with `sqlite3` into B's scratch vault only). The
+403 check uses B's **foreground** gateway (`tethra gateway serve` with B's
+`TETHRA_DIR`) and a fake upstream, never the machine's real gateway.
+
+| # | Step | Expected |
+|---|---|---|
+| DP1 | Open a project in the app | A **Devices** panel with **Share with my devices** and one sentence on what replicates. Nothing is shared by opening it |
+| DP2 | Share it | The panel shows the mesh project, its devices and **Unbind** |
+| DP3 | On B: `tethra mesh project bind <mesh> <local>` (or, in a second app, **Devices → Available from your devices → Bind to…**) | Nothing binds until this step |
+| DP4 | Seed B's usage, wait for an exchange, then **Refresh** the usage card | B's row with requests, tokens, estimated cost, unpriced and not-extracted counts, "as of"; the total labelled "estimated, gateway-observed, across N device(s) …"; no provider-reported figure in the card |
+| DP5 | Stop B's node for over 24 h (or use a clock-skewed scratch run) | B's row is labelled **stale**, never shown as 0 |
+| DP6 | **Create a spend cap** ($1) | Target, used, this device's available, the per-device rights table |
+| DP7 | On B, raise it | The CLI asks for `--yes` (override). In the app on a non-owner, **Raise** explains the local override before it acts |
+| DP8 | **Lower** it | A confirmation first; then "pending decrease" until devices burn rights |
+| DP9 | On B: `tethra mesh cap enforce <cap> on`, drive B's foreground gateway past its share | B's gateway answers 403 with the spend-cap JSON; after the next exchange the app shows B's used amount rising |
+| DP10 | In the app, **Enforce on this device** | The master password first, with the 403 / one-request overshoot / self-limit explanation; a wrong password changes nothing |
+| DP11 | With no gateway running | "Enforcement inactive" or "the gateway does not seem to be running" on an enforced cap |
+| DP12 | Merge two shared projects that both have caps | A confirmation, then the refusal message |
+| DP13 | Alerts | A cap at 80% / 100% shows in Alerts with a readable title |
+

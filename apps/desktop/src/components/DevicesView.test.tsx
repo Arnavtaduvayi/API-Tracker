@@ -40,6 +40,11 @@ vi.mock("../api", async () => {
       meshDoctor: vi.fn(),
       meshNodeGetSettings: vi.fn(),
       meshNodeSetSettings: vi.fn(),
+      // Increment 10: "Available from your devices".
+      meshProjectsList: vi.fn(),
+      meshProjectBind: vi.fn(),
+      projectList: vi.fn(),
+      projectCreate: vi.fn(),
     },
   };
 });
@@ -157,6 +162,7 @@ beforeEach(() => {
     all_interfaces: false,
     discover: false,
   });
+  mockApi.meshProjectsList.mockResolvedValue([]);
 });
 
 describe("DevicesView rendering", () => {
@@ -509,5 +515,44 @@ describe("Leave the mesh", () => {
     buttons = screen.getAllByRole("button", { name: "Leave mesh" });
     await user.click(buttons[buttons.length - 1]);
     expect(await screen.findByText(/No other device was reachable/)).toBeInTheDocument();
+  });
+});
+
+describe("Available from your devices (Increment 10)", () => {
+  it("lists shared projects not bound here, inside a mesh only, and binds nothing", async () => {
+    mockApi.meshProjectsList.mockResolvedValue([
+      {
+        mesh_project_id: "aa".repeat(16),
+        name: "fake-shared",
+        archived: false,
+        merged_into: null,
+        root: "aa".repeat(16),
+        bound_local_project: null,
+        bound_local_project_name: null,
+        publishing_devices: [DESKTOP_ID],
+      },
+    ]);
+    render(<DevicesView />);
+    expect(
+      await screen.findByRole("heading", { name: "Available from your devices" }),
+    ).toBeInTheDocument();
+    const row = (await screen.findByText("fake-shared")).closest("tr") as HTMLElement;
+    // The publishing device, by its short id (this roster has no names).
+    expect(within(row).getByText("22222222", { exact: false })).toBeInTheDocument();
+    expect(
+      within(row).getByRole("button", { name: "Bind fake-shared (aaaaaaaa) to a project" }),
+    ).toBeInTheDocument();
+    expect(mockApi.meshProjectBind).not.toHaveBeenCalled();
+    expect(mockApi.projectList).not.toHaveBeenCalled();
+  });
+
+  it("is not shown, and not read, outside a mesh", async () => {
+    mockApi.meshStatus.mockResolvedValue(NOT_IN_MESH);
+    render(<DevicesView />);
+    await screen.findByRole("heading", { name: "This device is not in a mesh" });
+    expect(
+      screen.queryByRole("heading", { name: "Available from your devices" }),
+    ).not.toBeInTheDocument();
+    expect(mockApi.meshProjectsList).not.toHaveBeenCalled();
   });
 });

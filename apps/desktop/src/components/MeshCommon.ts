@@ -3,6 +3,7 @@
 
 import { isApiError } from "../api";
 import type { ApiError } from "../types";
+import { formatMicros } from "../utils";
 
 /** Where the Devices view sends "Read the mesh user guide". */
 export const MESH_GUIDE_URL =
@@ -51,4 +52,30 @@ export function shortId(hex: string): string {
 export function isLoopbackAddr(addr: string): boolean {
   const a = addr.trim();
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{1,5}$/.test(a) || /^\[::1\]:\d{1,5}$/.test(a);
+}
+
+// --- Increment 10: shared projects, cross-device usage and spend caps. ---
+// Display formatting only: every figure, label and flag comes from core.
+
+/**
+ * `formatMicros` for an amount that may be negative (a device's available
+ * spend-cap rights once it has gone over): "-$0.50" rather than "$-0.50".
+ * Display only; the value is core's.
+ */
+export function formatSignedMicros(micros: number): string {
+  return micros < 0 ? `-${formatMicros(-micros)}` : formatMicros(micros);
+}
+
+/** "name (1a2b3c4d)", or "unnamed (1a2b3c4d)": how mesh tables name a device. */
+export function meshDeviceLabel(name: string | null | undefined, id: string): string {
+  return `${name ?? "unnamed"} (${shortId(id)})`;
+}
+
+/**
+ * A dollar amount the user typed, echoed back in a confirmation exactly as
+ * typed (with one leading "$"). Never parsed here: core parses the text.
+ */
+export function typedUsd(text: string): string {
+  const t = text.trim();
+  return t.startsWith("$") ? t : `$${t}`;
 }

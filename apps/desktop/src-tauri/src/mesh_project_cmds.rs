@@ -17,24 +17,19 @@
 //!   `with_vault_background` and write nothing.
 //! - No analytics (MESH-SI-14).
 
-// Contract stubs (Increment 10): every body below is replaced, and this
-// allow removed, before the increment's final commit.
-#![allow(dead_code)]
-
-use super::{AppState, CmdResult, ErrDto};
+use super::{with_vault, with_vault_background, AppState, CmdResult};
+use api_tracker_core::error::CoreError;
 use api_tracker_core::mesh::caps::ops::CapChanged;
-use api_tracker_core::mesh::caps::{CapCreated, CapReport};
-use api_tracker_core::mesh::projects::MeshProjectRow;
-use api_tracker_core::mesh::usage::UsageReport;
+use api_tracker_core::mesh::caps::{self, CapCreated, CapReport};
+use api_tracker_core::mesh::kinds::{Day, Month};
+use api_tracker_core::mesh::projects::{self, MeshProjectRow};
+use api_tracker_core::mesh::usage::{UsageFilter, UsageReport};
+use api_tracker_core::secret::SecretString;
+use api_tracker_core::vault::UnlockedVault;
+use api_tracker_mesh::node::GatewaySocket;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use tauri::State;
-
-fn not_implemented() -> ErrDto {
-    ErrDto {
-        code: "NotImplementedYet".into(),
-        message: "this mesh command is not built yet".into(),
-    }
-}
 
 /// `mesh_project_share`: the new mesh project, bound to the local one.
 #[derive(Serialize)]
@@ -94,10 +89,74 @@ pub(crate) struct MeshEnforceDto {
     pub on: bool,
 }
 
+/// An optional usage-filter field: trimmed, and absent when blank (a blank
+/// field only ever widens a read to its default).
+fn given(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// A dollar amount in micro-USD, parsed by core as the CLI does
+/// (`mesh cap … <usd>`); core refuses zero itself.
+fn micros(usd: &str) -> Result<u64, CoreError> {
+    let m = api_tracker_core::pricing::dollars_to_micros(usd)?;
+    Ok(u64::try_from(m).unwrap_or(0))
+}
+
+/// The usage filter, validated before anything is written. The wording
+/// matches the CLI's (`--day must be YYYY-MM-DD`).
+fn usage_filter(v: &UnlockedVault, f: &MeshUsageFilterDto) -> Result<UsageFilter, CoreError> {
+    let mut filter = UsageFilter::default();
+    if let Some(d) = given(f.day.as_deref()) {
+        filter.day = Some(
+            Day::parse(d)
+                .ok_or_else(|| CoreError::InvalidInput("day must be YYYY-MM-DD".into()))?,
+        );
+    }
+    if let Some(m) = given(f.month.as_deref()) {
+        filter.month = Some(
+            Month::parse(m)
+                .ok_or_else(|| CoreError::InvalidInput("month must be YYYY-MM".into()))?,
+        );
+    }
+    if let Some(p) = given(f.project.as_deref()) {
+        filter.project = Some(projects::resolve(&v.mesh_open_store()?, p)?);
+    }
+    Ok(filter)
+}
+
+/// The caps report after running the reconciler (as `tethra mesh cap show`
+/// does). Core already tolerates a rollback hold or a fork there; any other
+/// reconciler failure still shows the figures this device has, read only,
+/// with the reason in `reconcile_error`. An error the read hits as well (not
+/// in a mesh, no such cap) is the command's error.
+fn reconciled_report(
+    v: &UnlockedVault,
+    data_dir: &Path,
+    cap: Option<&str>,
+) -> Result<MeshCapsDto, CoreError> {
+    let probe = GatewaySocket::for_vault(v, data_dir);
+    match v.mesh_caps(cap, None, &probe) {
+        Ok(report) => Ok(MeshCapsDto {
+            report,
+            reconcile_error: None,
+        }),
+        Err(e) => {
+            let store = v.mesh_open_store()?;
+            let only = match cap {
+                Some(c) => Some(caps::resolve(&store, c)?),
+                None => None,
+            };
+            Ok(MeshCapsDto {
+                report: caps::report(&store, only, None)?,
+                reconcile_error: Some(e.to_string()),
+            })
+        }
+    }
+}
+
 #[tauri::command]
 pub(crate) fn mesh_projects_list(state: State<'_, AppState>) -> CmdResult<Vec<MeshProjectRow>> {
-    let _ = &state;
-    Err(not_implemented())
+    with_vault_background(&state, |v| v.mesh_projects())
 }
 
 /// Share a local project with the mesh: a new mesh project with its name,
@@ -107,8 +166,11 @@ pub(crate) fn mesh_project_share(
     state: State<'_, AppState>,
     local_project_id: String,
 ) -> CmdResult<MeshShareDto> {
-    let _ = (&state, &local_project_id);
-    Err(not_implemented())
+    let (id, name) = with_vault(&state, |v| v.mesh_project_share(&local_project_id))?;
+    Ok(MeshShareDto {
+        mesh_project_id: id.to_hex(),
+        name,
+    })
 }
 
 /// Bind a mesh project to a local project on this device only. Explicit,
@@ -119,8 +181,10 @@ pub(crate) fn mesh_project_bind(
     mesh_project_id: String,
     local_project_id: String,
 ) -> CmdResult<String> {
-    let _ = (&state, &mesh_project_id, &local_project_id);
-    Err(not_implemented())
+    let id = with_vault(&state, |v| {
+        v.mesh_project_bind(&mesh_project_id, &local_project_id)
+    })?;
+    Ok(id.to_hex())
 }
 
 /// Returns whether a binding was removed.
@@ -129,8 +193,7 @@ pub(crate) fn mesh_project_unbind(
     state: State<'_, AppState>,
     local_project_id: String,
 ) -> CmdResult<bool> {
-    let _ = (&state, &local_project_id);
-    Err(not_implemented())
+    with_vault(&state, |v| v.mesh_project_unbind(&local_project_id))
 }
 
 #[tauri::command]
@@ -139,8 +202,8 @@ pub(crate) fn mesh_project_rename(
     mesh_project_id: String,
     name: String,
 ) -> CmdResult<String> {
-    let _ = (&state, &mesh_project_id, &name);
-    Err(not_implemented())
+    let id = with_vault(&state, |v| v.mesh_project_rename(&mesh_project_id, &name))?;
+    Ok(id.to_hex())
 }
 
 #[tauri::command]
@@ -148,8 +211,8 @@ pub(crate) fn mesh_project_archive(
     state: State<'_, AppState>,
     mesh_project_id: String,
 ) -> CmdResult<String> {
-    let _ = (&state, &mesh_project_id);
-    Err(not_implemented())
+    let id = with_vault(&state, |v| v.mesh_project_archive(&mesh_project_id))?;
+    Ok(id.to_hex())
 }
 
 /// The UI confirms first. Refused by core when both projects have caps.
@@ -159,8 +222,11 @@ pub(crate) fn mesh_project_merge(
     a: String,
     b: String,
 ) -> CmdResult<MeshMergeDto> {
-    let _ = (&state, &a, &b);
-    Err(not_implemented())
+    let (root, merged) = with_vault(&state, |v| v.mesh_project_merge(&a, &b))?;
+    Ok(MeshMergeDto {
+        root: root.to_hex(),
+        merged: merged.to_hex(),
+    })
 }
 
 /// `publish: true` publishes this device's usage first (a write; for an
@@ -171,14 +237,26 @@ pub(crate) fn mesh_usage_report(
     filter: MeshUsageFilterDto,
     publish: bool,
 ) -> CmdResult<MeshUsageDto> {
-    let _ = (
-        &state,
-        &filter.project,
-        &filter.month,
-        &filter.day,
-        &publish,
-    );
-    Err(not_implemented())
+    if publish {
+        with_vault(&state, |v| {
+            let f = usage_filter(v, &filter)?;
+            // As `tethra mesh usage`: a failed publish is a note beside the
+            // figures already published, not a failure.
+            let publish_error = v.mesh_publish().err().map(|e| e.to_string());
+            Ok(MeshUsageDto {
+                report: v.mesh_usage(&f)?,
+                publish_error,
+            })
+        })
+    } else {
+        with_vault_background(&state, |v| {
+            let f = usage_filter(v, &filter)?;
+            Ok(MeshUsageDto {
+                report: v.mesh_usage(&f)?,
+                publish_error: None,
+            })
+        })
+    }
 }
 
 /// `reconcile: true` runs the cap reconciler first (a write; on open and
@@ -188,8 +266,16 @@ pub(crate) fn mesh_caps_list(
     state: State<'_, AppState>,
     reconcile: bool,
 ) -> CmdResult<MeshCapsDto> {
-    let _ = (&state, &reconcile);
-    Err(not_implemented())
+    if reconcile {
+        with_vault(&state, |v| reconciled_report(v, &state.data_dir, None))
+    } else {
+        with_vault_background(&state, |v| {
+            Ok(MeshCapsDto {
+                report: caps::report(&v.mesh_open_store()?, None, None)?,
+                reconcile_error: None,
+            })
+        })
+    }
 }
 
 /// `monthly_usd` is text such as `"25"` or `"12.50"`.
@@ -199,8 +285,11 @@ pub(crate) fn mesh_cap_create(
     mesh_project_id: String,
     monthly_usd: String,
 ) -> CmdResult<CapCreated> {
-    let _ = (&state, &mesh_project_id, &monthly_usd);
-    Err(not_implemented())
+    with_vault(&state, |v| {
+        let amount = micros(&monthly_usd)?;
+        let probe = GatewaySocket::for_vault(v, &state.data_dir);
+        v.mesh_cap_create(&mesh_project_id, amount, &probe)
+    })
 }
 
 /// On the owner a raise mints; elsewhere it is a labelled local override
@@ -211,8 +300,11 @@ pub(crate) fn mesh_cap_raise(
     cap_id: String,
     usd: String,
 ) -> CmdResult<CapChanged> {
-    let _ = (&state, &cap_id, &usd);
-    Err(not_implemented())
+    with_vault(&state, |v| {
+        let amount = micros(&usd)?;
+        let probe = GatewaySocket::for_vault(v, &state.data_dir);
+        v.mesh_cap_raise(&cap_id, amount, &probe)
+    })
 }
 
 /// Lower the monthly target to `usd` (the UI confirms first).
@@ -222,8 +314,11 @@ pub(crate) fn mesh_cap_lower(
     cap_id: String,
     usd: String,
 ) -> CmdResult<CapChanged> {
-    let _ = (&state, &cap_id, &usd);
-    Err(not_implemented())
+    with_vault(&state, |v| {
+        let target = micros(&usd)?;
+        let probe = GatewaySocket::for_vault(v, &state.data_dir);
+        v.mesh_cap_lower(&cap_id, target, &probe)
+    })
 }
 
 /// One cap's report with its per-device rights (reconciles first).
@@ -232,8 +327,9 @@ pub(crate) fn mesh_cap_rights(
     state: State<'_, AppState>,
     cap_id: String,
 ) -> CmdResult<MeshCapsDto> {
-    let _ = (&state, &cap_id);
-    Err(not_implemented())
+    with_vault(&state, |v| {
+        reconciled_report(v, &state.data_dir, Some(&cap_id))
+    })
 }
 
 /// Owner only: ask holders to give unspent rights back (every other device,
@@ -244,11 +340,19 @@ pub(crate) fn mesh_cap_reclaim(
     cap_id: String,
     from_device: Option<String>,
 ) -> CmdResult<MeshReclaimDto> {
-    let _ = (&state, &cap_id, &from_device);
-    Err(not_implemented())
+    // Passed as is: a blank device is refused by core, never widened to
+    // "every device".
+    let (id, devices) = with_vault(&state, |v| {
+        v.mesh_cap_reclaim(&cap_id, from_device.as_deref())
+    })?;
+    Ok(MeshReclaimDto {
+        cap_id: id.to_hex(),
+        devices: devices.iter().map(|d| d.to_hex()).collect(),
+    })
 }
 
-/// Reauthenticated in core. `cap_id: None` means every cap (`--all`).
+/// Reauthenticated in core. `cap_id: None` means every cap (`--all`); a
+/// blank id is passed as is (core refuses it), never read as "every cap".
 #[tauri::command]
 pub(crate) fn mesh_cap_enforce(
     state: State<'_, AppState>,
@@ -256,6 +360,12 @@ pub(crate) fn mesh_cap_enforce(
     cap_id: Option<String>,
     on: bool,
 ) -> CmdResult<MeshEnforceDto> {
-    let _ = (&state, &master_password, &cap_id, &on);
-    Err(not_implemented())
+    let master_password = SecretString::new(master_password);
+    let changed = with_vault(&state, |v| {
+        v.mesh_cap_enforce(&master_password, cap_id.as_deref(), on)
+    })?;
+    Ok(MeshEnforceDto {
+        caps: changed.iter().map(|c| c.to_hex()).collect(),
+        on,
+    })
 }

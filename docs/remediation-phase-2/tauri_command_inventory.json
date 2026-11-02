@@ -1,7 +1,7 @@
 {
   "generated_for": "Tethra Security Remediation Phase 2 (Phase 7)",
   "source": "apps/desktop/src-tauri/src/main.rs invoke_handler registration",
-  "total_commands": 152,
+  "total_commands": 167,
   "legend": {
     "security_relevance": "high | medium | low",
     "destructive": "performs a destructive or irreversible action (delete, remote push/delete, vault replace, provider mutation)",
@@ -11,7 +11,7 @@
     "test_status": "covered:<suite> = a Rust test exercises the backend path; not_covered = no direct Rust coverage yet; not_covered_wrapper_reauth = reauth lives in the Tauri wrapper and is not reachable from a core-level test (follow-up)"
   },
   "caveat": "A harness exists and covers the security-sensitive/destructive command set enumerated in the Phase 2 brief. This inventory does NOT claim all 137 commands are fully secured or fully tested: low-relevance read/metadata commands are gated only by the unlocked vault and are marked not_covered; three commands (backup_create, provider_admin_connect, provider_admin_test) enforce reauth in the Tauri wrapper rather than core and are recorded as follow-ups.",
-  "increment_09_note": "Increment 09 (Tethra Mesh, 2026-10-29) appended the 15 mesh_* rows only (apps/desktop/src-tauri/src/mesh_cmds.rs), so total_commands counts the rows listed here (137 + 15). The rest of this inventory is stale: main.rs registers commands added since Phase 2 that it does not list. It is not a full re-inventory. Mesh rows: reauth for mesh_invite_create, mesh_device_remove and mesh_leave is verified inside the core method; mesh_node_set_settings needs the master password only when it widens the LAN surface (all interfaces, mDNS discovery, a non-loopback listen address), also enforced in core (UnlockedVault::mesh_node_settings_set), and refuses with mesh_reauth_required without it. secret_bearing: mesh_invite_create returns the one-time invite string (outbound bearer secret); mesh_join receives it (inbound). Suites: tauri_command_authz (crates/core/tests), supervisor, pairing, node, discover, doctor (crates/mesh/tests), mesh_membership (crates/core/tests); the CLI's one-shot replicate and leave paths, which the desktop shares, are in apps/cli/tests/mesh_cli.rs.",
+  "increment_09_note": "Increment 09 (Tethra Mesh, 2026-10-29) appended the 15 mesh_* rows of apps/desktop/src-tauri/src/mesh_cmds.rs, and Increment 10 (2026-11-02) the 15 mesh_project*/mesh_usage_report/mesh_cap* rows of apps/desktop/src-tauri/src/mesh_project_cmds.rs, so total_commands counts the rows listed here (137 + 15 + 15). The rest of this inventory is stale: main.rs registers commands added since Phase 2 that it does not list. It is not a full re-inventory. Mesh rows: reauth for mesh_invite_create, mesh_device_remove, mesh_leave and mesh_cap_enforce (both on and off, one cap or every cap) is verified inside the core method; mesh_node_set_settings needs the master password only when it widens the LAN surface (all interfaces, mDNS discovery, a non-loopback listen address), also enforced in core (UnlockedVault::mesh_node_settings_set), and refuses with mesh_reauth_required without it. secret_bearing: mesh_invite_create returns the one-time invite string (outbound bearer secret); mesh_join receives it (inbound); mesh_cap_enforce receives the master password only, which core verifies and never echoes. Increment 10 rows: none is destructive. mesh_project_merge is an LWW merged_into pointer (no data is deleted; core refuses when both projects have caps) and mesh_cap_lower is an LWW target that the owner can raise again; both are confirmed in the UI. mesh_projects_list, mesh_usage_report (publish=false) and mesh_caps_list (reconcile=false) are polled reads that write nothing; publish/reconcile=true are explicit writes. Suites: tauri_command_authz, mesh_usage, mesh_caps, mesh_membership (crates/core/tests); supervisor, desktop_flow, pairing, node, discover, doctor (crates/mesh/tests); mesh_cli is apps/cli/tests/mesh_cli.rs (the same core methods through the CLI), where the CLI's one-shot replicate and leave paths, which the desktop shares, are also tested.",
   "commands": [
     {
       "command": "vault_status",
@@ -1378,6 +1378,141 @@
       "destructive": false,
       "secret_bearing": false,
       "reauth_required": "conditional",
+      "backend_enforcement": "core",
+      "test_status": "covered:tauri_command_authz"
+    },
+    {
+      "command": "mesh_projects_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "covered:desktop_flow"
+    },
+    {
+      "command": "mesh_project_share",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:desktop_flow"
+    },
+    {
+      "command": "mesh_project_bind",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:desktop_flow"
+    },
+    {
+      "command": "mesh_project_unbind",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_usage"
+    },
+    {
+      "command": "mesh_project_rename",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_cli"
+    },
+    {
+      "command": "mesh_project_archive",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_usage"
+    },
+    {
+      "command": "mesh_project_merge",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_usage"
+    },
+    {
+      "command": "mesh_usage_report",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "covered:desktop_flow"
+    },
+    {
+      "command": "mesh_caps_list",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural_unlock_gate",
+      "test_status": "covered:desktop_flow"
+    },
+    {
+      "command": "mesh_cap_create",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:desktop_flow"
+    },
+    {
+      "command": "mesh_cap_raise",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_caps"
+    },
+    {
+      "command": "mesh_cap_lower",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_caps"
+    },
+    {
+      "command": "mesh_cap_rights",
+      "security_relevance": "low",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_caps"
+    },
+    {
+      "command": "mesh_cap_reclaim",
+      "security_relevance": "medium",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "no",
+      "backend_enforcement": "structural",
+      "test_status": "covered:mesh_caps"
+    },
+    {
+      "command": "mesh_cap_enforce",
+      "security_relevance": "high",
+      "destructive": false,
+      "secret_bearing": false,
+      "reauth_required": "yes",
       "backend_enforcement": "core",
       "test_status": "covered:tauri_command_authz"
     }
