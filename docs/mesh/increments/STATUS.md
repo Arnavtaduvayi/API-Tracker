@@ -17,8 +17,8 @@ Every session reads this file first and updates it at the end (README §1).
 | 05 | [Node runtime](05-node-runtime.md) | S | M | done | 2026-10-28 | 2026-10-28 | `5b37ae7`, `beb3aa1` | CI `40739758045` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40739757930` (success). First commit `5b37ae7`: CI `40737167919` **failed** on Linux (`node::three_nodes_converge…`, a pairing race, fixed in `beb3aa1`; its Windows job passed), service `40737167795` success |
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | done | 2026-10-28 | 2026-10-28 | `dc6b110`, `c671d33`, `99df156` | CI `40749228074` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40749228069` (success). Earlier: `dc6b110` CI `40745888639` **failed** on Windows (the lost update fixed in `99df156`); `c671d33` CI `40746051787` and service `40746051748` success |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | done | 2026-10-28 | 2026-10-28 | `e2b9abd`, `6d06b15` | CI `40806698828` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (35 min; `6d06b15` removes the simulator's fsyncs), frontend, desktop backend, packaged app on macOS); macOS service `40806700080` (success). `6d06b15` + record `e7104c1`: CI `40810268430` (success), service `40810267760` (success) |
-| 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). This record: CI pending (next session) |
-| 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | in-progress | 2026-10-29 | | | |
+| 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). Record `c35615d`: CI `40819371929`, service `40819371912` (success) |
+| 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record: CI pending (next session) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | pending | | | | |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | pending | | | | |
 | 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | pending | | | | |
@@ -40,6 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
+| 09 `771b7ed` | **1,840 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`: 1,839 in the full run, plus `supervisor::a_device_pairs_with_the_in_process_node…` added after it and run with its file, 11/11). New (17): core `--test tauri_command_authz` `mesh::*` 4 (22 in the file), `mesh::node_settings` unit 2, `-p api-tracker-mesh --test supervisor` 11 | **347 passed** in 30 files (`npm test` in apps/desktop; base 308 in 25): `DevicesView` 16, `MeshThisDevice` 8, `MeshSetup` 7, `MeshPeersHealth` 7, `MeshAppNav` 1 | **179 passed** (`bash scripts/smoke.sh`) |
 | 08 `cb91633` | **1,823 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (15): gateway `--test cap_enforcement` 14, core `--test mesh_caps` 16 (+1); ignored +1 (`perf::perf_cap_admission_overhead`). Perf: `bash scripts/gateway_perf.sh` 9 passed; admission within noise (PERFORMANCE_RESULTS) | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`) |
 | 07 `e2b9abd` | **1,808 passed, 0 failed, 13 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`; the affected suites were rerun after the last edits). New (27): core `--test mesh_caps` 15, `--test mesh_sim` `caps_*` 3 (+1 ignored `caps_family_long`), `caps::policy` unit 7, `caps::period` unit 1, `cli --test mesh_cli` 9 (+1). Caps CI seeds: 16 × 240 steps in ~11 s locally. **Release soak: 256 seeds × 240 steps, 0 failing** (`bash scripts/mesh_soak.sh --scenario caps --minutes 10`; four batches of 64 seeds, ~43 s of simulation each; 629 s wall because the idle machine was throttled — a 64-seed batch takes ~45 s wall when it is not), plus 64 + 64 + 8 seeds in earlier and timing runs, 0 failing | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`; 4 cap checks) |
 | 06 `99df156` | **1,781 passed, 0 failed, 12 ignored** (1,779 in the last full run, plus the two tests added with the unbind and lost-update fixes, each run on its own; CI ran all) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (17): core `--test mesh_usage` 13, `mesh_membership` 6 (+1 lost update), `mesh_schema` 9 (+1 v23), gateway `--test mesh_publish_e2e` 1, `cli --test mesh_cli` 8 (+1) | unchanged (not touched) | **175 passed** (`bash scripts/smoke.sh`; 9 usage checks) |
@@ -97,12 +98,90 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 08 | **One cap in force per root**: a live cap supersedes a frozen one; a switch set on a superseded cap carries to the cap in force; `--all off` clears every switch. | A frozen cap and its replacement both covered the project (review finding). | ADR 0032 D11, PROTOCOL §5.5.1 |
 | 08 | The end-to-end runs in `crates/gateway/tests/cap_enforcement.rs`, not through the CLI; the gate's status reaches the CLI through `mesh_meta` `gate/status` (cross-platform), not the control socket; `gateway_config.cap_enforcement` follows "some cap is enforced"; the per-cap switch is `mesh_meta` `cap_enforce/<cap>`; the Windows probe is a loopback connection to the gateway's port. | The CLI cannot reach a plain-HTTP upstream (guarded TLS-only connector); the 08 file allowed either status path; one switch the node's fence reads. | DESIGN [Amended 08], 08 file |
 | 08 | Small, this table only: the refusal drains the unread body (bounded: 64 MiB, 5 s) after a half-close; `GateCapStatus.{unmetered_requests, refused_requests}`, `GateStatus.failing_open`; counter `cap_refused`; `CapReport.{gate, gate_fresh}`, `CapRow.enforced_here`; `CapGate::with_stale_after_for_test`. | Required by what was built. | — |
+| 09 | **Widening the node's network exposure needs the master password**, enforced in core (`UnlockedVault::mesh_node_settings_set`): turning on all interfaces or mDNS discovery (as the 09 file says) **and adding a non-loopback listen address** (same LAN surface). No password → `MeshError::ReauthRequired` (`mesh_reauth_required`, so the UI knows to ask), a wrong one → `WrongPassword`; audit `mesh_node_exposure_widened`. | A specific LAN address opens the same surface as the two flags. | ADR not needed (stronger, local); SECURITY_INVARIANTS SI-1, USER_GUIDE §8 |
+| 09 | Small, this table only: the node handle is `api_tracker_mesh::supervisor::NodeSupervisor` (own mutex) in `AppState.mesh_node`, not `Mutex<Option<NodeHandle>>`; the lifecycle tests are in `crates/mesh/tests/supervisor.rs` (CI runs no desktop-crate tests); the orchestrator wrote the shared pieces in the contract commit (`core::mesh::node_settings`, `membership::is_stale`, `peers::backoff_until`, the supervisor, `replicate::{replicate_known_peers, leave_mesh}` — the CLI's one-shot replicate and leave now call them too); `backup_restore` stops the node and waits before restoring (restarts it if the restore fails); polled reads use `with_vault_background`; extra codes `mesh_node_not_running`, `mesh_node_no_address`, `mesh_node_stopping`, `mesh_external_node`, `mesh_no_peers`, `mesh_network`, `mesh_node`; invites name at most 8 addresses; desktop listen addresses are `IP:PORT` literals (no `--advertise`); Devices sits in the sidebar's System group; `analyticsScreenFor` returns `null` for it. | Simpler, safer, or required by what was built. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 09 — Desktop: devices & node (2026-10-29 → 2026-11-02)
+
+**What landed.**
+- Contract (`a661b68`, orchestrator): `mesh_cmds.rs` signatures and DTOs,
+  `types.ts`/`api.ts`, and the shared pieces: `core::mesh::node_settings`
+  (`mesh_meta` `node/settings`: `run_while_open`, `listen`,
+  `all_interfaces`, `discover`; `validate`, `widenings`, `needs_reauth`),
+  `UnlockedVault::{mesh_node_settings, mesh_node_settings_set}`,
+  `membership::is_stale`, `peers::backoff_until`,
+  `MeshError::{InvalidNodeSettings, ReauthRequired}`;
+  `api_tracker_mesh::supervisor` (`NodeSupervisor`, `sync_with_settings`,
+  `StartOutcome`, `SupervisorState`, `STOP_WAIT` 10 s), `RunningNode::control`,
+  `GatewaySocket::for_vault`, `replicate::{replicate_known_peers,
+  leave_mesh}` (the CLI uses both now).
+- Subagent A (Rust): the 15 commands; `AppState.mesh_node`; start at the end
+  of `vault_unlock`; `lock()` beside every `notify_gateway_vault_locked`;
+  `shutdown(5 s)` on exit; restore stops the node first; authz tests; the
+  supervisor tests; 15 inventory rows (`total_commands` 152, a note that the
+  rest is stale). It found my misplaced `CapFrozen` doc comment (fixed).
+- Subagent B (React): `DevicesView` (+ `MeshSetup`, `MeshThisDevice`,
+  `MeshDeviceList` (pairing lives here), `MeshPairDialog`, `MeshPeers`,
+  `MeshHealth`, `MeshCommon.ts`), the nav entry and icon, no `screen_view`
+  for Devices, 39 tests. No contract change; `MeshDeviceList`/`MeshPeers`
+  take a `refreshKey` prop and `MeshSetup.onDone` an optional outcome.
+- Integration: user-facing example port aligned to the guide's 7420; one
+  end-to-end test (a device pairs with the in-process node, is removed, the
+  lock frees the data directory); docs.
+
+**The manual run, honestly.** This session had no way to drive a Tauri
+window (no UI automation tool for native windows). What was done instead:
+- the app was built and launched with `TETHRA_DIR` on a temp dir
+  (`npx tauri dev`; the process env checked) and ran without a panic, then
+  was closed — nothing touched the real data dir;
+- the manual run's steps 1-5 (create, listen on `127.0.0.1:0`, start the
+  node, pair a second device through an invite naming the node's address,
+  see it, remove it, lock, "not running") run end to end through the same
+  functions the commands call:
+  `supervisor::a_device_pairs_with_the_in_process_node_is_removed_and_the_lock_stops_the_node`.
+- **Owner action:** click through `docs/MANUAL_UI_TEST_PLAN.md` §D (D1-D13)
+  once. It is written for two temp data dirs.
+
+**For 10 (load-bearing).**
+- Commands: put them in `mesh_cmds.rs` (or a sibling module) the same way:
+  `with_vault` for actions, `with_vault_background` for anything the UI
+  polls, `net_err` for `NetError`, reauth only in core. Cap commands that
+  transfer take a probe: `api_tracker_mesh::node::GatewaySocket::for_vault(v,
+  &state.data_dir)`. `mesh_cap_enforce` is reauth-gated → authz test +
+  inventory row.
+- UI: copy the patterns in `MeshDeviceList.tsx` (confirm → `ReauthDialog`,
+  `scrubbed()` in `onConfirm`), `MeshCommon.ts` (`meshErrText`, `shortId`),
+  and `DevicesView.tsx` (10 s status poll with a sequence guard;
+  `refreshKey` to refresh child panels). A new view must map to `null` in
+  `analyticsScreenFor` (MESH-SI-14); `MeshAppNav.test.tsx` shows the test.
+- `mesh_status` already carries `node.running` / `node.external`; the
+  gate status for caps is `caps::gate::read_status(conn)` (08 handoff).
+
+**Surprises.**
+- The weekly API limit stopped both subagents mid-task; resuming each with
+  `SendMessage` continued from its saved transcript without lost work.
+- Polled reads must not use `with_vault` (it resets the auto-lock clock);
+  A caught this from main.rs's rule.
+- `tauri dev`'s log has ANSI colour codes: grep for `Running` alone, not
+  ``Running ` ``.
+- Under load (a cargo build alongside), vitest showed 15 timeouts in one run;
+  a quiet rerun passed. Run vitest without a concurrent cargo build.
+
+**Not done / honest list.**
+- The GUI click-through above (owner action). Nothing in 09's scope was
+  moved.
+- Auto-lock stops the node lazily, like the gateway's key: when a command or
+  the `vault_status` poll (every 30 s; 10 s while Devices is open, through
+  `mesh_status`) notices the expired session.
+- Network commands (join, leave's delivery, one-shot replicate, doctor) hold
+  the vault slot while they run (bounded by the transport timeouts); "Replicate
+  now" through the app's node does not.
 
 ### Increment 08 — Gateway cap enforcement (2026-10-28/29)
 
