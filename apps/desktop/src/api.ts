@@ -118,6 +118,16 @@ import type {
   MeshRemoveResult,
   MeshReplicateResult,
   MeshStatus,
+  MeshCapChanged,
+  MeshCapCreated,
+  MeshCapReport,
+  MeshEnforceResult,
+  MeshMergeResult,
+  MeshProjectRow,
+  MeshReclaimResult,
+  MeshShareResult,
+  MeshUsageFilter,
+  MeshUsageReport,
 } from "./types";
 
 let onVaultLocked: (() => void) | null = null;
@@ -843,4 +853,39 @@ export const api = {
    *  `mesh_reauth_required`; ask for it and retry. */
   meshNodeSetSettings: (settings: MeshNodeSettings, masterPassword: string | null) =>
     call<MeshNodeSettingsResult>("mesh_node_set_settings", { settings, masterPassword }),
+
+  // --- Tethra Mesh shared projects, usage and spend caps (Increment 10). No analytics. ---
+  meshProjectsList: () => call<MeshProjectRow[]>("mesh_projects_list"),
+  meshProjectShare: (localProjectId: string) =>
+    call<MeshShareResult>("mesh_project_share", { localProjectId }),
+  /** Explicit, never automatic. Returns the mesh project id. */
+  meshProjectBind: (meshProjectId: string, localProjectId: string) =>
+    call<string>("mesh_project_bind", { meshProjectId, localProjectId }),
+  meshProjectUnbind: (localProjectId: string) =>
+    call<boolean>("mesh_project_unbind", { localProjectId }),
+  meshProjectRename: (meshProjectId: string, name: string) =>
+    call<string>("mesh_project_rename", { meshProjectId, name }),
+  meshProjectArchive: (meshProjectId: string) =>
+    call<string>("mesh_project_archive", { meshProjectId }),
+  /** Confirm first; refused when both projects have caps. */
+  meshProjectMerge: (a: string, b: string) =>
+    call<MeshMergeResult>("mesh_project_merge", { a, b }),
+  /** `publish: true` publishes this device's usage first (explicit refresh only; never poll it). */
+  meshUsageReport: (filter: MeshUsageFilter, publish: boolean) =>
+    call<MeshUsageReport>("mesh_usage_report", { filter, publish }),
+  /** `reconcile: true` runs the cap reconciler first (on open / after actions; never poll it). */
+  meshCapsList: (reconcile: boolean) => call<MeshCapReport>("mesh_caps_list", { reconcile }),
+  /** Amounts are dollar text such as "25" or "12.50"; core parses them. */
+  meshCapCreate: (meshProjectId: string, monthlyUsd: string) =>
+    call<MeshCapCreated>("mesh_cap_create", { meshProjectId, monthlyUsd }),
+  meshCapRaise: (capId: string, usd: string) =>
+    call<MeshCapChanged>("mesh_cap_raise", { capId, usd }),
+  meshCapLower: (capId: string, usd: string) =>
+    call<MeshCapChanged>("mesh_cap_lower", { capId, usd }),
+  meshCapRights: (capId: string) => call<MeshCapReport>("mesh_cap_rights", { capId }),
+  meshCapReclaim: (capId: string, fromDevice: string | null) =>
+    call<MeshReclaimResult>("mesh_cap_reclaim", { capId, fromDevice }),
+  /** Reauthenticated in core. `capId: null` = every cap. */
+  meshCapEnforce: (masterPassword: string, capId: string | null, on: boolean) =>
+    call<MeshEnforceResult>("mesh_cap_enforce", { masterPassword, capId, on }),
 };

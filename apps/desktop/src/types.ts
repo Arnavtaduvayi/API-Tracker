@@ -2197,3 +2197,206 @@ export interface MeshNodeSettingsResult {
   /** Why the node did not start; the settings are saved either way. */
   start_error: string | null;
 }
+
+// --- Tethra Mesh shared projects, usage and spend caps (Increment 10): mirrors
+// apps/desktop/src-tauri/src/mesh_project_cmds.rs. Ids are lowercase hex; months
+// are "YYYY-MM", days "YYYY-MM-DD"; money is integer micro-USD (display only).
+
+export interface MeshProjectRow {
+  mesh_project_id: string;
+  name: string;
+  archived: boolean;
+  merged_into: string | null;
+  /** The project its counters fold into (itself unless merged). */
+  root: string;
+  /** The local project bound to it on this device, if any. */
+  bound_local_project: string | null;
+  bound_local_project_name: string | null;
+  /** Devices that have published usage for it. */
+  publishing_devices: string[];
+}
+
+export interface MeshShareResult {
+  mesh_project_id: string;
+  name: string;
+}
+
+export interface MeshMergeResult {
+  root: string;
+  merged: string;
+}
+
+export interface MeshUsageFilter {
+  project: string | null;
+  month: string | null;
+  day: string | null;
+}
+
+/** One usage counter's totals; `estimated_cost_micros` covers priced requests only. */
+export interface MeshUsageTotals {
+  requests: number;
+  priced_requests: number;
+  unpriced_requests: number;
+  unextracted_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_input_tokens: number;
+  estimated_cost_micros: number;
+}
+
+export interface MeshDeviceUsage {
+  device_id: string;
+  device_name: string | null;
+  is_self: boolean;
+  /** The last exchange with it; null for this device (current) or never exchanged. */
+  as_of: string | null;
+  stale: boolean;
+  removed: boolean;
+  totals: MeshUsageTotals;
+  split_unknown_requests: number;
+  split_known_since: string | null;
+}
+
+export interface MeshProjectUsage {
+  mesh_project_id: string;
+  name: string;
+  archived: boolean;
+  merged: string[];
+  devices: MeshDeviceUsage[];
+  /** Active devices with no figures in range: unknown, not zero. [device id, name]. */
+  no_data_from: [string, string | null][];
+  /** The sum over `devices`; only ever shown with `total_label`. */
+  total: MeshUsageTotals;
+  /** Core's label for the sum, e.g. "estimated, gateway-observed, across 2 device(s); 0 stale; 1 with no data". */
+  total_label: string;
+}
+
+export interface MeshUsageReport {
+  period: string;
+  projects: MeshProjectUsage[];
+  horizon_start: string;
+  /** The fixed honesty notes; show them with the figures. */
+  notes: string[];
+  /** Why this device's usage was not published first (when asked). */
+  publish_error: string | null;
+}
+
+export interface MeshCapDeviceRow {
+  device_id: string;
+  device_name: string | null;
+  is_self: boolean;
+  is_owner: boolean;
+  removed: boolean;
+  as_of: string | null;
+  stale: boolean;
+  minted: number;
+  is_override: boolean;
+  received: number;
+  sent: number;
+  burned: number;
+  /** Outgoing amounts the view ignored (more than the device held). */
+  clamped: number;
+  used: number;
+  avail: number;
+}
+
+export interface MeshCapMonthRow {
+  month: string;
+  target: number | null;
+  /** The target plus every override. */
+  effective_target: number | null;
+  owner_minted: number;
+  overrides: number;
+  burned: number;
+  total_used: number;
+  supply: number;
+  /** Rights beyond what the cap now allows, until holders burn them. */
+  pending_decrease: number;
+  used_pct: number | null;
+  devices: MeshCapDeviceRow[];
+  /** This device's spend including what its gateway has not published (null: nothing bound here). */
+  local_spend: number | null;
+  /** What this device may still spend (null: nothing bound here). */
+  local_avail: number | null;
+  escrow_open: number;
+  total_label: string;
+}
+
+export interface MeshCapRow {
+  /** This device's gateway enforces this cap (switched on here). */
+  enforced_here: boolean;
+  cap_id: string;
+  mesh_project_id: string;
+  project_name: string | null;
+  owner_device: string;
+  owner_name: string | null;
+  owned_here: boolean;
+  bound_here: boolean;
+  frozen: boolean;
+  superseded_by: string | null;
+  months: MeshCapMonthRow[];
+}
+
+export interface MeshGateCapStatus {
+  cap_id: string;
+  month: string;
+  enforced: boolean;
+  avail_micros: number;
+  near_exhaustion: boolean;
+  accounting_incomplete: boolean;
+  unpriced_requests: number;
+  unmetered_requests: number;
+  refused_requests: number;
+}
+
+/** The gateway's last report of its spend-cap gate. */
+export interface MeshGateStatus {
+  at_ms: number;
+  generation: number;
+  /** Why the gate admits everything right now, if it does. */
+  inactive_reason: string | null;
+  /** The reason is a failure: caps switched on are not holding. */
+  failing_open: boolean;
+  caps: MeshGateCapStatus[];
+}
+
+export interface MeshCapReport {
+  month: string;
+  caps: MeshCapRow[];
+  gate: MeshGateStatus | null;
+  /** The gate status is recent enough to mean the gateway is running. */
+  gate_fresh: boolean;
+  /** The fixed honesty notes; show them with the figures. */
+  notes: string[];
+  /** Why the reconciler did not run first (when asked). */
+  reconcile_error: string | null;
+}
+
+export interface MeshCapCreated {
+  cap_id: string;
+  mesh_project_id: string;
+  month: string;
+  monthly_micros: number;
+  distributed_micros: number;
+}
+
+export interface MeshCapChanged {
+  cap_id: string;
+  owner: boolean;
+  /** A raise on a device that does not own the cap: a labelled local override for this month. */
+  is_override: boolean;
+  months: string[];
+  amount_micros: number;
+  burned_micros: number;
+  distributed_micros: number;
+}
+
+export interface MeshReclaimResult {
+  cap_id: string;
+  devices: string[];
+}
+
+export interface MeshEnforceResult {
+  caps: string[];
+  on: boolean;
+}
