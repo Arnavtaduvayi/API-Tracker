@@ -2183,7 +2183,7 @@ export interface MeshDoctorReport {
 /** Local-only node settings. Widening the LAN surface needs the master password (enforced in core). */
 export interface MeshNodeSettings {
   run_while_open: boolean;
-  /** IP:PORT literals, such as 127.0.0.1:7700 or 100.64.1.2:7700. */
+  /** IP:PORT literals, such as 127.0.0.1:7420 or 100.64.1.2:7420. */
   listen: string[];
   /** Allow 0.0.0.0 / [::] in `listen`. */
   all_interfaces: boolean;

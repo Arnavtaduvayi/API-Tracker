@@ -19,8 +19,12 @@
 //! the real behavior of the shared core the commands delegate to. The
 //! machine-readable command inventory in
 //! `docs/remediation-phase-2/tauri_command_inventory.json` records, for
-//! every one of the 137 commands, whether enforcement is in core (tested
-//! here) or in the wrapper.
+//! each command it lists, whether enforcement is in core (tested here) or in
+//! the wrapper: the 137 commands of the Phase 2 inventory, plus the 15
+//! Tethra Mesh commands Increment 09 appended (`mesh_cmds.rs`; their
+//! reauth-gated core methods are covered at the end of this file). It is not
+//! a full re-inventory: main.rs registers commands added since Phase 2 that
+//! it does not list.
 
 mod common;
 
@@ -563,4 +567,309 @@ fn temporary_access_termination_is_identity_guarded() {
     // No PID recorded → termination refused cleanly.
     let err = vault.terminate_process_session(&session).unwrap_err();
     assert!(matches!(err, CoreError::InvalidInput(_)), "{err:?}");
+}
+
+// ------------------------------------------------- Tethra Mesh (Increment 09)
+//
+// The desktop's Devices view (`apps/desktop/src-tauri/src/mesh_cmds.rs`)
+// passes the master password straight through to these core methods; the
+// check lives here, so a hostile `invoke` cannot skip it.
+
+mod mesh {
+    use super::{assert_no_secret_leak, wrong, WRONG_PW};
+    use crate::common::{master_pw, new_vault, MASTER_PW};
+    use api_tracker_core::error::CoreError;
+    use api_tracker_core::mesh::clock::{Clock, SystemClock};
+    use api_tracker_core::mesh::invite::{format_invite, parse_invite};
+    use api_tracker_core::mesh::membership::{self, PendingIdentity};
+    use api_tracker_core::mesh::node_settings::NodeSettings;
+    use api_tracker_core::mesh::MeshError;
+    use api_tracker_core::vault::UnlockedVault;
+
+    /// No master or wrong password in any error the desktop could show.
+    fn assert_clean(err: &CoreError) {
+        assert_no_secret_leak(err, MASTER_PW);
+        assert_no_secret_leak(err, WRONG_PW);
+    }
+
+    fn count(v: &UnlockedVault, sql: &str) -> i64 {
+        v.connection().query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    fn audit_count(v: &UnlockedVault, event: &str) -> i64 {
+        v.connection()
+            .query_row(
+                "SELECT COUNT(*) FROM audit_events WHERE event = ?1",
+                [event],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn epoch(v: &UnlockedVault) -> u32 {
+        v.connection()
+            .query_row("SELECT access_key_epoch FROM mesh_self", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The base32 code inside an invite string (between the prefix and `@`):
+    /// the bearer secret.
+    fn invite_code(invite: &str) -> String {
+        let rest = invite.split_once("v1:").unwrap().1;
+        rest.split_once('@').unwrap().0.to_owned()
+    }
+
+    #[test]
+    fn mesh_invite_create_requires_correct_reauth() {
+        // Command: mesh_invite_create.
+        let (_d, _p, v) = new_vault();
+        v.mesh_init("dev-a").unwrap();
+
+        let err = v.mesh_invite_create(&wrong(), None).unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        assert_clean(&err);
+        // Refused before anything was stored or audited.
+        assert_eq!(count(&v, "SELECT COUNT(*) FROM mesh_invites"), 0);
+        assert_eq!(audit_count(&v, "mesh_invite_created"), 0);
+
+        let inv = v.mesh_invite_create(&master_pw(), Some(10)).unwrap();
+        assert_eq!(inv.ttl_minutes, 10);
+        assert_eq!(count(&v, "SELECT COUNT(*) FROM mesh_invites"), 1);
+        assert_eq!(audit_count(&v, "mesh_invite_created"), 1);
+        let text = format_invite(&inv.token, &["127.0.0.1:7700".to_owned()]).unwrap();
+        let code = invite_code(text.expose());
+        assert_eq!(code.len(), 34, "token plus checksum");
+
+        // No error or debug output carries the token, once it exists.
+        let debug = format!("{inv:?}");
+        assert!(!debug.contains(&code), "Invite's Debug leaked the token");
+        let err = v.mesh_invite_create(&wrong(), None).unwrap_err();
+        assert_clean(&err);
+        assert!(!err.to_string().contains(&code));
+        assert!(!format!("{err:#}").contains(&code));
+        let mut typo = text.expose().to_owned();
+        let at = typo.find('@').unwrap() - 1;
+        let flipped = if typo.as_bytes()[at] == b'a' {
+            "b"
+        } else {
+            "a"
+        };
+        typo.replace_range(at..=at, flipped);
+        for bad in [typo.as_str(), text.expose().split('@').next().unwrap()] {
+            let e = parse_invite(bad).unwrap_err();
+            assert!(
+                !e.to_string().contains(&code),
+                "parse error echoed the token: {e}"
+            );
+        }
+        assert_eq!(count(&v, "SELECT COUNT(*) FROM mesh_invites"), 1);
+    }
+
+    /// Admit a second device into `v`'s roster with core's pairing step (no
+    /// network): the inviter's side of a join.
+    fn admit(v: &UnlockedVault, name: &str) -> api_tracker_core::mesh::DeviceId {
+        let inv = v.mesh_invite_create(&master_pw(), None).unwrap();
+        let pending = PendingIdentity::generate(name).unwrap();
+        let req = pending.request();
+        let access = v
+            .mesh_vault()
+            .access_keys(v.connection(), SystemClock.now_ms())
+            .unwrap()
+            .current;
+        let keys = v.mesh_keys().unwrap();
+        let mut store = v.mesh_open_store().unwrap();
+        membership::accept_pairing(
+            &mut store,
+            keys.signing_key(),
+            &inv.token.hash(),
+            &req,
+            &req.noise_pub,
+            &access,
+        )
+        .unwrap();
+        pending.device_id()
+    }
+
+    #[test]
+    fn mesh_device_remove_requires_correct_reauth() {
+        // Command: mesh_device_remove.
+        let (_d, _p, v) = new_vault();
+        v.mesh_init("dev-a").unwrap();
+        let unknown = "0123456789abcdef";
+
+        // The password is checked before the device is even resolved.
+        let err = v.mesh_device_remove(&wrong(), unknown).unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        assert_clean(&err);
+        // The right password with an unknown id: a clean refusal.
+        let err = v.mesh_device_remove(&master_pw(), unknown).unwrap_err();
+        assert!(
+            matches!(err, CoreError::Mesh(MeshError::NotAMember)),
+            "{err:?}"
+        );
+        assert_clean(&err);
+        assert_eq!(epoch(&v), 1);
+
+        // A real second member.
+        let b = admit(&v, "dev-b");
+        let row = |v: &UnlockedVault| {
+            v.mesh_devices()
+                .unwrap()
+                .into_iter()
+                .find(|d| d.device_id == b)
+                .unwrap()
+        };
+        assert!(!row(&v).removed);
+        let err = v.mesh_device_remove(&wrong(), &b.to_hex()).unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        assert_clean(&err);
+        assert!(!row(&v).removed, "a refused removal removes nothing");
+        assert_eq!(epoch(&v), 1, "and rotates nothing");
+        assert_eq!(audit_count(&v, "mesh_device_removed"), 0);
+
+        let (removed, new_epoch) = v.mesh_device_remove(&master_pw(), &b.to_hex()).unwrap();
+        assert_eq!(removed, b);
+        assert_eq!(new_epoch, 2);
+        assert!(row(&v).removed);
+        assert_eq!(epoch(&v), 2);
+        assert_eq!(audit_count(&v, "mesh_device_removed"), 1);
+    }
+
+    #[test]
+    fn mesh_leave_requires_correct_reauth() {
+        // Command: mesh_leave (through `api_tracker_mesh::replicate::leave_mesh`).
+        let (_d, _p, v) = new_vault();
+        v.mesh_init("dev-a").unwrap();
+        let before = v.mesh_status().unwrap().detail.unwrap();
+        let mut tried = 0;
+
+        let err = v
+            .mesh_leave(&wrong(), &mut |_| {
+                tried += 1;
+                false
+            })
+            .unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        assert_clean(&err);
+        assert_eq!(tried, 0, "nothing is delivered before the password");
+        let after = v.mesh_status().unwrap();
+        assert!(after.initialized, "a refused leave keeps the mesh");
+        let after = after.detail.unwrap();
+        assert_eq!(after.device_id, before.device_id);
+        assert_eq!(after.next_seq, before.next_seq, "no self-removal minted");
+        assert_eq!(audit_count(&v, "mesh_left"), 0);
+
+        let report = v.mesh_leave(&master_pw(), &mut |_| false).unwrap();
+        assert!(!report.delivered);
+        assert!(!v.mesh_status().unwrap().initialized);
+        assert_eq!(audit_count(&v, "mesh_left"), 1);
+    }
+
+    fn settings(listen: &[&str], all_interfaces: bool, discover: bool) -> NodeSettings {
+        NodeSettings {
+            run_while_open: true,
+            listen: listen.iter().map(|a| (*a).to_owned()).collect(),
+            all_interfaces,
+            discover,
+        }
+    }
+
+    const WIDENED: &str = "mesh_node_exposure_widened";
+
+    #[test]
+    fn mesh_node_settings_widening_the_lan_surface_requires_reauth() {
+        // Command: mesh_node_set_settings.
+        let (_d, _p, v) = new_vault();
+        // Not in a mesh: nothing to configure, nothing stored.
+        let err = v
+            .mesh_node_settings_set(None, &settings(&["127.0.0.1:7700"], false, false))
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Mesh(MeshError::NotInitialized)),
+            "{err:?}"
+        );
+        v.mesh_init("dev-a").unwrap();
+        assert_eq!(v.mesh_node_settings().unwrap(), NodeSettings::default());
+
+        // Loopback: no password, and no exposure audit.
+        let narrow = settings(&["127.0.0.1:7700"], false, false);
+        assert_eq!(v.mesh_node_settings_set(None, &narrow).unwrap(), narrow);
+        let more_loopback = settings(&["127.0.0.1:7700", "[::1]:7701"], false, false);
+        assert_eq!(
+            v.mesh_node_settings_set(None, &more_loopback).unwrap(),
+            more_loopback
+        );
+        assert_eq!(audit_count(&v, WIDENED), 0);
+        assert_eq!(v.mesh_node_settings_set(None, &narrow).unwrap(), narrow);
+
+        let widenings = [
+            ("all interfaces", settings(&["127.0.0.1:7700"], true, false)),
+            ("mDNS discovery", settings(&["127.0.0.1:7700"], false, true)),
+            (
+                "a LAN address",
+                settings(&["127.0.0.1:7700", "192.168.1.20:7700"], false, false),
+            ),
+            (
+                "a VPN address",
+                settings(&["100.64.1.2:7700"], false, false),
+            ),
+        ];
+        for (n, (what, wide)) in widenings.iter().enumerate() {
+            // No password: refused with its own code, nothing stored.
+            let err = v.mesh_node_settings_set(None, wide).unwrap_err();
+            assert!(
+                matches!(err, CoreError::Mesh(MeshError::ReauthRequired)),
+                "{what}: {err:?}"
+            );
+            assert_eq!(err.code(), "mesh_reauth_required");
+            assert_clean(&err);
+            assert_eq!(v.mesh_node_settings().unwrap(), narrow, "{what}");
+            // A wrong password: refused, nothing stored.
+            let err = v.mesh_node_settings_set(Some(&wrong()), wide).unwrap_err();
+            assert!(matches!(err, CoreError::WrongPassword), "{what}: {err:?}");
+            assert_clean(&err);
+            assert_eq!(v.mesh_node_settings().unwrap(), narrow, "{what}");
+            assert_eq!(audit_count(&v, WIDENED), n as i64, "{what}");
+            // The right password: stored and audited.
+            assert_eq!(
+                v.mesh_node_settings_set(Some(&master_pw()), wide).unwrap(),
+                *wide
+            );
+            assert_eq!(v.mesh_node_settings().unwrap(), *wide);
+            assert_eq!(audit_count(&v, WIDENED), n as i64 + 1, "{what}");
+            // Keeping it needs no password; narrowing back needs none either.
+            assert_eq!(v.mesh_node_settings_set(None, wide).unwrap(), *wide);
+            assert_eq!(v.mesh_node_settings_set(None, &narrow).unwrap(), narrow);
+            assert_eq!(audit_count(&v, WIDENED), n as i64 + 1, "{what}");
+        }
+        // The audit detail names what widened, never a password.
+        let details: Vec<String> = {
+            let mut st = v
+                .connection()
+                .prepare("SELECT detail FROM audit_events WHERE event = ?1 ORDER BY id")
+                .unwrap();
+            st.query_map([WIDENED], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            details,
+            vec![
+                "all interfaces allowed",
+                "mDNS discovery on",
+                "a non-loopback listen address added",
+                "a non-loopback listen address added",
+            ]
+        );
+        assert!(details
+            .iter()
+            .all(|d| !d.contains(MASTER_PW) && !d.contains(WRONG_PW)));
+        // Turning the node off is a narrowing.
+        let off = NodeSettings {
+            run_while_open: false,
+            ..narrow.clone()
+        };
+        assert_eq!(v.mesh_node_settings_set(None, &off).unwrap(), off);
+    }
 }

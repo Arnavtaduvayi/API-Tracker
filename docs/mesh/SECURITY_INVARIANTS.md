@@ -29,6 +29,18 @@ NN)** otherwise.
   `bind_guard::unspecified_addresses_are_refused_without_the_flag`,
   `no_mesh_dependency::the_gateway_does_not_depend_on_api_tracker_mesh`
   (the gateway's listener stays its own, loopback-only).
+  *Implemented (09), the desktop:* the app's node listens only on the
+  addresses in its local node settings (`core::mesh::node_settings`; empty by
+  default, so nothing listens until the user adds one), and an unspecified
+  address is refused unless "all interfaces" is on. Widening the LAN surface
+  — turning on all interfaces or mDNS discovery, or adding a listen address
+  that is not loopback — needs the master password, checked in core
+  (`UnlockedVault::mesh_node_settings_set`; no password →
+  `mesh_reauth_required`, a wrong one → `wrong_password`) and recorded in the
+  audit log (`mesh_node_exposure_widened`); the UI warns before it asks.
+  *Tests:* `tauri_command_authz::mesh::mesh_node_settings_widening_the_lan_surface_requires_reauth`,
+  `node_settings::tests::{validation_normalizes_and_refuses_what_the_node_would_refuse,
+  only_widening_the_lan_surface_needs_the_password}`.
 - **MESH-SI-2 No mesh data before authentication.** No mesh data is accepted or
   sent before a Noise handshake completes with an **active** roster device's
   static key (PROTOCOL §6.4), or with a valid pairing token.
@@ -199,6 +211,18 @@ NN)** otherwise.
   `identity::tests::key_blobs_are_bound_to_their_vault_and_corruption_is_typed`,
   `identity::tests::a_swapped_public_key_is_caught_when_the_keys_load`,
   `mesh_cli::init_then_status_in_human_and_json_form_without_any_key_material`.
+  *Implemented (09), the desktop:* the app runs its node in-process
+  (`api_tracker_mesh::supervisor`), never as a child process, so keys never
+  travel through an environment variable or a session file. Every lock path
+  (explicit lock, both auto-lock checks, backup restore) raises the node's
+  lock flag; a reaper joins the node so its keys drop; exit waits up to 5 s for
+  the same; a backup restore and `leave` stop the node and wait before they
+  touch the data directory. The node is started only from an unlocked vault,
+  while the app holds it. *Tests:*
+  `supervisor::a_real_node_starts_from_the_settings_and_a_lock_stops_it_and_drops_its_keys`,
+  `supervisor::a_lock_raises_the_flag_reaps_the_node_and_nothing_restarts`,
+  `supervisor::shutdown_on_exit_releases_the_data_directory_and_a_second_node_is_a_recorded_error`,
+  `supervisor::sync_runs_nothing_outside_a_mesh_or_with_the_setting_off_and_stops_a_running_node`.
 
 ## Spend caps
 
@@ -266,9 +290,12 @@ NN)** otherwise.
   `mesh_usage::binding_is_never_automatic_cascades_on_delete_and_is_refused_twice`,
   `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the
-  `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01, 05):
-  no mesh code, the node included, references the analytics module. *Tests:* none yet (12 adds a grep
-  guard).
+  `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01, 05,
+  09): no mesh code, the node included, references the analytics module; the
+  desktop's Devices view maps to no analytics screen, so opening it sends no
+  `screen_view`, and its `mesh_*` commands produce no product event. *Tests:*
+  `MeshAppNav.test.tsx` (the Devices view tracks nothing with consent
+  granted); 12 adds a grep guard.
 - **MESH-SI-15 No unsafe code.** `#![forbid(unsafe_code)]` in `crates/mesh`, and
   core keeps its crate-level `#![forbid(unsafe_code)]`. *Status:* implemented
   (01) for core (`core::mesh` is inside core), (04) for `crates/mesh`. The

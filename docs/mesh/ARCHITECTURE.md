@@ -60,7 +60,8 @@ Nothing outside this table ever replicates.
         crates/mesh  (api-tracker-mesh, from Increment 04)
         noise · wire · handshake · pair · session · serve ·
         replicate · node · runtime · peers · discover ·
-        instance · doctor · bind  — the ONLY network code
+        instance · doctor · supervisor · bind
+                               — the ONLY network code
                        │ drives
                        ▼
         crates/core::mesh   (pure, sans-IO)          ◄── crates/gateway reads
@@ -97,6 +98,8 @@ Nothing outside this table ever replicates.
 | `crates/mesh` `runtime`, `peers`, `instance`, `discover`, `doctor` | implemented (05) | the node loop (rounds, hooks, stop conditions), backoff and targets, one node per data directory with its control socket, opt-in mDNS and its in-memory fake, `mesh doctor` |
 | `mesh::caps` | implemented (07) | spend caps: month helpers, the policy thresholds, the read model and this device's `Ledger` (unpublished spend, open escrow), the escrow fence and the gateway's ack contract, create/raise/lower/reclaim/`try_spend`, the reconciler and rights requests/grants, alerts |
 | `mesh::sim::caps` | implemented (07) | the spend-cap scenario family on SQLite |
+| `mesh::node_settings` | implemented (09) | the desktop's local-only node settings (`mesh_meta` `node/settings`) and the rule for which changes widen the LAN surface (reauthenticated in `UnlockedVault::mesh_node_settings_set`) |
+| `crates/mesh` `supervisor` | implemented (09) | the desktop's in-process node: started after unlock and when the setting is turned on, stopped on every lock path, when it is turned off, and on exit |
 | `share` | specified, lands in 11 | credential shares |
 
 **Rules.** Core performs no network I/O (`crates/core/src/lib.rs`), and
@@ -157,12 +160,12 @@ pair again.
 
 ## Runtime
 
-**Status: implemented (05)** — `crates/mesh::{runtime, peers, instance,
-discover, doctor}`; the user-facing view is [USER_GUIDE.md](USER_GUIDE.md).
+**Status: implemented (05; the desktop's in-process node 09)** —
+`crates/mesh::{runtime, peers, instance, discover, doctor, supervisor}`; the user-facing view is [USER_GUIDE.md](USER_GUIDE.md).
 
 A **node** is `RunningNode::start(MeshNode, data_dir, NodeConfig,
 StopCondition)`. `tethra mesh serve` runs one in the foreground; the desktop
-app runs one on a thread from Increment 09. In order, it:
+app runs one in-process (below). In order, it:
 
 1. claims the data directory (`instance::claim`): binding
    `<data-dir>/mesh/node.sock` (0600, in the 0700 `mesh/` directory) is the
@@ -209,6 +212,31 @@ running exchanges finish, joins every thread, and the last reference to the
 `StopReport::keys_dropped` states it. Ctrl-C ends the process without this
 sequence (no signal handler, like the gateway); stored state is safe because
 every write is one transaction and an interrupted exchange commits nothing.
+
+**The desktop's node (Increment 09).** The app runs the same `RunningNode`
+**in-process**, on threads, through `api_tracker_mesh::supervisor`
+(`NodeSupervisor` in the app state). This deliberately differs from the
+foreground gateway, which is a child process: the keys never travel through an
+environment variable or a session file. The node is built from the unlocked
+vault (`MeshNode::open`) and the local node settings
+(`core::mesh::node_settings`, `mesh_meta` `node/settings`: run while open,
+listen addresses, all interfaces, discovery):
+
+- `sync_with_settings` runs after every unlock and every settings change: it
+  starts the node (setting on), restarts it (settings changed), or stops it
+  (setting off, or no mesh). It runs while the app holds the unlocked vault, so
+  a lock that follows always finds the node.
+- Every lock path (explicit lock, both auto-lock checks, backup restore)
+  raises the node's `StopFlag` (`StopReason::Locked`) and returns at once; a
+  reaper thread joins the node, whose last reference then drops and zeroizes
+  its keys. App exit does the same and waits up to 5 s. `leave` stops the node
+  and waits before the wipe.
+- Start failures (an address in use, another process's node holding the data
+  directory, an identity problem) never fail the unlock: they are kept and
+  shown by `mesh_status`, with how the last node stopped.
+- The desktop's commands (`apps/desktop/src-tauri/src/mesh_cmds.rs`) are thin
+  wrappers over core and this crate; reauthentication (invite, remove, leave,
+  widening the node's network exposure) is enforced in core.
 
 **Rollback hold (PROTOCOL.md §7.4).** A peer's `RollbackNotice` is stored per
 reporting device in `mesh_meta` (`rollback_hold/<device>`), so every process

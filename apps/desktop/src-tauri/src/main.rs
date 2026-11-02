@@ -99,6 +99,12 @@ struct AppState {
     /// NOT kill on drop, so without that the child outlived the app while
     /// the UI promised "tracking pauses when Tethra closes" (ZFT-021).
     foreground_gateway: Mutex<ForegroundGateway>,
+    /// The in-process Tethra Mesh node (Increment 09, DESIGN §D13): started
+    /// after unlock when "Run mesh while Tethra is open" is on, stopped on
+    /// every lock path and on exit. Never a child process, so the mesh keys
+    /// never leave this one. It has its own internal mutex; lock order is
+    /// `slot` before it, never the reverse.
+    mesh_node: api_tracker_mesh::supervisor::NodeSupervisor,
 }
 
 impl AppState {
@@ -191,6 +197,8 @@ fn with_vault_impl<T>(
         drop(slot);
         drop(expired);
         notify_gateway_vault_locked(&state.data_dir, Some(auto_lock_minutes));
+        // The mesh node's keys go with the vault (ADR 0020, MESH-SI-7).
+        state.mesh_node.lock();
         return Err(locked_err());
     }
     if touch_activity {
@@ -223,6 +231,7 @@ fn vault_status(state: State<'_, AppState>) -> CmdResult<VaultStatusDto> {
     }
     if let Some(minutes) = auto_locked_minutes {
         notify_gateway_vault_locked(&state.data_dir, Some(minutes));
+        state.mesh_node.lock();
     }
     Ok(VaultStatusDto {
         exists: state.paths().vault_exists(),
@@ -282,6 +291,10 @@ fn vault_unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
             e.code
         );
     }
+    // Start the mesh node when "Run mesh while Tethra is open" is on, while
+    // the unlocked vault is held. Best effort: a failure never fails the
+    // unlock; `mesh_status` shows it.
+    mesh_cmds::start_node_after_unlock(&state);
     Ok(())
 }
 
@@ -295,6 +308,7 @@ fn vault_lock(state: State<'_, AppState>) -> CmdResult<()> {
     drop(slot);
     drop(vault);
     notify_gateway_vault_locked(&state.data_dir, minutes);
+    state.mesh_node.lock();
     Ok(())
 }
 
@@ -1026,12 +1040,27 @@ fn backup_restore(
     force: bool,
 ) -> CmdResult<backup::BackupInfo> {
     let backup_password = SecretString::new(backup_password);
-    let info = backup::restore_backup(
+    // The in-process mesh node writes to this data directory (its rows, its
+    // identity marker, its control socket): it must be gone before the
+    // restore replaces the directory under it, or it could write a stale
+    // marker after the restore wiped the mesh identity.
+    let mesh_was_running = state.mesh_node.is_running();
+    mesh_cmds::stop_node_for_restore(&state)?;
+    let info = match backup::restore_backup(
         std::path::Path::new(&path),
         &backup_password,
         &state.paths(),
         force,
-    )?;
+    ) {
+        Ok(info) => info,
+        Err(e) => {
+            // Nothing was restored: the session stays, and so does its node.
+            if mesh_was_running {
+                mesh_cmds::start_node_after_unlock(&state);
+            }
+            return Err(e.into());
+        }
+    };
     // Only after a successful restore: drop the old in-memory session. The
     // restored vault requires a fresh unlock with its own master password.
     // (On failure we leave the current session intact so the user is not
@@ -1046,6 +1075,7 @@ fn backup_restore(
     // stay resident in the gateway to attribute traffic against a vault that
     // may no longer even exist (ADR 0020).
     notify_gateway_vault_locked(&state.data_dir, minutes);
+    state.mesh_node.lock();
     Ok(info)
 }
 
@@ -4768,6 +4798,7 @@ fn main() {
             data_dir,
             tracking: Mutex::new(None),
             foreground_gateway: Mutex::new(ForegroundGateway::default()),
+            mesh_node: api_tracker_mesh::supervisor::NodeSupervisor::new(),
         })
         .invoke_handler(tauri::generate_handler![
             vault_status,
@@ -5017,6 +5048,9 @@ fn main() {
                     minutes
                 };
                 notify_gateway_vault_locked(&state.data_dir, minutes);
+                // The in-process mesh node stops with the app and drops its
+                // keys; bounded so a stuck exchange cannot hold the exit.
+                let _ = state.mesh_node.shutdown(Duration::from_secs(5));
                 // The foreground fallback is a CHILD of this app, and the UI
                 // promises "tracking pauses when Tethra closes". Nothing else
                 // ends it — `Child` has no kill-on-drop — so the promise is

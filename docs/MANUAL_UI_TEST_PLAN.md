@@ -2848,7 +2848,7 @@ cover the primary workflow. Use fake credentials only.
 ## U — Card-based interface and first run (ADR 0030)
 
 Supersedes earlier cases wherever labels differ. Run against a scratch vault
-(`TETHRA_DATA_DIR` pointed somewhere disposable), never a real one.
+(`TETHRA_DIR` pointed somewhere disposable), never a real one.
 
 ### U1 — First run, from nothing
 
@@ -2913,3 +2913,29 @@ Supersedes earlier cases wherever labels differ. Run against a scratch vault
 | U6.4 | System → Reduce motion on | No card lift, no button transform, no chart animation |
 | U6.5 | Resize the window to ~700px, then ~560px | Grids collapse; the content pane never scrolls sideways |
 | U6.6 | Check every status dot | Each sits beside a word — colour never carries the meaning alone |
+
+---
+
+## D — Devices (Tethra Mesh, Increment 09)
+
+Run against **two scratch data directories**, never a real vault. The app:
+`cd apps/desktop && TETHRA_DIR="$(mktemp -d)/tethra" TETHRA_INSECURE_FAST_KDF=1 npx tauri dev`
+(never `tauri dev` without `TETHRA_DIR`: it opens the real vault). The second
+device is the CLI with its own `TETHRA_DIR`, `TETHRA_INSECURE_FAST_KDF=1` and a
+fake `TETHRA_PASSWORD`. Listen on `127.0.0.1` only on a development machine.
+
+| # | Step | Expected |
+|---|---|---|
+| D1 | Unlock, open **Devices** | Two or three sentences on what the mesh does and does not do, a user-guide link, **Create mesh** and **Join a mesh**. No analytics event fires for the view |
+| D2 | **Create mesh** with a name | This device, Devices (one row, "this device"), Peers, Health and Leave appear |
+| D3 | Add listen `127.0.0.1:0`, turn on **Run mesh while Tethra is open**, save | No password asked (loopback). The node shows as running with its bound `127.0.0.1:<port>` |
+| D4 | Turn on **Allow all interfaces** or **Find devices on this network**, or add `192.168.x.y:7420`; save | A LAN-exposure warning is on screen before saving; saving asks for the master password; a wrong one is refused and nothing changes |
+| D5 | **Pair a device** | Master password first; then the invite, shown once, with copy, a countdown and the "treat this like a password" warning |
+| D6 | Close the dialog | The invite is gone (reopening needs a new invite and the password again) |
+| D7 | In a terminal: `TETHRA_DIR=<second> tethra mesh join -` and paste the invite | Joins; within a round the new device appears in Devices with a last exchange |
+| D8 | **Remove** the new device | Confirmation first, then the master password; the row shows **removed** |
+| D9 | Lock the app (or wait for auto-lock), then `TETHRA_DIR=<app's dir> tethra mesh status` | "not running": the node stopped with the lock |
+| D10 | Unlock again | The node starts again by itself (the setting is on) |
+| D11 | Quit the app; `tethra mesh status` against its data dir | Not running |
+| D12 | **Leave mesh** | Confirmation, then the password; back to the not-in-a-mesh screen |
+| D13 | Stale and errors | A device not exchanged with for over 24 h shows **stale**; every error shows a plain message, never an invite or a password |

@@ -206,7 +206,9 @@ step on its own over your LAN or VPN
 share projects and see their gateway-observed usage across devices
 (`tethra mesh project|usage|settings`); and set monthly spend caps that hold
 across devices, raise alerts, and are enforced by a device's gateway where you
-switch that on (`tethra mesh cap`). See the
+switch that on (`tethra mesh cap`). The desktop app's **Devices** view does
+the device workflow (create, pair, devices, peers, health, leave) and runs the
+node in-process while Tethra is open and unlocked. See the
 [user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md),
 [ADR 0031](docs/decisions/0031-device-mesh.md) and
 [ADR 0032](docs/decisions/0032-spend-caps.md).

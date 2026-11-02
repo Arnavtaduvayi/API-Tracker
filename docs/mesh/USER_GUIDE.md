@@ -10,7 +10,9 @@ encrypted Noise channel that only your paired devices can open
 This guide covers what exists today: pairing, the node that keeps devices
 converged, shared projects and cross-device usage, monthly spend caps (alerts,
 and a gateway that refuses requests over a cap where you switch that on), and
-the `status` and `doctor` views.
+the `status` and `doctor` views. The commands below are the CLI's; the desktop
+app does the device workflow from its **Devices** view
+([section 8](#8-in-the-desktop-app)).
 
 ## What replicates
 
@@ -346,10 +348,71 @@ removed item fetches it again (`repair` then reports a change, which is expected
 after a rebuild). `--repair` runs a repair round now: through the running node,
 or directly from `doctor` when no node runs.
 
+## 8. In the desktop app
+
+Open **Devices** in the sidebar. It covers sections 1 to 3 and the device side
+of 6 and 7 without a terminal; shared projects, usage and spend caps are still
+CLI-only in the app.
+
+- **Start or join a mesh.** A device outside a mesh offers **Create mesh**
+  (name the device: the other devices see the name) and **Join a mesh** (paste
+  an invite from another device, and name this one).
+- **Run the node.** Under **This device**, add a listen address and turn on
+  **Run mesh while Tethra is open**. An address is `IP:PORT`: `127.0.0.1:7420`
+  for this machine only, your LAN address (`192.168.1.20:7420`) or your VPN
+  address (`100.101.102.103:7420`); port 0 picks a free port at each start.
+  The node runs inside the app, on its own threads:
+  - it starts when you unlock Tethra (if the setting is on) and when you turn
+    the setting on;
+  - it stops when Tethra locks (including auto-lock and a backup restore), when
+    you turn the setting off, and when you quit;
+  - its keys are in the app's memory only while it runs, and never go to
+    another process. There is no background service: while Tethra is closed or
+    locked, this device does not exchange.
+
+  `tethra mesh serve` is the alternative. Only one node runs per data
+  directory; **This device** shows a node another process runs.
+- **Opening the node to your network needs your master password.** Turning
+  on **Allow all interfaces** or **Find devices on this network (mDNS)**, or
+  adding a listen address that is not a loopback address, lets other machines
+  on your network reach this device's mesh listener. They still have to pass
+  the handshake, which needs your mesh's keys, but the listener is exposed.
+  The app warns you and asks for your master password before it saves such a
+  change; this is checked in Tethra's core, not only in the window. Turning
+  these off, or loopback addresses, need no password.
+- **Pair a device.** **Pair a device** asks for your master password, then
+  shows a one-time invite naming the running node's addresses. The node must
+  be running, because the new device connects to it. The invite is shown once,
+  with a countdown. Until it expires, treat it like a password and move it over
+  a channel you trust; closing the dialog discards it. On the new device, use
+  **Join a mesh** (or `tethra mesh join -`).
+- **Devices.** Every device this one knows, with its state: **this device**,
+  **stale** (no exchange with it for over 24 hours, or never), **removed**,
+  **forked** or **not admitted**, the last exchange, and how much it lacked at
+  the last exchange. **Remove** asks you to confirm and then for your master
+  password, like `tethra mesh remove`.
+- **Peers.** The addresses the node dials, where each came from, the last
+  success, failures and when it retries; add or remove addresses as with
+  `tethra mesh peer`.
+- **Health.** The `doctor` checks, and **Replicate now**: a round through the
+  running node (the app's or another process's), or one exchange per known
+  address when none runs.
+- **Leave mesh.** Asks you to confirm and then for your master password, like
+  `tethra mesh leave`; the app stops its node first. Leaving deletes this
+  device's mesh identity and records here, including any spend-cap
+  enforcement you switched on.
+
+The app sends no analytics about any of this.
+
 ## Troubleshooting
 
 - **"another Tethra Mesh node is already running for this data directory".**
   Stop it with `tethra mesh stop`, or use it: `replicate` and `status` talk to it.
+  In the desktop app, **This device** shows the other node, and the app's own
+  node cannot start until it stops.
+- **"Start the mesh node first" when pairing from the desktop.** Add a listen
+  address and turn on **Run mesh while Tethra is open** (or run `tethra mesh
+  serve`): the invite names the running node's addresses.
 - **"the data directory path is too long for the node's control socket".**
   Unix sockets are limited to about 100 bytes of path. Use a shorter `TETHRA_DIR`.
 - **A peer stays unreachable.** Check that its node is running (`mesh status`

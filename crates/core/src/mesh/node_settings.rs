@@ -61,7 +61,7 @@ pub fn validate(s: &NodeSettings) -> Result<NodeSettings> {
         let addr: SocketAddr = raw
             .trim()
             .parse()
-            .map_err(|_| invalid("a listen address must be IP:PORT, such as 127.0.0.1:7700"))?;
+            .map_err(|_| invalid("a listen address must be IP:PORT, such as 127.0.0.1:7420"))?;
         if addr.ip().is_unspecified() && !s.all_interfaces {
             return Err(invalid(
                 "listening on every interface (0.0.0.0 or [::]) needs \"all interfaces\" turned on",
@@ -77,7 +77,7 @@ pub fn validate(s: &NodeSettings) -> Result<NodeSettings> {
     }
     if s.run_while_open && listen.is_empty() {
         return Err(invalid(
-            "the node needs a listen address before it can run; add one such as 127.0.0.1:7700",
+            "the node needs a listen address before it can run; add one such as 127.0.0.1:7420",
         ));
     }
     Ok(NodeSettings {

@@ -6,6 +6,30 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: pair and manage your devices from the desktop app (in development)
+
+A new **Devices** view does the whole device workflow without a terminal
+([ADR 0031](docs/decisions/0031-device-mesh.md),
+[user guide](docs/mesh/USER_GUIDE.md#8-in-the-desktop-app)): create or join a
+mesh, pair a device with a one-time invite, see each device's state (stale,
+removed, forked) and when it last exchanged, remove a device, manage the
+addresses your node dials, run the health checks, replicate now, and leave.
+
+- **The mesh runs while Tethra is open.** Turn on "Run mesh while Tethra is
+  open" and give a listen address: the node runs inside the app, starts when
+  you unlock, and stops when Tethra locks (auto-lock included) or quits. Its
+  keys stay in the app's memory and never go to another process. There is
+  still no background service.
+- **Your password guards anything that exposes or admits.** Creating an
+  invite, removing a device, leaving, and opening the node to your network
+  (all interfaces, mDNS discovery, a non-loopback address) each ask for your
+  master password, and Tethra's core checks it, not just the window. The app
+  warns you before it opens the node to your network.
+- **The invite is shown once.** With a countdown and a reminder to treat it
+  like a password; closing the dialog discards it. No key material is ever
+  shown.
+- No analytics are sent for any of it.
+
 ### Added — Tethra Mesh: the gateway enforces spend caps where you switch it on (in development)
 
 `tethra mesh cap enforce <cap> on` has this device's local gateway refuse a

@@ -98,7 +98,8 @@ permanent design choice or something a later increment changes.
 
 - **No background service for the mesh in v1.** There is no LaunchAgent,
   systemd unit or Windows service: the node runs only while `tethra mesh serve`
-  runs (and, from Increment 09, while the desktop app is open and unlocked). A
+  runs, or while the desktop app is open and unlocked with "Run mesh while
+  Tethra is open" on. A
   service would have to hold keys while the vault is locked, which ADR 0020
   forbids. A device whose node is not running replicates only when someone runs
   `tethra mesh replicate`.
@@ -148,6 +149,22 @@ permanent design choice or something a later increment changes.
   report).
 - **Lag is measured at the last exchange**, not continuously: a device not heard
   from shows its last figures with their time.
+- **The desktop's node stops with the app, not instantly.** On a lock the app
+  signals its node and returns; the node finishes the exchange it is in
+  (bounded by the session limits) before its threads end and its keys are
+  dropped. On quit the app waits up to 5 s for that, then exits; the operating
+  system reclaims the rest. A crash or a killed process skips the sequence, as
+  for the gateway. While a stopped node is still finishing, turning the node on
+  again waits up to 10 s and otherwise says so.
+- **The desktop's node and `tethra mesh serve` exclude each other.** One node
+  per data directory: whichever starts first holds it, and the other reports
+  why it could not start. The desktop shows a CLI node and replicates through
+  it, but cannot change its settings.
+- **Listen addresses in the desktop are IP literals.** The app listens on
+  `IP:PORT` addresses only (no host names, no `--advertise` equivalent): the
+  node publishes the addresses it is bound to. A device reachable under a VPN
+  name can be dialled by name from the others (`peer add`), or run
+  `tethra mesh serve --advertise`.
 
 ## Usage and cost
 
