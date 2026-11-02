@@ -18,8 +18,8 @@ Every session reads this file first and updates it at the end (README §1).
 | 06 | [Shared projects & cross-device usage](06-shared-projects-and-usage.md) | S | M | done | 2026-10-28 | 2026-10-28 | `dc6b110`, `c671d33`, `99df156` | CI `40749228074` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `40749228069` (success). Earlier: `dc6b110` CI `40745888639` **failed** on Windows (the lost update fixed in `99df156`); `c671d33` CI `40746051787` and service `40746051748` success |
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | done | 2026-10-28 | 2026-10-28 | `e2b9abd`, `6d06b15` | CI `40806698828` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (35 min; `6d06b15` removes the simulator's fsyncs), frontend, desktop backend, packaged app on macOS); macOS service `40806700080` (success). `6d06b15` + record `e7104c1`: CI `40810268430` (success), service `40810267760` (success) |
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). Record `c35615d`: CI `40819371929`, service `40819371912` (success) |
-| 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record: CI pending (next session) |
-| 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | in-progress | 2026-11-02 | | | |
+| 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
+| 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). This record: CI pending (next session) |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | pending | | | | |
 | 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | pending | | | | |
 
@@ -40,6 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
+| 10 `aa63799` | **1,842 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (2): `tauri_command_authz` `mesh::mesh_cap_enforce_requires_correct_reauth` (23 in the file), `-p api-tracker-mesh --test desktop_flow` 1 | **392 passed** in 35 files (`npm test`; +45): `CapsPanel` 17, `MeshUsageCard` 10, `MeshProjectPanel` 8, `MeshAvailableProjects` 7, `MeshCapAlerts` 1, `DevicesView` +2 | **179 passed** (`bash scripts/smoke.sh`) |
 | 09 `771b7ed` | **1,840 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`: 1,839 in the full run, plus `supervisor::a_device_pairs_with_the_in_process_node…` added after it and run with its file, 11/11). New (17): core `--test tauri_command_authz` `mesh::*` 4 (22 in the file), `mesh::node_settings` unit 2, `-p api-tracker-mesh --test supervisor` 11 | **347 passed** in 30 files (`npm test` in apps/desktop; base 308 in 25): `DevicesView` 16, `MeshThisDevice` 8, `MeshSetup` 7, `MeshPeersHealth` 7, `MeshAppNav` 1 | **179 passed** (`bash scripts/smoke.sh`) |
 | 08 `cb91633` | **1,823 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (15): gateway `--test cap_enforcement` 14, core `--test mesh_caps` 16 (+1); ignored +1 (`perf::perf_cap_admission_overhead`). Perf: `bash scripts/gateway_perf.sh` 9 passed; admission within noise (PERFORMANCE_RESULTS) | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`) |
 | 07 `e2b9abd` | **1,808 passed, 0 failed, 13 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`; the affected suites were rerun after the last edits). New (27): core `--test mesh_caps` 15, `--test mesh_sim` `caps_*` 3 (+1 ignored `caps_family_long`), `caps::policy` unit 7, `caps::period` unit 1, `cli --test mesh_cli` 9 (+1). Caps CI seeds: 16 × 240 steps in ~11 s locally. **Release soak: 256 seeds × 240 steps, 0 failing** (`bash scripts/mesh_soak.sh --scenario caps --minutes 10`; four batches of 64 seeds, ~43 s of simulation each; 629 s wall because the idle machine was throttled — a 64-seed batch takes ~45 s wall when it is not), plus 64 + 64 + 8 seeds in earlier and timing runs, 0 failing | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`; 4 cap checks) |
@@ -100,12 +101,76 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 08 | Small, this table only: the refusal drains the unread body (bounded: 64 MiB, 5 s) after a half-close; `GateCapStatus.{unmetered_requests, refused_requests}`, `GateStatus.failing_open`; counter `cap_refused`; `CapReport.{gate, gate_fresh}`, `CapRow.enforced_here`; `CapGate::with_stale_after_for_test`. | Required by what was built. | — |
 | 09 | **Widening the node's network exposure needs the master password**, enforced in core (`UnlockedVault::mesh_node_settings_set`): turning on all interfaces or mDNS discovery (as the 09 file says) **and adding a non-loopback listen address** (same LAN surface). No password → `MeshError::ReauthRequired` (`mesh_reauth_required`, so the UI knows to ask), a wrong one → `WrongPassword`; audit `mesh_node_exposure_widened`. | A specific LAN address opens the same surface as the two flags. | ADR not needed (stronger, local); SECURITY_INVARIANTS SI-1, USER_GUIDE §8 |
 | 09 | Small, this table only: the node handle is `api_tracker_mesh::supervisor::NodeSupervisor` (own mutex) in `AppState.mesh_node`, not `Mutex<Option<NodeHandle>>`; the lifecycle tests are in `crates/mesh/tests/supervisor.rs` (CI runs no desktop-crate tests); the orchestrator wrote the shared pieces in the contract commit (`core::mesh::node_settings`, `membership::is_stale`, `peers::backoff_until`, the supervisor, `replicate::{replicate_known_peers, leave_mesh}` — the CLI's one-shot replicate and leave now call them too); `backup_restore` stops the node and waits before restoring (restarts it if the restore fails); polled reads use `with_vault_background`; extra codes `mesh_node_not_running`, `mesh_node_no_address`, `mesh_node_stopping`, `mesh_external_node`, `mesh_no_peers`, `mesh_network`, `mesh_node`; invites name at most 8 addresses; desktop listen addresses are `IP:PORT` literals (no `--advertise`); Devices sits in the sidebar's System group; `analyticsScreenFor` returns `null` for it. | Simpler, safer, or required by what was built. | — |
+| 10 | Small, this table only: the commands are in `apps/desktop/src-tauri/src/mesh_project_cmds.rs` (a sibling of `mesh_cmds.rs`, not additions to it, so neither file passes ~600 lines); `mesh_usage_report(filter, publish)` and `mesh_caps_list(reconcile)` take a flag — polled reads write nothing, publishing and reconciling run on open, refresh and after an action; dollar amounts cross IPC as text for core's `pricing::dollars_to_micros`; `mesh_cap_rights` falls back to the read-only report with `reconcile_error` like `mesh_caps_list`; blank usage-filter fields mean "absent", blank cap or device ids are refused by core; "Enforcement inactive: …" shows only when the gate status is fresh, otherwise "the gateway does not seem to be running" for a cap enforced here (a stale reason could contradict a switch just made); caps are matched to a project through its `root`; no month picker (the current month); reclaim from every other device only (the CLI's `--from` is not in the UI); Alerts needed no change (it renders the backend's title and text, `MeshCapAlerts.test.tsx`). | Simpler, or required by what was built. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 10 — Desktop: projects, usage & caps (2026-11-02)
+
+**What landed.**
+- Contract (`75dc394`, orchestrator): `mesh_project_cmds.rs` (15 commands,
+  DTOs `MeshShareDto`, `MeshMergeDto`, `MeshUsageFilterDto`, `MeshUsageDto`,
+  `MeshCapsDto`, `MeshReclaimDto`, `MeshEnforceDto`), registered; the
+  TypeScript types and `api.mesh*` methods.
+- Subagent A (Rust): every command (thin wrappers; `GatewaySocket::for_vault`
+  as the cap probe), the enforcement authz test, `desktop_flow.rs` (the
+  manual run's backend path), 15 inventory rows (`total_commands` 167).
+- Subagent B (React): `MeshProjectPanel` (project page), `MeshUsageCard`
+  (project page and Usage), `CapsPanel`, `MeshAvailableProjects` (Devices
+  page), `MeshFigureParts`, `MeshTestFixtures` (tests only), 45 tests. No
+  contract change. Values computed in TS, all display-only: formatting
+  (`formatSignedMicros`, the typed dollar text echoed in confirmations, device
+  labels, `toLocaleString`), which columns/rows to show (split-unknown column
+  only when some device has any; no total row without device rows), list
+  filters on backend booleans ("available" = unbound, not archived, not
+  merged; merge candidates), matching caps by `root`, labels "This
+  month"/"Next month" by position, hiding actions core would refuse on
+  frozen/replaced caps.
+- Integration: docs (USER_GUIDE §8 "Shared projects, usage and spend caps in
+  the app", MANUAL_UI_TEST_PLAN §D-P, SECURITY_INVARIANTS SI-9/11/13,
+  TEST_PLAN, ARCHITECTURE, README, CHANGELOG).
+
+**The manual run, honestly.** As in 09, no native-window automation was
+available. The flows ran end to end through the functions the commands call:
+`desktop_flow::a_project_shared_in_the_app_shows_the_cli_devices_usage_and_its_cap`
+— the app's in-process node, a paired device, share in the app, bind on the
+other, seeded priced/unpriced/not-extracted usage published and exchanged,
+the app's report labelled per device ($0.42, 9/5/3/1 requests) with the
+total label, a $100 cap created in the app with $50 reaching the other device
+and its $0.42 of use coming back, polled reads writing nothing, enforcement
+switched on one device only. The 403 on a foreground gateway is 08's
+`crates/gateway/tests/cap_enforcement.rs` (two devices end to end); it was
+not re-run by hand. The app was not relaunched for 10 (09 launched it; 10
+changes no startup path). **Owner action:** `docs/MANUAL_UI_TEST_PLAN.md`
+§D and §D-P once.
+
+**For 11 (load-bearing).**
+- "Share credential with my devices" belongs on the credential page
+  (`CredentialDetail.tsx`), in a delimited panel like `MeshProjectPanel`: a
+  credential can be shared only when its project is bound
+  (`MeshProjectRow.bound_local_project`); incoming shares fit a list on the
+  Devices page beside `MeshAvailableProjects` ("Shared with this device",
+  each with **Import into…** a local project, through `ReauthDialog`).
+- Commands: a third sibling module (`mesh_share_cmds.rs`) keeps the files
+  small; `with_vault_background` for polled lists; reauth in core
+  (`mesh_credential_share`, `mesh_credential_import`) with authz tests and
+  inventory rows. Never return a credential value or sealed bytes over IPC.
+- UI helpers to reuse: `MeshCommon.ts` (`meshErrText`, `scrubbed`,
+  `shortId`), `MeshFigureParts.tsx` (device cell, as-of cell, notes),
+  `MeshTestFixtures.ts`.
+
+**Surprises.**
+- None in the code. The core alert's recommended action names CLI commands
+  only (`tethra mesh cap show`/`raise`); the desktop shows it as text. The TS
+  `AlertKind` union in `types.ts` predates many core kinds (unused; left).
+
+**Not done / honest list.**
+- The GUI click-through (owner action above). Nothing in 10's scope was
+  moved.
 
 ### Increment 09 — Desktop: devices & node (2026-10-29 → 2026-11-02)
 
