@@ -951,7 +951,13 @@ impl CapsWorld {
             if pending > 0 && !c.frozen {
                 return self.fail(
                     "lower settles",
-                    format!("device {i}: pending decrease {pending} beyond {stuck} held by others"),
+                    format!(
+                        "device {i}: pending decrease {pending} beyond {stuck} held by others \
+                         (target {target}, supply {}, used {}, this device holds {})",
+                        f.supply(),
+                        f.view.total_used,
+                        f.device(&l.me).avail
+                    ),
                 );
             }
             if f.pending_decrease() > 0 {

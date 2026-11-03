@@ -10,6 +10,13 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 12 (2026-11-03).** The release caps soak found a
+> lower that could not settle when devices had spent past their shares: the
+> remainder sat with the owner's own share. The owner now also burns, from
+> its own keep, what the other holders' excess cannot cover (ADR 0032 D12,
+> PROTOCOL.md §5.5.1). A running node stops when a backup restore replaces
+> its vault database (`StopReason::Replaced`).
+>
 > **Amended by Increment 11 (2026-11-03).** Credential sharing as built (ADR
 > 0033, PROTOCOL.md §5.7): the sealed plaintext and its seven bound fields are
 > as D16 says; the "all current devices" intent is the local table

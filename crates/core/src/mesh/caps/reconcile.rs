@@ -476,7 +476,28 @@ pub(crate) fn burn_after_lower(
                 let fair = policy::fair_share(target, n);
                 let keep =
                     policy::keep_after_lower(fair, used, f.overrides_of(&l.me, &cap.owner_device));
-                let burn = policy::burn_after_lower(plan.avail(&cap, m, &f)?, keep, pending);
+                let avail = plan.avail(&cap, m, &f)?;
+                let mut burn = policy::burn_after_lower(avail, keep, pending);
+                if cap.owner_device == l.me {
+                    // The owner absorbs what the other holders' excess cannot
+                    // cover (ADR 0032 D12).
+                    let others: u128 = f
+                        .view
+                        .devices
+                        .iter()
+                        .filter(|(d, _)| **d != l.me)
+                        .map(|(d, r)| {
+                            let used_d = u64::try_from(r.used).unwrap_or(u64::MAX);
+                            let keep_d = policy::keep_after_lower(
+                                fair,
+                                used_d,
+                                f.overrides_of(d, &cap.owner_device),
+                            );
+                            u128::try_from((r.avail - i128::from(keep_d)).max(0)).unwrap_or(0)
+                        })
+                        .sum();
+                    burn = policy::owner_burn_after_lower(burn, avail, others, pending);
+                }
                 if burn > 0 {
                     burned += plan.give(fence, &cap, m, &f, Recipient::Burn, burn)?;
                 }

@@ -196,6 +196,12 @@ permanent design choice or something a later increment changes.
 
 ## Spend caps
 
+- **After a lower, the owner gives up its own unspent share first when other
+  devices spent past theirs.** A decrease must bring the rights in existence
+  down to the new cap (or to what was already spent); devices that overspent
+  have nothing left to burn, so the cap's owner burns from its own share the
+  part they cannot cover (ADR 0032 D12). The owner can then spend less this
+  month than an equal share would suggest.
 - **Enforcement is per device and opt-in.** A device's gateway refuses requests
   over a cap only after `tethra mesh cap enforce` there; elsewhere the cap
   raises alerts and a device can spend past its rights (its available amount

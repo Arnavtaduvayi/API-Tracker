@@ -105,6 +105,28 @@ pub fn burn_after_lower(avail: i128, keep: u64, pending: u128) -> u64 {
     u64::try_from(u128::from(above).min(pending)).unwrap_or(u64::MAX)
 }
 
+/// What the cap's **owner** burns after a lower: its own excess
+/// (`own_burn`, from [`burn_after_lower`]) plus the part of the pending
+/// decrease the other holders cannot cover from their excess
+/// (`others_excess`, each holder's avail above its keep, from this view),
+/// taken from the owner's own keep, never more than it holds. Devices that
+/// spent past their share leave nothing to burn, so without this the
+/// owner's own remainder would keep the supply above the cap forever, and
+/// the owner could still spend after the total passed it (ADR 0032 D12).
+pub fn owner_burn_after_lower(
+    own_burn: u64,
+    own_avail: i128,
+    others_excess: u128,
+    pending: u128,
+) -> u64 {
+    let short = pending
+        .saturating_sub(others_excess)
+        .saturating_sub(u128::from(own_burn));
+    let total = u128::from(own_burn).saturating_add(short).min(pending);
+    let total = total.min(u128::from(clamp_u64(own_avail)));
+    u64::try_from(total).unwrap_or(u64::MAX)
+}
+
 /// Whether the owner mints next month on this day of the month.
 pub fn advance_due(day_of_month: u8) -> bool {
     day_of_month >= ADVANCE_MINT_DAY
@@ -173,6 +195,21 @@ mod tests {
         assert_eq!(burn_after_lower(45, keep, 100), 30);
         assert_eq!(burn_after_lower(45, keep, 10), 10);
         assert_eq!(burn_after_lower(10, keep, 100), 0);
+    }
+
+    #[test]
+    fn the_owner_absorbs_what_other_holders_cannot_cover() {
+        // The others overspent (no excess): the owner burns its keep down to
+        // the pending decrease (the soak's seed 5000537: 2 918 of 2 918).
+        assert_eq!(owner_burn_after_lower(0, 2_918, 0, 2_918), 2_918);
+        // Others will burn enough: the owner burns only its own excess.
+        assert_eq!(owner_burn_after_lower(5, 40, 100, 60), 5);
+        // Others cover part: the owner takes the rest from its keep.
+        assert_eq!(owner_burn_after_lower(5, 40, 20, 60), 40);
+        // Never more than it holds, never more than pending.
+        assert_eq!(owner_burn_after_lower(0, 10, 0, 50), 10);
+        assert_eq!(owner_burn_after_lower(0, -3, 0, 50), 0);
+        assert_eq!(owner_burn_after_lower(30, 90, 0, 20), 20);
         assert_eq!(
             keep_after_lower(20, 35, 7),
             7,

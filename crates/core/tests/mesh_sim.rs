@@ -308,6 +308,20 @@ fn caps_each_injection_alone_is_exercised_and_defended() {
     }
 }
 
+/// Caps seeds the release soak found failing (Increment 12): a lower whose
+/// remainder sat with the owner's own share while other devices had
+/// overspent theirs, so the supply never came down to the cap (fixed by the
+/// owner absorbing it, ADR 0032 D12).
+#[test]
+fn caps_regression_seeds() {
+    let configs: Vec<CapsConfig> = [5_000_537u64, 5_002_412]
+        .into_iter()
+        .map(|s| CapsConfig::from_seed(s, 240))
+        .collect();
+    let (_, failures) = caps_run_all(configs);
+    assert!(failures.is_empty(), "{}", caps_report(&failures));
+}
+
 /// The same seed gives the same decisions: `MESH_SIM_SEED` (default 7).
 #[test]
 fn caps_replay_is_deterministic() {

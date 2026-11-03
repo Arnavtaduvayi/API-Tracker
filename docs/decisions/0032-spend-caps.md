@@ -200,6 +200,21 @@ never see cap figures (SI-19).
 - **Measured:** the admission check is inside run-to-run noise
   (`docs/gateway/PERFORMANCE_RESULTS.md`).
 
+**D12 — The owner absorbs a lower's remainder (Increment 12).** A lower's
+holders each keep `max(0, share − own spend)`. When some devices spent past
+their share (a partition, the bounded overshoot), they have nothing to burn,
+and the owner's reclaim finds nothing to take back: the remainder sits with
+the owner's own share, so the supply stays above `max(target, total used)`
+and the owner can still spend after the total passed the cap. The release
+soak found this (`mesh_sim::caps_regression_seeds`, 2 seeds of 3 136). The
+owner therefore also burns, from its own keep, the part of the pending
+decrease that the other holders' excess in its view (`max(0, avail − keep)`
+each) cannot cover, never more than it holds (`policy::owner_burn_after_lower`).
+While other holders still have excess, the owner waits for their burns; once
+the views agree that they have none, the decrease settles. The cost falls on
+the cap's owner, which is the authority that minted the rights; a lower below
+what was spent still caps every device for the rest of the month, as D4 says.
+
 ## Alternatives considered
 
 - **Consensus (Raft) on each spend or each cap change.** Rejected for the

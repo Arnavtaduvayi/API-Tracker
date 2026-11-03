@@ -456,7 +456,13 @@ the last 30 days.
   target is already written there. `pending = supply − max(effective target,
   total used)` (never negative). A holder with `pending > 0` burns
   `min(local_avail − keep, pending)`, `keep = max(0, fair − own used) + own
-  overrides`.
+  overrides`. The **owner** also burns, from its own keep, the part of
+  `pending` the other holders cannot cover: `pending − own burn − Σ` over the
+  other devices in its view of `max(0, avail − keep)`, never more than it
+  holds. Devices that spent past their share have nothing to burn, so without
+  this the owner's own remainder would hold the supply above the cap and the
+  owner could still spend after the total passed it. (Amended in 12: the
+  release soak found it, seeds 5000537 and 5002412.)
 - **Spendable figure.** `local_avail = avail + U − max(U, local spend) −
   open escrow`: a device counts its gateway's spend before publishing it, and
   never gives what it reserved.
