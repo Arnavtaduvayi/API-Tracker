@@ -216,7 +216,9 @@ name = "api-tracker-mesh"
 version = "0.1.1"
 dependencies = [
  "api-tracker-core",
+ "base64 0.22.1",
  "blake3",
+ "hex",
  "if-addrs",
  "mdns-sd",
  "rusqlite",

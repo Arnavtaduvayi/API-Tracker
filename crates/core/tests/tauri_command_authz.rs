@@ -991,4 +991,83 @@ mod mesh {
             .iter()
             .all(|d| !d.contains(MASTER_PW) && !d.contains(WRONG_PW)));
     }
+
+    #[test]
+    fn mesh_credential_share_import_and_reseal_require_correct_reauth() {
+        // Commands: mesh_credential_share, mesh_credential_import,
+        // mesh_credential_reseal (Increment 11). Each reauthenticates in core
+        // before it reads a value or the sealing key.
+        use api_tracker_core::mesh::share::Recipients;
+        use api_tracker_core::model::Environment;
+        use api_tracker_core::vault::ImportOptions;
+        let (_d, _p, mut v) = new_vault();
+        v.mesh_init("dev-a").unwrap();
+        let project = crate::common::add_project(&mut v, "app").id;
+        v.mesh_project_share(&project).unwrap();
+        let (cred, _) = super::add_key(
+            &mut v,
+            "app",
+            "KEY",
+            super::SECRET,
+            Environment::Development,
+        );
+        admit(&v, "dev-b");
+        let clean = |e: &CoreError| {
+            assert_clean(e);
+            assert_no_secret_leak(e, super::SECRET);
+        };
+        let shares = |v: &UnlockedVault| {
+            count(
+                v,
+                "SELECT COUNT(*) FROM mesh_items WHERE kind = 'share.sealed'",
+            )
+        };
+
+        let err = v
+            .mesh_credential_share(&wrong(), &cred.id, Recipients::AllCurrent)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        clean(&err);
+        assert_eq!(shares(&v), 0);
+        assert_eq!(audit_count(&v, "mesh_credential_shared"), 0);
+        let receipt = v
+            .mesh_credential_share(&master_pw(), &cred.id, Recipients::AllCurrent)
+            .unwrap();
+        assert_eq!(receipt.recipients.len(), 1);
+        assert_eq!(shares(&v), 1);
+        assert_eq!(audit_count(&v, "mesh_credential_shared"), 1);
+        assert!(!serde_json::to_string(&receipt)
+            .unwrap()
+            .contains(super::SECRET));
+
+        let opts = ImportOptions {
+            replace: false,
+            environment: Environment::Development,
+        };
+        let share = "0123456789abcdef0123456789abcdef";
+        let err = v
+            .mesh_credential_import(&wrong(), share, "app", opts)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        clean(&err);
+        // The right password with no such share: a clean refusal.
+        let err = v
+            .mesh_credential_import(&master_pw(), share, "app", opts)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::NotFound { .. }), "{err:?}");
+        clean(&err);
+        assert_eq!(count(&v, "SELECT COUNT(*) FROM mesh_share_imports"), 0);
+        assert_eq!(audit_count(&v, "mesh_credential_imported"), 0);
+
+        let err = v.mesh_credential_reseal(&wrong(), &cred.id).unwrap_err();
+        assert!(matches!(err, CoreError::WrongPassword), "{err:?}");
+        clean(&err);
+        // Nothing to reseal: refused, nothing minted.
+        let err = v
+            .mesh_credential_reseal(&master_pw(), &cred.id)
+            .unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)), "{err:?}");
+        clean(&err);
+        assert_eq!(shares(&v), 1);
+    }
 }

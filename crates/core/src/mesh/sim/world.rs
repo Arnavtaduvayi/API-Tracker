@@ -1088,10 +1088,17 @@ impl<F: StoreFactory> World<F> {
         let mut sid = [0u8; 16];
         self.rng.fill_bytes(&mut sid);
         if self.rng.chance(1, 3) {
+            // Revoke the share this device sees at the key (a revoke ends
+            // only the share it names, PROTOCOL §5.6); with none, a random
+            // id. No extra draw, so the seeded stream is unchanged.
+            let named = match st.share_at(&key) {
+                Some(crate::mesh::views::ShareWinner::Sealed { value, .. }) => value.share_id,
+                _ => ShareId::from_bytes(sid),
+            };
             let r = ShareRevoke {
                 credential,
                 recipient,
-                share_id: ShareId::from_bytes(sid),
+                share_id: named,
             };
             self.mint(n, &r, HlcPolicy::After(winner))?;
         } else {

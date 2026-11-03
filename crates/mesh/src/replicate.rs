@@ -126,6 +126,11 @@ pub fn replicate_known_peers(
     if let Err(e) = vault.mesh_cap_reconcile(&probe) {
         notes.push(format!("spend caps were not reconciled: {e}"));
     }
+    // As the node's round hook does: shares addressed to removed devices are
+    // collected before exchanging, so this store's digests match its peers'.
+    if let Err(e) = vault.mesh_share_purge() {
+        notes.push(format!("old credential shares were not collected: {e}"));
+    }
     let node = MeshNode::open(
         vault,
         std::sync::Arc::new(api_tracker_core::mesh::clock::SystemClock),

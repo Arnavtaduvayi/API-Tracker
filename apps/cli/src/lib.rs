@@ -19,6 +19,7 @@ mod gateway_cmd;
 mod key_cmd;
 mod mesh_cap_cmd;
 mod mesh_cmd;
+mod mesh_share_cmd;
 mod observe_cmd;
 mod pricing_cmd;
 mod project_cmd;

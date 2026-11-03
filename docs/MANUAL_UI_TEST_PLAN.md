@@ -2965,3 +2965,23 @@ way `scripts/smoke.sh` does (its "mesh usage" block inserts
 | DP12 | Merge two shared projects that both have caps | A confirmation, then the refusal message |
 | DP13 | Alerts | A cap at 80% / 100% shows in Alerts with a readable title |
 
+### D-S — Sharing one credential with your devices (Increment 11)
+
+Continue from §D-P (the app on scratch dir A with a shared, bound project; a
+CLI device on scratch dir B, its node running, its own project bound to the
+same mesh project). Use only fake values such as `sk-test-FAKE-manual-0001`.
+
+| # | Step | Expected |
+|---|---|---|
+| DS1 | Open a credential in an **unshared** project | **Shared with my devices** says to share the project first; no Share button |
+| DS2 | Open a credential in the shared project; **Share with my devices…** | The revoke notice (does not revoke at the provider; a device keeps what it imported) before anything; **All my devices** or **Only these devices** with a checklist; **Continue** is disabled with no device ticked |
+| DS3 | Continue, then a wrong master password | Refused; nothing listed as shared |
+| DS4 | The right password | A notice naming the device; the table lists it as shared with its share id |
+| DS5 | On B: `tethra mesh replicate`, `tethra mesh credential list` | The share is listed as available; nothing imported |
+| DS6 | On B: `tethra mesh credential import <share> --project <local>` | The masked value only, never the value |
+| DS7 | In the app: **Revoke** | A confirmation with the same notice; then "revoked"; **Open Rotation** opens the Rotation view |
+| DS8 | On B: `tethra mesh credential share <cred> --to <app device>`; in the app, **Devices → Credentials shared with this device** | The share listed as available; opening the view imports nothing |
+| DS9 | **Import into…** a project, then a wrong password, then the right one | The wrong one is refused with no password on screen; the right one shows "Imported <project>/<name> (<masked>)" and the row becomes "imported as …" |
+| DS10 | Pair a third device after sharing with **All my devices** | The credential's panel shows a reseal offer; nothing is sent until **Reseal…** and the master password |
+
+

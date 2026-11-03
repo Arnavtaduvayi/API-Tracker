@@ -37,7 +37,7 @@ use super::oracle_api::{
     ExpectedRights, ExpectedShare, ExpectedState, GenesisInfo, OracleModel,
 };
 use crate::mesh::codec::ItemBody;
-use crate::mesh::dot::{CapId, CredentialRef, DeviceId, MeshProjectId};
+use crate::mesh::dot::{CapId, CredentialRef, DeviceId, MeshProjectId, ShareId};
 use crate::mesh::hlc::Hlc;
 use crate::mesh::item::{ItemHash, SignedItem};
 use crate::mesh::kinds::{CapDef, Month, Recipient, RosterAdd, TypedItem, UsageKey, UsageTotals};
@@ -754,37 +754,80 @@ fn bounded_view(
     view
 }
 
+/// A share key: `(credential_ref, recipient)`.
+type ShareSlot = (CredentialRef, DeviceId);
+/// The order of entries at one key: `(hlc, origin)`.
+type ShareRank = (Hlc, DeviceId);
+
 fn view_shares(
     admitted: &[&Entry<'_>],
     roster: &Roster,
 ) -> BTreeMap<(CredentialRef, DeviceId), ExpectedShare> {
-    winners(admitted.iter().filter_map(|e| {
-        let (slot, rank, share) = match e.item {
-            TypedItem::ShareSealed(s) => (
-                (s.credential, s.recipient),
-                0u8,
-                ExpectedShare::Sealed {
-                    sharer: e.origin,
-                    share_id: s.share_id,
-                    mesh_project_id: s.mesh_project_id,
-                    credential_name: s.credential_name.clone(),
-                    provider: s.provider.clone(),
-                    value_version: s.value_version,
-                    sealed: s.sealed.clone(),
+    // §5.6 (amended in 11): the winning share is the greatest `(hlc, origin)`
+    // admitted `share.sealed`; it is revoked when an admitted revoke names its
+    // share id (the greatest such revoke is the revoker), whatever the HLCs.
+    // With no share, the greatest revoke stands.
+    let mut sealed: BTreeMap<ShareSlot, (ShareRank, ExpectedShare)> = BTreeMap::new();
+    let mut revokes: BTreeMap<ShareSlot, Vec<(ShareRank, ShareId)>> = BTreeMap::new();
+    for e in admitted {
+        match e.item {
+            TypedItem::ShareSealed(s) => {
+                let slot = (s.credential, s.recipient);
+                let rank = (e.hlc, e.origin);
+                let greater = sealed.get(&slot).is_none_or(|(cur, _)| rank > *cur);
+                if greater {
+                    sealed.insert(
+                        slot,
+                        (
+                            rank,
+                            ExpectedShare::Sealed {
+                                sharer: e.origin,
+                                share_id: s.share_id,
+                                mesh_project_id: s.mesh_project_id,
+                                credential_name: s.credential_name.clone(),
+                                provider: s.provider.clone(),
+                                value_version: s.value_version,
+                                sealed: s.sealed.clone(),
+                            },
+                        ),
+                    );
+                }
+            }
+            TypedItem::ShareRevoke(r) => revokes
+                .entry((r.credential, r.recipient))
+                .or_default()
+                .push(((e.hlc, e.origin), r.share_id)),
+            _ => {}
+        }
+    }
+    let mut out = BTreeMap::new();
+    let slots: BTreeSet<_> = sealed.keys().chain(revokes.keys()).copied().collect();
+    for slot in slots {
+        if roster.removed(slot.1) {
+            continue;
+        }
+        let rv = revokes.get(&slot).map(Vec::as_slice).unwrap_or(&[]);
+        let share = match sealed.get(&slot) {
+            Some((_, s @ ExpectedShare::Sealed { share_id, .. })) => {
+                match rv.iter().filter(|(_, id)| id == share_id).max() {
+                    Some(((_, revoker), id)) => ExpectedShare::Revoked {
+                        revoker: *revoker,
+                        share_id: *id,
+                    },
+                    None => s.clone(),
+                }
+            }
+            _ => match rv.iter().max() {
+                Some(((_, revoker), id)) => ExpectedShare::Revoked {
+                    revoker: *revoker,
+                    share_id: *id,
                 },
-            ),
-            TypedItem::ShareRevoke(r) => (
-                (r.credential, r.recipient),
-                1u8,
-                ExpectedShare::Revoked {
-                    revoker: e.origin,
-                    share_id: r.share_id,
-                },
-            ),
-            _ => return None,
+                None => continue,
+            },
         };
-        (!roster.removed(slot.1)).then_some((slot, (e.hlc, e.origin, rank), share))
-    }))
+        out.insert(slot, share);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1808,36 +1851,52 @@ mod tests {
     }
 
     #[test]
-    fn share_winner_is_greatest_hlc_then_origin_then_rank() {
+    fn a_revoke_ends_only_the_share_it_names_whatever_the_hlcs() {
         let mut g = Dev::new();
         let mut o = oracle_for(&mut g);
         let (mut lo, mut hi, r) = sorted3();
         for d in [&lo, &hi, &r] {
             add(&mut o, &mut g, d);
         }
-        // Same origin, same hlc: revoke (rank 1) beats sealed (rank 0).
+        // A revoke naming the share ends it, even with a lower HLC.
         let (s1, r1) = (sealed(&r, 0xE2), revoke(&r, 0xE2));
-        put(&mut o, &mut lo, 50, &s1);
-        put(&mut o, &mut lo, 50, &r1);
-        // Same hlc, different origins: the greater origin wins before rank.
-        let (s2, r2) = (sealed(&r, 0xE3), revoke(&r, 0xE3));
-        put(&mut o, &mut hi, 50, &s2);
-        put(&mut o, &mut lo, 50, &r2);
-        // A greater hlc wins outright.
-        let (s3, r3) = (sealed(&r, 0xE4), revoke(&r, 0xE4));
-        put(&mut o, &mut lo, 60, &s3);
-        put(&mut o, &mut hi, 59, &r3);
+        put(&mut o, &mut lo, 60, &s1);
+        put(&mut o, &mut hi, 50, &r1);
+        // A revoke naming another share id ends nothing, even with a higher
+        // HLC (the share it named was superseded).
+        let s2 = sealed(&r, 0xE3);
+        let r2 = ShareRevoke {
+            share_id: ShareId::from_bytes([0x77; 16]),
+            ..revoke(&r, 0xE3)
+        };
+        put(&mut o, &mut lo, 50, &s2);
+        put(&mut o, &mut hi, 90, &r2);
+        // Between shares, the greatest (hlc, origin) wins: same HLC, the
+        // greater origin.
+        let s3 = sealed(&r, 0xE4);
+        put(&mut o, &mut lo, 50, &s3);
+        put(&mut o, &mut hi, 50, &s3);
+        // A revoke alone stands.
+        let r4 = revoke(&r, 0xE5);
+        put(&mut o, &mut lo, 50, &r4);
         let s = o.expected();
         let at = |c: u8| &s.shares[&(CredentialRef::from_bytes([c; 16]), r.id)];
         assert_eq!(
             at(0xE2),
             &ExpectedShare::Revoked {
+                revoker: hi.id,
+                share_id: share_id(),
+            }
+        );
+        assert!(matches!(at(0xE3), ExpectedShare::Sealed { sharer, .. } if *sharer == lo.id));
+        assert!(matches!(at(0xE4), ExpectedShare::Sealed { sharer, .. } if *sharer == hi.id));
+        assert_eq!(
+            at(0xE5),
+            &ExpectedShare::Revoked {
                 revoker: lo.id,
                 share_id: share_id(),
             }
         );
-        assert!(matches!(at(0xE3), ExpectedShare::Sealed { sharer, .. } if *sharer == hi.id));
-        assert!(matches!(at(0xE4), ExpectedShare::Sealed { sharer, .. } if *sharer == lo.id));
     }
 
     // ------------------------------------------------------------- scale

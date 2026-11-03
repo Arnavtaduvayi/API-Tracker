@@ -121,6 +121,31 @@ pub enum MeshError {
     /// Static text: the desktop's node settings were refused.
     #[error("invalid mesh node settings: {0}")]
     InvalidNodeSettings(&'static str),
+
+    /// A credential can be shared only from a project bound to a mesh
+    /// project (Increment 11).
+    #[error("this credential's project is not shared with your devices; share it first with `tethra mesh project share`")]
+    ProjectNotBound,
+
+    /// An opened share's sealed contents disagree with its signed envelope
+    /// or its signer (ADR 0033): a device may be trying to plant a
+    /// credential. The field name is static; no value is ever carried.
+    #[error(
+        "this credential share does not match its signed envelope ({0}); nothing was imported"
+    )]
+    ShareBindingMismatch(&'static str),
+
+    /// The sealed box did not open with this device's sealing key.
+    #[error("this credential share cannot be opened by this device; nothing was imported")]
+    ShareUnreadable,
+
+    #[error("this credential share was revoked; ask for it to be shared again")]
+    ShareRevoked,
+
+    /// The device that made the share has since been removed (or forked):
+    /// what it shared is not trusted any more (ADR 0033).
+    #[error("the device that shared this credential has been removed from the mesh; ask an active device to share it again")]
+    ShareFromRemovedDevice,
 }
 
 impl MeshError {
@@ -160,6 +185,11 @@ impl MeshError {
             MeshError::CapFrozen => "mesh_cap_frozen",
             MeshError::InvalidNodeSettings(_) => "mesh_invalid_node_settings",
             MeshError::ReauthRequired => "mesh_reauth_required",
+            MeshError::ProjectNotBound => "mesh_project_not_bound",
+            MeshError::ShareBindingMismatch(_) => "mesh_share_binding_mismatch",
+            MeshError::ShareUnreadable => "mesh_share_unreadable",
+            MeshError::ShareRevoked => "mesh_share_revoked",
+            MeshError::ShareFromRemovedDevice => "mesh_share_from_removed_device",
         }
     }
 }

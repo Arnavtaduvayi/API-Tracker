@@ -35,6 +35,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+mod mesh_share;
+pub use mesh_share::{ImportOptions, ImportReceipt};
+
 /// Minimum length for newly chosen master, project, and backup passwords.
 /// Enforced only when a password is *set* — existing vaults, projects, and
 /// backups created under an older, shorter policy still unlock and restore.
@@ -1390,6 +1393,17 @@ impl UnlockedVault {
         &mut self,
         add: AddCredential,
     ) -> Result<(Credential, Vec<ReuseWarning>)> {
+        self.add_credential_with(add, |_, _| Ok(()))
+    }
+
+    /// [`Self::add_credential`], running `also` (with the new credential's
+    /// id) inside the same write transaction, so a caller's own record of
+    /// the credential commits with it or not at all.
+    fn add_credential_with(
+        &mut self,
+        add: AddCredential,
+        also: impl FnOnce(&Connection, &str) -> Result<()>,
+    ) -> Result<(Credential, Vec<ReuseWarning>)> {
         let name = add.name.trim().to_owned();
         if name.is_empty() {
             return Err(CoreError::InvalidInput(
@@ -1462,6 +1476,7 @@ impl UnlockedVault {
             Some(&id),
             &format!("name={name}"),
         )?;
+        also(&self.conn, &id)?;
         tx.commit()?;
         Ok((self.get_credential(&id)?, warnings))
     }
@@ -1690,6 +1705,21 @@ impl UnlockedVault {
                 .ok_or(CoreError::VaultCorrupted("reference target is missing"))?,
             None => requested.clone_row(),
         };
+        let value = self.decrypt_credential_value(&root)?;
+        audit::record(
+            &self.conn,
+            "credential_revealed",
+            Some(&requested.project_id),
+            Some(&requested.id),
+            "",
+        )?;
+        Ok(value)
+    }
+
+    /// Decrypt the value a (non-reference) credential row holds. Fails with
+    /// [`CoreError::ProjectLocked`] for a password-locked project that is not
+    /// unlocked in this session. Callers reauthenticate first.
+    fn decrypt_credential_value(&self, root: &CredentialRow) -> Result<SecretString> {
         let ciphertext = root.ciphertext.as_deref().ok_or(CoreError::VaultCorrupted(
             "credential is missing its ciphertext",
         ))?;
@@ -1703,13 +1733,6 @@ impl UnlockedVault {
         )?;
         let value = String::from_utf8(plaintext.expose().to_vec())
             .map_err(|_| CoreError::VaultCorrupted("credential value is not valid UTF-8"))?;
-        audit::record(
-            &self.conn,
-            "credential_revealed",
-            Some(&requested.project_id),
-            Some(&requested.id),
-            "",
-        )?;
         Ok(SecretString::new(value))
     }
 
@@ -1865,6 +1888,19 @@ impl UnlockedVault {
         new_value: SecretString,
     ) -> Result<(Credential, Vec<ReuseWarning>)> {
         self.verify_master_password(master_password)?;
+        self.replace_value_with(selector, new_value, "value replaced", |_, _| Ok(()))
+    }
+
+    /// [`Self::replace_credential_value`] after its reauthentication: the
+    /// outgoing value is retained as a version (with `reason`), and `also`
+    /// runs inside the same write transaction.
+    fn replace_value_with(
+        &mut self,
+        selector: &str,
+        new_value: SecretString,
+        reason: &str,
+        also: impl FnOnce(&Connection, &str) -> Result<()>,
+    ) -> Result<(Credential, Vec<ReuseWarning>)> {
         if new_value.expose().trim().is_empty() {
             return Err(CoreError::InvalidInput(
                 "credential value must not be empty".into(),
@@ -1899,7 +1935,7 @@ impl UnlockedVault {
         let now = clock::now_rfc3339();
         // Retain the outgoing value as an encrypted version so destination
         // synchronization can roll back (see docs/decisions/0012).
-        let retained = self.retain_credential_version(&row, &project_key, "value replaced")?;
+        let retained = self.retain_credential_version(&row, &project_key, reason)?;
         // The new value's provider-reported expiration is unknown until the
         // next validation; carrying the OLD value's expiry over would report
         // a false "expired".
@@ -1923,6 +1959,7 @@ impl UnlockedVault {
             Some(&row.id),
             "",
         )?;
+        also(&self.conn, &row.id)?;
         tx.commit()?;
         Ok((self.get_credential(&row.id)?, warnings))
     }

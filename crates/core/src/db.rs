@@ -1591,6 +1591,24 @@ ALTER TABLE mesh_publish_cursor_v23 RENAME TO mesh_publish_cursor;
 CREATE INDEX idx_mesh_cursor_mesh ON mesh_publish_cursor(mesh_project_id, day);
 "#,
     },
+    Migration {
+        version: 24,
+        name: "mesh credential shares this device made",
+        sql: r#"
+-- Tethra Mesh credential sharing (Increment 11, ADR 0033). Local-only: which
+-- local credential each credential reference this device shared came from,
+-- and whether the user chose "all my current devices" (the reseal offer for
+-- devices paired later). The replicated share items carry only the reference;
+-- local credential ids never leave this device. No value or key material.
+CREATE TABLE mesh_share_outgoing (
+    credential_ref TEXT PRIMARY KEY CHECK (length(credential_ref) = 32),
+    credential_id  TEXT NOT NULL UNIQUE REFERENCES credentials(id) ON DELETE CASCADE,
+    all_current    INTEGER NOT NULL CHECK (all_current IN (0, 1)),
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+) STRICT;
+"#,
+    },
 ];
 
 /// Open (or create) the database file with hardened pragmas.

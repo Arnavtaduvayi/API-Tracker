@@ -128,6 +128,9 @@ struct Mirror {
     /// Usage counters for days before this are not stored (the retention
     /// horizon, set by the publisher; `None` stores everything).
     usage_floor: Option<Day>,
+    /// Credential shares addressed to a removed device are not stored
+    /// (`share::purge` sets it; off in the simulator, like the usage floor).
+    share_purge: bool,
 }
 
 impl Mirror {
@@ -145,6 +148,7 @@ impl Mirror {
             dirty: BTreeSet::new(),
             rollback_holds: BTreeMap::new(),
             usage_floor: None,
+            share_purge: false,
         }
     }
 
@@ -460,6 +464,18 @@ fn apply_entry(
     // its dot is still logged by the caller. Not a rejection.
     if let (Some(floor), TypedItem::UsageCounter(c)) = (m.usage_floor, &v.typed) {
         if c.key.day < floor {
+            return Ok((false, false));
+        }
+    }
+    // A share addressed to a removed device is excluded the same way
+    // (removal is forever), so it is not stored either.
+    if m.share_purge {
+        let recipient = match &v.typed {
+            TypedItem::ShareSealed(sh) => Some(sh.recipient),
+            TypedItem::ShareRevoke(r) => Some(r.recipient),
+            _ => None,
+        };
+        if recipient.is_some_and(|r| m.state.roster.is_removed(&r)) {
             return Ok((false, false));
         }
     }
@@ -974,6 +990,68 @@ impl SqliteStore {
                 .map_err(sql("collecting old usage counters"))?;
             for o in origins {
                 m.dirty.insert(DeviceId::parse(&o)?);
+            }
+            Ok(n)
+        })?;
+        if n > 0 {
+            self.reload()?;
+        }
+        Ok(n)
+    }
+
+    /// Stop storing credential shares addressed to removed devices (an
+    /// arriving one is dropped at ingest, its dot logged); see
+    /// [`Self::gc_shares`].
+    pub fn set_share_purge(&mut self, on: bool) {
+        self.m.share_purge = on;
+    }
+
+    /// Delete held `share.sealed` and `share.revoke` items (any origin)
+    /// addressed to a removed device, and reload the views. Allowed because
+    /// removal is forever, so such an item is excluded on every device for a
+    /// reason that does not depend on its seq (PROTOCOL.md §8.4 (b)). Returns
+    /// how many rows went.
+    pub fn gc_shares(&mut self) -> Result<usize, MeshError> {
+        let n = self.write(|tx, m, _| {
+            let doomed: Vec<String> = m
+                .state
+                .share_keys()
+                .into_iter()
+                .filter(|(_, recipient)| m.state.roster.is_removed(recipient))
+                .map(|(cred, recipient)| format!("{cred}/{recipient}"))
+                .collect();
+            let mut n = 0;
+            for key in doomed {
+                let mut st = tx
+                    .prepare_cached(
+                        "SELECT origin FROM mesh_items WHERE kind IN (?1, ?2) AND item_key = ?3",
+                    )
+                    .map_err(sql("reading mesh_items"))?;
+                let origins: Vec<String> = st
+                    .query_map(
+                        params![
+                            super::kinds::names::SHARE_SEALED,
+                            super::kinds::names::SHARE_REVOKE,
+                            key
+                        ],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .map_err(sql("reading mesh_items"))?
+                    .collect::<Result<_, _>>()
+                    .map_err(sql("reading mesh_items"))?;
+                n += tx
+                    .execute(
+                        "DELETE FROM mesh_items WHERE kind IN (?1, ?2) AND item_key = ?3",
+                        params![
+                            super::kinds::names::SHARE_SEALED,
+                            super::kinds::names::SHARE_REVOKE,
+                            key
+                        ],
+                    )
+                    .map_err(sql("collecting shares to removed devices"))?;
+                for o in origins {
+                    m.dirty.insert(DeviceId::parse(&o)?);
+                }
             }
             Ok(n)
         })?;

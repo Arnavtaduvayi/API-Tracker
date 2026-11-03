@@ -176,15 +176,49 @@ NN)** otherwise.
 
 - **MESH-SI-6 Credential values.** They leave a device only as a sealed box to a
   specific roster device, after reauthentication, and never appear in plaintext
-  in frames, logs, errors, JSON output or plaintext columns. *Status:* specified
-  (lands in 11); until then no item kind carries a credential value.
-  *Tests:* `kinds::tests::share_debug_never_prints_the_sealed_bytes`; canaries
-  in 11.
+  in frames, logs, errors, JSON output or plaintext columns. *Status:*
+  implemented (11, ADR 0033). A share is one `share.sealed` per chosen active
+  device, sealed (`crypto_box`) to that device's sealing key inside
+  `share::share`, from a zeroizing buffer that never reallocates; the sharer
+  reauthenticates first, and the credential's project must be bound (a
+  password-locked one unlocked). The importer verifies every sealed field
+  against the signed envelope and its signer before anything is stored, so a
+  member cannot plant a value under another device's name. Errors on these
+  paths are static (a JSON parse error, which could quote its input, becomes
+  `ShareBindingMismatch("contents")`); receipts, lists and import results
+  carry names, devices, share ids and the masked value only; audit details
+  carry ids only. *Tests:*
+  `share_wire::a_shared_credential_never_crosses_the_wire_in_plaintext` (every
+  byte of a real Noise session through a TCP shim: raw, hex, base64 at each
+  alignment, JSON-escaped),
+  `mesh_share::share_then_import_round_trip_re_encrypts_under_the_target_project`
+  (every session frame; every column of every table on three devices, the item
+  store's sealed bytes and audit rows included; doctor, status and list
+  output; the value decrypts only through the normal reveal path),
+  `mesh_share::a_member_cannot_plant_a_credential_in_the_name_of_another_device`,
+  `mesh_share::each_bound_field_that_disagrees_with_the_envelope_is_refused`,
+  `mesh_share::the_share_items_carry_names_but_never_the_value`,
+  `mesh_share::a_wrong_password_on_share_or_import_changes_nothing`,
+  `mesh_share::a_share_from_a_since_removed_device_cannot_be_imported`,
+  `mesh_share::replace_refuses_a_same_named_credential_of_another_provider`,
+  `mesh_share::a_share_whose_audit_row_fails_mints_nothing`,
+  `share::tests::sealed_bindings_round_trip_and_each_field_is_checked`,
+  `share::tests::a_box_for_another_key_or_garbage_is_unreadable_without_echoing_it`,
+  `mesh_cli::share_a_credential_and_import_it_on_another_device_over_a_real_node`
+  (CLI stdout and stderr, human and `--json`), smoke's sharing block,
+  `kinds::tests::share_debug_never_prints_the_sealed_bytes`,
+  `MeshCredentialSharePanel.test.tsx`, `MeshIncomingShares.test.tsx`.
 - **MESH-SI-7 Key lifetime.** Mesh private keys are in memory only while the
   vault is unlocked or the CLI session lives; the sealing key is used only
   inside a reauth-gated import. Key types never print secret material.
-  *Status:* implemented (01, 03, 05); the reauth-gated import that uses the
-  sealing key is 11. `SigningKeyPair` wipes on drop (dalek `zeroize`) and
+  *Status:* implemented (01, 03, 05, 11). *Implemented (11):* the sealing key
+  is unwrapped only by `identity::load_seal_key`, called only by
+  `UnlockedVault::mesh_credential_import` after its reauthentication; it is
+  checked against its public key, used through `crypto_box::SecretKey`
+  (zeroized on drop) to open one box, and dropped before the value is stored.
+  A running node never holds it, so no share is ever opened unattended
+  (`mesh_share::a_wrong_password_on_share_or_import_changes_nothing`,
+  `tauri_command_authz::mesh::mesh_credential_share_import_and_reseal_require_correct_reauth`). `SigningKeyPair` wipes on drop (dalek `zeroize`) and
   redacts in `Debug`/`Display` (01). The four private keys are encrypted under
   the vault key with AAD naming the vault and the device (or mesh and epoch)
   (03). `UnlockedVault::mesh_keys` returns only the signing key, the Noise key
@@ -298,13 +332,19 @@ NN)** otherwise.
   the sharer's own project; every other device binds by an explicit command,
   never by name or local id; spend caps (07) are created and changed only by
   explicit commands; nothing is enforced until the user switches enforcement
-  on, per cap, on that device, with reauthentication (08); imports (11)
-  follow. The desktop (10) shares and binds only on an explicit click
-  (rendering the project panel or "Available from your devices" calls
-  neither). *Tests:*
+  on, per cap, on that device, with reauthentication (08). Credential shares
+  (11) are made, imported and resealed only by explicit, reauthenticated
+  commands: a share waits until the user imports it, and a device paired
+  later, or a changed value, only raises a reseal *offer* (the node never
+  reseals: it would need the value in memory unattended). The desktop (10, 11)
+  shares, binds and imports only on an explicit click (rendering the project
+  panel, "Available from your devices", the credential's share panel or
+  "Credentials shared with this device" calls none of them). *Tests:*
   `mesh_usage::binding_is_never_automatic_cascades_on_delete_and_is_refused_twice`,
   `MeshProjectPanel.test.tsx`, `MeshAvailableProjects.test.tsx`,
-  `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`.
+  `mesh_usage::usage_on_a_reaches_b_labelled_per_device_with_freshness`,
+  `mesh_share::a_new_device_gets_a_reseal_offer_that_does_nothing_without_reauth`,
+  `MeshIncomingShares.test.tsx`, `MeshCredentialSharePanel.test.tsx`.
 - **MESH-SI-14 No analytics.** The mesh emits no analytics events; the
   `docs/ANALYTICS.md` allowlists are unchanged. *Status:* implemented (01, 05,
   09): no mesh code, the node included, references the analytics module; the

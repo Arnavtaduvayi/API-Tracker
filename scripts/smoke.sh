@@ -630,6 +630,32 @@ for _ in $(seq 1 20); do
   sleep 0.5
 done
 check $CAPSEEN "B sees the cap and its owner after an exchange"
+
+echo "-- mesh credential sharing (sealed to B, imported on B) --"
+SHARE_KEY="sk-test-FAKE-smoke-mesh-share-0123456789"
+printf '%s' "$SHARE_KEY" | API_TRACKER_DIR="$MESH_A" "$BIN" key add --project smoke-app --name SMOKE_SHARED --provider openai --value-stdin >/dev/null 2>&1
+check $? "A: a credential in the shared project"
+OUT=$(API_TRACKER_DIR="$MESH_A" "$BIN" mesh credential share smoke-app/SMOKE_SHARED --to smoke-b --yes 2>&1)
+echo "$OUT" | grep -q "Shared SMOKE_SHARED with 1 device(s)" && echo "$OUT" | grep -q "does not revoke the credential at its provider"
+check $? "mesh credential share seals it to B (reauthenticated) and says what revoking does not do"
+SHARE_ID=""
+for _ in $(seq 1 20); do
+  API_TRACKER_DIR="$MESH_B" "$BIN" mesh replicate >/dev/null 2>&1
+  SHARE_ID=$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh credential list 2>/dev/null \
+    | sed -n 's/.*"share_id": "\([0-9a-f]*\)".*/\1/p' | head -1)
+  [ ${#SHARE_ID} -eq 32 ] && break
+  sleep 0.5
+done
+[ ${#SHARE_ID} -eq 32 ]; check $? "B lists the share after an exchange (nothing imported yet)"
+OUT=$(API_TRACKER_DIR="$MESH_B" "$BIN" mesh credential import "$SHARE_ID" --project smoke-app 2>&1)
+echo "$OUT" | grep -q "Imported smoke-app/SMOKE_SHARED (openai)" && echo "$OUT" | grep -q "sk-t…89"
+check $? "mesh credential import stores it on B and shows the masked value only"
+ALLOUT="$OUT$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh credential list 2>&1)$(API_TRACKER_DIR="$MESH_B" "$BIN" --json mesh status 2>&1)"
+printf '%s' "$ALLOUT" | grep -qF "$SHARE_KEY" && bad "share output printed the credential value" || ok "no share output prints the credential value"
+sqlite3 "$MESH_B/vault.db" "SELECT count(*) FROM mesh_items WHERE instr(CAST(bytes AS TEXT), '$SHARE_KEY') > 0" 2>/dev/null | grep -qx 0
+check $? "the value is not in B's item store in plaintext"
+REVEALED=$(API_TRACKER_DIR="$MESH_B" "$BIN" key reveal smoke-app/SMOKE_SHARED 2>/dev/null)
+printf '%s' "$REVEALED" | grep -qF "$SHARE_KEY"; check $? "B decrypts the imported value through the normal reveal path"
 API_TRACKER_DIR="$MESH_A" "$BIN" mesh stop >/dev/null 2>&1
 wait "$SERVE_PID" >/dev/null 2>&1
 ! kill -0 "$SERVE_PID" 2>/dev/null; check $? "A's node stops"

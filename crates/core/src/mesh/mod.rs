@@ -48,6 +48,11 @@
 //! - Increment 09: how the desktop runs its in-process node
 //!   ([`node_settings`]; local-only, reauthenticated to widen the LAN
 //!   surface).
+//!
+//! - Increment 11: opt-in credential sharing ([`share`]): one credential,
+//!   sealed to each chosen device and signed by the sharer, imported only
+//!   after reauthentication with every sealed field checked against its
+//!   signed envelope (ADR 0033).
 
 pub mod caps;
 pub mod chain;
@@ -70,6 +75,7 @@ pub mod peers;
 pub mod projects;
 pub mod proto;
 pub mod publish;
+pub mod share;
 pub mod sign;
 pub mod sqlite_store;
 pub mod store;

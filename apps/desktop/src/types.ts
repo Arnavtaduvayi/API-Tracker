@@ -2400,3 +2400,96 @@ export interface MeshEnforceResult {
   caps: string[];
   on: boolean;
 }
+
+// --- Tethra Mesh credential sharing (Increment 11, ADR 0033) ---------------
+// Mirrors core's `mesh::share` and `vault::ImportReceipt`, returned by
+// apps/desktop/src-tauri/src/mesh_share_cmds.rs. No type here carries a
+// credential value or sealed bytes.
+
+export interface MeshSharedTo {
+  device_id: string;
+  device_name: string | null;
+  share_id: string;
+}
+
+export interface MeshShareReceipt {
+  credential_ref: string;
+  credential_id: string;
+  credential_name: string;
+  provider: string;
+  value_version: number;
+  mesh_project_id: string;
+  /** "All my current devices": devices paired later get a reseal offer. */
+  all_current: boolean;
+  recipients: MeshSharedTo[];
+}
+
+export interface MeshImportedAs {
+  credential_id: string;
+  credential_name: string;
+  project_id: string;
+  project_name: string;
+  imported_at: string;
+}
+
+export interface MeshShareRow {
+  share_id: string;
+  credential_ref: string;
+  credential_name: string;
+  provider: string;
+  mesh_project_id: string;
+  mesh_project_name: string | null;
+  sharer: string;
+  sharer_name: string | null;
+  /** False for a device since removed or forked: its share cannot be imported. */
+  sharer_active: boolean;
+  recipient: string;
+  recipient_name: string | null;
+  value_version: number;
+  revoked: boolean;
+  revoked_by: string | null;
+  /** Outgoing: another device's share holds this key now (a reseal sends this device's again). */
+  superseded_by: string | null;
+  /** Incoming: what this device imported it as, if it did. */
+  imported: MeshImportedAs | null;
+  /** Outgoing: the local credential it came from, and its value version now. */
+  local_credential_id: string | null;
+  current_value_version: number | null;
+}
+
+export interface MeshResealOffer {
+  credential_ref: string;
+  credential_id: string;
+  credential_name: string;
+  project_name: string;
+  current_value_version: number;
+  /** Devices paired after a share to "all my current devices". */
+  new_devices: string[];
+  /** Devices holding an older value version. */
+  stale_devices: string[];
+}
+
+export interface MeshSharesList {
+  incoming: MeshShareRow[];
+  outgoing: MeshShareRow[];
+  reseal_offers: MeshResealOffer[];
+}
+
+export interface MeshImportReceipt {
+  /** The stored credential, masked. */
+  credential: Credential;
+  share_id: string;
+  sharer: string;
+  sharer_name: string | null;
+  /** An existing credential's value was replaced (the old one kept as a version). */
+  replaced: boolean;
+  reuse_warnings: ReuseWarning[];
+}
+
+export interface MeshRevokedShare {
+  share_id: string;
+  credential_ref: string;
+  credential_name: string;
+  recipient: string;
+  recipient_name: string | null;
+}

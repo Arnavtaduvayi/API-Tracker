@@ -85,7 +85,12 @@ fn v21_applies_on_a_populated_v20_database() {
     let mut conn = db::open(&path).unwrap();
     db::migrate(&mut conn).unwrap();
     assert!(db::user_version(&conn).unwrap() >= 21);
-    assert_eq!(mesh_tables(&conn), V21_TABLES);
+    // v21's tables, plus the ones later migrations added (v24:
+    // `mesh_share_outgoing`).
+    let mut want: Vec<&str> = V21_TABLES.to_vec();
+    want.push("mesh_share_outgoing");
+    want.sort();
+    assert_eq!(mesh_tables(&conn), want);
     // Existing rows survive; the new switch defaults to off.
     let (name, port, enforcement): (String, i64, i64) = conn
         .query_row(
@@ -406,4 +411,52 @@ fn v23_splits_the_daily_rollup_and_keys_the_cursor_by_mesh_project() {
         .query_row("SELECT COUNT(*) FROM vault_meta", [], |r| r.get(0))
         .unwrap();
     assert_eq!(meta, 0);
+}
+
+#[test]
+fn v24_records_shared_credentials_locally_and_cascades_with_the_credential() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v23.db");
+    {
+        let conn = db_at_version(&path, 23);
+        conn.execute_batch(
+            "INSERT INTO projects (id, name, description, notes, environments, archived,
+                 created_at, updated_at, wrapped_project_key, key_wrap_mode)
+             VALUES ('p1', 'app', '', '', 'development', 0,
+                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', x'00112233', 'vault');
+             INSERT INTO credentials (id, project_id, provider, name, environment,
+                 credential_type, ciphertext, fingerprint, masked_value, created_at, updated_at)
+             VALUES ('c1', 'p1', 'openai', 'KEY', 'development', 'api_key', x'00',
+                 x'00', '••••', 'x', 'x');",
+        )
+        .unwrap();
+    }
+    let mut conn = db::open(&path).unwrap();
+    db::migrate(&mut conn).unwrap();
+    assert!(db::user_version(&conn).unwrap() >= 24);
+    let r = "0123456789abcdef0123456789abcdef";
+    conn.execute(
+        "INSERT INTO mesh_share_outgoing (credential_ref, credential_id, all_current,
+             created_at, updated_at) VALUES (?1, 'c1', 1, 'x', 'x')",
+        [r],
+    )
+    .unwrap();
+    // STRICT with CHECKs: a short reference, a second row for one
+    // credential and a non-boolean intent are refused.
+    for bad in [
+        "INSERT INTO mesh_share_outgoing VALUES ('abc', 'c1', 1, 'x', 'x')",
+        "INSERT INTO mesh_share_outgoing VALUES ('fedcba9876543210fedcba9876543210', 'c1', 0, 'x', 'x')",
+        "UPDATE mesh_share_outgoing SET all_current = 2",
+    ] {
+        assert!(conn.execute(bad, []).is_err(), "{bad}");
+    }
+    // Local only and wiped with every mesh table; deleting the credential
+    // deletes the record.
+    assert!(mesh_tables(&conn).contains(&"mesh_share_outgoing".to_owned()));
+    conn.execute("DELETE FROM credentials WHERE id = 'c1'", [])
+        .unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM mesh_share_outgoing", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
 }

@@ -42,6 +42,7 @@ vi.mock("../api", async () => {
       meshNodeSetSettings: vi.fn(),
       // Increment 10: "Available from your devices".
       meshProjectsList: vi.fn(),
+      meshSharesList: vi.fn(),
       meshProjectBind: vi.fn(),
       projectList: vi.fn(),
       projectCreate: vi.fn(),
@@ -163,6 +164,7 @@ beforeEach(() => {
     discover: false,
   });
   mockApi.meshProjectsList.mockResolvedValue([]);
+  mockApi.meshSharesList.mockResolvedValue({ incoming: [], outgoing: [], reseal_offers: [] });
 });
 
 describe("DevicesView rendering", () => {
@@ -554,5 +556,25 @@ describe("Available from your devices (Increment 10)", () => {
       screen.queryByRole("heading", { name: "Available from your devices" }),
     ).not.toBeInTheDocument();
     expect(mockApi.meshProjectsList).not.toHaveBeenCalled();
+  });
+});
+
+describe("Credentials shared with this device (Increment 11)", () => {
+  it("is shown inside a mesh, collects old shares on opening, and imports nothing", async () => {
+    render(<DevicesView />);
+    expect(
+      await screen.findByRole("heading", { name: "Credentials shared with this device" }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(mockApi.meshSharesList).toHaveBeenCalledWith(true));
+  });
+
+  it("is not shown, and not read, outside a mesh", async () => {
+    mockApi.meshStatus.mockResolvedValue(NOT_IN_MESH);
+    render(<DevicesView />);
+    await screen.findByRole("heading", { name: "This device is not in a mesh" });
+    expect(
+      screen.queryByRole("heading", { name: "Credentials shared with this device" }),
+    ).not.toBeInTheDocument();
+    expect(mockApi.meshSharesList).not.toHaveBeenCalled();
   });
 });

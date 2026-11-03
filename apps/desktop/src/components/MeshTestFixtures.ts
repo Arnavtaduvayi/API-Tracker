@@ -10,6 +10,8 @@ import type {
   MeshDeviceUsage,
   MeshProjectRow,
   MeshProjectUsage,
+  MeshShareRow,
+  MeshSharesList,
   MeshStatus,
   MeshUsageReport,
   MeshUsageTotals,
@@ -244,4 +246,38 @@ export function capReport(over: Partial<MeshCapReport> = {}): MeshCapReport {
     reconcile_error: null,
     ...over,
   };
+}
+
+// --- Increment 11: credential shares. ---
+
+export const SHARE_ID = "5e".repeat(16);
+export const CRED_REF = "c7".repeat(16);
+export const CRED_ID = "cred-fake-1";
+
+export function shareRow(over: Partial<MeshShareRow> = {}): MeshShareRow {
+  return {
+    share_id: SHARE_ID,
+    credential_ref: CRED_REF,
+    credential_name: "FAKE_API_KEY",
+    provider: "openai",
+    mesh_project_id: MESH_A,
+    mesh_project_name: "fake-app",
+    sharer: DESKTOP_ID,
+    sharer_name: "test-desktop",
+    sharer_active: true,
+    recipient: SELF_ID,
+    recipient_name: "test-laptop",
+    value_version: 1,
+    revoked: false,
+    revoked_by: null,
+    superseded_by: null,
+    imported: null,
+    local_credential_id: null,
+    current_value_version: null,
+    ...over,
+  };
+}
+
+export function sharesList(over: Partial<MeshSharesList> = {}): MeshSharesList {
+  return { incoming: [], outgoing: [], reseal_offers: [], ...over };
 }

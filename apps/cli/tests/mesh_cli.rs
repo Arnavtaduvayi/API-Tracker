@@ -827,3 +827,255 @@ fn spend_caps_across_two_devices_with_a_rights_request_over_a_real_exchange() {
     );
     drop(node_a);
 }
+
+/// A fake value shared in the CLI test; finding it in any output is a leak.
+const SHARE_CANARY: &str = "sk-test-FAKE-mesh-cli-canary-3e8b1d07c95a";
+
+/// The encodings of the canary a leak could take in text output (raw and
+/// hex; `crates/core/tests/mesh_share.rs` also checks base64 everywhere the
+/// value could be stored).
+fn canary_forms() -> Vec<String> {
+    vec![
+        SHARE_CANARY.to_owned(),
+        to_hex(SHARE_CANARY.as_bytes()),
+        // The part after the fixed `sk-test-FAKE-` prefix, alone.
+        SHARE_CANARY["sk-test-FAKE-".len()..].to_owned(),
+    ]
+}
+
+fn assert_no_canary(what: &str, text: &str) {
+    for form in canary_forms() {
+        assert!(!text.contains(&form), "{what} leaked the value as {form}");
+    }
+}
+
+#[test]
+fn share_a_credential_and_import_it_on_another_device_over_a_real_node() {
+    let a = TestVault::new();
+    run(&a, &["mesh", "init", "--name", "dev-a"]);
+    let (ok, _, err) = run(&a, &["project", "create", "app"]);
+    assert!(ok, "{err}");
+    a.cmd()
+        .args([
+            "key",
+            "add",
+            "--project",
+            "app",
+            "--name",
+            "OPENAI_API_KEY",
+            "--provider",
+            "openai",
+            "--value-stdin",
+        ])
+        .write_stdin(SHARE_CANARY)
+        .assert()
+        .success();
+    let node_a = serve(&a);
+    let inv = json(&a, &["mesh", "invite", "--addr", &node_a.addr]);
+    let b = TestVault::new();
+    run(
+        &b,
+        &[
+            "mesh",
+            "join",
+            inv["invite"].as_str().unwrap(),
+            "--name",
+            "dev-b",
+        ],
+    );
+    let (ok, _, err) = run(&b, &["project", "create", "laptop-app"]);
+    assert!(ok, "{err}");
+    let mut outputs = Vec::new();
+
+    // Not shared until its project is.
+    let (ok, out, err) = run(
+        &a,
+        &["mesh", "credential", "share", "app/OPENAI_API_KEY", "--yes"],
+    );
+    assert!(!ok && err.contains("tethra mesh project share"), "{err}");
+    outputs.push(out + &err);
+    json(&a, &["mesh", "project", "share", "app"]);
+    // Without --yes, a non-interactive share is refused before anything.
+    let (ok, out, err) = run(&a, &["mesh", "credential", "share", "app/OPENAI_API_KEY"]);
+    assert!(!ok && err.contains("--yes"), "{err}");
+    outputs.push(out + &err);
+    let (ok, out, err) = run(
+        &a,
+        &[
+            "mesh",
+            "credential",
+            "share",
+            "app/OPENAI_API_KEY",
+            "--to",
+            "dev-b",
+            "--yes",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("Shared OPENAI_API_KEY with 1 device(s)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("does not revoke the credential at its provider"),
+        "{out}"
+    );
+    outputs.push(out + &err);
+    let st = json(&a, &["mesh", "status"]);
+    assert_eq!(st["shares"]["outgoing_live"], 1, "{st}");
+
+    // B replicates with A's node and sees the share; nothing is imported.
+    let r = json(&b, &["mesh", "replicate"]);
+    assert!(r["exchanges"][0]["error"].is_null(), "{r}");
+    let list = json(&b, &["mesh", "credential", "list"]);
+    outputs.push(list.to_string());
+    let incoming = list["incoming"].as_array().unwrap();
+    assert_eq!(incoming.len(), 1, "{list}");
+    assert_eq!(incoming[0]["credential_name"], "OPENAI_API_KEY");
+    assert_eq!(incoming[0]["sharer_name"], "dev-a");
+    assert!(incoming[0]["imported"].is_null());
+    let share = incoming[0]["share_id"].as_str().unwrap().to_owned();
+    let st = json(&b, &["mesh", "status"]);
+    assert_eq!(st["shares"]["incoming_available"], 1, "{st}");
+    let (_, text, _) = run(&b, &["mesh", "credential", "list"]);
+    assert!(text.contains("available"), "{text}");
+    outputs.push(text);
+
+    // A wrong password imports nothing.
+    let out = b
+        .raw_no_password()
+        .env("TETHRA_PASSWORD", "not-the-master-password")
+        .args([
+            "mesh",
+            "credential",
+            "import",
+            &share[..8],
+            "--project",
+            "laptop-app",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr).into_owned();
+    outputs.push(err);
+
+    // Import (human output: masked only), then JSON list shows it imported.
+    let (ok, out, err) = run(
+        &b,
+        &[
+            "mesh",
+            "credential",
+            "import",
+            &share[..8],
+            "--project",
+            "laptop-app",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("Imported laptop-app/OPENAI_API_KEY (openai) from dev-a"),
+        "{out}"
+    );
+    assert!(out.contains("sk-t…5a"), "masked value shown: {out}");
+    outputs.push(out + &err);
+    let list = json(&b, &["mesh", "credential", "list"]);
+    assert_eq!(
+        list["incoming"][0]["imported"]["project_name"], "laptop-app",
+        "{list}"
+    );
+    outputs.push(list.to_string());
+    // The value is in B's vault, re-encrypted: the normal reveal decrypts it.
+    {
+        let paths = VaultPaths::new(b.data_dir.clone());
+        let mut v = vault::unlock_vault(&paths, &SecretString::from(MASTER_PW)).unwrap();
+        let value = v
+            .reveal_credential("laptop-app/OPENAI_API_KEY", &SecretString::from(MASTER_PW))
+            .unwrap();
+        assert_eq!(value.expose(), SHARE_CANARY);
+    }
+
+    // Review #9: a value another device chose that starts with a terminal
+    // escape never reaches the terminal through the masked receipt.
+    a.cmd()
+        .args([
+            "key",
+            "add",
+            "--project",
+            "app",
+            "--name",
+            "ESC_KEY",
+            "--provider",
+            "openai",
+            "--value-stdin",
+        ])
+        .write_stdin("\u{1b}[2Jsk-test-FAKE-mesh-esc-0001")
+        .assert()
+        .success();
+    let (ok, _, err) = run(
+        &a,
+        &[
+            "mesh",
+            "credential",
+            "share",
+            "app/ESC_KEY",
+            "--to",
+            "dev-b",
+            "--yes",
+        ],
+    );
+    assert!(ok, "{err}");
+    json(&b, &["mesh", "replicate"]);
+    let list = json(&b, &["mesh", "credential", "list"]);
+    let esc_share = list["incoming"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["credential_name"] == "ESC_KEY")
+        .unwrap()["share_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (ok, out, err) = run(
+        &b,
+        &[
+            "mesh",
+            "credential",
+            "import",
+            &esc_share,
+            "--project",
+            "laptop-app",
+        ],
+    );
+    assert!(ok, "{err}");
+    assert!(out.contains("Imported laptop-app/ESC_KEY"), "{out}");
+    assert!(
+        !out.contains('\u{1b}') && !err.contains('\u{1b}'),
+        "{out:?}"
+    );
+
+    // Revoke (asks first) and its notice; A's list shows it revoked.
+    let (ok, out, err) = run(&a, &["mesh", "credential", "revoke", &share[..8], "--yes"]);
+    assert!(ok, "{err}");
+    assert!(out.contains("Revoked 1 share(s)"), "{out}");
+    assert!(out.contains("rotate the credential"), "{out}");
+    outputs.push(out + &err);
+    let list = json(&a, &["mesh", "credential", "list"]);
+    let revoked = list["outgoing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["credential_name"] == "OPENAI_API_KEY")
+        .unwrap();
+    assert_eq!(revoked["revoked"], true, "{list}");
+    outputs.push(list.to_string());
+    let (_, doctor, derr) = run(&b, &["mesh", "doctor"]);
+    outputs.push(doctor + &derr);
+    let (_, status, serr) = run(&b, &["mesh", "status"]);
+    outputs.push(status + &serr);
+
+    for (i, text) in outputs.iter().enumerate() {
+        assert_no_canary(&format!("output #{i}"), text);
+        assert!(!has_hex64(text), "output #{i} printed a 64-hex run: {text}");
+    }
+    drop(node_a);
+}

@@ -46,7 +46,8 @@ Nothing outside this table ever replicates.
 | Usage counters per (origin device, mesh project, UTC day, provider, model) | yes | Counts, tokens and an estimated-cost split; **no** request-level data (`usage.counter`) |
 | Spend caps, rights, used totals | yes | `cap.def`, `cap.target`, `cap.rights`, `cap.used` |
 | Mesh settings (retention horizon) | yes | `mesh.setting` |
-| Credential shares (Increment 11) | yes | Sealed per recipient device; opt-in per credential (`share.sealed`, `share.revoke`) |
+| Credential shares (Increment 11) | yes, opt-in | One credential at a time, sealed to each chosen device's key and imported only on request (`share.sealed`, `share.revoke`; ADR 0033) |
+| Which local credential a share came from, imports, the "all my devices" intent | **no** | `mesh_share_outgoing`, `mesh_share_imports` (device-local) |
 | Local project ids, bindings, peers, invites, keys, cursors, enforcement switch | **no** | Device-local only |
 | Gateway request events, routes, paths, endpoints, scan findings, alerts, audit rows, provider admin keys, destinations | **no** | Never |
 
@@ -319,6 +320,34 @@ migration v23, the gateway writer's split, the node's `UsagePublisher` hook.
   `mesh_spend_cap`, dedup `mesh_cap:<cap>:<month>:{80,100}`.
 - **Views.** `caps::report` gives each cap and month per device, labelled with
   freshness like usage; frozen and superseded caps are labelled.
+
+## Credential sharing
+
+**Status: implemented (11)** ([ADR 0033](../decisions/0033-credential-sharing.md)).
+
+- **Share** (`UnlockedVault::mesh_credential_share`, `vault/mesh_share.rs`):
+  reauthenticate; the credential's project must be bound; decrypt the value
+  (a locked password project refuses); `mesh::share::share` seals it per
+  recipient (`crypto_box` to the recipient's `seal_pub`) and mints one
+  `share.sealed` each, with the local intent row (`mesh_share_outgoing`,
+  migration v24), in one `mint_with` transaction.
+- **Import** (`mesh_credential_import`): reauthenticate; find the share
+  addressed to this device; unwrap the sealing key
+  (`identity::load_seal_key`) for the open only; `share::open_incoming`
+  verifies every sealed field against the signed envelope and its signer;
+  store through the vault's own add or replace-and-version path, with the
+  `mesh_share_imports` row and the audit event in the same transaction.
+- **Revoke** (`mesh_share_revoke`, `mesh_credential_revoke`): `share.revoke`
+  tombstones, LWW per `(credential_ref, recipient)` (`views::State::share_at`).
+- **Purge**: production stores drop shares addressed to removed devices at
+  ingest (`SqliteStore::set_share_purge`, on in `identity::open_store`);
+  `share::purge` collects held ones, run by the node's `SharePurge` round hook
+  (after the cap reconciler) and before `mesh credential list`.
+- **Reseal offers** (`share::reseal_offers`) are computed when read, never
+  acted on by the node. CLI: `tethra mesh credential share|list|import|revoke|reseal`
+  (`apps/cli/src/mesh_share_cmd.rs`); desktop: `mesh_share_cmds.rs`, the
+  credential page's "Shared with my devices" panel and the Devices page's
+  "Credentials shared with this device".
 
 ## Data flow
 

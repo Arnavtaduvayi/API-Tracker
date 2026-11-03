@@ -256,9 +256,44 @@ permanent design choice or something a later increment changes.
   listening on the gateway's configured port as a running gateway, so with
   enforcement on a transfer waits for the gateway's acknowledgement then.
 
-## Credential sharing (Increment 11)
+## Credential sharing (Increment 11, ADR 0033)
 
-- **No forward secrecy.** Shares are sealed to static per-device keys.
-- **A recipient keeps what it imported.** Revoking a share does not revoke the
-  credential at the provider; rotate it there.
-- **Nothing is imported automatically.** Every import needs reauthentication.
+- **No forward secrecy.** Shares are sealed to static per-device sealing keys.
+  Anyone who later gets a recipient's vault and master password can open every
+  share sealed to it that its store still holds.
+- **A recipient keeps what it imported.** Revoking a share stops a device that
+  has not imported it yet; it never removes a value from a vault, and it
+  **does not revoke the credential at its provider**. To cut a device off,
+  rotate the credential (`tethra rotation`, the Rotation view). The same holds
+  for a removed or stolen device.
+- **Nothing is imported or resealed automatically.** Every share, import and
+  reseal needs the master password. A device paired after a share to "all my
+  devices", or a credential whose value changed, only gets a reseal *offer*
+  on the sharing device; nothing is sent until the user reseals there.
+- **An import by share id can be made ambiguous, or a share shadowed.** A
+  misbehaving member can mint items that reuse another share's id (importing
+  by that id is then refused as ambiguous), or mint its own item at another
+  device's share key so the recipient sees that one instead. It can never
+  deliver a value under another device's name (the bindings refuse it). The
+  sharing device sees its share "replaced at the recipient" and a reseal
+  offer; resealing (or revoking and resharing) puts its share back.
+- **A share from a removed device cannot be imported,** even if it was made
+  before the removal: the device may have been removed because it was lost
+  or stolen. Ask an active device to share the credential.
+- **A device revokes only the shares it made.** To end a share another
+  device made, revoke it there (or remove that device).
+- **A member can share a value under its own name.** The bindings stop a
+  device planting a credential *attributed to another device*; they cannot
+  stop one of your devices sharing a value of its own. The list and the import
+  dialog always name the sharing device.
+- **Size.** A shared value is at most 15 KiB, and the sealed box must fit
+  16 KiB; a value that needs heavy JSON escaping can be refused below that.
+- **Memory.** The value is held in zeroizing buffers while it is sealed or
+  opened, but serde's scratch buffer for a JSON string that needs unescaping,
+  and the vault's own copies while it re-encrypts, are not zeroized (the
+  memory-inspection limitation of the root threat model).
+- **The receiving device chooses the environment** of an imported
+  credential (default development); the share does not carry it.
+- **Desktop.** The share and import dialogs are covered by vitest and the
+  backend paths by tests; a manual click-through
+  (`docs/MANUAL_UI_TEST_PLAN.md` §D-S) is the owner's to run.

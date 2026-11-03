@@ -10,6 +10,7 @@
 
 mod mesh_cmds;
 mod mesh_project_cmds;
+mod mesh_share_cmds;
 
 use api_tracker_core::backup;
 use api_tracker_core::docwatch::{DocWatch, HttpFetcher};
@@ -5046,6 +5047,13 @@ fn main() {
             mesh_project_cmds::mesh_cap_rights,
             mesh_project_cmds::mesh_cap_reclaim,
             mesh_project_cmds::mesh_cap_enforce,
+            // Tethra Mesh (Increment 11): mesh_share_cmds.rs.
+            mesh_share_cmds::mesh_shares_list,
+            mesh_share_cmds::mesh_credential_share,
+            mesh_share_cmds::mesh_credential_reseal,
+            mesh_share_cmds::mesh_credential_import,
+            mesh_share_cmds::mesh_share_revoke,
+            mesh_share_cmds::mesh_credential_revoke,
         ])
         .build(tauri::generate_context!())
         .expect("error while running the Tethra desktop app")

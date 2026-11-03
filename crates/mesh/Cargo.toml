@@ -31,6 +31,10 @@ mdns-sd = { version = "0.21.6", default-features = false }
 if-addrs = "0.15"
 
 [dev-dependencies]
+# Already in the lockfile through core; the wire canary test encodes the fake
+# value the ways a leak could take (share_wire.rs).
+base64 = "0.22.1"
+hex = "0.4.3"
 tempfile = "3.27.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 api-tracker-core = { path = "../core", features = ["mesh-sim"] }

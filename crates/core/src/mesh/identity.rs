@@ -488,6 +488,31 @@ pub(crate) fn load_keys(
     })
 }
 
+/// This device's X25519 **sealing** private key, checked against its public
+/// key. Only the reauthenticated credential import calls this, and it drops
+/// the key before returning (MESH-SI-7); a running node never holds it.
+pub(crate) fn load_seal_key(
+    conn: &Connection,
+    vault_key: &SecretBytes,
+    vault_id: &str,
+) -> Result<Zeroizing<[u8; 32]>> {
+    let row = read_self(conn)?.ok_or(MeshError::NotInitialized)?;
+    let wrapped: Vec<u8> =
+        conn.query_row("SELECT wrapped_seal_key FROM mesh_self", [], |r| r.get(0))?;
+    let seal = unwrap32(
+        vault_key,
+        &aad::mesh_seal_key(vault_id, &row.info.device_id.to_hex()),
+        &wrapped,
+        "mesh sealing key",
+    )?;
+    if x25519_public(&seal) != row.info.seal_pub {
+        return Err(corrupt(
+            "the mesh sealing key does not match its public key",
+        ));
+    }
+    Ok(seal)
+}
+
 /// Open this device's store on its own connection to `db_path`, or `None`
 /// when it is not in a mesh.
 pub fn open_store(
@@ -500,7 +525,11 @@ pub fn open_store(
         return Ok(None);
     };
     let params = row.params(data_dir);
-    Ok(Some(SqliteStore::open(conn, params, clock)?))
+    let mut store = SqliteStore::open(conn, params, clock)?;
+    // Credential shares addressed to a removed device are never stored
+    // again (PROTOCOL.md §8.4 (b)); `share::purge` collects held ones.
+    store.set_share_purge(true);
+    Ok(Some(store))
 }
 
 /// One device in `status`.

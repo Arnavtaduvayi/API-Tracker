@@ -162,6 +162,10 @@ pub enum MeshCmd {
     /// (alerts only in this version).
     #[command(subcommand)]
     Cap(crate::mesh_cap_cmd::CapCmd),
+    /// Share one credential with chosen devices (sealed to each, imported
+    /// only when asked; reauthentication).
+    #[command(subcommand)]
+    Credential(crate::mesh_share_cmd::CredentialCmd),
     /// Check this device's mesh: identity, keys, stored items, the node,
     /// its listeners and peers. Every finding comes with a fix.
     Doctor {
@@ -375,6 +379,7 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
         } => usage(ctx, project, month, day, by_device)?,
         MeshCmd::Settings(cmd) => settings_cmd(ctx, cmd)?,
         MeshCmd::Cap(cmd) => crate::mesh_cap_cmd::run(ctx, cmd)?,
+        MeshCmd::Credential(cmd) => crate::mesh_share_cmd::run(ctx, cmd)?,
         MeshCmd::Doctor { rebuild, repair } => doctor(ctx, rebuild, repair)?,
     }
     Ok(())
@@ -1004,6 +1009,9 @@ struct StatusOut {
     /// Spend caps known here and the reconciler's last run (Increment 07).
     #[serde(skip_serializing_if = "Option::is_none")]
     caps: Option<CapsStatus>,
+    /// Credential shares and reseal offers (Increment 11).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shares: Option<crate::mesh_share_cmd::SharesSummary>,
 }
 
 #[derive(Serialize)]
@@ -1026,6 +1034,7 @@ fn status(ctx: &Ctx) -> Result<()> {
         address_changes: None,
         publish: None,
         caps: None,
+        shares: None,
     };
     if out.status.initialized {
         let node = instance::status(&ctx.paths.data_dir);
@@ -1056,6 +1065,7 @@ fn status(ctx: &Ctx) -> Result<()> {
             escrow_open: api_tracker_core::mesh::caps::escrow::open_rows(store.connection())?.len(),
             last_run: api_tracker_core::mesh::caps::reconcile::last_report(store.connection())?,
         });
+        out.shares = Some(crate::mesh_share_cmd::status_summary(&vault)?);
     }
     render::emit(ctx.json, &out, || print_status(&out));
     Ok(())
@@ -1336,6 +1346,20 @@ fn print_status(out: &StatusOut) {
             p.collected,
             p.retention_days
         );
+    }
+    if let Some(s) = out.shares.as_ref() {
+        if s.incoming_available + s.incoming_imported + s.outgoing_live + s.reseal_offers > 0 {
+            println!(
+                "Credentials:  {} shared with this device to import, {} imported, {} shared                  from here; `tethra mesh credential list`",
+                s.incoming_available, s.incoming_imported, s.outgoing_live
+            );
+        }
+        if s.reseal_offers > 0 {
+            println!(
+                "Reseal:       {} credential(s) could be sealed to devices that lack the                  current value; `tethra mesh credential list` (needs your master password)",
+                s.reseal_offers
+            );
+        }
     }
     if let Some(c) = out.caps.as_ref().filter(|c| c.count > 0) {
         println!(

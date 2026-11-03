@@ -15,7 +15,7 @@ use super::crdt::bounded::BoundedCounter;
 use super::crdt::lww_map::{LwwMap, LwwValue};
 use super::crdt::owner_counter::{CounterValue, OwnerCounterMap};
 use super::crdt::roster::{AddRecord, Roster};
-use super::crdt::SwEntry;
+use super::crdt::{Admit, SwEntry};
 use super::dot::{CapId, CredentialRef, DeviceId, MeshProjectId, ShareId};
 use super::error::MeshError;
 use super::hlc::Hlc;
@@ -23,7 +23,7 @@ use super::item::{ItemHash, SignedItem};
 use super::kinds::{Month, TypedItem, UsageKey, UsageTotals};
 use super::store::GenesisInfo;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfoValue {
@@ -236,6 +236,130 @@ impl State {
     }
 }
 
+/// The current value of one `(credential_ref, recipient)` share key
+/// (PROTOCOL.md §5.6 `shares`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShareWinner<'a> {
+    /// The winning `share.sealed`, which no admitted revoke names; `sharer`
+    /// is its origin (the signer).
+    Sealed {
+        sharer: DeviceId,
+        hlc: Hlc,
+        value: &'a SealedValue,
+    },
+    /// An admitted `share.revoke` names the winning share (`sealed` is that
+    /// share and its sharer), or there is no admitted share at the key and
+    /// this is its greatest revoke (`sealed` is `None`).
+    Revoked {
+        revoker: DeviceId,
+        hlc: Hlc,
+        share_id: ShareId,
+        sealed: Option<(DeviceId, &'a SealedValue)>,
+    },
+}
+
+impl State {
+    /// Every share key with an entry of either kind.
+    pub fn share_keys(&self) -> BTreeSet<(CredentialRef, DeviceId)> {
+        self.shares_sealed
+            .keys()
+            .chain(self.shares_revoked.keys())
+            .copied()
+            .collect()
+    }
+
+    /// The share at `key`, as every device converges to: `None` when the
+    /// recipient is removed (such shares are purged, §8.4) or no entry is
+    /// admitted. Otherwise the winning share is the admitted `share.sealed`
+    /// with the greatest `(hlc, origin)`; it is revoked when an admitted
+    /// `share.revoke` names its share id (the greatest such revoke is the
+    /// revoker), whatever their HLCs. A revoke of another share id ends
+    /// nothing. With no admitted share, the greatest admitted revoke is the
+    /// value.
+    pub fn share_at(&self, key: &(CredentialRef, DeviceId)) -> Option<ShareWinner<'_>> {
+        let roster = &self.roster;
+        if roster.is_removed(&key.1) {
+            return None;
+        }
+        let revokes: Vec<(DeviceId, Hlc, ShareId)> = self
+            .shares_revoked
+            .register(key)
+            .map(|r| {
+                r.entries()
+                    .filter(|(o, e)| roster.admits(o, e.seq))
+                    .map(|(o, e)| (*o, e.value.hlc, e.value.value))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let greatest = |it: &mut dyn Iterator<Item = &(DeviceId, Hlc, ShareId)>| {
+            it.max_by_key(|(o, h, _)| (*h, *o)).copied()
+        };
+        match self
+            .shares_sealed
+            .register(key)
+            .and_then(|r| r.winner(roster))
+        {
+            Some((sharer, e)) => {
+                let value = &e.value.value;
+                let naming =
+                    greatest(&mut revokes.iter().filter(|(_, _, id)| *id == value.share_id));
+                Some(match naming {
+                    Some((revoker, hlc, share_id)) => ShareWinner::Revoked {
+                        revoker,
+                        hlc,
+                        share_id,
+                        sealed: Some((*sharer, value)),
+                    },
+                    None => ShareWinner::Sealed {
+                        sharer: *sharer,
+                        hlc: e.value.hlc,
+                        value,
+                    },
+                })
+            }
+            None => {
+                greatest(&mut revokes.iter()).map(|(revoker, hlc, share_id)| ShareWinner::Revoked {
+                    revoker,
+                    hlc,
+                    share_id,
+                    sealed: None,
+                })
+            }
+        }
+    }
+
+    /// Whether an admitted `share.revoke` at `key` names `share_id`, and the
+    /// greatest such revoke's origin.
+    pub fn share_revoked_by(
+        &self,
+        key: &(CredentialRef, DeviceId),
+        share_id: &ShareId,
+    ) -> Option<DeviceId> {
+        let roster = &self.roster;
+        self.shares_revoked.register(key).and_then(|r| {
+            r.entries()
+                .filter(|(o, e)| roster.admits(o, e.seq) && e.value.value == *share_id)
+                .max_by_key(|(o, e)| (e.value.hlc, **o))
+                .map(|(o, _)| *o)
+        })
+    }
+
+    /// The timestamp a new write at `key` must exceed to win, whatever its
+    /// kind: the greatest admitted HLC of either register.
+    pub fn share_winning_hlc(&self, key: &(CredentialRef, DeviceId)) -> Option<Hlc> {
+        let roster = &self.roster;
+        let a = self
+            .shares_sealed
+            .register(key)
+            .and_then(|r| r.winning_hlc(roster));
+        let b = self
+            .shares_revoked
+            .register(key)
+            .and_then(|r| r.winning_hlc(roster));
+        a.max(b)
+    }
+}
+
 /// Fold one stored item (verified when it was accepted) into `state`.
 pub fn apply_stored(state: &mut State, item: &SignedItem) -> Result<ApplyOutcome, MeshError> {
     let body = item.decode_unverified()?;
@@ -265,7 +389,6 @@ mod expected {
         ExpectedCapDef, ExpectedCapMonth, ExpectedDevice, ExpectedDeviceInfo, ExpectedProject,
         ExpectedRights, ExpectedShare, ExpectedState,
     };
-    use std::collections::BTreeSet;
 
     impl State {
         /// The comparable state, exactly as PROTOCOL.md §5.6 defines it.
@@ -377,48 +500,21 @@ mod expected {
                 }
                 out.cap_months.insert(k, m);
             }
-            let share_keys: BTreeSet<(CredentialRef, DeviceId)> = self
-                .shares_sealed
-                .keys()
-                .chain(self.shares_revoked.keys())
-                .copied()
-                .collect();
-            for k in share_keys {
-                if roster.is_removed(&k.1) {
-                    continue;
-                }
-                let sealed = self
-                    .shares_sealed
-                    .register(&k)
-                    .and_then(|r| r.winner(roster))
-                    .map(|(o, e)| ((e.value.hlc, *o, 0u8), Some(e), None));
-                let revoked = self
-                    .shares_revoked
-                    .register(&k)
-                    .and_then(|r| r.winner(roster))
-                    .map(|(o, e)| ((e.value.hlc, *o, 1u8), None, Some(e)));
-                let winner = [sealed, revoked].into_iter().flatten().max_by_key(|w| w.0);
-                let Some(((_, origin, _), s, r)) = winner else {
-                    continue;
-                };
-                let share = match (s, r) {
-                    (Some(e), _) => {
-                        let v = &e.value.value;
-                        ExpectedShare::Sealed {
-                            sharer: origin,
-                            share_id: v.share_id,
-                            mesh_project_id: v.mesh_project_id,
-                            credential_name: v.credential_name.clone(),
-                            provider: v.provider.clone(),
-                            value_version: v.value_version,
-                            sealed: v.sealed.clone(),
-                        }
-                    }
-                    (None, Some(e)) => ExpectedShare::Revoked {
-                        revoker: origin,
-                        share_id: e.value.value,
+            for k in self.share_keys() {
+                let share = match self.share_at(&k) {
+                    Some(ShareWinner::Sealed { sharer, value, .. }) => ExpectedShare::Sealed {
+                        sharer,
+                        share_id: value.share_id,
+                        mesh_project_id: value.mesh_project_id,
+                        credential_name: value.credential_name.clone(),
+                        provider: value.provider.clone(),
+                        value_version: value.value_version,
+                        sealed: value.sealed.clone(),
                     },
-                    (None, None) => continue,
+                    Some(ShareWinner::Revoked {
+                        revoker, share_id, ..
+                    }) => ExpectedShare::Revoked { revoker, share_id },
+                    None => continue,
                 };
                 out.shares.insert(k, share);
             }

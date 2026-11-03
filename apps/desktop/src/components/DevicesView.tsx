@@ -23,6 +23,7 @@ import { MeshDeviceList } from "./MeshDeviceList";
 import { MeshPeers } from "./MeshPeers";
 import { MeshHealth } from "./MeshHealth";
 import { MeshAvailableProjects } from "./MeshAvailableProjects";
+import { MeshIncomingShares } from "./MeshIncomingShares";
 import { meshErrText, scrubbed } from "./MeshCommon";
 
 /** How often the open view re-reads the mesh status, devices and peers. */
@@ -128,6 +129,8 @@ export function DevicesView() {
             devices={status.devices}
             onChanged={changed}
           />
+          {/* Tethra Mesh (Increment 11): credentials sealed to this device. */}
+          <MeshIncomingShares refreshKey={refreshKey} onChanged={changed} />
           <MeshPeers refreshKey={refreshKey} onChanged={changed} />
           <MeshHealth onChanged={changed} />
 

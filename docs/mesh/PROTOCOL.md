@@ -146,8 +146,8 @@ month).
 | `cap.target` | `<cap_id>/<month>` | `target_micros` (u64) | |
 | `cap.rights` | `<cap_id>/<month>/<to>` | `amount_micros` (u64, cumulative), `override` (bool, absent = false) | `to` is a `device_id` or the literal `burn`. `override = true` requires `to == origin`. |
 | `cap.used` | `<cap_id>/<month>` | `epoch` (u32), `used_micros` (u64, cumulative) | |
-| `share.sealed` | `<credential_ref>/<recipient>` | `credential_name`, `mesh_project_id`, `provider` (slug), `recipient`, `sealed` (standard base64 with padding, 1-16384 bytes decoded), `share_id`, `value_version` (u64) | payload `recipient` MUST equal the key's. Used from Increment 11. |
-| `share.revoke` | `<credential_ref>/<recipient>` | `share_id` | Used from Increment 11. |
+| `share.sealed` | `<credential_ref>/<recipient>` | `credential_name`, `mesh_project_id`, `provider` (slug), `recipient`, `sealed` (standard base64 with padding, 1-16384 bytes decoded), `share_id`, `value_version` (u64) | payload `recipient` MUST equal the key's. Minted and opened as §5.7 says (implemented, 11). |
+| `share.revoke` | `<credential_ref>/<recipient>` | `share_id` | §5.7 (implemented, 11). |
 | `fork.report` | forked `device_id` | `hash_a`, `hash_b` (item hashes, 64 lowercase hex), `seq` (u64 ≥ 1) | `hash_a ≠ hash_b`. Minted by a device that detected the fork (§7). Added in 02. |
 
 `usage.counter` totals: `requests`, `priced_requests`, `unpriced_requests`,
@@ -499,7 +499,7 @@ per §6.4. Then:
 | `usage` | For each `usage.counter` key with at least one admitted entry: each admitted origin's `(epoch, totals)`. |
 | `caps` | For each `cap.def` key with at least one admitted entry: `Conflicted` if admitted entries come from more than one origin; otherwise `Defined` with that entry's `mesh_project_id`, `owner_device`, `created_hlc`, and `frozen` = the owner device is removed. |
 | `cap_months` | For each `(cap_id, month)` that has an admitted `cap.rights` or `cap.used` entry, or an admitted `cap.target` entry: `target` = the LWW `target_micros` of `<cap_id>/<month>` (or none); `devices` and totals = the bounded-counter view (§5.5) over the admitted `cap.rights` entries (`from` = origin, `to` = the key's recipient, amount = `amount_micros`) and admitted `cap.used` entries (`U[origin] = used_micros`). `devices` lists every device that is the origin or device-recipient of an admitted rights entry or the origin of an admitted used entry. |
-| `shares` | For each `<credential_ref>/<recipient>` whose recipient is **not removed**: among the admitted `share.sealed` and `share.revoke` entries for that key, the one with the greatest `(hlc, origin, rank)` with rank 0 for sealed and 1 for revoke; `Sealed` (with the sharer = its origin and its payload fields) or `Revoked` (revoker = its origin, `share_id`). Keys with no admitted entry are absent. |
+| `shares` | For each `<credential_ref>/<recipient>` whose recipient is **not removed**: let *S* be the admitted `share.sealed` entry with the greatest `(hlc, origin)`. If *S* exists, the value is `Revoked` (revoker = the origin of the greatest `(hlc, origin)` admitted `share.revoke` whose `share_id` equals *S*'s, and that `share_id`) when such a revoke exists, whatever the HLCs, and otherwise `Sealed` (sharer = *S*'s origin, and its payload fields). A revoke naming any other share id ends nothing. If no *S* exists, the value is `Revoked` by the greatest admitted revoke, if any. Keys with no admitted entry are absent. (Amended in 11: the rule was the greatest `(hlc, origin, rank)` over both kinds, under which a revoke of an older share, written by a device that had not seen a newer one, hid the newer share.) |
 
 **Valid items**, as a model with every item ever minted (the simulator's
 oracle) must judge them:
@@ -536,6 +536,68 @@ its oracle which items these are, through `OracleModel::observe_unreached`.)
 seq at which two different valid items of that origin exist. The detection
 guarantee of §7 makes (a) reach (b) at quiescence; a model that sees every mint
 uses both.
+
+### 5.7 Credential shares
+
+**Status: implemented (11)** — `mesh::share`, `vault/mesh_share.rs` (ADR 0033)
+
+A `share.sealed` item (§2.4) carries one credential's value for one
+recipient, inside `sealed`: a libsodium-compatible sealed box (`crypto_box`:
+X25519 and XSalsa20-Poly1305) to the recipient's **sealing** public key
+(`roster.add.seal_pub`). Its plaintext is the UTF-8 JSON object
+
+```json
+{"mesh_id": "…", "share_id": "…", "credential_name": "…", "provider": "…",
+ "value_version": 1, "recipient": "…", "sharer": "…", "value": "…"}
+```
+
+with ids as 32 lowercase hex characters. A reader ignores members it does not
+know and refuses duplicate members.
+
+**Writing.** A sharer mints one item per recipient, each with a fresh random
+`share_id`; the key's `credential_ref` is chosen once per local credential and
+reused for every later share and reseal of it (local-only mapping,
+`mesh_share_outgoing`). Recipients are active members other than the sharer.
+The HLC of every new `share.sealed` or `share.revoke` exceeds the key's
+current winner of either kind (`HlcPolicy::After`). A revoke ends exactly the
+share it names (§5.6), so a reshare (a new share id) is never hidden by a
+revoke of an older one. The value is at most
+15 KiB, and `sealed` must fit §2.4's 16 KiB (a value that escapes past it is
+refused, not truncated).
+
+**Reading (import).** Only the device named by the key's recipient can open
+the box. After opening it, the recipient MUST check, and refuse on any
+difference (`ShareBindingMismatch(<field>)`), that the plaintext's
+
+| Field | equals |
+|---|---|
+| `mesh_id` | this mesh's id |
+| `share_id` | the winning entry's payload `share_id` |
+| `recipient` | this device (the key's recipient) |
+| `sharer` | the winning entry's **origin** (its signer) |
+| `credential_name`, `provider`, `value_version` | the winning entry's payload fields |
+
+and that `value` is not blank. The box is anonymous, so these checks are what
+stop one member re-wrapping another member's box, or sealing a value of its
+own under another member's name. A plaintext that is not this JSON is a
+mismatch of `contents`; a box that does not open is unreadable. A share whose
+sharer is no longer an active member (removed or forked, even when the share
+is within its cutoff and so still admitted) is not imported: a device removed
+because it was lost or stolen may have shared a value of its choosing.
+Nothing is stored on any refusal.
+
+**Revoking.** `share.revoke` names the share id it ends. It deletes nothing:
+a device that imported the value keeps it, and the credential stays valid at
+its provider. Replaying a superseded or revoked share changes no view (the
+store already holds that entry or a later one of its origin). An
+implementation offers to revoke only the shares this device made; it never
+matches a share between two other devices that it merely relays. A sharer's
+own view of its shares reads its own entry at each key, so another member's
+item at the same key cannot hide the sharer's share from it (the sharer sees
+it replaced at the recipient, and resealing puts its own back).
+
+**Removed recipients.** Keys whose recipient is removed are absent from
+`shares` (§5.6) and collected under §8.4 (b).
 
 ## 6. Roster and admission
 
@@ -856,6 +918,22 @@ stored (not a rejection; its dot is logged as usual) and held ones are deleted
 when the publisher runs. The two days of slack keep devices whose clocks
 straddle midnight from disagreeing about what they hold; while two devices
 briefly do, their digests differ and repair resends what the other then drops.
+
+**Shares to removed devices (implemented, 11).** A `share.sealed` or
+`share.revoke` whose recipient is removed is excluded under (b): removal is
+forever (a removal counts once its origin is known, and *known* only grows),
+so the exclusion does not depend on seq, and it covers every item at that key
+from every origin. The rule above that an item of a removed or forked origin
+above its cutoff or fork seq MUST NOT be deleted is about deletion justified
+by that cutoff; it does not apply to an exclusion like this one (or the
+usage retention below), under which the origin's older entries for the key
+are excluded too and are themselves dropped at ingest, so nothing can
+resurface. While two devices disagree about what they hold, repair resends
+it and the purging side drops it again. A device's store does not
+keep an arriving one (not a rejection; its dot is logged as usual), and held
+ones are deleted when the share purge runs (every node round, and before a
+share list). While two devices disagree about a removal, repair resends what
+the other then drops, as for usage.
 
 ### 8.5 Repair
 

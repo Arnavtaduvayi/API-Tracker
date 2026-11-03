@@ -797,6 +797,7 @@ export default function App() {
                   )
                 }
                 onEdit={() => setView({ name: "credential-edit", id: view.id })}
+                onOpenRotation={() => setView({ name: "rotation" })}
               />
             )}
             {view.name === "providers" && (

@@ -19,8 +19,8 @@ Every session reads this file first and updates it at the end (README §1).
 | 07 | [Spend caps (alerts only)](07-spend-caps.md) | S | L | done | 2026-10-28 | 2026-10-28 | `e2b9abd`, `6d06b15` | CI `40806698828` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (35 min; `6d06b15` removes the simulator's fsyncs), frontend, desktop backend, packaged app on macOS); macOS service `40806700080` (success). `6d06b15` + record `e7104c1`: CI `40810268430` (success), service `40810267760` (success) |
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). Record `c35615d`: CI `40819371929`, service `40819371912` (success) |
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
-| 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). This record: CI pending (next session) |
-| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | pending | | | | |
+| 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
+| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | in-progress | 2026-11-03 | | | |
 | 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | pending | | | | |
 
 Sizes are rough context cost for a 1M-token session:
@@ -40,6 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
+| 11 (this increment) | **1,867 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (25): core `--test mesh_share` 18 (6 of them the review's regressions), `mesh::share` unit 3, `mesh_schema` 11 (+1 v24), `tauri_command_authz` 24 (+1 share/import/reseal reauth), `-p api-tracker-mesh --test share_wire` 1, `cli --test mesh_cli` 11 (+1); the oracle's share-rule test rewritten (same count) | **407 passed** in 37 files (`npm test`; +15): `MeshCredentialSharePanel` 8, `MeshIncomingShares` 5, `DevicesView` +2 | **186 passed** (`bash scripts/smoke.sh`; 7 sharing checks) |
 | 10 `aa63799` | **1,842 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (2): `tauri_command_authz` `mesh::mesh_cap_enforce_requires_correct_reauth` (23 in the file), `-p api-tracker-mesh --test desktop_flow` 1 | **392 passed** in 35 files (`npm test`; +45): `CapsPanel` 17, `MeshUsageCard` 10, `MeshProjectPanel` 8, `MeshAvailableProjects` 7, `MeshCapAlerts` 1, `DevicesView` +2 | **179 passed** (`bash scripts/smoke.sh`) |
 | 09 `771b7ed` | **1,840 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`: 1,839 in the full run, plus `supervisor::a_device_pairs_with_the_in_process_node…` added after it and run with its file, 11/11). New (17): core `--test tauri_command_authz` `mesh::*` 4 (22 in the file), `mesh::node_settings` unit 2, `-p api-tracker-mesh --test supervisor` 11 | **347 passed** in 30 files (`npm test` in apps/desktop; base 308 in 25): `DevicesView` 16, `MeshThisDevice` 8, `MeshSetup` 7, `MeshPeersHealth` 7, `MeshAppNav` 1 | **179 passed** (`bash scripts/smoke.sh`) |
 | 08 `cb91633` | **1,823 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (15): gateway `--test cap_enforcement` 14, core `--test mesh_caps` 16 (+1); ignored +1 (`perf::perf_cap_admission_overhead`). Perf: `bash scripts/gateway_perf.sh` 9 passed; admission within noise (PERFORMANCE_RESULTS) | unchanged (not touched) | **179 passed** (`bash scripts/smoke.sh`) |
@@ -102,12 +103,127 @@ also update DESIGN.md and the affected increment files; README §7.)_
 | 09 | **Widening the node's network exposure needs the master password**, enforced in core (`UnlockedVault::mesh_node_settings_set`): turning on all interfaces or mDNS discovery (as the 09 file says) **and adding a non-loopback listen address** (same LAN surface). No password → `MeshError::ReauthRequired` (`mesh_reauth_required`, so the UI knows to ask), a wrong one → `WrongPassword`; audit `mesh_node_exposure_widened`. | A specific LAN address opens the same surface as the two flags. | ADR not needed (stronger, local); SECURITY_INVARIANTS SI-1, USER_GUIDE §8 |
 | 09 | Small, this table only: the node handle is `api_tracker_mesh::supervisor::NodeSupervisor` (own mutex) in `AppState.mesh_node`, not `Mutex<Option<NodeHandle>>`; the lifecycle tests are in `crates/mesh/tests/supervisor.rs` (CI runs no desktop-crate tests); the orchestrator wrote the shared pieces in the contract commit (`core::mesh::node_settings`, `membership::is_stale`, `peers::backoff_until`, the supervisor, `replicate::{replicate_known_peers, leave_mesh}` — the CLI's one-shot replicate and leave now call them too); `backup_restore` stops the node and waits before restoring (restarts it if the restore fails); polled reads use `with_vault_background`; extra codes `mesh_node_not_running`, `mesh_node_no_address`, `mesh_node_stopping`, `mesh_external_node`, `mesh_no_peers`, `mesh_network`, `mesh_node`; invites name at most 8 addresses; desktop listen addresses are `IP:PORT` literals (no `--advertise`); Devices sits in the sidebar's System group; `analyticsScreenFor` returns `null` for it. | Simpler, safer, or required by what was built. | — |
 | 10 | Small, this table only: the commands are in `apps/desktop/src-tauri/src/mesh_project_cmds.rs` (a sibling of `mesh_cmds.rs`, not additions to it, so neither file passes ~600 lines); `mesh_usage_report(filter, publish)` and `mesh_caps_list(reconcile)` take a flag — polled reads write nothing, publishing and reconciling run on open, refresh and after an action; dollar amounts cross IPC as text for core's `pricing::dollars_to_micros`; `mesh_cap_rights` falls back to the read-only report with `reconcile_error` like `mesh_caps_list`; blank usage-filter fields mean "absent", blank cap or device ids are refused by core; "Enforcement inactive: …" shows only when the gate status is fresh, otherwise "the gateway does not seem to be running" for a cap enforced here (a stale reason could contradict a switch just made); caps are matched to a project through its `root`; no month picker (the current month); reclaim from every other device only (the CLI's `--from` is not in the UI); Alerts needed no change (it renders the backend's title and text, `MeshCapAlerts.test.tsx`). | Simpler, or required by what was built. | — |
+| 11 | **R24 A revoke ends exactly the share id it names**, whatever the HLCs: the winning share at a key is the greatest `(hlc, origin)` admitted `share.sealed`, revoked when an admitted `share.revoke` names it; with no share, the greatest revoke stands. The oracle and the simulator's workload follow (its revokes name the share they see, with no extra RNG draw). | The review found that "greatest `(hlc, origin, rank)` over both kinds" let a revoke of an older share, written by a device that had not seen a newer one, hide the newer share (test failed first). | PROTOCOL §5.6 (amended in 11), §5.7, ADR 0033 decision 7, DESIGN [Amended 11] |
+| 11 | **Migration v24** `mesh_share_outgoing(credential_ref PK, credential_id UNIQUE → credentials ON DELETE CASCADE, all_current, created_at, updated_at)`: which local credential a share came from and the "all current devices" intent. `migration_safety` still 9. | The replicated items carry only the reference; the reseal offer needs the intent and the local credential. | ADR 0033, DESIGN [Amended 11], ARCHITECTURE |
+| 11 | **Reseal offers are computed when read** (`share::reseal_offers`: devices paired since an "all current" share, devices holding an older value version, devices whose key another device's item holds now), performed only by the reauthenticated `mesh_credential_reseal`; the round hook (`SharePurge`) only purges. | The 11 file said the hook "queues" an offer; deriving it from state and the local table is always fresh, needs no storage, and keeps the node away from values. Stale value versions (after a rotation) are a natural second reason for the same offer. | ADR 0033 decision 6, ARCHITECTURE |
+| 11 | **Purge at ingest**: production stores (`identity::open_store`) drop `share.*` items addressed to a removed device at ingest (`SqliteStore::set_share_purge`, like the usage floor; off in the simulator and conformance stores), and `share::purge` collects held ones (every node round, before `mesh credential list`, before a one-shot `mesh replicate`, and when the desktop lists open). PROTOCOL §8.4 clarified that its "MUST NOT delete items of removed or forked origins above the cutoff" is about deletion justified by that cutoff, not a seq-independent exclusion covering every item at the key. | Without the drop, repair re-delivered purged shares (test fails with it disabled). | PROTOCOL §8.4, ADR 0033 |
+| 11 | Small, this table only: `MeshError::{ProjectNotBound, ShareBindingMismatch(&'static str), ShareUnreadable, ShareRevoked, ShareFromRemovedDevice}` (not `Bound(NotBound)`); `mesh_credential_revoke` split into `mesh_share_revoke(share)` and `mesh_credential_revoke(credential)`, each for this device's own shares only; also `mesh_credential_reseal`, `mesh_shares_peek` (writes nothing), `mesh_share_purge`; `ImportOptions { replace, environment }` (default development; `--replace` refused across providers); a reference record cannot be shared; a share already imported here is refused; the value limit is 15 KiB (and the sealed box 16 KiB); the share/revoke audit rows commit in the minting transaction (`mesh_credential_shared` details count devices only); the vault half lives in `crates/core/src/vault/mesh_share.rs` (a child module of `vault.rs`), with `add_credential_with` / `replace_value_with` / `decrypt_credential_value` factored out of the existing paths; CLI `mesh_share_cmd.rs`, desktop `mesh_share_cmds.rs` (siblings, per 10's handoff) and `MeshCredentialSharePanel.tsx` / `MeshIncomingShares.tsx`; `crates/mesh` dev-dependencies `base64` and `hex` (already in the lockfile) for the wire canary. | Simpler, safer, or required by what was built. | — |
 | 02 | Small deviations, in this table only: `GenesisInfo` lives in `mesh::store` (re-exported by `oracle_api`). The oracle contract gained `observe_unreached`. `Session::new(limits, expected_peer)` takes the store per call (`start(&store)`, `on_frame(frame, &store)`) instead of a snapshot. The store owns the HLC. `HlcClock: Clone`. The genesis is always a member once its self-add exists (PROTOCOL §6.3 clarified). The workspace dev profile optimises only the crypto crates. | Simpler or required by what was built. | — |
 
 ## Handoff notes (newest first)
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 11 — Opt-in credential sharing (2026-11-03)
+
+**What landed.**
+- Core `mesh::share` (seal/open, `verify_bindings` over the seven bound
+  fields, `find_incoming`, `share`, `revoke`, `purge`, `list`,
+  `reseal_offers`); `views::State::{share_keys, share_at, share_revoked_by,
+  share_winning_hlc}` (production code; the oracle comparison now runs
+  through `share_at`); `identity::load_seal_key`;
+  `SqliteStore::{set_share_purge, gc_shares}`; migration v24; the vault half
+  in `vault/mesh_share.rs` (`mesh_credential_share`, `mesh_credential_reseal`,
+  `mesh_credential_import`, `mesh_shares_list`, `mesh_shares_peek`,
+  `mesh_share_purge`, `mesh_share_revoke`, `mesh_credential_revoke`).
+- `crates/mesh`: the `SharePurge` round hook (after the cap reconciler);
+  `replicate_known_peers` purges before a one-shot exchange.
+- CLI `tethra mesh credential share|list|import|revoke|reseal` and the
+  `shares` object/line in `mesh status`. Desktop: 6 commands
+  (`mesh_share_cmds.rs`), the credential page's **Shared with my devices**
+  panel (with the Rotation link), and **Devices → Credentials shared with
+  this device**.
+- Docs: ADR 0033; PROTOCOL §5.6 (amended), §5.7, §8.4; SECURITY_INVARIANTS
+  SI-6 (implemented), SI-7, SI-13; mesh and root THREAT_MODEL; KNOWN_LIMITATIONS;
+  USER_GUIDE §5b and "Credentials in the app"; root SECURITY.md; ARCHITECTURE;
+  TEST_PLAN; MANUAL_UI_TEST_PLAN §D-S; README; CHANGELOG (Added + Security);
+  command inventory (173 rows); DESIGN [Amended 11].
+
+**Acceptance, each demonstrated.**
+- CLI between two real nodes: `mesh_cli::share_a_credential_and_import_it_on_another_device_over_a_real_node`
+  and smoke's sharing block (masked value shown, value decrypts through
+  `key reveal`). Desktop: the commands' functions are the tested core methods
+  (`mesh_share.rs`, authz); the UI flows by vitest. Not moved to 12.
+- Canaries (MESH-SI-6): `share_wire::a_shared_credential_never_crosses_the_wire_in_plaintext`
+  (every byte through a TCP shim), and in `mesh_share` every session frame,
+  every column of every table on three devices, errors, doctor, status, list
+  and receipts; CLI stdout/stderr; SI-6 and SI-7 marked implemented with names.
+- Planting and every binding mismatch refused:
+  `mesh_share::a_member_cannot_plant_a_credential_in_the_name_of_another_device`,
+  `each_bound_field_that_disagrees_with_the_envelope_is_refused`.
+- ADR 0033 written; the review ran and its findings are resolved (below).
+- Full suite, both clippies and smoke green (test counts row).
+
+**Review (S+R).** `code-review` at high effort on the uncommitted diff, ten
+findings. Nine confirmed and fixed, each with a test that failed first
+(the two whose first failure was not yet the bug, #3 and #9, were checked by
+disabling the fix and watching the test fail):
+1. A revoke of an older share hid a newer one (LWW over both kinds) → R24,
+   PROTOCOL §5.6 amended, oracle rule and test rewritten, simulator revokes
+   name the share they see (`a_revoke_ends_only_the_share_it_names`).
+2. `revoke <prefix>` matched shares between other devices → own live shares
+   only (`a_device_revokes_only_shares_it_made`); the CLI prompt names the
+   credential and recipient.
+3. A share from a since-removed (lost/stolen) device stayed importable →
+   `ShareFromRemovedDevice`, listed with `sharer_active: false`
+   (`a_share_from_a_since_removed_device_cannot_be_imported`).
+4. **Rejected**: "the purge deletes items of removed/forked origins above
+   their cutoff, against §8.4". The exclusion (recipient removed; removal
+   counts once its origin is known, and *known* only grows) covers every
+   item at the key from every origin, independent of seq, and the ingest
+   drop stops older entries resurfacing; usage retention (06) already works
+   this way. §8.4 now says so explicitly.
+5. An unescaped value (`Cow::Owned`) was copied and the original dropped
+   unzeroized → moved into `SecretString` without a copy (no test: memory).
+6. Another member's item at my key hid my outgoing row and reseal offer →
+   outgoing rows and offers read this device's own entry; `superseded_by`
+   (`another_devices_item_at_my_share_key_does_not_hide_my_share`).
+7. `--replace` could overwrite another provider's same-named credential →
+   refused (`replace_refuses_a_same_named_credential_of_another_provider`).
+8. The audit row was written after the mint commit → inside the minting
+   transaction, for share and revoke (`a_share_whose_audit_row_fails_mints_nothing`).
+9. The CLI printed the masked value unsanitized (its characters come from
+   another device) → sanitized (the escape-sequence block in the CLI test).
+10. The desktop never used `purge = true` → each list collects old shares
+    when it opens and after its own action; polls write nothing.
+
+**Every reauth-gated mesh method (for 12's auditors).** All on
+`UnlockedVault`, each calling `verify_master_password` itself:
+`mesh_invite_create` (04), `mesh_device_remove` (04), `mesh_leave` (04),
+`mesh_cap_enforce` (08), `mesh_node_settings_set` (09, only when it widens
+the LAN surface; `MeshError::ReauthRequired` without a password),
+`mesh_credential_share`, `mesh_credential_reseal`, `mesh_credential_import`
+(11). Tauri commands that reach them: `mesh_invite_create`,
+`mesh_device_remove`, `mesh_leave`, `mesh_cap_enforce`,
+`mesh_node_set_settings`, `mesh_credential_share`, `mesh_credential_reseal`,
+`mesh_credential_import` (all `covered:tauri_command_authz` in the
+inventory). Not reauth-gated by design: list/peek/purge (no value), revoke
+(a protective tombstone, confirmed in the UI/CLI).
+
+**For 12 (load-bearing).**
+- The sealing key: only `identity::load_seal_key`, only from
+  `mesh_credential_import`, after reauth; `MeshKeys` still has no sealing
+  key. A mutation for 12: skip `verify_bindings` → the planting test fails.
+- Value buffers: `share::seal_to` (zeroizing, reserved so it never
+  reallocates), `share::open` (zeroizing), `open_incoming` (moves the value
+  into `SecretString`). The vault's own encrypt copies and serde's unescape
+  scratch are the documented residue.
+- Share views: `State::share_at` is the one rule (PROTOCOL §5.6); outgoing
+  rows use `share::own_entry`. The simulator exercises the rule against the
+  oracle (random shares and revokes; revokes name what the device sees).
+
+**Surprises.**
+- Writing the removed-sharer test showed the protocol already excludes a
+  share minted *above* the remover's cutoff (it is not admitted); the real
+  gap was a share within the cutoff.
+- `cargo fmt` reflows Python-heredoc edits; re-read before a second edit.
+- `npx prettier --write src` touched no unrelated file (checked), but prefer
+  naming files.
+
+**Not done / honest list.**
+- The GUI click-through: `docs/MANUAL_UI_TEST_PLAN.md` §D-S (owner action),
+  as for 09 and 10. Nothing in 11's scope was moved to 12.
 
 ### Increment 10 — Desktop: projects, usage & caps (2026-11-02)
 

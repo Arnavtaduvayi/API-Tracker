@@ -9,8 +9,9 @@ encrypted Noise channel that only your paired devices can open
 
 This guide covers what exists today: pairing, the node that keeps devices
 converged, shared projects and cross-device usage, monthly spend caps (alerts,
-and a gateway that refuses requests over a cap where you switch that on), and
-the `status` and `doctor` views. The commands below are the CLI's; the desktop
+and a gateway that refuses requests over a cap where you switch that on),
+opt-in sharing of one credential with chosen devices, and the `status` and
+`doctor` views. The commands below are the CLI's; the desktop
 app does the device workflow from its **Devices** view
 ([section 8](#8-in-the-desktop-app)).
 
@@ -21,7 +22,9 @@ lists: today, the device roster (ids, names, public keys, removals), each
 device's published listen addresses, the projects you share (id, name,
 archived, merged), the daily usage counters of those projects, spend caps
 (their target, each device's rights and spend), and the mesh settings.
-Credential values never replicate.
+Credential values never replicate on their own: only a credential you share
+explicitly, one at a time, sealed to the devices you choose
+([section 5b](#5b-share-a-credential-with-your-devices)).
 
 ## 1. Pair your devices
 
@@ -289,6 +292,51 @@ it forwards everything and says why. `tethra mesh cap show` and `tethra
 gateway status` show what each enforced cap still admits. Requests that do not
 go through Tethra's gateway are not capped; `off` switches it off again.
 
+## 5b. Share a credential with your devices
+
+Use this when you want the same API key on two of your own machines without
+pasting it through a chat or a note ([ADR 0033](../decisions/0033-credential-sharing.md)).
+Nothing is shared or imported by itself.
+
+```bash
+# on the laptop: the credential's project must be shared first (section 4)
+tethra mesh credential share app/OPENAI_API_KEY                # all my devices
+tethra mesh credential share app/OPENAI_API_KEY --to desktop   # only this one
+# on the desktop, after its next exchange
+tethra mesh credential list
+tethra mesh credential import 5e1f0a2b --project app           # the share id (8+ chars)
+```
+
+- **Sharing** asks you to confirm the devices and then for your master
+  password. The value is sealed separately to each device's own key; only
+  that device can open it. A password-locked project must be unlocked first.
+  Choosing all your devices also offers the credential to devices you pair
+  later: `mesh credential list` and `mesh status` show a **reseal offer**, and
+  nothing is sent until you run `tethra mesh credential reseal <credential>`
+  (master password). The same offer appears when the credential's value
+  changes (after a rotation), for the devices that hold the old value.
+- **Importing** asks for the master password, opens the share with this
+  device's key, checks that everything sealed inside matches what the sharing
+  device signed (so another device cannot plant a credential in its name),
+  and stores the value in the project you choose, encrypted with that
+  project's key. It prints the masked value only. If the project already has
+  a credential with that name, `--replace` replaces its value and keeps the
+  old one as a version; without it the import is refused. `--environment`
+  sets a new credential's environment (default development).
+- **Revoking** (`tethra mesh credential revoke <share>`, or `--credential
+  <credential>` for every share of it) asks first. It stops a device that has
+  not imported the share yet. It **does not** remove the value from a device
+  that imported it, and it **does not** revoke the key at its provider: to
+  cut a device off, rotate the credential (`tethra rotation plan
+  <credential>`, or the Rotation view).
+  A device revokes only the shares it made.
+- A removed device gets no new shares, and shares addressed to it are
+  dropped everywhere. Anything it already imported stays on it: rotate those
+  credentials. A share *from* a removed device is listed but cannot be
+  imported (it may have been removed because it was lost or stolen).
+- There is no forward secrecy: shares are sealed to each device's long-lived
+  key. A value is at most 15 KiB.
+
 ## 6. `tethra mesh status`
 
 Everything `status` shows is local; nothing in it is secret. `--json` gives the
@@ -440,6 +488,21 @@ The app sends no analytics about any of this.
   blocked. It is a self-limit on traffic through Tethra's gateway, not a
   security boundary. When the gateway cannot enforce (it is not running, or
   it reports a reason), the panel says "Enforcement inactive" and why.
+
+### Credentials in the app
+
+- **Share one.** On a credential's page, **Shared with my devices** offers
+  **Share with my devices…** once its project is shared: choose all your
+  devices (and future ones, as a reseal offer) or tick specific ones, then
+  confirm your master password. The panel lists where the credential is
+  shared, with **Revoke** (it asks first) and **Reseal…** when a device lacks
+  the current value. The notice under it says what revoking does not do and
+  links to the **Rotation** view.
+- **Import one.** On **Devices**, **Credentials shared with this device**
+  lists what other devices sealed to this one: available, imported (and as
+  what) or revoked. **Import into…** chooses a project here, an environment,
+  and whether to replace a same-named credential's value, then asks for your
+  master password. The app shows the stored credential's masked value only.
 
 ## Troubleshooting
 

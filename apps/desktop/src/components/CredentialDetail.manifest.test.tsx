@@ -13,6 +13,8 @@ vi.mock("../api", async () => {
   return {
     ...actual,
     api: {
+      // Tethra Mesh share panel (Increment 11): outside a mesh, it shows nothing.
+      meshStatus: vi.fn().mockResolvedValue({ initialized: false, node: { running: null } }),
       credentialGet: vi.fn(),
       credentialPermissions: vi.fn().mockResolvedValue(null),
       providerGet: vi.fn(),

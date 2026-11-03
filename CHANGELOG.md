@@ -6,6 +6,41 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: share one credential with your own devices (in development)
+
+You can now send one credential to chosen paired devices without pasting it
+anywhere, from the CLI (`tethra mesh credential share|list|import|revoke|reseal`)
+or the app (a credential's **Shared with my devices** panel, and **Devices →
+Credentials shared with this device**)
+([ADR 0033](docs/decisions/0033-credential-sharing.md),
+[user guide](docs/mesh/USER_GUIDE.md#5b-share-a-credential-with-your-devices)).
+
+- **Opt-in and explicit.** Share one credential with all your devices or
+  specific ones; the receiving device imports it into a project of its
+  choice. Nothing is shared, imported or resealed automatically; a device
+  paired later, or a changed value, gets a reseal offer you act on.
+- **Revoking is not rotating.** A revoke stops devices that have not imported
+  the share; a device that imported it keeps the value, and the credential
+  stays valid at its provider until you rotate it. The CLI and app say so
+  wherever you revoke, and link to rotation.
+
+### Security — credential sharing (Tethra Mesh)
+
+- Sharing, resealing and importing each require the master password, checked
+  in core. The value is sealed to each recipient device's own key (a key used
+  for nothing else, unwrapped only during an import) inside an item the
+  sharing device signs. An import checks every sealed field against that
+  signed envelope and its signer before storing anything, so one of your
+  devices cannot plant a credential under another device's name, and stores
+  the value through the normal credential path, encrypted under the target
+  project's key.
+- Tests assert the value never appears on the encrypted wire (a byte capture
+  of a real session), in any session frame, in any database column of any
+  device, in errors, audit rows, `doctor`/`status`/list output or CLI output,
+  in raw, hex, base64 or JSON-escaped form. Shares addressed to a removed
+  device are dropped everywhere. There is no forward secrecy (long-lived
+  device keys); see `docs/mesh/KNOWN_LIMITATIONS.md`.
+
 ### Added — Tethra Mesh: shared projects, cross-device usage and spend caps in the desktop app (in development)
 
 A project's page can now share the project with your other devices, show its

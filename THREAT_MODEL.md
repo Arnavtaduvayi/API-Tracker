@@ -158,8 +158,13 @@ integrations land.
   devices exchange signed items directly over Noise-encrypted sessions; no
   Tethra server, relay or rendezvous is involved, and nothing listens unless the
   user starts the mesh node with an explicit listen address. What crosses the
-  boundary is fixed (`docs/mesh/ARCHITECTURE.md` "What replicates"); credential
-  values cross it only as opt-in sealed boxes (Increment 11). Full model:
+  boundary is fixed (`docs/mesh/ARCHITECTURE.md` "What replicates"). A
+  credential value crosses it only when the user shares that one credential,
+  with the master password, as a sealed box to each chosen device's own key,
+  imported there only on request with the master password again, after every
+  sealed field is checked against the sharer's signed envelope (ADR 0033). A
+  device keeps what it imported: revoking a share is not a provider-side
+  revocation, so rotate a credential to cut a device off. Full model:
   [`docs/mesh/THREAT_MODEL.md`](docs/mesh/THREAT_MODEL.md).
 
 ## Adversaries and outcomes
@@ -183,7 +188,7 @@ integrations land.
 | Active LAN prober | Without the mesh access key the handshake fails at its first message, so it never learns a device's static key; handshakes are rate-limited and only the handshake is parsed before authentication. |
 | Holder of a stolen invite token | Can pair one device within the token's lifetime (10 minutes by default, single use, 5 attempts); the user sees and removes it. |
 | Removed or stolen paired device | Removal cuts its later items off and rotates the access key, eventually consistently. Credentials it already imported stay compromised: rotate them. |
-| Malicious paired device (your own, compromised) | Cannot impersonate another device or create spend-cap rights in others' views; can remove other devices, report false usage about itself and raise its own cap with a labelled override. Recovery is re-pairing. |
+| Malicious paired device (your own, compromised) | Cannot impersonate another device, create spend-cap rights in others' views, or plant a credential under another device's name (sealed-field bindings); can remove other devices, report false usage about itself, raise its own cap with a labelled override and share a value of its own under its own name. Recovery is re-pairing; rotate anything it imported. |
 | Cloned or rolled-back data directory | Restore wipes mesh identity; a marker file and on-the-wire fork evidence stop a clone from reusing an identity. |
 
 Details, residual risks and status: [`docs/mesh/THREAT_MODEL.md`](docs/mesh/THREAT_MODEL.md).

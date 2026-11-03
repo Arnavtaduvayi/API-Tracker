@@ -10,6 +10,22 @@ amendment text in §2 when they approved the plan on 2026-10-26.
 
 Section ids (D1 to D21) are stable. Increment files cite them as "DESIGN §Dn".
 
+> **Amended by Increment 11 (2026-11-03).** Credential sharing as built (ADR
+> 0033, PROTOCOL.md §5.7): the sealed plaintext and its seven bound fields are
+> as D16 says; the "all current devices" intent is the local table
+> `mesh_share_outgoing` (migration v24); reseal offers are computed when read
+> (new members of an "all current" share, and devices holding an older value
+> version) and performed only by the reauthenticated
+> `mesh_credential_reseal`; the round hook only purges; production stores drop
+> shares to removed recipients at ingest and `share::purge` collects held
+> ones (§8.4 (b)); the not-bound error is `MeshError::ProjectNotBound`;
+> revoke is `mesh_share_revoke(share)` or `mesh_credential_revoke(credential)`,
+> each for this device's own shares only; a revoke ends exactly the share id
+> it names, whatever the HLCs (the review's change to PROTOCOL.md §5.6); a
+> share from a since-removed sharer is not imported; import takes `replace`
+> (refused across providers) and the new credential's environment. Passages
+> marked **[Amended 11]**.
+>
 > **Amended by Increment 08 (2026-10-29).** Enforcement as built (ADR 0032
 > D11, gateway SI-22): the per-cap opt-in is `mesh_meta` `cap_enforce/<cap>`
 > and `gateway_config.cap_enforcement` follows "some cap is enforced"; the
@@ -828,6 +844,9 @@ used. The list below is the original brief:
   `budget.rs`.
 
 ## D16. Credential sharing (Increment 11, ADR 0033)
+
+> **[Amended 11]** Built as ADR 0033 and PROTOCOL.md §5.7 describe (the
+> header note lists what differs from the brief below).
 
 - **Opt-in, one credential at a time:**
   `UnlockedVault::mesh_credential_share(master_password, credential_id, recipients)`.

@@ -122,6 +122,10 @@ import type {
   MeshCapCreated,
   MeshCapReport,
   MeshEnforceResult,
+  MeshImportReceipt,
+  MeshRevokedShare,
+  MeshShareReceipt,
+  MeshSharesList,
   MeshMergeResult,
   MeshProjectRow,
   MeshReclaimResult,
@@ -888,4 +892,36 @@ export const api = {
   /** Reauthenticated in core. `capId: null` = every cap. */
   meshCapEnforce: (masterPassword: string, capId: string | null, on: boolean) =>
     call<MeshEnforceResult>("mesh_cap_enforce", { masterPassword, capId, on }),
+
+  // Tethra Mesh credential sharing (Increment 11): mesh_share_cmds.rs. Share,
+  // reseal and import are reauthenticated in core; nothing returns a value.
+  /** `purge: false` is the polled read (writes nothing). */
+  meshSharesList: (purge: boolean) => call<MeshSharesList>("mesh_shares_list", { purge }),
+  /** `devices: null` = all my current devices (and an offer for later ones). */
+  meshCredentialShare: (
+    masterPassword: string,
+    credentialId: string,
+    devices: string[] | null,
+  ) =>
+    call<MeshShareReceipt>("mesh_credential_share", { masterPassword, credentialId, devices }),
+  meshCredentialReseal: (masterPassword: string, credentialId: string) =>
+    call<MeshShareReceipt>("mesh_credential_reseal", { masterPassword, credentialId }),
+  meshCredentialImport: (
+    masterPassword: string,
+    shareId: string,
+    localProjectId: string,
+    replace: boolean,
+    environment: string | null,
+  ) =>
+    call<MeshImportReceipt>("mesh_credential_import", {
+      masterPassword,
+      shareId,
+      localProjectId,
+      replace,
+      environment,
+    }),
+  meshShareRevoke: (shareId: string) =>
+    call<MeshRevokedShare[]>("mesh_share_revoke", { shareId }),
+  meshCredentialRevoke: (credentialId: string) =>
+    call<MeshRevokedShare[]>("mesh_credential_revoke", { credentialId }),
 };

@@ -1,12 +1,13 @@
 //! The round hooks a node runs before each round ([`crate::runtime::RoundHook`]):
 //! the usage publisher (Increment 06), then the spend-cap reconciler
-//! (Increment 07), so caps see this round's usage.
+//! (Increment 07), so caps see this round's usage, then the credential-share
+//! purge (Increment 11).
 
 use crate::error::{NetError, NetResult};
 use crate::node::MeshNode;
 use crate::runtime::RoundHook;
 use api_tracker_core::mesh::MeshError;
-use api_tracker_core::mesh::{caps, publish};
+use api_tracker_core::mesh::{caps, publish, share};
 use api_tracker_core::CoreError;
 
 /// Publishes this device's gateway usage for bound projects
@@ -55,10 +56,29 @@ impl RoundHook for CapReconciler {
     }
 }
 
+/// Collects credential shares addressed to removed devices and stops
+/// storing new ones (`core::mesh::share::purge`). It mints nothing and never
+/// touches a value: a node does not hold the sealing key, and it never
+/// reseals on its own (a reseal offer waits for the user, who must
+/// reauthenticate).
+pub struct SharePurge;
+
+impl RoundHook for SharePurge {
+    fn name(&self) -> &'static str {
+        "share purge"
+    }
+
+    fn before_round(&self, node: &MeshNode) -> NetResult<()> {
+        let mut store = node.store();
+        share::purge(&mut store).map(|_| ()).map_err(NetError::Core)
+    }
+}
+
 /// The hooks every node runs, in order.
 pub fn default_hooks() -> Vec<std::sync::Arc<dyn RoundHook>> {
     vec![
         std::sync::Arc::new(UsagePublisher),
         std::sync::Arc::new(CapReconciler),
+        std::sync::Arc::new(SharePurge),
     ]
 }
