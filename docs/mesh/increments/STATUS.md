@@ -20,8 +20,8 @@ Every session reads this file first and updates it at the end (README §1).
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). Record `c35615d`: CI `40819371929`, service `40819371912` (success) |
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
-| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | in-progress | 2026-11-03 | | | |
-| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | pending | | | | |
+| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | in-progress (work complete; CI pending) | 2026-11-03 | | `1e3e387` | CI `41682903354` and macOS service `41682903236`: **pending** at session end — next session checks them first, then sets `done` |
+| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | in-progress (Phase A part-done) | 2026-11-03 | | (this checkpoint) | |
 
 Sizes are rough context cost for a 1M-token session:
 - **M** is about 15-25% of the session.
@@ -114,6 +114,68 @@ also update DESIGN.md and the affected increment files; README §7.)_
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### Increment 12 — Hardening, audit & ship (started 2026-11-03; in progress)
+
+The session hit its usage limit during Phase A. **Read this first.**
+
+**Done (committed in this checkpoint):**
+- `crates/mesh/tests/adversarial.rs`, 10 tests, all passing
+  (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-mesh --test adversarial`):
+  - seeded fuzzing: 120 000 mutations of items, frames, preambles and invites;
+  - a handshake flood from 300 source ports;
+  - a peer that stalls after a valid Hello;
+  - a Commit whose `upto` claims more than it sent;
+  - ±1 year of clock skew;
+  - a removed device using its old and its new access key;
+  - a forked clone racing its original;
+  - a backup restore under a running node;
+  - a writer storm during exchanges;
+  - a flood of 5 000 `Direct` frames (this covers the 64-direct bound deferred from 07).
+- **A real bug, found and fixed in Phase A.** `backup restore --force` renames
+  the live `vault.db` aside and creates a new one. A running node kept its
+  connection to the file set aside. When the backup came from another vault,
+  the marker stayed in place, so the node kept running as this device on an
+  orphaned file.
+  - Fix: `crates/mesh/src/runtime.rs` records the database's (dev, inode) at
+    start, and the identity check (every 1 s) stops the node with the new
+    `StopReason::Replaced`. On Unix only: Windows cannot rename an open file.
+  - Test: `adversarial::a_backup_restore_under_a_running_node_stops_it`. It
+    fails without the fix (checked by disabling the fix). Record this as a
+    Phase A finding in the audit folder.
+
+**Not done (do next, in order):**
+1. Check CI for `1e3e387` (row 11) and for this checkpoint; set 11 `done`.
+2. **Soak results are not recorded.** A 30-minute protocol soak was running
+   in the background, with
+   `CARGO_TARGET_DIR=<scratch>/target-soak bash scripts/mesh_soak.sh --minutes 30`.
+   Its output was lost with the session, so rerun it, then run
+   `--scenario caps --minutes 20`. Convert any failing seed into a regression
+   test.
+3. **The ten mutants are not yet in `scripts/mutation_checks.sh`.** Anchors
+   found so far:
+   - signature check: `proto.rs`
+     `if p.item.verify_with(&vk, &store.genesis().mesh_id).is_err() {`;
+   - drift clamp: `hlc.rs` `self.last = self.last.max(remote.min(bound));`;
+   - removal cutoff: `roster.rs`
+     `self.cutoff(origin).is_none_or(|c| seq <= c)`;
+   - view clamp: `bounded.rs` `let honoured = amount.min(*remaining);`;
+   - escrow fence: `caps/escrow.rs`
+     `if enforcement_on(conn)? && probe.gateway_running() {`;
+   - one-in-flight: `capgate.rs`
+     `if others > 0 && avail - i128::from(held) < e.threshold() {`;
+   - 403 → 429: `forward.rs` `respond_cap_refused` `403,`;
+   - share bindings: `share.rs`
+     `verify_bindings(&plain, mesh, me, incoming.sharer, &incoming.value)?;`;
+   - restore wipe: `backup.rs` the `on_restore` call;
+   - VV before commit: still to choose (candidates: the proto gap check in
+     `on_commit`, `if !stage.items.contains_key(&s) && !stage.dots.contains_key(&s) {`,
+     killed by `adversarial::a_commit_claiming_more_…` or `mesh_sim`).
+
+   Run the mutants only on a clean tree, with no soak running: both use the
+   same source.
+4. Phases B to E as the 12 file describes (four auditors, triage, the
+   verification agent, ship docs, `gh pr ready`).
 
 ### Increment 11 — Opt-in credential sharing (2026-11-03)
 

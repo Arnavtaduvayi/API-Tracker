@@ -95,6 +95,9 @@ pub enum StopReason {
     Removed,
     /// This device left the mesh (its mesh rows are gone).
     Left,
+    /// The vault database file the node opened is no longer the data
+    /// directory's (a backup restore set it aside and made a new one).
+    Replaced,
 }
 
 impl StopReason {
@@ -108,6 +111,9 @@ impl StopReason {
             StopReason::Forked => "this device's mesh identity forked",
             StopReason::Removed => "this device was removed from the mesh",
             StopReason::Left => "this device left the mesh",
+            StopReason::Replaced => {
+                "the vault database was replaced (a backup restore); this node stopped"
+            }
         }
     }
 }
@@ -478,6 +484,7 @@ impl RunningNode {
                 return Err(e);
             }
         };
+        let db_path = api_tracker_core::vault::VaultPaths::new(data_dir.to_path_buf()).db_path();
         let main = {
             let sh = shared.clone();
             let port = listen.first().map_or(0, SocketAddr::port);
@@ -485,6 +492,7 @@ impl RunningNode {
                 .name("tethra-mesh-node".into())
                 .spawn(move || {
                     let mut lp = Loop {
+                        db_file: file_id(&db_path),
                         node,
                         shared: sh,
                         sched: Mutex::new(Scheduler::new(config.jitter.clone())),
@@ -578,8 +586,27 @@ enum Eligibility {
     All,
 }
 
+/// The identity of the file at `path` (device and inode), where the
+/// platform has one. `None` elsewhere, and when the file is missing.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Windows keeps an open database file from being renamed, so a restore
+/// cannot set it aside under a running node; there is nothing to compare.
+#[cfg(not(unix))]
+fn file_id(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
 struct Loop {
     node: Arc<MeshNode>,
+    /// The vault database's file identity when the node started: a backup
+    /// restore renames that file aside and creates a new one, which the
+    /// node's open connection would otherwise never notice.
+    db_file: Option<(u64, u64)>,
     shared: Arc<Shared>,
     sched: Mutex<Scheduler>,
     jitter: Jitter,
@@ -656,6 +683,13 @@ impl Loop {
     /// Stop when this device left, was removed, forked, or its marker no
     /// longer vouches for the database.
     fn identity_stop(&self) -> Option<StopReason> {
+        if let Some(id) = self.db_file {
+            let path = api_tracker_core::vault::VaultPaths::new(self.node.data_dir().to_path_buf())
+                .db_path();
+            if file_id(&path) != Some(id) {
+                return Some(StopReason::Replaced);
+            }
+        }
         let store = self.node.store();
         match membership::mesh_of(store.connection()) {
             Ok(None) => return Some(StopReason::Left),
