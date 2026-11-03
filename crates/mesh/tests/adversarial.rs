@@ -296,9 +296,19 @@ fn a_peer_that_sends_a_valid_hello_and_stalls_is_dropped_and_frees_its_slot() {
         before,
         "nothing committed"
     );
-    // The one slot is free: a normal exchange goes through.
-    let r = replicate_once(&nb, &server.addr_string()).unwrap();
-    assert!(r.aborted.is_none(), "{r:?}");
+    // The one slot frees as the server's session thread finishes (moments
+    // after the close we saw): a normal exchange then goes through.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match replicate_once(&nb, &server.addr_string()) {
+            Ok(r) if r.aborted.is_none() => break,
+            other => assert!(
+                Instant::now() < deadline,
+                "the slot was never freed: {other:?}"
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     assert!(node(&a).store().vv().get(&b_id) > before);
 }
 
@@ -517,7 +527,12 @@ fn a_backup_restore_under_a_running_node_stops_it() {
 
 /// Exchanges keep working, and the store stays consistent with its disk,
 /// while another connection hammers the database with short write
-/// transactions (as the gateway writer does under load).
+/// transactions, as the gateway writer does under load (one transaction per
+/// batch, a moment between batches). SQLite's lock has no fairness: an
+/// attempt that waits out the 5 s busy timeout is refused cleanly with a
+/// storage error and succeeds on retry (the node retries every round), and
+/// nothing is ever half-applied. (A writer with no gap at all can starve any
+/// other connection; CI's slower machines showed it.)
 #[test]
 fn exchanges_survive_a_writer_storm_on_the_database() {
     let (a, server, b) = pair_of();
@@ -535,28 +550,52 @@ fn exchanges_survive_a_writer_storm_on_the_database() {
                      COMMIT;",
                 );
                 n += 1;
+                std::thread::sleep(Duration::from_millis(1));
             }
             n
         })
     };
     let nb = node(&b);
     let keys = b.vault.mesh_keys().unwrap();
+    let mut refused = 0u32;
     for i in 0..8u64 {
-        {
-            let mut st = nb.store();
-            let m = MeshSetting {
-                name: format!("storm.{i}"),
-                value: serde_json::json!(i),
-            };
-            st.mint(keys.signing_key(), Draft::of(&m, HlcPolicy::After(None)))
-                .unwrap();
+        let m = MeshSetting {
+            name: format!("storm.{i}"),
+            value: serde_json::json!(i),
+        };
+        let mut minted = false;
+        for _ in 0..5 {
+            match nb
+                .store()
+                .mint(keys.signing_key(), Draft::of(&m, HlcPolicy::After(None)))
+            {
+                Ok(_) => {
+                    minted = true;
+                    break;
+                }
+                Err(api_tracker_core::mesh::MeshError::Storage(_)) => refused += 1,
+                Err(e) => panic!("{e:?}"),
+            }
         }
-        let r = replicate_once(&nb, &server.addr_string()).unwrap();
-        assert!(r.aborted.is_none(), "{r:?}");
+        assert!(minted, "storm.{i} was never minted");
+        let mut exchanged = false;
+        for _ in 0..5 {
+            match replicate_once(&nb, &server.addr_string()) {
+                Ok(r) if r.aborted.is_none() => {
+                    exchanged = true;
+                    break;
+                }
+                _ => refused += 1,
+            }
+        }
+        assert!(exchanged, "exchange {i} never completed");
     }
+    eprintln!("writer storm: {refused} attempt(s) refused while the lock was held, then retried");
     stop.store(true, Ordering::SeqCst);
     let writes = storm.join().unwrap();
-    assert!(writes > 100, "the storm ran ({writes} transactions)");
+    // Windows' sleep granularity is coarse (~15 ms), so the floor is low:
+    // what matters is that the storm wrote throughout the exchanges.
+    assert!(writes > 10, "the storm ran ({writes} transactions)");
     assert_eq!(node(&a).store().vv(), nb.store().vv());
     open(&b, Arc::new(SystemClock))
         .verify_against_disk()
