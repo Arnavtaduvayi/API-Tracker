@@ -20,7 +20,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 08 | [Gateway cap enforcement](08-gateway-cap-enforcement.md) | S+R | M | done | 2026-10-28 | 2026-10-29 | `cb91633` (handoff `40a73e3`) | CI `40817785600` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows (16 min), frontend, desktop backend, packaged app on macOS); macOS service `40817785553` (success). `6d06b15`/`e7104c1`: CI `40810268430`, service `40810267760` (success; Windows 15.5 min after the fsync change). `40a73e3`: CI `40813059875`, service `40813058474` (success). Record `c35615d`: CI `40819371929`, service `40819371912` (success) |
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
-| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | in-progress (work complete; CI pending) | 2026-11-03 | | `1e3e387` | CI `41682903354` and macOS service `41682903236`: **pending** at session end — next session checks them first, then sets `done` |
+| 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | done | 2026-11-03 | 2026-11-03 | `1e3e387` | CI `41682903354` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); its macOS service run `41682903236` was **cancelled** (superseded by the next push), and the service run on `c8c019f`, which contains all of 11, `41684406424` succeeded |
 | 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | in-progress (Phase A part-done) | 2026-11-03 | | (this checkpoint) | |
 
 Sizes are rough context cost for a 1M-token session:
@@ -144,14 +144,25 @@ The session hit its usage limit during Phase A. **Read this first.**
     fails without the fix (checked by disabling the fix). Record this as a
     Phase A finding in the audit folder.
 
+**Soak (Phase A step 2), protocol:** **481 000 seeds × 3 000 steps from
+1 000 000 in 1 803 s, 0 failing**
+(`CARGO_TARGET_DIR=<scratch>/target-soak bash scripts/mesh_soak.sh --minutes 30`,
+release, run against `1e3e387`'s core).
+
+**CI on the checkpoint `c8c019f`:** CI `41684406591` **failed** on two of the
+new adversarial tests (Linux and Windows), both test-robustness problems
+fixed in the next commit:
+- The zero-gap writer storm starved the node's mint past SQLite's 5 s busy
+  timeout, which is a correct, clean refusal under an unrealistic load.
+- The stalled-peer test reconnected before the server freed its single
+  session slot.
+
+The macOS service run `41684406424` succeeded.
+
 **Not done (do next, in order):**
-1. Check CI for `1e3e387` (row 11) and for this checkpoint; set 11 `done`.
-2. **Soak results are not recorded.** A 30-minute protocol soak was running
-   in the background, with
-   `CARGO_TARGET_DIR=<scratch>/target-soak bash scripts/mesh_soak.sh --minutes 30`.
-   Its output was lost with the session, so rerun it, then run
-   `--scenario caps --minutes 20`. Convert any failing seed into a regression
-   test.
+1. Check CI for the test-fix commit.
+2. Run the caps soak: `--scenario caps --minutes 20`. Convert any failing
+   seed into a regression test.
 3. **The ten mutants are not yet in `scripts/mutation_checks.sh`.** Anchors
    found so far:
    - signature check: `proto.rs`
