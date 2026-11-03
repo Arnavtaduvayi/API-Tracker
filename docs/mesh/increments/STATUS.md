@@ -159,11 +159,32 @@ fixed in the next commit:
 
 The macOS service run `41684406424` succeeded.
 
+**Phase A, done.**
+- **Caps soak:** 3 136 seeds × 240 steps in 1 203 s. **2 failed**: seeds
+  5000537 and 5002412 broke the "lower settles" invariant, and that was a
+  real policy bug. A lower's remainder sat in the owner's own share while
+  other devices had overspent theirs, so the supply never came down to the
+  cap.
+  - Fixed in `d7accf6`: the owner absorbs what other holders cannot cover
+    (ADR 0032 D12, PROTOCOL §5.5.1).
+  - Both seeds are now `mesh_sim::caps_regression_seeds`, which fails without
+    the fix.
+  - Re-soak after the fix: 1 600 seeds in 617 s, 0 failing.
+- **Mutants:** all 10 killed, none skipped
+  (`docs/mesh/audit/2026-11-03/evidence/phase_a_mutants.log.txt`).
+  - The first run had one survivor, `mesh_vv_before_commit` on the session's
+    gap clamp in `proto.rs`. That clamp is redundant by design: the store's
+    `validate_commit` refuses a gapped range anyway, and an end-to-end test
+    cannot see it.
+  - No test pinned the store's own check, so this commit adds
+    `sqlite_store::tests::a_batch_with_a_hole_in_its_range_is_refused_and_writes_nothing`
+    and targets the mutant at the store.
+- **Check suite:** 1 879 Rust tests passed, 0 failed (before the new store
+  test); clippy is clean on both toolchains; smoke 186/186.
+
 **Not done (do next, in order):**
-1. Check CI for the test-fix commit.
-2. Run the caps soak: `--scenario caps --minutes 20`. Convert any failing
-   seed into a regression test.
-3. **The ten mutants are not yet in `scripts/mutation_checks.sh`.** Anchors
+1. Phase B: the four auditors.
+3. (Done, see above.) **The ten mutants were not yet in `scripts/mutation_checks.sh`.** Anchors
    found so far:
    - signature check: `proto.rs`
      `if p.item.verify_with(&vk, &store.genesis().mesh_id).is_err() {`;

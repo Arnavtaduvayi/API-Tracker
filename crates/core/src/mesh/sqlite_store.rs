@@ -1850,6 +1850,42 @@ mod tests {
             .unwrap()
     }
 
+    /// MESH-SI-4 at the store, under the session's own check: a batch whose
+    /// range has a hole (an item dropped from the middle), or whose `upto`
+    /// claims seqs it carries nothing for, is refused whole. The VV never
+    /// covers a seq without its item or dot.
+    #[test]
+    fn a_batch_with_a_hole_in_its_range_is_refused_and_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut g, mut b) = pair(root.path());
+        for i in 0..6 {
+            setting(&mut g, &format!("h{i}"), i);
+        }
+        let full = batch_from(&g, &b);
+        let before = (b.store.vv().clone(), rows(&b.store, "mesh_items"));
+        // An item from the middle of g's range goes missing.
+        let mut holed = full.clone();
+        let mid = holed
+            .items
+            .iter()
+            .position(|v| v.body.origin == g.id && v.body.seq > 2)
+            .unwrap();
+        holed.items.remove(mid);
+        assert_eq!(
+            b.store.commit(holed).unwrap_err(),
+            MeshError::InvalidOperation("commit is missing a dot in its range")
+        );
+        // The upto claims beyond what the batch carries.
+        let mut beyond = full.clone();
+        let top = beyond.upto.get(&g.id);
+        beyond.upto.advance_to(g.id, top + 3);
+        assert!(b.store.commit(beyond).is_err());
+        assert_eq!((b.store.vv().clone(), rows(&b.store, "mesh_items")), before);
+        b.store.verify_against_disk().unwrap();
+        b.store.commit(full).unwrap();
+        assert_eq!(b.store.vv(), g.store.vv());
+    }
+
     #[test]
     fn a_failure_between_the_item_insert_and_the_vv_update_leaves_nothing() {
         let root = tempfile::tempdir().unwrap();
