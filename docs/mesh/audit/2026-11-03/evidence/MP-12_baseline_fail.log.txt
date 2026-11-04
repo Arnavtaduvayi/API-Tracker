@@ -1,0 +1,12 @@
+# MP-12 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-mesh --test pairing -- join_fails_when
+# HEAD fb55b07 + the new test; inviter_verified is reported (false here) but the join succeeds and keeps its identity
+# (public keys and ids below are freshly generated test keys, not secrets)
+---- join_fails_when_the_inviter_key_does_not_match_its_roster_entry stdout ----
+
+thread 'join_fails_when_the_inviter_key_does_not_match_its_roster_entry' (21533087) panicked at crates/mesh/tests/pairing.rs:400:9:
+joined an unverified inviter: Some(JoinReport { info: MeshSelfInfo { mesh_id: MeshId(41c065facf170586bdd7c6a43b163d32), genesis_device: DeviceId(b1da194464e7067e1b54dda7102c8156), device_id: DeviceId(c9600e304ba666e9105d2e0c40bd6d3f), device_name: "dev-b", sign_pub: PublicKeyBytes(946b8b9424d96087a773b5ef9dd4048c4b683f6eb2afe99b01702c20450b24ec), noise_pub: PublicKeyBytes(ba3c86e7249e654d2eaebc6b415d0bced8e68f90d6e2f1cf1ef26dceec868658), seal_pub: PublicKeyBytes(6a1d5e68117721e7e82faab0484d614e8efffae1da388e3626313fcb8b406413), access_key_epoch: 1, state: "active", created_at: "2026-11-04T07:01:44.363642Z" }, exchange: ExchangeReport { peer: DeviceId(b1da194464e7067e1b54dda7102c8156), direction: Outbound, items_in: 3, items_out: 1, duration_ms: 13, aborted: None, hello: Some(HelloRecord { at_ms: 1793775704391, completed: true, peer_vv: {DeviceId(b1da194464e7067e1b54dda7102c8156): 3}, our_vv: {DeviceId(c9600e304ba666e9105d2e0c40bd6d3f): 1}, digest_mismatches: [] }) }, inviter_verified: false })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_dropped_connection_does_not_count_as_a_wrong_attempt stdout ----
+
+thread 'a_dropped_connection_does_not_count_as_a_wrong_attempt' (21533086) panicked at crates/mesh/tests/pairing.rs:284:56:

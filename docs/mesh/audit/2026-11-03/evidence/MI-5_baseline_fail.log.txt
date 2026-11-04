@@ -1,0 +1,9 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- a_failed_rotation_after_removal_is_completed_by_a_retry stdout ----
+
+thread 'a_failed_rotation_after_removal_is_completed_by_a_retry' (21508715) panicked at crates/core/tests/mesh_audit_identity.rs:550:10:
+the retry completes the removal: Mesh(AlreadyRemoved)
+

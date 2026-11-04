@@ -1,0 +1,23 @@
+# MP-4 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-mesh --test bounds a_trickled_handshake
+# HEAD fb55b07 + the new test; handshake_timeout (300 ms here) is a per-read socket timeout
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.36s
+     Running tests/bounds.rs (<scratch>/target-r1/debug/deps/bounds-10d5a7dffa531c75)
+
+running 1 test
+test a_trickled_handshake_is_closed_at_the_handshake_deadline ... FAILED
+
+failures:
+
+---- a_trickled_handshake_is_closed_at_the_handshake_deadline stdout ----
+
+thread 'a_trickled_handshake_is_closed_at_the_handshake_deadline' (21532049) panicked at crates/mesh/tests/bounds.rs:138:5:
+a trickled handshake held its slot for 7.715129583s
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_trickled_handshake_is_closed_at_the_handshake_deadline
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 7.97s
+
+error: test failed, to rerun pass `-p api-tracker-mesh --test bounds`

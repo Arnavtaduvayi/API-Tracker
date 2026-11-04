@@ -1,0 +1,23 @@
+# MC-2 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_caps caps_a_burn_awaiting_the_ack_is_not_burned_twice
+# Second reconcile before the gateway's ack burned another 40 USD (owner absorbs rule) on top of the open 60 USD burn.
+
+running 1 test
+test caps_a_burn_awaiting_the_ack_is_not_burned_twice ... FAILED
+
+failures:
+
+---- caps_a_burn_awaiting_the_ack_is_not_burned_twice stdout ----
+
+thread 'caps_a_burn_awaiting_the_ack_is_not_burned_twice' (21280409) panicked at crates/core/tests/mesh_caps.rs:1139:9:
+assertion `left == right` failed: the open burn covers the decrease
+  left: 40000000
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    caps_a_burn_awaiting_the_ack_is_not_burned_twice
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.09s
+
+error: test failed, to rerun pass `-p api-tracker-core --test mesh_caps`

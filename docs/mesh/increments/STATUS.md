@@ -182,8 +182,52 @@ The macOS service run `41684406424` succeeded.
 - **Check suite:** 1 879 Rust tests passed, 0 failed (before the new store
   test); clippy is clean on both toolchains; smoke 186/186.
 
-**Not done (do next, in order):**
-1. Phase B: the four auditors.
+**Phase B, done (2026-11-03).** Four read-only auditors (A1 protocol/crypto
+`MP-`, A2 persistence/identity `MI-`, A3 caps/gateway `MC-`, A4
+claims/UX/leakage `MD-`) reported 48 findings. Triage:
+`docs/mesh/audit/2026-11-03/findings.json` and `FINDINGS_INDEX.md` record
+41 confirmed and 7 accepted. Each finding has its remediation track (R1-R4)
+and decision. The high-severity findings are:
+- MP-1: a removed device can raise its own cutoff;
+- MI-1 and MI-2: a failed multi-block mint locks the identity, and `leave`
+  cannot recover it;
+- MC-1: a cold gate admits unbounded concurrency;
+- MC-2: an escrowed burn is burned again.
+
+**Phase C, IN PROGRESS: the tree is dirty and may not compile.** Four
+remediation subagents worked in parallel in this worktree, each owning
+disjoint files. All four were stopped part-way by the account's usage limit
+on 2026-11-04. Their partial, **uncommitted** edits are in the working tree
+(about 90 files).
+
+Where each track stopped:
+
+| Track | Findings | Last step |
+|---|---|---|
+| R1 protocol | MP-1, 2, 3, 4, 5, 7, 9, 10, 11, 12 | roster/kinds/views/oracle done or mid-way; starting serve.rs and pair.rs (MP-4, MP-11, MP-12) |
+| R2 persistence | MI-1, 2, 3, 4, 5, 8, 9 | sqlite_store/marker/identity/backup changes; updating migration_safety comments (keep 9 tests) and mesh_schema assertions |
+| R3 caps | MC-1, 2, 3, 4, 5, 6, 7, 8, 10 | MC-1, MC-2 and MC-3 under way; starting the MC-4 over-burn invariant |
+| R4 docs/UX | MD-1 to MD-14, MC-12, accepted-risk docs | desktop and CLI copy and most docs done; finishing KNOWN_LIMITATIONS (status header, caps, sharing, retention, accepted risks) |
+
+Evidence logs written so far: `docs/mesh/audit/2026-11-03/evidence/`.
+
+**Next session, do this first:**
+1. `git status`. The uncommitted diff is the remediation work in progress,
+   so do not discard it.
+2. Read `findings.json` (the `remediation_track` field) and review the diff
+   track by track.
+3. Finish each confirmed finding failing-test-first, with an evidence log.
+4. Run the full README §3 suite, smoke, the desktop checks, both clippies, the
+   mutants and a 10-minute soak.
+5. Commit one track (or one finding) at a time, as `fix(mesh): <ids> — …`.
+6. Apply each track's doc deltas to PROTOCOL, ADRs and SECURITY_INVARIANTS:
+   - MP-1: the cutoff is the minimum over counting removes.
+   - MP-10: a revoke counts only from the sharer or the recipient.
+   - MC-2: open escrow burns count against the pending decrease.
+7. Then do Phase D (the verification agent) and Phase E (ship).
+
+If the same orchestrator session continues, resume the four agents with
+`SendMessage` instead; their transcripts are saved.
 3. (Done, see above.) **The ten mutants were not yet in `scripts/mutation_checks.sh`.** Anchors
    found so far:
    - signature check: `proto.rs`

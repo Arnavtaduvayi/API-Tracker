@@ -1,0 +1,18 @@
+# MP-11 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-mesh --test pairing -- a_dropped_connection
+# HEAD fb55b07 + the new test; any error reading pairing message 3 counts as a failed invite attempt
+
+---- a_dropped_connection_does_not_count_as_a_wrong_attempt stdout ----
+
+thread 'a_dropped_connection_does_not_count_as_a_wrong_attempt' (21533951) panicked at crates/mesh/tests/pairing.rs:313:9:
+assertion `left == right` failed: dropped connection 0 burned an attempt
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_dropped_connection_does_not_count_as_a_wrong_attempt
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.36s
+
+error: test failed, to rerun pass `-p api-tracker-mesh --test pairing`

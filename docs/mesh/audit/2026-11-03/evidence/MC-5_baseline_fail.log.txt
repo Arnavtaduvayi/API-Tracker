@@ -1,0 +1,21 @@
+# MC-5 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-gateway --lib capgate::tests
+# avail was read before in_flight.fetch_add: a completion that spent every right in between was not seen, and the request was admitted alone.
+
+running 1 test
+test capgate::tests::a_completion_racing_an_admission_is_seen_by_it ... FAILED
+
+failures:
+
+---- capgate::tests::a_completion_racing_an_admission_is_seen_by_it stdout ----
+
+thread 'capgate::tests::a_completion_racing_an_admission_is_seen_by_it' (21531153) panicked at crates/gateway/src/capgate.rs:563:9:
+admitted with the rights already spent
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    capgate::tests::a_completion_racing_an_admission_is_seen_by_it
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 82 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p api-tracker-gateway --lib`

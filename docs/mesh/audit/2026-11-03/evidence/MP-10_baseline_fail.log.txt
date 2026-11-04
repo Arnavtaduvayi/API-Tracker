@@ -1,0 +1,30 @@
+# MP-10 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --lib a_revoke_by_neither
+# HEAD fb55b07 + the new tests; any admitted share.revoke naming the winning share's id ends it
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.05s
+     Running unittests src/lib.rs (<scratch>/target-r1/debug/deps/api_tracker_core-adc27cd358eaf2b3)
+
+running 2 tests
+test mesh::views::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing ... FAILED
+test mesh::sim::oracle::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing ... FAILED
+
+failures:
+
+---- mesh::views::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing stdout ----
+
+thread 'mesh::views::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing' (21513413) panicked at crates/core/src/mesh/views.rs:611:9:
+Some(Revoked { revoker: DeviceId(04040404040404040404040404040404), hlc: Hlc(0.20), share_id: ShareId(05050505050505050505050505050505), sealed: Some((DeviceId(02020202020202020202020202020202), SealedValue { share_id: ShareId(05050505050505050505050505050505), sealed_len: 28, .. })) })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- mesh::sim::oracle::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing stdout ----
+
+thread 'mesh::sim::oracle::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing' (21513412) panicked at crates/core/src/mesh/sim/oracle.rs:1945:9:
+Some(Revoked { revoker: DeviceId(cc5552a2fa05194ca85fec2a3d428e82), share_id: ShareId(5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e) })
+
+
+failures:
+    mesh::sim::oracle::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing
+    mesh::views::tests::a_revoke_by_neither_sharer_nor_recipient_ends_nothing
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 556 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p api-tracker-core --lib`
