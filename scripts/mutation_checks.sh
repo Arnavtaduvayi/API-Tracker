@@ -493,12 +493,13 @@ mutate "mesh_escrow_fence_skipped" \
       "    Ok(if false && enforcement_on(conn)? && probe.gateway_running() {")' \
   -p api-tracker-core --test mesh_caps caps_escrow_publishes_at_once_unfenced_and_waits_for_the_gateway_ack_when_fenced
 
-# MESH-SI-9: near exhaustion only one request per cap runs at a time.
+# MESH-SI-9: near exhaustion (and while no request cost is known, audit
+# MC-1) only one request per cap runs at a time.
 mutate "mesh_one_in_flight_never_set" \
   "crates/gateway/src/capgate.rs" \
   's = s.replace(
-      "        if others > 0 && avail - i128::from(held) < e.threshold() {",
-      "        if false && others > 0 && avail - i128::from(held) < e.threshold() {")' \
+      "        if others > 0 && (!known || avail - i128::from(held) < e.threshold()) {",
+      "        if false && others > 0 && (!known || avail - i128::from(held) < e.threshold()) {")' \
   -p api-tracker-gateway --test cap_enforcement near_exhaustion_one_request_at_a_time_and_the_slot_clears_on_every_exit
 
 # D15: a spend-cap refusal is a non-retryable 403, never 429.
@@ -517,13 +518,42 @@ mutate "mesh_share_bindings_skipped" \
       "    let _ = verify_bindings(&plain, mesh, me, incoming.sharer, &incoming.value);")' \
   -p api-tracker-core --test mesh_share a_member_cannot_plant_a_credential_in_the_name_of_another_device
 
-# MESH-SI-5: a restored backup never keeps the mesh identity it came from.
+# MESH-SI-5: a restored backup never keeps the mesh identity it came from
+# (the wipe turns cap enforcement off and removes the marker naming it;
+# since audit MI-3/MI-4 the backup carries no mesh rows at all).
 mutate "mesh_restore_wipe_skipped" \
   "crates/core/src/mesh/identity.rs" \
   's = s.replace(
-      "pub fn on_restore(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {\n    let report = wipe(conn, data_dir)?;",
-      "pub fn on_restore(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {\n    let _ = (conn, data_dir);\n    let report = WipeReport { identity: None, rows_deleted: 0, marker: MarkerRemoval::Absent };")' \
+      "    let report = wipe(conn, data_dir, skipped_identity, skipped_rows)?;",
+      "    let _ = (conn, data_dir, skipped_identity, skipped_rows);\n    let report = WipeReport { identity: None, rows_deleted: 0, marker: MarkerRemoval::Absent };")' \
   -p api-tracker-core --test mesh_schema backup_then_restore_wipes_mesh_state_and_mints_nothing
+
+# Audit MP-1: a device's cutoff is the minimum over counting removes, so a
+# removed device's own remove cannot raise it.
+mutate "mesh_cutoff_takes_the_max" \
+  "crates/core/src/mesh/crdt/roster.rs" \
+  's = s.replace(
+      "                *c = (*c).min(e.value);",
+      "                *c = (*c).max(e.value);")' \
+  -p api-tracker-core --lib mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff
+
+# Audit MI-1: a rollback is judged against the committed floor, so a failed
+# multi-block batch does not lock the identity.
+mutate "mesh_marker_floor_ignored" \
+  "crates/core/src/mesh/marker.rs" \
+  's = s.replace(
+      "        Some(m) if last_seq < m.seq_floor => MarkerStatus::RolledBack,",
+      "        Some(m) if m.seq_high_water > last_seq.saturating_add(SEQ_BLOCK) => MarkerStatus::RolledBack,")' \
+  -p api-tracker-core --test mesh_audit_identity a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok
+
+# Audit MC-2: a burn waiting for the gateway's ack counts against the
+# pending decrease, so it is not burned again.
+mutate "mesh_open_burns_ignored" \
+  "crates/core/src/mesh/caps/view.rs" \
+  's = s.replace(
+      "            f.supply() - i128::from(burning),",
+      "            f.supply(),")' \
+  -p api-tracker-core --test mesh_caps caps_a_burn_awaiting_the_ack_is_not_burned_twice
 
 echo
 echo "========================================================"
