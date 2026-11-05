@@ -39,7 +39,8 @@ export const ENFORCE_EXPLANATION =
   "(not 429, so SDKs do not retry them) once this device's share of the cap for the month is " +
   "used up; a refused request never reaches the provider. A request's cost is known only after " +
   "its response, so spend can go over the cap. Near the cap, and while no request cost is known " +
-  "(after a gateway restart or at the start of a month), the gateway lets one request through " +
+  "(a new cap, or one with no priced request in this gateway's history yet), the gateway lets " +
+  "one request through " +
   "at a time; otherwise each request in flight reserves the cap's typical (95th-percentile) " +
   "cost, so several requests that each cost far more than that can together go over by more " +
   "than one request, and a gateway restart can forget spend it has not saved yet. Models " +

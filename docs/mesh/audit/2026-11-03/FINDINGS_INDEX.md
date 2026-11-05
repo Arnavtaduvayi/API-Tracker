@@ -54,4 +54,4 @@ Verdicts: **41 confirmed** (each fixed failing-test-first, evidence in `evidence
 | MD-14 | low | confirmed | Inventory labels for revoke/list purge rows | Correct. |
 | MD-15 | low | accepted | Invite copies in plain Strings for the response | The invite must reach the user once; short-lived (≤ 60 min, single use); documented. |
 
-Status of each confirmed finding's fix: see the commits `fix(mesh): <id> …` and `FINAL_VERDICT.md`.
+Status: every confirmed finding is fixed with a failing-first test, in `bd49ebf` (MP-), `0b569ae` (MI-), `e2999b7` (MC-) and `9e1eaf6` (MD-, MC-12), plus the Phase D follow-up commit (MP-2's dot-hash case, MD-1's last sentence, and the caps soak's seed 5000331). The independent verification and its outcome: [`FINAL_VERDICT.md`](FINAL_VERDICT.md).

@@ -240,8 +240,7 @@ up. What your SDK sees:
 
 The request never reaches the provider. Cost is known only when a response
 completes, so the request that crosses the cap is allowed to finish, and spend
-can go over the cap. Near the cap, and while no request cost is known (after a
-gateway restart or at the start of a month), requests run one at a time, so
+can go over the cap. Near the cap, and while no request cost is known (a new cap, or one with no priced request in this gateway's history yet), requests run one at a time, so
 that is one request's cost. Otherwise each request in flight reserves the
 cap's typical (95th-percentile) cost, so several requests that each cost far
 more than that can together go over by more than one request, and a gateway

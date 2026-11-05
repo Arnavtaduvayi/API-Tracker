@@ -314,7 +314,10 @@ fn caps_each_injection_alone_is_exercised_and_defended() {
 /// owner absorbing it, ADR 0032 D12).
 #[test]
 fn caps_regression_seeds() {
-    let configs: Vec<CapsConfig> = [5_000_537u64, 5_002_412]
+    // 5000331 (Increment 12, Phase C soak): a lower's remainder held under
+    // a device's own override, while other devices had overspent, is never
+    // taken back (audit MC-6); the invariant settles down to it.
+    let configs: Vec<CapsConfig> = [5_000_537u64, 5_002_412, 5_000_331]
         .into_iter()
         .map(|s| CapsConfig::from_seed(s, 240))
         .collect();

@@ -7,3 +7,9 @@ $ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_chain_claim_n
 test mesh::proto::tests::a_peers_chain_claim_never_reports_this_device_forked ... FAILED
 thread 'mesh::proto::tests::a_peers_chain_claim_never_reports_this_device_forked' (23427714) panicked at crates/core/src/mesh/proto.rs:1675:9:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 567 filtered out; finished in 0.00s
+
+# Verification follow-up (Phase D): a peer's dot hash for this device's own origin, committed beside genuine items with `upto` naming this device's seq 1; the own-origin dot filter in Session::on_items disabled
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked
+test mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked ... FAILED
+thread 'mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked' panicked at crates/core/src/mesh/proto.rs:1758:17:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 568 filtered out; finished in 0.01s

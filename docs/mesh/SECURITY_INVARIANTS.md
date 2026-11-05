@@ -206,7 +206,8 @@ NN)** otherwise.
   `proto::tests::repair_fits_in_what_the_main_path_leaves_of_max_staged`);
   `ChainReply` entries outside the queried range are ignored (MP-2,
   `proto::tests::{a_chain_reply_outside_the_queried_range_is_ignored,
-  a_peers_chain_claim_never_reports_this_device_forked}`); the adversarial
+  a_peers_chain_claim_never_reports_this_device_forked,
+  a_peers_dot_hash_never_makes_this_device_report_itself_forked}`); the adversarial
   suite (`crates/mesh/tests/adversarial.rs`, Phase A).
 
 ## Keys and secrets
@@ -306,8 +307,7 @@ NN)** otherwise.
 - **MESH-SI-9 Enforcement.** Cap enforcement is local and opt-in, peers cannot
   toggle it, the forward path never waits on the database or network for a cap
   decision, and overshoot is bounded only as far as costs are known: near
-  exhaustion, and while no request cost is known (after a gateway restart or
-  at the start of a month), requests run one at a time per cap; beside other
+  exhaustion, and while no request cost is known (a new cap, or one with no priced request in this gateway's history yet), requests run one at a time per cap; beside other
   in-flight requests a request is admitted only while every in-flight
   request's reserved typical (p95) cost still leaves the margin, so several
   requests that each cost far more than typical can together go over by more

@@ -147,8 +147,7 @@ reporting a blocker.
   upstream connect; it carries static text, the cap id and the month only.
   Every in-flight request reserves the cap's recent p95 cost, and a request
   is admitted beside others only while those reservations leave the margin;
-  near exhaustion, and while no request cost is known (after a restart or at
-  the start of a month), one request at a time is admitted per cap. The
+  near exhaustion, and while no request cost is known (a new cap, or one with no priced request in this gateway's history yet), one request at a time is admitted per cap. The
   overshoot is therefore one request's cost when requests run one at a time,
   but several concurrent requests that each cost far more than the p95 can
   together go over by more, and spend not yet persisted is forgotten by a

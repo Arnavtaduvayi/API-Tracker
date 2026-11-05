@@ -56,8 +56,12 @@ tethra mesh join -          # paste the invite; reading it from stdin keeps it o
 tethra mesh serve --listen 192.168.1.30:7420
 ```
 
-Joining records the invite's address that answered as this device's first
-peer. From here on, each running node exchanges with every peer it knows about
+Joining runs a first exchange and checks that the inviting device's roster
+entry carries the key that answered the pairing; if it does not (or the first
+exchange dropped before it could check), the join fails and this device keeps
+nothing. Remove the half-added device on the inviting device (`tethra mesh
+remove`) and pair again with a new invite. Joining records the invite's
+address that answered as this device's first peer. From here on, each running node exchanges with every peer it knows about
 every 30 seconds, and learns the addresses your other devices publish, so the
 inviting device starts dialling the new one too. Add other addresses with
 `tethra mesh peer add HOST:PORT` (for example a device that moved).
@@ -66,9 +70,17 @@ inviting device starts dialling the new one too. Add other addresses with
 and then for your master password) has every device refuse it as it hears of
 the removal, and rotates the mesh access key. It takes nothing back from that
 device: credentials it imported, and shares sealed to it that it already
-holds, stay usable there, so rotate them at the provider (`tethra rotation plan
-<credential>`). If it holds spend-cap rights, reclaim them on the cap's owner
-first ([section 5](#5-spend-caps)).
+holds, stay usable there, so revoke its shares and rotate them at the provider
+(`tethra rotation plan <credential>`). If it holds spend-cap rights, reclaim
+them on the cap's owner first ([section 5](#5-spend-caps)).
+
+**Leaving** (`tethra mesh leave`, confirmation and master password) hands this
+device's departure to a reachable peer, then deletes its mesh identity, keys
+and records here. When this device's identity is untrusted (its marker is
+missing, foreign, rolled back or unreadable) or held by a rollback notice, it
+announces nothing and only deletes; the others list it until one of them
+removes it. A restored backup never brings a mesh identity back: pair the
+restored device again.
 
 ### On Tailscale (or another VPN)
 
@@ -303,8 +315,7 @@ your SDK reports and does not retry, before the request reaches the provider
 within 5 seconds. Each device decides for itself: your other devices enforce
 only if you switch it on there too, and no device can switch it on for
 another. A request's cost is known only when it completes, so spend can go
-over the cap. Near the cap, and while no request cost is known (after a
-gateway restart or at the start of a month), the gateway lets one request
+over the cap. Near the cap, and while no request cost is known (a new cap, or one with no priced request in this gateway's history yet), the gateway lets one request
 through at a time. Otherwise each request in flight reserves the cap's typical
 (95th-percentile) cost, and a request is admitted only while those
 reservations leave room, so several requests that each cost far more than
@@ -518,8 +529,7 @@ The app sends no analytics about any of this.
 - **Enforce on this device** asks for your master password and explains what
   it does: this device's gateway answers requests to the project with HTTP
   403 (not 429, so SDKs do not retry) once this device's share for the month
-  is used; near the cap, and while no request cost is known (after a gateway
-  restart or at the start of a month), one request runs at a time; requests
+  is used; near the cap, and while no request cost is known (a new cap, or one with no priced request in this gateway's history yet), one request runs at a time; requests
   that each cost far more than typical can together go over by more than one
   request, and a gateway restart can forget spend not yet saved; unpriced
   models and responses without usage are never charged against the cap. It is a self-limit on traffic through Tethra's gateway, not a

@@ -604,9 +604,12 @@ impl Session {
         // Repair fits in what the main path left of the peer's staging bound
         // (audit MP-3): unbounded, it pushed a session with a device far
         // behind past `max_staged`, the peer aborted, and that device never
-        // caught up while any repair was due. The main path goes first; a
-        // repair cut short continues in the next session (its digests still
-        // differ).
+        // caught up while any repair was due. The main path goes first. A
+        // repair cut short is sent again from its first held item in the
+        // next session (its digests still differ): once the main path is
+        // caught up the whole bound is available, and an origin holding more
+        // items than the bound itself is never repaired in full (before, the
+        // session aborted instead).
         let roster = &store.state().roster;
         let mut repair: Vec<SignedItem> = Vec::new();
         for (o, ov) in own.iter() {
@@ -703,6 +706,8 @@ impl Session {
             }
             self.stage_bytes(&b.0, items.repair, store);
         }
+        let me = store.self_id();
+        let own_vv = store.vv().get(&me);
         for (o, s, h) in items.dots {
             if !self.bump_staged() {
                 let mut out = Vec::new();
@@ -712,6 +717,14 @@ impl Session {
                     CloseReason::Aborted("too many staged items"),
                 );
                 return out;
+            }
+            // A dot hash is a peer's unsigned claim. For this device's own
+            // origin at or below what it already logged, it can add nothing
+            // and could only become fork evidence against this device itself
+            // (audit MP-2). A signed item of its own origin with another hash
+            // still counts: only its key could have signed it.
+            if o == me && s <= own_vv {
+                continue;
             }
             let stage = self.staged.entry(o).or_default();
             if !stage.open(s) {
@@ -1694,6 +1707,62 @@ mod tests {
                 .any(|a| matches!(a, Action::ForkDetected(ev) if ev.origin == b.id && ev.seq == 2)),
             "{acts:?}"
         );
+    }
+
+    #[test]
+    fn a_peers_dot_hash_never_makes_this_device_report_itself_forked() {
+        // Audit MP-2 (verification): a peer sends its own genuine items plus
+        // a made-up dot hash for this device's own seq 1, and a Commit whose
+        // `upto` names both. The genuine items commit; nothing about this
+        // device's own origin may come out as fork evidence.
+        let (g, mut b) = pair();
+        setting(&mut b, 1);
+        let mut sb = Session::new(Limits::default(), Some(g.id));
+        let _ = sb.start(&b.store);
+        let (_, hello_g) = hello_of(&g);
+        let _ = sb.on_frame(hello_g, &b.store);
+        let genuine = g.store.held_items(&g.id, 0, u64::MAX).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        let batch: Vec<B64> = genuine
+            .iter()
+            .map(|i| {
+                let w = i.to_wire();
+                hasher.update(&ItemHash::of(&w).0);
+                B64(w)
+            })
+            .collect();
+        let count = batch.len() as u64;
+        let fake = Frame {
+            n: 1,
+            body: Body::Items(Items {
+                batch,
+                dots: vec![(b.id, 1, ItemHash([0xEE; 32]))],
+                repair: false,
+            }),
+        };
+        let _ = sb.on_frame(fake, &b.store);
+        let mut upto = VersionVector::new();
+        upto.advance_to(g.id, g.store.vv().get(&g.id));
+        upto.advance_to(b.id, 1);
+        let commit = Frame {
+            n: 2,
+            body: Body::Commit(Commit {
+                upto,
+                count,
+                batch_hash: Hash32(*hasher.finalize().as_bytes()),
+            }),
+        };
+        let acts = sb.on_frame(commit, &b.store);
+        let mut committed = false;
+        for a in acts {
+            if let Action::Commit(batch) = a {
+                committed = true;
+                let out = b.store.commit(batch).unwrap();
+                assert!(out.forks.iter().all(|f| f.origin != b.id), "{out:?}");
+            }
+        }
+        assert!(committed, "the genuine items commit");
+        assert_eq!(b.store.vv().get(&g.id), g.store.vv().get(&g.id));
     }
 
     #[test]

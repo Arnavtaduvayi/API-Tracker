@@ -446,7 +446,8 @@ first (`evidence/<id>_baseline_fail.log.txt`):
   receiver ignores a notice above what the reporter's `Hello` claimed for it.
 - **Bisection and self-reports (MP-2).** `ChainReply` entries outside the
   queried `(lo, hi]` are ignored, and a device never reports its own origin
-  forked from a peer's chain claim. The broader decision ("fork evidence needs
+  forked from a peer's chain claim or dot hash (own-origin dots at or below
+  its own log are dropped; found by the Phase D verification). The broader decision ("fork evidence needs
   two signed items") was not adopted: superseded items survive only as dot
   hashes, so it would leave real forks in superseded history unreported, and
   any known device's `fork.report` already counts (§6.3), so a member gains

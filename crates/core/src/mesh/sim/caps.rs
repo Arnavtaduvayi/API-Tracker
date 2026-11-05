@@ -1002,12 +1002,30 @@ impl CapsWorld {
                 .filter(|(d, _)| !up.iter().any(|&k| self.devs[k].id == **d))
                 .map(|(_, r)| u128::try_from(r.avail.max(0)).unwrap_or(0))
                 .sum();
-            let pending = f.pending_decrease().saturating_sub(stuck);
+            // Rights a device holds under its own overrides are never burned
+            // or reclaimed (ADR 0032 D4, audit MC-6): when other devices
+            // overspent during a partition, the decrease settles only down
+            // to them (soak seed 5000331).
+            let protected: u128 = f
+                .view
+                .devices
+                .iter()
+                .filter(|(d, _)| up.iter().any(|&k| self.devs[k].id == **d))
+                .map(|(d, r)| {
+                    let held = u128::try_from(r.avail.max(0)).unwrap_or(0);
+                    held.min(u128::from(f.overrides_of(d, &c.owner_device)))
+                })
+                .sum();
+            let pending = f
+                .pending_decrease()
+                .saturating_sub(stuck)
+                .saturating_sub(protected);
             if pending > 0 && !c.frozen {
                 return self.fail(
                     "lower settles",
                     format!(
                         "device {i}: pending decrease {pending} beyond {stuck} held by others \
+                         and {protected} under overrides \
                          (target {target}, supply {}, used {}, this device holds {})",
                         f.supply(),
                         f.view.total_used,

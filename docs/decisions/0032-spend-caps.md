@@ -197,8 +197,9 @@ never see cap figures (SI-19).
 - **The node's probe** of the running gateway: the control socket on Unix; on
   Windows (no control channel) a loopback connection to the configured port,
   where anything listening counts as running.
-- **Measured:** the admission check is inside run-to-run noise
-  (`docs/gateway/PERFORMANCE_RESULTS.md`).
+- **Measured:** admission alone, far from the cap (no response cost
+  charged, no poller running; printed, not asserted), is inside run-to-run
+  noise (`docs/gateway/PERFORMANCE_RESULTS.md`, which states the scope).
 
 **D12 — The owner absorbs a lower's remainder (Increment 12).** A lower's
 holders each keep `max(0, share − own spend)`. When some devices spent past
@@ -285,12 +286,23 @@ Each with a test that failed first (`docs/mesh/audit/2026-11-03/evidence/`):
   sent. A device that holds rights and never cooperates (malicious, broken or
   gone) keeps a lower from fully settling: its rights are counted as pending
   until it burns them or is removed.
-- **Bounded overshoot.** Cost is known only after a response, so an
-  enforcing gateway admits at most one in-flight request per cap when rights
-  are nearly exhausted; `Σ used` may exceed supply by at most one request's
-  cost per cap per device (MESH-SI-9). A device that does not enforce blocks
-  nothing: spend beyond its rights shows as a negative available amount and
-  an alert.
+- **Limited overshoot, not zero.** Cost is known only after a response. An
+  enforcing gateway admits one in-flight request per cap when rights are
+  nearly exhausted, and while no request cost is known for the cap (MC-1), so
+  there `Σ used` exceeds supply by that request's cost; beside other
+  in-flight requests it admits while every reservation of the cap's typical
+  (p95) cost leaves the margin, so several requests that each cost far more
+  than typical can together go over by more than one request, and spend a
+  gateway restart forgot is not counted (MESH-SI-9,
+  `docs/mesh/KNOWN_LIMITATIONS.md` "Spend caps"). A device that does not
+  enforce blocks nothing: spend beyond its rights shows as a negative
+  available amount and an alert.
+- **Overrides survive a lower (MC-6).** A holder never burns, and the owner
+  never reclaims, rights a device holds under its own overrides. If other
+  devices overspent while partitioned, a lower settles only down to those
+  rights, and their holder may still spend them: the month's total can end
+  above the effective target by up to what overrides still hold (soak seed
+  5000331, now `mesh_sim::caps_regression_seeds`).
 - **Spend not yet persisted.** The node reserves a transfer against the
   writer's persisted spend and re-checks at publication; spend still in the
   writer's queue then (seconds) is not covered, and after a gateway restart

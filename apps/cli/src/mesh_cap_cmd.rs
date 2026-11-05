@@ -276,8 +276,8 @@ pub fn run(ctx: &Ctx, cmd: CapCmd) -> Result<()> {
                      capped project once this device's rights for the month are used up: a \
                      403 your SDK reports, never retried automatically. A request's cost is \
                      known only when it completes, so it can go over: near the cap, and while \
-                     no request cost is known yet (after a gateway restart or at the start of \
-                     a month), requests run one at a time; otherwise each request in flight \
+                     no request cost is known yet (a new cap, or one with no priced request in \
+                     this gateway's history yet), requests run one at a time; otherwise each request in flight \
                      reserves the cap's typical (95th-percentile) cost, so several requests \
                      that each cost far more than that can together go over by more than one \
                      request, and a gateway restart can forget spend it has not saved yet. \

@@ -4,13 +4,12 @@ What the mesh does not do, stated plainly
 ([ADR 0031](../decisions/0031-device-mesh.md)). Each entry says whether it is a
 permanent design choice or something a later increment changes.
 
-> **Status.** The mesh is in development on `feat/device-mesh`. Increments
-> 01-11 are built: pairing, the node, shared projects and cross-device usage,
-> spend caps with gateway enforcement, the desktop app's Devices view and
-> project panels, and opt-in credential sharing; Increment 12 (hardening and
-> the audit of 2026-11-03) is in progress. These limitations describe what is
-> built; the ones the audit accepted rather than fixed are marked
-> "(accepted, audit 2026-11-03)".
+> **Status.** All twelve increments are built: pairing, the node, shared
+> projects and cross-device usage, spend caps with gateway enforcement, the
+> desktop app's Devices view and project panels, opt-in credential sharing,
+> and hardening with an independent audit (2026-11-03; 41 findings fixed, 7
+> accepted). These limitations describe what is built; the ones the audit
+> accepted rather than fixed are marked "(accepted, audit 2026-11-03)".
 
 ## Reachability
 
@@ -141,6 +140,15 @@ permanent design choice or something a later increment changes.
   rename. On Windows the file inherits the data directory's per-user ACLs (as
   the vault's files do), and the directory is not fsynced (the standard library
   cannot open a directory there; NTFS journals the rename).
+- **Downgrading after the audit release leaves the identity untrusted.**
+  The identity marker is now version 2 (it records the committed log length).
+  A build from before it reads version 2 as unknown, so the device refuses to
+  mint until it leaves and pairs again.
+- **A repair larger than one session never completes.** Repair items fit in
+  what a session may stage (50 000) after the main path; a cut-short repair is
+  sent again from its start, so an origin holding more items than that is
+  never repaired in full. Honest operation needs repair only after forks or
+  rare divergences.
 - **Opened views cost memory and start-up time.** The views are rebuilt in
   memory from the stored items whenever the store opens (`mesh status`, and the
   node from 05). This is linear in the number of held items: one per device, key
@@ -272,10 +280,20 @@ permanent design choice or something a later increment changes.
   own pricing table.
 - **Overshoot is limited, not zero, and not "one request".** Cost is known
   only after a response. Near the cap, and while no request cost is known
-  (after a gateway restart or at the start of a month), requests run one at a
+  (a new cap, or one with no priced request in this gateway's history yet), requests run one at a
   time, so a device goes over by that request's cost. Otherwise see the next
   entries: concurrent requests far above the typical cost, and spend a
   restart forgets, can take it further.
+- **A device's own overrides survive a lower.** A lower never burns, and
+  the owner never reclaims, rights a device holds under its own overrides
+  (audit MC-6). If other devices overspent while apart, the month's total
+  can therefore end above the effective target by up to what overrides still
+  hold, spent by the device that raised its own limit.
+- **A removed device's later cap figures stop counting.** After a removal,
+  its `cap.used` written above its cutoff no longer counts and its earlier
+  figure is not restored, so the cap's total spend can drop by what it
+  reported after the cutoff (with concurrent removals, the smaller cutoff
+  applies).
 - **Unpriced or unmetered traffic is never charged.** A model with no pricing
   record, or a response that reported no usage (an OpenAI stream without
   `stream_options.include_usage`, a route without usage extraction), is

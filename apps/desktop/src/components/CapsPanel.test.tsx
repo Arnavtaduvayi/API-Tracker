@@ -359,7 +359,7 @@ describe("CapsPanel enforcement", () => {
     // The overshoot is qualified, never "at most one request" (MD-1).
     expect(dialog).not.toHaveTextContent(/at most one request/);
     expect(dialog).toHaveTextContent(
-      /while no request cost is known \(after a gateway restart or at the start of a month\)/,
+      /while no request cost is known \(a new cap, or one with no priced request in this gateway's history yet\)/,
     );
     expect(dialog).toHaveTextContent(/typical \(95th-percentile\) cost/);
     expect(dialog).toHaveTextContent(/can together go over by more than one request/);

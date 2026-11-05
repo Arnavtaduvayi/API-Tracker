@@ -757,8 +757,10 @@ every later one, so the first difference can be found by bisection.
   `(lo, hi]` — chains equal at `lo`, different at `hi` — until `hi = lo + 1`.
   The fork seq is `hi`; the two hashes at `hi` are its own and the peer's.
   Reply entries outside the queried `(lo, hi]` are ignored, and a device
-  never reports **its own** origin forked from a peer's chain claim: it knows
-  what it signed, and other devices still find a real clone of it between
+  never reports **its own** origin forked from a peer's chain claim or dot
+  hash (a receiver drops `Items.dots` for its own origin at or below its own
+  `vv[self]`; a signed item of its own origin with another hash still counts,
+  since only its key could sign it): it knows what it signed, and other devices still find a real clone of it between
   themselves. (Amended in 12, audit MP-2. The peer's hash at `hi` is a claim,
   not a signed item; a fork report always rests on the reporting member's
   word, as any known device's `fork.report` counts, KNOWN_LIMITATIONS.)
@@ -993,8 +995,11 @@ and either
 - `o` is forked in its own roster (§7.3).
 
 Repair items fit in what the main path left of the session's staging bound
-(`max_staged`, §11): the main path goes first, and a repair cut short continues
-in the next session, whose digests still differ. (Amended in 12, audit MP-3:
+(`max_staged`, §11): the main path goes first. A repair cut short is sent
+again from its first held item in the next session, whose digests still
+differ; once the main path has caught up the whole bound is available, and an
+origin holding more items than the bound itself is never repaired in full
+(KNOWN_LIMITATIONS). (Amended in 12, audit MP-3:
 unbounded repair pushed a session with a device far behind past the bound, so
 that device never caught up while any repair was due.)
 
