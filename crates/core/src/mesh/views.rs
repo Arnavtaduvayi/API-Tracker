@@ -272,10 +272,12 @@ impl State {
     /// recipient is removed (such shares are purged, §8.4) or no entry is
     /// admitted. Otherwise the winning share is the admitted `share.sealed`
     /// with the greatest `(hlc, origin)`; it is revoked when an admitted
-    /// `share.revoke` names its share id (the greatest such revoke is the
-    /// revoker), whatever their HLCs. A revoke of another share id ends
-    /// nothing. With no admitted share, the greatest admitted revoke is the
-    /// value.
+    /// `share.revoke` **by its sharer or by the key's recipient** names its
+    /// share id (the greatest such revoke is the revoker), whatever their
+    /// HLCs. A revoke of another share id, or by any other device, ends
+    /// nothing (audit MP-10: any member could end another device's share).
+    /// With no admitted share, the recipient's greatest admitted revoke is
+    /// the value.
     pub fn share_at(&self, key: &(CredentialRef, DeviceId)) -> Option<ShareWinner<'_>> {
         let roster = &self.roster;
         if roster.is_removed(&key.1) {
@@ -294,6 +296,7 @@ impl State {
         let greatest = |it: &mut dyn Iterator<Item = &(DeviceId, Hlc, ShareId)>| {
             it.max_by_key(|(o, h, _)| (*h, *o)).copied()
         };
+        let recipient = key.1;
         match self
             .shares_sealed
             .register(key)
@@ -301,8 +304,9 @@ impl State {
         {
             Some((sharer, e)) => {
                 let value = &e.value.value;
-                let naming =
-                    greatest(&mut revokes.iter().filter(|(_, _, id)| *id == value.share_id));
+                let naming = greatest(&mut revokes.iter().filter(|(o, _, id)| {
+                    *id == value.share_id && (*o == *sharer || *o == recipient)
+                }));
                 Some(match naming {
                     Some((revoker, hlc, share_id)) => ShareWinner::Revoked {
                         revoker,
@@ -317,28 +321,39 @@ impl State {
                     },
                 })
             }
-            None => {
-                greatest(&mut revokes.iter()).map(|(revoker, hlc, share_id)| ShareWinner::Revoked {
+            // No admitted share: no device can be its sharer, so only the
+            // recipient's revokes count.
+            None => greatest(&mut revokes.iter().filter(|(o, _, _)| *o == recipient)).map(
+                |(revoker, hlc, share_id)| ShareWinner::Revoked {
                     revoker,
                     hlc,
                     share_id,
                     sealed: None,
-                })
-            }
+                },
+            ),
         }
     }
 
-    /// Whether an admitted `share.revoke` at `key` names `share_id`, and the
-    /// greatest such revoke's origin.
+    /// Whether an admitted `share.revoke` at `key` names `share_id` of a share
+    /// written by `sharer`, and the greatest such revoke's origin. As in
+    /// [`Self::share_at`], only a revoke by that sharer or by the key's
+    /// recipient counts (audit MP-10). The caller names the sharer: share
+    /// ids are readable metadata, so another member could copy one into its
+    /// own `share.sealed` and must not become a sharer of it.
     pub fn share_revoked_by(
         &self,
         key: &(CredentialRef, DeviceId),
+        sharer: &DeviceId,
         share_id: &ShareId,
     ) -> Option<DeviceId> {
         let roster = &self.roster;
         self.shares_revoked.register(key).and_then(|r| {
             r.entries()
-                .filter(|(o, e)| roster.admits(o, e.seq) && e.value.value == *share_id)
+                .filter(|(o, e)| {
+                    roster.admits(o, e.seq)
+                        && e.value.value == *share_id
+                        && (**o == key.1 || *o == sharer)
+                })
                 .max_by_key(|(o, e)| (e.value.hlc, **o))
                 .map(|(o, _)| *o)
         })
@@ -520,5 +535,141 @@ mod expected {
             }
             out
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mesh::dot::MeshId;
+    use crate::mesh::kinds::{ItemKind, RosterAdd, ShareRevoke, ShareSealed};
+    use crate::mesh::sign::PublicKeyBytes;
+
+    fn dev(n: u8) -> DeviceId {
+        DeviceId::from_bytes([n; 16])
+    }
+
+    /// A state with the genesis `dev(1)` and members `dev(2..=4)`, and a
+    /// per-origin seq counter.
+    struct Harness {
+        state: State,
+        next: BTreeMap<DeviceId, u64>,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let genesis = GenesisInfo {
+                mesh_id: MeshId::from_bytes([9; 16]),
+                genesis: dev(1),
+            };
+            let mut h = Self {
+                state: State::new(genesis),
+                next: BTreeMap::new(),
+            };
+            for d in 1..=4 {
+                let add = RosterAdd {
+                    device: dev(d),
+                    name: format!("fake device {d}"),
+                    sign_pub: PublicKeyBytes([d; 32]),
+                    noise_pub: PublicKeyBytes([d + 10; 32]),
+                    seal_pub: PublicKeyBytes([d + 20; 32]),
+                    added_by: dev(1),
+                };
+                h.put(dev(1), 1, &add, TypedItem::RosterAdd(add.clone()));
+            }
+            h
+        }
+
+        fn put<K: ItemKind>(&mut self, origin: DeviceId, hlc: u64, v: &K, typed: TypedItem) {
+            let seq = self.next.entry(origin).or_insert(0);
+            *seq += 1;
+            let body = v.to_body(self.state.genesis.mesh_id, origin, *seq, Hlc::from_raw(hlc));
+            let hash = ItemHash::of(&crate::mesh::codec::encode_body(&body).unwrap());
+            self.state.apply(&body, hash, &typed);
+        }
+
+        fn share(&mut self, by: DeviceId, hlc: u64, key: (CredentialRef, DeviceId), id: ShareId) {
+            let s = ShareSealed {
+                credential: key.0,
+                recipient: key.1,
+                share_id: id,
+                mesh_project_id: MeshProjectId::from_bytes([3; 16]),
+                credential_name: "Fake credential".into(),
+                provider: "fake-provider".into(),
+                value_version: 1,
+                sealed: b"FAKE-SEALED-BOX-NOT-A-SECRET".to_vec(),
+            };
+            self.put(by, hlc, &s, TypedItem::ShareSealed(s.clone()));
+        }
+
+        fn revoke(&mut self, by: DeviceId, hlc: u64, key: (CredentialRef, DeviceId), id: ShareId) {
+            let r = ShareRevoke {
+                credential: key.0,
+                recipient: key.1,
+                share_id: id,
+            };
+            self.put(by, hlc, &r, TypedItem::ShareRevoke(r.clone()));
+        }
+    }
+
+    #[test]
+    fn a_revoke_by_neither_sharer_nor_recipient_ends_nothing() {
+        // Audit MP-10: dev(2) shares to dev(3); dev(4), a third member,
+        // revokes that share id with a greater HLC. Only the share's sharer
+        // or its recipient may end it.
+        let mut h = Harness::new();
+        let (sharer, recipient, other) = (dev(2), dev(3), dev(4));
+        let key = (CredentialRef::from_bytes([7; 16]), recipient);
+        let id = ShareId::from_bytes([5; 16]);
+        h.share(sharer, 10, key, id);
+        h.revoke(other, 20, key, id);
+        assert!(
+            matches!(h.state.share_at(&key), Some(ShareWinner::Sealed { sharer: s, .. }) if s == sharer),
+            "{:?}",
+            h.state.share_at(&key)
+        );
+        assert_eq!(h.state.share_revoked_by(&key, &sharer, &id), None);
+        // A third member's revoke at a key with no share is not a value
+        // either.
+        let lone = (CredentialRef::from_bytes([8; 16]), recipient);
+        h.revoke(other, 20, lone, id);
+        assert_eq!(h.state.share_at(&lone), None);
+        // The recipient may decline, and the sharer may revoke, whatever the
+        // HLCs.
+        let declined = (CredentialRef::from_bytes([9; 16]), recipient);
+        h.share(sharer, 30, declined, id);
+        h.revoke(recipient, 5, declined, id);
+        assert!(matches!(
+            h.state.share_at(&declined),
+            Some(ShareWinner::Revoked { revoker, .. }) if revoker == recipient
+        ));
+        h.revoke(sharer, 6, key, id);
+        assert!(matches!(
+            h.state.share_at(&key),
+            Some(ShareWinner::Revoked { revoker, sealed: Some((s, _)), .. })
+                if revoker == sharer && s == sharer
+        ));
+        assert_eq!(h.state.share_revoked_by(&key, &sharer, &id), Some(sharer));
+    }
+
+    #[test]
+    fn copying_a_share_id_does_not_make_a_member_its_sharer() {
+        // Share ids are readable metadata. dev(4) copies dev(2)'s share id
+        // into its own older share at the same key, then revokes it: that
+        // must not end dev(2)'s share, in either view.
+        let mut h = Harness::new();
+        let (sharer, recipient, other) = (dev(2), dev(3), dev(4));
+        let key = (CredentialRef::from_bytes([7; 16]), recipient);
+        let id = ShareId::from_bytes([5; 16]);
+        h.share(sharer, 10, key, id);
+        h.share(other, 5, key, id);
+        h.revoke(other, 20, key, id);
+        assert_eq!(h.state.share_revoked_by(&key, &sharer, &id), None);
+        assert!(matches!(
+            h.state.share_at(&key),
+            Some(ShareWinner::Sealed { sharer: s, .. }) if s == sharer
+        ));
+        // The copier's own (losing) share is the one its revoke ends.
+        assert_eq!(h.state.share_revoked_by(&key, &other, &id), Some(other));
     }
 }

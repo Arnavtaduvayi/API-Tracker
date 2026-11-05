@@ -98,11 +98,29 @@ pub(crate) fn report_fork(node: &MeshNode, ev: ForkEvidence) -> NetResult<()> {
 /// `writer`, with `peer` already authenticated.
 pub fn exchange(
     node: &MeshNode,
-    mut reader: FrameReader,
+    reader: FrameReader,
     writer: FrameWriter,
     peer: DeviceId,
     direction: Direction,
 ) -> ExchangeReport {
+    exchange_with(node, reader, writer, vec![peer], direction)
+}
+
+/// [`exchange`] with the peer one of `candidates` (never empty), the active
+/// devices whose Noise key the handshake authenticated; the peer's `Hello`
+/// names which (audit MP-7). With several, nothing that depends on the
+/// peer's identity happens before its `Hello` arrives.
+pub fn exchange_with(
+    node: &MeshNode,
+    mut reader: FrameReader,
+    writer: FrameWriter,
+    candidates: Vec<DeviceId>,
+    direction: Direction,
+) -> ExchangeReport {
+    let ambiguous = candidates.len() > 1;
+    // Until a Hello resolves it, the first candidate (the only one, unless
+    // ambiguous); identity-dependent steps wait for the Hello when ambiguous.
+    let mut peer = candidates.first().copied().unwrap_or(DeviceId::MIN);
     let started = Instant::now();
     let limits = node.limits();
     let mut report = ExchangeReport {
@@ -131,7 +149,7 @@ pub fn exchange(
     let mut rollback_notice = false;
     let result = (|| -> NetResult<()> {
         reader.set_read_timeout(Some(limits.idle_timeout))?;
-        let mut session = Session::new(Limits::default(), Some(peer));
+        let mut session = Session::with_candidates(Limits::default(), candidates);
         let (mut actions, ours) = {
             let store = node.store();
             let ours: (VersionVector, BTreeMap<DeviceId, Hash32>) = (
@@ -150,9 +168,12 @@ pub fn exchange(
         actions.extend(session.direct(DirectMsg::AccessKeyUpdate { epoch, key }));
         // Spend-cap rebalancing: ask this peer for rights where this device
         // is short (rate-limited per peer and cap). A failure to work out
-        // what to ask never fails the exchange.
-        for msg in directs::rights_requests(node, peer).unwrap_or_default() {
-            actions.extend(session.direct(msg));
+        // what to ask never fails the exchange. With an ambiguous peer, once
+        // its Hello names it (below).
+        if !ambiguous {
+            for msg in directs::rights_requests(node, peer).unwrap_or_default() {
+                actions.extend(session.direct(msg));
+            }
         }
         loop {
             let mut done = false;
@@ -216,11 +237,20 @@ pub fn exchange(
                 report_hello = session
                     .peer_hello()
                     .map(|h| hello_record(node, &ours.0, &ours.1, &h.vv, &h.digests));
+                if let (true, Some(h)) = (ambiguous, session.peer_hello()) {
+                    // The session checked it is one of the candidates.
+                    peer = h.device_id;
+                    for msg in directs::rights_requests(node, peer).unwrap_or_default() {
+                        actions.extend(session.direct(msg));
+                    }
+                }
             }
         }
     })();
     drop(tx);
     let _ = writer_thread.join();
+    // The peer as its Hello named it (the same unless it was ambiguous).
+    report.peer = peer;
     // Now that whatever the peer sent is committed, the roster knows the
     // removals that justify a rotated key (or the key stays unapplied), and
     // a donor answers rights requests on the freshest view. Only a

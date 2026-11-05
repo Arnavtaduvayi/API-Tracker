@@ -673,3 +673,52 @@ fn a_flood_of_direct_frames_is_bounded_and_the_node_keeps_serving() {
     let r = replicate_once(&nb, &server.addr_string()).unwrap();
     assert!(r.aborted.is_none(), "{r:?}");
 }
+
+// ------------------------------------------------------------- MP-7
+
+/// Audit MP-7: a member adds a ghost device whose roster entry copies B's
+/// Noise key (with its own signing and sealing keys, so its own id), sorted
+/// before B. The node answering B's handshake must still resolve the session
+/// to B by its Hello, not refuse it as "not the peer".
+#[test]
+fn a_ghost_device_with_a_copied_noise_key_does_not_shadow_the_real_one() {
+    use api_tracker_core::mesh::kinds::RosterAdd;
+    use api_tracker_core::mesh::sign::{derive_device_id, PublicKeyBytes, SigningKeyPair};
+    let (a, server, b) = pair_of();
+    let na = node(&a);
+    let nb = node(&b);
+    let b_id = nb.self_id();
+    let b_noise = na.store().state().roster.keys(&b_id).unwrap().noise_pub;
+    // A fake sealing key (not one of the small-order points refused at parse).
+    let seal_pub = PublicKeyBytes([0x42; 32]);
+    let (ghost, sign_pub) = (1u8..=255)
+        .map(|n| {
+            let sign_pub = SigningKeyPair::from_secret_bytes(&[n; 32]).public_key();
+            (derive_device_id(&sign_pub, &b_noise, &seal_pub), sign_pub)
+        })
+        .find(|(id, _)| *id < b_id)
+        .expect("some ghost id sorts before B's");
+    {
+        let keys = a.vault.mesh_keys().unwrap();
+        let add = RosterAdd {
+            device: ghost,
+            name: "ghost".into(),
+            sign_pub,
+            noise_pub: b_noise,
+            seal_pub,
+            added_by: na.self_id(),
+        };
+        na.store()
+            .mint(keys.signing_key(), Draft::of(&add, HlcPolicy::Now))
+            .unwrap();
+    }
+    assert!(na.store().state().roster.is_active(&ghost));
+    assert_eq!(na.active_devices(&b_noise.0), vec![ghost, b_id]);
+    let mut st = nb.store();
+    set(&mut st, &b, "after.ghost", 1);
+    drop(st);
+    let want = nb.store().vv().get(&b_id);
+    let r = replicate_once(&nb, &server.addr_string()).unwrap();
+    assert!(r.aborted.is_none(), "{r:?}");
+    assert_eq!(na.store().vv().get(&b_id), want, "B's item reached A");
+}

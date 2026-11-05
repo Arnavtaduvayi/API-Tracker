@@ -213,9 +213,9 @@ fn a_sender_killed_mid_session_advances_no_vv() {
     // B authenticates for real, then sends its Items but dies before Commit.
     let mut stream = TcpStream::connect(server.addr).unwrap();
     let key = nb.access_keys().unwrap().current.1;
-    let (state, peer) = handshake::initiate(&mut stream, &nb, &key).unwrap();
+    let (state, peers) = handshake::initiate(&mut stream, &nb, &key).unwrap();
     let (mut reader, mut writer) = wire::split(stream, state).unwrap();
-    let mut session = Session::new(Limits::default(), Some(peer));
+    let mut session = Session::with_candidates(Limits::default(), peers);
     for act in session.start(&*nb.store()) {
         if let Action::Send(f) = act {
             writer.send(&f.encode().unwrap()).unwrap();

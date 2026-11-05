@@ -333,7 +333,7 @@ fn own_live(state: &State, me: &DeviceId) -> Vec<((CredentialRef, DeviceId), Sea
             let e = own_entry(state, &k, me)?;
             let v = &e.value.value;
             state
-                .share_revoked_by(&k, &v.share_id)
+                .share_revoked_by(&k, me, &v.share_id)
                 .is_none()
                 .then(|| (k, v.clone()))
         })
@@ -852,7 +852,7 @@ pub fn list(store: &SqliteStore) -> Result<SharesList> {
                 continue;
             };
             let value = &e.value.value;
-            let revoked_by = state.share_revoked_by(&key, &value.share_id);
+            let revoked_by = state.share_revoked_by(&key, &me, &value.share_id);
             let superseded_by = match state.share_at(&key) {
                 Some(ShareWinner::Sealed { sharer, .. })
                 | Some(ShareWinner::Revoked {
@@ -929,7 +929,7 @@ pub fn reseal_offers(store: &SqliteStore) -> Result<Vec<ResealOffer>> {
                 }
                 Some(e) => {
                     let v = &e.value.value;
-                    if state.share_revoked_by(&key, &v.share_id).is_some() {
+                    if state.share_revoked_by(&key, &me, &v.share_id).is_some() {
                         continue; // revoked on purpose: never offered again
                     }
                     let shadowed = matches!(

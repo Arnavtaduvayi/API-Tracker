@@ -169,15 +169,20 @@ impl MeshNode {
         Ok(self.vault.access_keys(self.store().connection(), now)?)
     }
 
-    /// The active roster device whose Noise key is `remote` (MESH-SI-2).
-    pub fn active_device(&self, remote: &[u8]) -> Option<DeviceId> {
+    /// The active roster devices whose Noise key is `remote` (MESH-SI-2),
+    /// other than this one. Normally one; several when a member added a
+    /// device with a copied Noise key, and then the session's `Hello`
+    /// decides which of them answered (audit MP-7): only the holder of that
+    /// Noise secret completes the handshake, whichever id it names.
+    pub fn active_devices(&self, remote: &[u8]) -> Vec<DeviceId> {
         let store = self.store();
         let roster = &store.state().roster;
-        let found = roster
+        let me = self.self_id();
+        roster
             .known()
-            .find(|(d, k)| k.noise_pub.0.as_slice() == remote && roster.is_active(d))
-            .map(|(d, _)| *d);
-        found.filter(|d| *d != self.self_id())
+            .filter(|(d, k)| k.noise_pub.0.as_slice() == remote && roster.is_active(d) && **d != me)
+            .map(|(d, _)| *d)
+            .collect()
     }
 }
 

@@ -5,7 +5,7 @@
 use crate::error::{NetError, NetResult};
 use crate::handshake;
 use crate::node::MeshNode;
-use crate::session::{exchange, Direction, ExchangeReport};
+use crate::session::{exchange_with, Direction, ExchangeReport};
 use crate::wire;
 use api_tracker_core::mesh::membership::{self, ExchangeRecord};
 use api_tracker_core::mesh::peers;
@@ -75,9 +75,9 @@ pub fn replicate_once(node: &MeshNode, addr: &str) -> NetResult<ExchangeReport> 
             continue;
         };
         match handshake::initiate(&mut stream, node, key) {
-            Ok((state, peer)) => {
+            Ok((state, peers)) => {
                 let (r, w) = channel(stream, state, node)?;
-                let report = exchange(node, r, w, peer, Direction::Outbound);
+                let report = exchange_with(node, r, w, peers, Direction::Outbound);
                 log(node, &report);
                 return Ok(report);
             }

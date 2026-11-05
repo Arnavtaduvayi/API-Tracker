@@ -260,7 +260,13 @@ struct Pending {
 /// One anti-entropy session with one peer.
 pub struct Session {
     limits: Limits,
-    expected_peer: Option<DeviceId>,
+    /// The devices the transport authenticated: the Hello must name one of
+    /// them (empty: any). More than one only when several active devices
+    /// share the Noise key that answered (audit MP-7).
+    expected_peers: Vec<DeviceId>,
+    /// The VV this side's own `Hello` advertised: a `RollbackNotice` is sent
+    /// from it, never from a later read (audit MP-9).
+    own_hello_vv: Option<VersionVector>,
     next_send: u64,
     next_recv: u64,
     peer: Option<Hello>,
@@ -285,9 +291,20 @@ impl Session {
     /// `expected_peer` is the device the transport authenticated (None in
     /// tests that do not care).
     pub fn new(limits: Limits, expected_peer: Option<DeviceId>) -> Self {
+        Self::with_candidates(limits, expected_peer.into_iter().collect())
+    }
+
+    /// A session whose peer is one of `candidates`, the active devices whose
+    /// Noise key the transport authenticated, resolved by the `Hello`'s
+    /// device id (audit MP-7: a member could add a device with a copied
+    /// Noise key and shadow the real one). Only the holder of that Noise
+    /// secret completes the handshake, so whichever candidate it names is
+    /// the device that holds it. Empty: any peer.
+    pub fn with_candidates(limits: Limits, candidates: Vec<DeviceId>) -> Self {
         Self {
             limits,
-            expected_peer,
+            expected_peers: candidates,
+            own_hello_vv: None,
             next_send: 0,
             next_recv: 0,
             peer: None,
@@ -406,6 +423,7 @@ impl Session {
             chains,
             digests,
         };
+        self.own_hello_vv = Some(hello.vv.clone());
         vec![self.frame(Body::Hello(hello))]
     }
 
@@ -427,6 +445,17 @@ impl Session {
             Body::Commit(c) => self.on_commit(c, store),
             Body::ChainQuery(q) => self.on_chain_query(q, store),
             Body::ChainReply(r) => self.on_chain_reply(r, store),
+            // Audit MP-9: a notice claiming more of this device's log than
+            // the reporter's own Hello said it held is not evidence of a
+            // rollback; it would only stop this device minting.
+            Body::Direct(DirectMsg::RollbackNotice { held_seq })
+                if self
+                    .peer
+                    .as_ref()
+                    .is_some_and(|h| held_seq > h.vv.get(&store.self_id())) =>
+            {
+                Vec::new()
+            }
             Body::Direct(d) => vec![Action::Direct(d)],
             Body::Bye { reason } => {
                 self.got_bye = true;
@@ -462,7 +491,7 @@ impl Session {
             );
             return out;
         }
-        if self.expected_peer.is_some_and(|e| e != h.device_id) {
+        if !self.expected_peers.is_empty() && !self.expected_peers.contains(&h.device_id) {
             self.close(
                 &mut out,
                 Some(ByeReason::NotThePeer),
@@ -473,8 +502,12 @@ impl Session {
         self.roster = Some(store.state().roster.clone());
         let own = store.vv().clone();
 
-        // Rollback (§7.4).
-        let held = own.get(&h.device_id);
+        // Rollback (§7.4), from what our own Hello advertised (the peer
+        // ignores a notice above it, audit MP-9).
+        let held = self
+            .own_hello_vv
+            .as_ref()
+            .map_or_else(|| own.get(&h.device_id), |vv| vv.get(&h.device_id));
         if held >= h.own_next_seq && held > 0 {
             let f = self.frame(Body::Direct(DirectMsg::RollbackNotice { held_seq: held }));
             out.push(f);
@@ -568,13 +601,27 @@ impl Session {
             budget -= to - pv;
             upto.advance_to(*o, to);
         }
+        // Repair fits in what the main path left of the peer's staging bound
+        // (audit MP-3): unbounded, it pushed a session with a device far
+        // behind past `max_staged`, the peer aborted, and that device never
+        // caught up while any repair was due. The main path goes first; a
+        // repair cut short continues in the next session (its digests still
+        // differ).
         let roster = &store.state().roster;
         let mut repair: Vec<SignedItem> = Vec::new();
         for (o, ov) in own.iter() {
+            if budget == 0 {
+                break;
+            }
             let differs = peer.digests.get(o) != Some(&store.origin_digest(o));
             let eligible = *ov == peer.vv.get(o) || roster.fork_seq(o).is_some();
             if differs && eligible {
-                repair.extend(store.held_items(o, 0, u64::MAX)?);
+                let held = store.held_items(o, 0, u64::MAX)?;
+                let take = usize::try_from(budget)
+                    .unwrap_or(usize::MAX)
+                    .min(held.len());
+                budget -= take as u64;
+                repair.extend(held.into_iter().take(take));
             }
         }
 
@@ -911,7 +958,7 @@ impl Session {
 
     fn on_chain_reply<S: MeshStore>(&mut self, r: ChainReply, store: &S) -> Vec<Action> {
         let mut out = Vec::new();
-        let Some((lo, _hi)) = self.queries.get(&r.origin).copied() else {
+        let Some((lo, hi)) = self.queries.get(&r.origin).copied() else {
             return self.abort("unexpected ChainReply");
         };
         let mut entries = r.entries;
@@ -919,7 +966,9 @@ impl Session {
         let mut new_lo = lo;
         let mut found: Option<(u64, ItemHash)> = None;
         for (seq, chain, hash) in entries {
-            if seq <= lo {
+            // Only the range asked about (audit MP-2): an entry above `hi`
+            // would place the fork past what the Hellos compared.
+            if seq <= lo || seq > hi {
                 continue;
             }
             match store.chain_at(&r.origin, seq) {
@@ -942,7 +991,11 @@ impl Session {
                     Ok(h) => h,
                     Err(_) => return self.unavailable(),
                 };
-                if let Some(ours) = ours {
+                // A peer's word alone never makes this device report its own
+                // origin forked (audit MP-2): its chain and hash are claims,
+                // and this device knows what it signed. Other devices still
+                // detect a real clone of it between themselves.
+                if let (Some(ours), false) = (ours, r.origin == store.self_id()) {
                     out.push(Action::ForkDetected(ForkEvidence {
                         origin: r.origin,
                         seq: hi,
@@ -1431,5 +1484,247 @@ mod tests {
         assert!(la
             .iter()
             .any(|a| matches!(a, Action::Direct(DirectMsg::RollbackNotice { held_seq: 2 }))));
+    }
+
+    /// The first frame a fresh session for `d` sends: its Hello.
+    fn hello_of(d: &Dev) -> (Session, Frame) {
+        let mut s = Session::new(Limits::default(), None);
+        let Action::Send(h) = s.start(&d.store).remove(0) else {
+            panic!("start sends a Hello")
+        };
+        (s, h)
+    }
+
+    #[test]
+    fn a_rollback_notice_above_the_reporters_hello_is_ignored() {
+        // Audit MP-9: g's Hello says it holds none of b's log. A notice
+        // claiming 50 is no evidence of a rollback and must not reach the
+        // caller (it would stop b minting).
+        let (g, mut b) = pair();
+        setting(&mut b, 1);
+        let mut sb = Session::new(Limits::default(), Some(g.id));
+        let _ = sb.start(&b.store);
+        let (_, hello_g) = hello_of(&g);
+        let _ = sb.on_frame(hello_g, &b.store);
+        let lie = Frame {
+            n: 1,
+            body: Body::Direct(DirectMsg::RollbackNotice { held_seq: 50 }),
+        };
+        let acts = sb.on_frame(lie, &b.store);
+        assert!(acts.is_empty(), "{acts:?}");
+
+        // A notice within the reporter's Hello still reaches the caller.
+        let mut g2 = g_clone_for_self(&g);
+        exchange(&mut g2, &mut b);
+        assert_eq!(g2.store.vv().get(&b.id), 1);
+        let mut sb = Session::new(Limits::default(), Some(g2.id));
+        let _ = sb.start(&b.store);
+        let (_, hello_g2) = hello_of(&g2);
+        let _ = sb.on_frame(hello_g2, &b.store);
+        let honest = Frame {
+            n: 1,
+            body: Body::Direct(DirectMsg::RollbackNotice { held_seq: 1 }),
+        };
+        let acts = sb.on_frame(honest, &b.store);
+        assert!(matches!(
+            acts.as_slice(),
+            [Action::Direct(DirectMsg::RollbackNotice { held_seq: 1 })]
+        ));
+    }
+
+    #[test]
+    fn a_rollback_notice_is_sent_from_the_reporters_own_hello() {
+        // Audit MP-9, the sender's half: g advertised none of b's log, then
+        // another session gave it b's seq 1 before b's Hello (from a
+        // restored b, own_next_seq 1) arrived. g's notice comes from what it
+        // advertised, so it sends none, rather than one b would ignore.
+        let (g, mut b) = pair();
+        let genesis = b.store.genesis();
+        let before = g.store.clone();
+        setting(&mut b, 1);
+        let mut g_after = g_clone_for_self(&g);
+        exchange(&mut g_after, &mut b);
+        let restored = dev(2, Some(genesis));
+        let mut sg = Session::new(Limits::default(), Some(b.id));
+        let _ = sg.start(&before);
+        let (_, hello_r) = hello_of(&restored);
+        let acts = sg.on_frame(hello_r, &g_after.store);
+        assert!(
+            !acts.iter().any(|a| matches!(
+                a,
+                Action::Send(Frame {
+                    body: Body::Direct(DirectMsg::RollbackNotice { .. }),
+                    ..
+                })
+            )),
+            "{acts:?}"
+        );
+    }
+
+    #[test]
+    fn repair_fits_in_what_the_main_path_leaves_of_max_staged() {
+        // Audit MP-3: b is 8 seqs behind on g's origin, and a repair of b's
+        // own origin is due (its digest differs). With a staging bound of 5
+        // the main path takes all of it and the repair waits; before, the
+        // repair was sent on top, b's session aborted (too many staged) and
+        // b never caught up while any repair was due.
+        let (mut g, mut b) = pair();
+        for v in 1..=3 {
+            setting(&mut b, v);
+        }
+        exchange(&mut g, &mut b);
+        for v in 10..18 {
+            setting(&mut g, v);
+        }
+        let limits = Limits {
+            max_staged: 5,
+            ..Limits::default()
+        };
+        let (_, mut hello_b) = hello_of(&b);
+        if let Body::Hello(h) = &mut hello_b.body {
+            assert_eq!(h.vv.get(&b.id), 3);
+            h.digests.insert(b.id, Hash32([0xAB; 32]));
+        }
+        let mut sg = Session::new(limits, Some(b.id));
+        let _ = sg.start(&g.store);
+        let acts = sg.on_frame(hello_b.clone(), &g.store);
+        let (mut main, mut repair, mut dots) = (0, 0, 0);
+        for a in &acts {
+            if let Action::Send(Frame {
+                body: Body::Items(i),
+                ..
+            }) = a
+            {
+                if i.repair {
+                    repair += i.batch.len();
+                } else {
+                    main += i.batch.len();
+                }
+                dots += i.dots.len();
+            }
+        }
+        assert_eq!((main + dots, repair), (5, 0), "{acts:?}");
+
+        // Caught up on the main path, the same repair is sent in full.
+        let (_, mut hello_b) = hello_of(&g_clone_for_self(&g));
+        if let Body::Hello(h) = &mut hello_b.body {
+            h.device_id = b.id;
+            h.digests.insert(b.id, Hash32([0xAB; 32]));
+        }
+        let mut sg = Session::new(limits, Some(b.id));
+        let _ = sg.start(&g.store);
+        let acts = sg.on_frame(hello_b, &g.store);
+        let repair: usize = acts
+            .iter()
+            .filter_map(|a| match a {
+                Action::Send(Frame {
+                    body: Body::Items(i),
+                    ..
+                }) if i.repair => Some(i.batch.len()),
+                _ => None,
+            })
+            .sum();
+        let held = g.store.held_items(&b.id, 0, u64::MAX).unwrap().len();
+        assert!(held > 0);
+        assert_eq!(repair, held, "every item g holds of b's origin");
+    }
+
+    #[test]
+    fn a_chain_reply_outside_the_queried_range_is_ignored() {
+        // Audit MP-2: entries above `hi` (or at or below `lo`) never decide
+        // where a fork is.
+        let (mut g, mut b) = pair();
+        for v in 1..=4 {
+            setting(&mut b, v);
+        }
+        exchange(&mut g, &mut b);
+        let mut s = Session::new(Limits::default(), None);
+        s.queries.insert(b.id, (0, 2));
+        let r = ChainReply {
+            origin: b.id,
+            entries: vec![
+                (
+                    1,
+                    g.store.chain_at(&b.id, 1).unwrap().unwrap(),
+                    ItemHash([1; 32]),
+                ),
+                (
+                    2,
+                    g.store.chain_at(&b.id, 2).unwrap().unwrap(),
+                    ItemHash([2; 32]),
+                ),
+                // A made-up difference past the queried range.
+                (4, Hash32([9; 32]), ItemHash([4; 32])),
+            ],
+        };
+        let acts = s.on_chain_reply(r, &g.store);
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::ForkDetected(_))),
+            "{acts:?}"
+        );
+        assert!(s.queries.is_empty(), "no difference within (0, 2]");
+    }
+
+    #[test]
+    fn a_peers_chain_claim_never_reports_this_device_forked() {
+        // Audit MP-2: a peer claiming a different chain for this device's
+        // own origin ends the bisection with no report against itself; the
+        // same claim about another device's origin is still a report.
+        let (mut g, mut b) = pair();
+        for v in 1..=2 {
+            setting(&mut b, v);
+        }
+        exchange(&mut g, &mut b);
+        let claim = || ChainReply {
+            origin: b.id,
+            entries: vec![(2, Hash32([9; 32]), ItemHash([9; 32]))],
+        };
+        let mut s = Session::new(Limits::default(), None);
+        s.queries.insert(b.id, (1, 2));
+        let acts = s.on_chain_reply(claim(), &b.store);
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::ForkDetected(_))),
+            "{acts:?}"
+        );
+        let mut s = Session::new(Limits::default(), None);
+        s.queries.insert(b.id, (1, 2));
+        let acts = s.on_chain_reply(claim(), &g.store);
+        assert!(
+            acts.iter()
+                .any(|a| matches!(a, Action::ForkDetected(ev) if ev.origin == b.id && ev.seq == 2)),
+            "{acts:?}"
+        );
+    }
+
+    #[test]
+    fn a_shared_noise_key_resolves_by_the_hellos_device_id() {
+        // Audit MP-7: when several active devices share the Noise key that
+        // answered, the session accepts a Hello naming any of them, and
+        // still refuses one naming another device.
+        let (g, b) = pair();
+        let ghost = DeviceId::from_bytes([0; 16]);
+        let mut s = Session::with_candidates(Limits::default(), vec![ghost, b.id]);
+        let _ = s.start(&g.store);
+        let (_, hello_b) = hello_of(&b);
+        let acts = s.on_frame(hello_b, &g.store);
+        assert!(
+            !acts.iter().any(|a| matches!(a, Action::Close(_))),
+            "{acts:?}"
+        );
+        assert_eq!(s.peer_hello().map(|h| h.device_id), Some(b.id));
+
+        let mut s = Session::with_candidates(Limits::default(), vec![ghost]);
+        let _ = s.start(&g.store);
+        let (_, hello_b) = hello_of(&b);
+        let acts = s.on_frame(hello_b, &g.store);
+        assert!(acts.iter().any(|a| matches!(
+            a,
+            Action::Send(Frame {
+                body: Body::Bye {
+                    reason: ByeReason::NotThePeer
+                },
+                ..
+            })
+        )));
     }
 }

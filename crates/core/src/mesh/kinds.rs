@@ -396,6 +396,15 @@ impl ItemKind for RosterAdd {
         p.sign_pub
             .to_verifying_key()
             .map_err(|_| invalid(k, "sign_pub is not a usable Ed25519 key"))?;
+        // Audit MP-5: a small-order seal_pub makes every share sealed to the
+        // device readable by anyone; a small-order noise_pub, a static key
+        // whose DH authenticates nothing.
+        if is_small_order_x25519(&p.noise_pub) {
+            return Err(invalid(k, "noise_pub is a small-order X25519 key"));
+        }
+        if is_small_order_x25519(&p.seal_pub) {
+            return Err(invalid(k, "seal_pub is a small-order X25519 key"));
+        }
         if derive_device_id(&p.sign_pub, &p.noise_pub, &p.seal_pub) != device {
             return Err(invalid(k, "device id is not derived from these keys"));
         }
@@ -408,6 +417,55 @@ impl ItemKind for RosterAdd {
             added_by: p.added_by,
         })
     }
+}
+
+/// The X25519 public keys of small order: the u-coordinates of the points of
+/// order 1, 2, 4 and 8 on Curve25519 and its twist, as 32-byte little-endian
+/// encodings — the published blocklist of libsodium
+/// (`crypto_scalarmult/curve25519/ref10/x25519_ref10.c`, `has_small_order`;
+/// D. J. Bernstein, <https://cr.yp.to/ecdh.html#validate>): 0, 1, the two
+/// order-8 points, p − 1, and the non-canonical encodings p (= 0) and
+/// p + 1 (= 1), where p = 2^255 − 19.
+///
+/// X25519 with any secret key on one of these gives the all-zero shared
+/// secret (RFC 7748 §6.1), so a box sealed to it can be opened by anyone and
+/// a Noise static DH with it authenticates nothing (audit MP-5).
+const SMALL_ORDER_X25519: [[u8; 32]; 7] = [
+    [0; 32],
+    [
+        1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0,
+    ],
+    [
+        0xe0, 0xeb, 0x7a, 0x7c, 0x3b, 0x41, 0xb8, 0xae, 0x16, 0x56, 0xe3, 0xfa, 0xf1, 0x9f, 0xc4,
+        0x6a, 0xda, 0x09, 0x8d, 0xeb, 0x9c, 0x32, 0xb1, 0xfd, 0x86, 0x62, 0x05, 0x16, 0x5f, 0x49,
+        0xb8, 0x00,
+    ],
+    [
+        0x5f, 0x9c, 0x95, 0xbc, 0xa3, 0x50, 0x8c, 0x24, 0xb1, 0xd0, 0xb1, 0x55, 0x9c, 0x83, 0xef,
+        0x5b, 0x04, 0x44, 0x5c, 0xc4, 0x58, 0x1c, 0x8e, 0x86, 0xd8, 0x22, 0x4e, 0xdd, 0xd0, 0x9f,
+        0x11, 0x57,
+    ],
+    p_plus(-1),
+    p_plus(0),
+    p_plus(1),
+];
+
+/// The little-endian encoding of p + `d` for a small `d` (p = 2^255 − 19).
+const fn p_plus(d: i8) -> [u8; 32] {
+    let mut b = [0xff; 32];
+    b[0] = (0xed_i16 + d as i16) as u8;
+    b[31] = 0x7f;
+    b
+}
+
+/// Whether `key` is a small-order X25519 public key, in any of its 32-byte
+/// encodings: bit 255 is ignored, as X25519 ignores it (RFC 7748 §5). Real
+/// keys (`identity::x25519_generate`) are never of small order.
+pub fn is_small_order_x25519(key: &PublicKeyBytes) -> bool {
+    let mut u = key.0;
+    u[31] &= 0x7f;
+    SMALL_ORDER_X25519.contains(&u)
 }
 
 // ------------------------------------------------------------- roster.remove
@@ -1357,6 +1415,112 @@ mod tests {
         let mut add = sample_add(dev(1));
         add.seal_pub = PublicKeyBytes([10; 32]); // same id, other keys: a hijack attempt
         assert!(RosterAdd::try_from(&add.to_body(mesh(), dev(1), 1, Hlc::ZERO)).is_err());
+    }
+
+    /// The published X25519 small-order u-coordinates (libsodium's
+    /// `has_small_order` blocklist), little-endian, and the same values with
+    /// bit 255 set, which X25519 ignores (RFC 7748 §5).
+    fn small_order_encodings() -> Vec<[u8; 32]> {
+        let hex = [
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "0100000000000000000000000000000000000000000000000000000000000000",
+            "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+            "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+            "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+            "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        ];
+        let mut out = Vec::new();
+        for h in hex {
+            let mut b = [0u8; 32];
+            hex::decode_to_slice(h, &mut b).unwrap();
+            out.push(b);
+            b[31] |= 0x80;
+            out.push(b);
+        }
+        out
+    }
+
+    #[test]
+    fn roster_add_refuses_small_order_noise_and_seal_keys() {
+        // Audit MP-5: a share sealed to a small-order seal_pub is readable by
+        // anyone (the X25519 shared secret no longer depends on the secret
+        // key), and a small-order noise_pub defeats the handshake's static
+        // DH. Both are refused at parse, so such an add is an invalid item
+        // (PROTOCOL.md R10) that no device ingests.
+        let sign_pub = SigningKeyPair::from_secret_bytes(&[7; 32]).public_key();
+        let good = PublicKeyBytes([8; 32]);
+        for bad in small_order_encodings() {
+            let bad = PublicKeyBytes(bad);
+            for (noise_pub, seal_pub) in [(bad, good), (good, bad)] {
+                let add = RosterAdd {
+                    device: derive_device_id(&sign_pub, &noise_pub, &seal_pub),
+                    name: "work laptop".into(),
+                    sign_pub,
+                    noise_pub,
+                    seal_pub,
+                    added_by: dev(1),
+                };
+                let body = add.to_body(mesh(), dev(1), 1, Hlc::ZERO);
+                assert!(
+                    RosterAdd::try_from(&body).is_err(),
+                    "accepted noise {} seal {}",
+                    noise_pub.to_hex(),
+                    seal_pub.to_hex()
+                );
+                assert!(TypedItem::parse(&body).is_err());
+            }
+        }
+        // A real key from the same generator the identity uses still parses.
+        let (_, real) = crate::mesh::identity::x25519_generate();
+        let add = RosterAdd {
+            device: derive_device_id(&sign_pub, &real, &real),
+            name: "work laptop".into(),
+            sign_pub,
+            noise_pub: real,
+            seal_pub: real,
+            added_by: dev(1),
+        };
+        assert!(RosterAdd::try_from(&add.to_body(mesh(), dev(1), 1, Hlc::ZERO)).is_ok());
+    }
+
+    #[test]
+    fn a_box_to_a_listed_key_has_at_most_eight_keys_whatever_the_secret() {
+        // On each listed point the shared secret depends only on the secret
+        // key modulo the point's order (at most 8), so anyone can open what
+        // is sealed to it by trying at most 8 box keys; on a real key every
+        // secret key gives its own. This checks the constants with the
+        // crypto library the shares use.
+        use crypto_box::aead::{Aead, AeadCore, OsRng};
+        use std::collections::BTreeSet;
+        let secrets: Vec<crypto_box::SecretKey> = (0..40)
+            .map(|_| {
+                let (s, _) = crate::mesh::identity::x25519_generate();
+                crypto_box::SecretKey::from_bytes(*s)
+            })
+            .collect();
+        let nonce = crypto_box::SalsaBox::generate_nonce(&mut OsRng);
+        let boxes = |pk: [u8; 32]| -> BTreeSet<Vec<u8>> {
+            secrets
+                .iter()
+                .map(|sk| {
+                    crypto_box::SalsaBox::new(&crypto_box::PublicKey::from_bytes(pk), sk)
+                        .encrypt(&nonce, &b"fake test plaintext"[..])
+                        .unwrap()
+                })
+                .collect()
+        };
+        for p in small_order_encodings() {
+            assert!(
+                is_small_order_x25519(&PublicKeyBytes(p)),
+                "{}",
+                hex::encode(p)
+            );
+            assert!(boxes(p).len() <= 8, "{}", hex::encode(p));
+        }
+        let (_, real) = crate::mesh::identity::x25519_generate();
+        assert!(!is_small_order_x25519(&real));
+        assert_eq!(boxes(real.0).len(), secrets.len());
     }
 
     #[test]

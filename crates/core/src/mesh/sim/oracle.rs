@@ -24,7 +24,7 @@
 //!    materialized.
 //! 4. **Roster** (§6.3): forks (minimum of `fork.report` entries and of the
 //!    lowest seq holding two different valid items, §5.6 "Forks"), cutoffs
-//!    (maximum), members (step 1 again, counting only adds admitted at their
+//!    (minimum, as amended by audit MP-1), members (step 1 again, counting only adds admitted at their
 //!    own seq); **admission** and **active** (§6.4).
 //! 5. **Views** (§5.6 table) over the admitted entries.
 //!
@@ -458,12 +458,14 @@ impl Oracle {
             }
         }
 
-        // Step 3: the maximum cutoff over remove entries (origins all known).
+        // Step 3: the minimum cutoff over remove entries (origins all known).
+        // Audit MP-1 amended this from the maximum: with the maximum, a
+        // removed device's own remove(self, u64::MAX) cancelled its removal.
         let mut cutoffs: BTreeMap<DeviceId, u64> = BTreeMap::new();
         for e in entries {
             if let TypedItem::RosterRemove(remove) = e.item {
                 let slot = cutoffs.entry(remove.device).or_insert(remove.cutoff_seq);
-                *slot = (*slot).max(remove.cutoff_seq);
+                *slot = (*slot).min(remove.cutoff_seq);
             }
         }
 
@@ -766,7 +768,9 @@ fn view_shares(
     // §5.6 (amended in 11): the winning share is the greatest `(hlc, origin)`
     // admitted `share.sealed`; it is revoked when an admitted revoke names its
     // share id (the greatest such revoke is the revoker), whatever the HLCs.
-    // With no share, the greatest revoke stands.
+    // With no share, the greatest revoke stands. Amended by audit MP-10: only
+    // a revoke whose origin is the winning share's sharer or the key's
+    // recipient counts (with no share, only the recipient's).
     let mut sealed: BTreeMap<ShareSlot, (ShareRank, ExpectedShare)> = BTreeMap::new();
     let mut revokes: BTreeMap<ShareSlot, Vec<(ShareRank, ShareId)>> = BTreeMap::new();
     for e in admitted {
@@ -807,9 +811,19 @@ fn view_shares(
             continue;
         }
         let rv = revokes.get(&slot).map(Vec::as_slice).unwrap_or(&[]);
+        let recipient = slot.1;
         let share = match sealed.get(&slot) {
-            Some((_, s @ ExpectedShare::Sealed { share_id, .. })) => {
-                match rv.iter().filter(|(_, id)| id == share_id).max() {
+            Some((
+                _,
+                s @ ExpectedShare::Sealed {
+                    share_id, sharer, ..
+                },
+            )) => {
+                match rv
+                    .iter()
+                    .filter(|((_, by), id)| id == share_id && (by == sharer || *by == recipient))
+                    .max()
+                {
                     Some(((_, revoker), id)) => ExpectedShare::Revoked {
                         revoker: *revoker,
                         share_id: *id,
@@ -817,7 +831,7 @@ fn view_shares(
                     None => s.clone(),
                 }
             }
-            _ => match rv.iter().max() {
+            _ => match rv.iter().filter(|((_, by), _)| *by == recipient).max() {
                 Some(((_, revoker), id)) => ExpectedShare::Revoked {
                     revoker: *revoker,
                     share_id: *id,
@@ -1449,11 +1463,35 @@ mod tests {
     }
 
     #[test]
-    fn roster_example_4_concurrent_removes_take_the_max_cutoff() {
+    fn roster_example_4_concurrent_removes_take_the_min_cutoff() {
         let mut ex = roster_example();
         remove(&mut ex.o, &mut ex.a, &ex.b, 4);
         remove(&mut ex.o, &mut ex.g, &ex.b, 7);
-        assert_eq!(device(&ex.o.expected(), &ex.b).cutoff, Some(7));
+        assert_eq!(device(&ex.o.expected(), &ex.b).cutoff, Some(4));
+    }
+
+    #[test]
+    fn a_removed_devices_own_remove_cannot_raise_its_cutoff() {
+        // Audit MP-1: G removes A at cutoff 2 (A 1 is its add of B, A 2 a
+        // filler); A then signs remove(A, u64::MAX) at A 3 and add(D) at A 4.
+        let mut ex = roster_example();
+        ex.a.fill_to(&mut ex.o, 3);
+        remove(&mut ex.o, &mut ex.g, &ex.a, 2);
+        let own = RosterRemove {
+            device: ex.a.id,
+            cutoff_seq: u64::MAX,
+        };
+        put(&mut ex.o, &mut ex.a, 1, &own);
+        let d = Dev::new();
+        add(&mut ex.o, &mut ex.a, &d);
+        let s = ex.o.expected();
+        assert_eq!(device(&s, &ex.a).cutoff, Some(2));
+        let dd = device(&s, &d);
+        assert!(
+            !dd.member && !dd.active,
+            "A's add at seq 4 brings no one in"
+        );
+        assert!(device(&s, &ex.b).member, "A 1 <= 2 still counts");
     }
 
     #[test]
@@ -1854,13 +1892,14 @@ mod tests {
     fn a_revoke_ends_only_the_share_it_names_whatever_the_hlcs() {
         let mut g = Dev::new();
         let mut o = oracle_for(&mut g);
-        let (mut lo, mut hi, r) = sorted3();
+        let (mut lo, mut hi, mut r) = sorted3();
         for d in [&lo, &hi, &r] {
             add(&mut o, &mut g, d);
         }
-        // A revoke naming the share ends it, even with a lower HLC.
+        // A revoke naming the share ends it, even with a lower HLC (by its
+        // sharer: audit MP-10 counts only the sharer's and the recipient's).
         let (s1, r1) = (sealed(&r, 0xE2), revoke(&r, 0xE2));
-        put(&mut o, &mut lo, 60, &s1);
+        put(&mut o, &mut hi, 60, &s1);
         put(&mut o, &mut hi, 50, &r1);
         // A revoke naming another share id ends nothing, even with a higher
         // HLC (the share it named was superseded).
@@ -1876,9 +1915,10 @@ mod tests {
         let s3 = sealed(&r, 0xE4);
         put(&mut o, &mut lo, 50, &s3);
         put(&mut o, &mut hi, 50, &s3);
-        // A revoke alone stands.
+        // A revoke alone stands (the recipient's: no one else can be the
+        // sharer of a share that is not there).
         let r4 = revoke(&r, 0xE5);
-        put(&mut o, &mut lo, 50, &r4);
+        put(&mut o, &mut r, 50, &r4);
         let s = o.expected();
         let at = |c: u8| &s.shares[&(CredentialRef::from_bytes([c; 16]), r.id)];
         assert_eq!(
@@ -1893,9 +1933,44 @@ mod tests {
         assert_eq!(
             at(0xE5),
             &ExpectedShare::Revoked {
-                revoker: lo.id,
+                revoker: r.id,
                 share_id: share_id(),
             }
+        );
+    }
+
+    #[test]
+    fn a_revoke_by_neither_sharer_nor_recipient_ends_nothing() {
+        // Audit MP-10: only the share's sharer (the winning share's origin)
+        // or the key's recipient may end it.
+        let mut g = Dev::new();
+        let mut o = oracle_for(&mut g);
+        let (mut sharer, mut other, mut r) = (Dev::new(), Dev::new(), Dev::new());
+        for d in [&sharer, &other, &r] {
+            add(&mut o, &mut g, d);
+        }
+        put(&mut o, &mut sharer, 10, &sealed(&r, 0xE6));
+        put(&mut o, &mut other, 20, &revoke(&r, 0xE6));
+        // A third member's revoke where there is no share is no value.
+        put(&mut o, &mut other, 20, &revoke(&r, 0xE7));
+        // The recipient may decline, whatever the HLCs.
+        put(&mut o, &mut sharer, 30, &sealed(&r, 0xE8));
+        let decline = revoke(&r, 0xE8);
+        put(&mut o, &mut r, 5, &decline);
+        let s = o.expected();
+        let at = |c: u8| s.shares.get(&(CredentialRef::from_bytes([c; 16]), r.id));
+        assert!(
+            matches!(at(0xE6), Some(ExpectedShare::Sealed { sharer: x, .. }) if *x == sharer.id),
+            "{:?}",
+            at(0xE6)
+        );
+        assert_eq!(at(0xE7), None);
+        assert_eq!(
+            at(0xE8),
+            Some(&ExpectedShare::Revoked {
+                revoker: r.id,
+                share_id: share_id(),
+            })
         );
     }
 

@@ -16,7 +16,7 @@ use crate::error::{NetError, NetResult};
 use crate::node::{MeshNode, TransportLimits};
 use crate::noise;
 use crate::session::{exchange, Direction, ExchangeReport};
-use crate::wire::{self, Preamble, MAX_HANDSHAKE_MSG};
+use crate::wire::{self, Deadline, Preamble, MAX_HANDSHAKE_MSG};
 use api_tracker_core::mesh::clock::Clock;
 use api_tracker_core::mesh::identity::{self, MeshSelfInfo};
 use api_tracker_core::mesh::invite::{parse_invite, PairAccept, PairRequest, HINT_LEN};
@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use snow::HandshakeState;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Instant;
 
 /// The largest pairing message (`PairRequest`/the reply); far above need.
 const MAX_PAIR_FRAME: usize = 16 * 1024;
@@ -65,7 +66,7 @@ fn refusal(e: &CoreError) -> &'static str {
     }
 }
 
-fn hs_send(stream: &mut TcpStream, hs: &mut HandshakeState) -> NetResult<()> {
+fn hs_send(stream: &mut Deadline<'_>, hs: &mut HandshakeState) -> NetResult<()> {
     let mut buf = [0u8; MAX_HANDSHAKE_MSG];
     let n = hs
         .write_message(&[], &mut buf)
@@ -74,7 +75,11 @@ fn hs_send(stream: &mut TcpStream, hs: &mut HandshakeState) -> NetResult<()> {
     Ok(())
 }
 
-fn hs_recv(stream: &mut TcpStream, hs: &mut HandshakeState) -> NetResult<()> {
+/// Read one handshake message. A failure to read it (a timeout, a reset, a
+/// message over the cap) is an `Io` error; a message that does not
+/// authenticate under the psk is `Handshake`. Only the second is a wrong
+/// attempt at the invite (audit MP-11).
+fn hs_recv(stream: &mut Deadline<'_>, hs: &mut HandshakeState) -> NetResult<()> {
     let msg = wire::read_msg(stream, MAX_HANDSHAKE_MSG)?;
     let mut payload = [0u8; MAX_HANDSHAKE_MSG];
     hs.read_message(&msg, &mut payload)
@@ -88,7 +93,9 @@ pub struct JoinReport {
     pub info: MeshSelfInfo,
     pub exchange: ExchangeReport,
     /// After the first exchange: the inviter's roster entry carries the Noise
-    /// key that answered the pairing handshake.
+    /// key that answered the pairing handshake. Always `true` in a report: a
+    /// join where it does not hold fails and keeps no identity (audit
+    /// MP-12).
     pub inviter_verified: bool,
 }
 
@@ -139,8 +146,35 @@ pub fn join(
             }
         };
         let info = vault.mesh_join(&pending, &accept)?;
-        let node = MeshNode::open(vault, clock, limits)?;
+        let node = match MeshNode::open(vault, clock, limits) {
+            Ok(node) => node,
+            Err(e) => {
+                forget_identity(vault);
+                return Err(e);
+            }
+        };
         let report = exchange(&node, reader, writer, accept.inviter, Direction::Outbound);
+        // The inviter is who the roster says only if its roster entry, as
+        // the exchange delivered it, carries the Noise key that answered the
+        // pairing handshake. Otherwise whoever answered held the invite token
+        // but not the inviter's identity: keep nothing (audit MP-12).
+        let inviter_verified = node
+            .store()
+            .state()
+            .roster
+            .keys(&accept.inviter)
+            .is_some_and(|k| k.noise_pub.0.as_slice() == remote.as_slice());
+        if !inviter_verified {
+            let why = if report.aborted.is_some() {
+                // Nothing to verify the inviter against: fail closed.
+                "the first exchange with the inviter did not complete; pair again"
+            } else {
+                "the inviter's key does not match its roster entry"
+            };
+            drop(node);
+            forget_identity(vault);
+            return Err(NetError::Refused(why));
+        }
         crate::replicate::log(&node, &report);
         // The invite's address that answered becomes this device's first
         // peer (the user entered it, with the invite), so a node started
@@ -155,12 +189,6 @@ pub fn join(
                 api_tracker_core::mesh::peers::AttemptOutcome::Reached(accept.inviter),
             );
         }
-        let inviter_verified = node
-            .store()
-            .state()
-            .roster
-            .keys(&accept.inviter)
-            .is_some_and(|k| k.noise_pub.0.as_slice() == remote.as_slice());
         return Ok(JoinReport {
             info,
             exchange: report,
@@ -168,6 +196,14 @@ pub fn join(
         });
     }
     Err(last)
+}
+
+/// Undo a join that cannot stand: the same local wipe as `mesh leave`
+/// (identity, mesh tables, marker). Nothing was minted under the new
+/// identity but its roster.add, which the inviter minted; the keys behind it
+/// are gone. Best effort: the join fails either way.
+fn forget_identity(vault: &UnlockedVault) {
+    let _ = identity::leave_local_wipe(vault.connection(), &vault.paths().data_dir);
 }
 
 type PairChannel = (wire::FrameReader, wire::FrameWriter, Vec<u8>, PairReply);
@@ -180,32 +216,41 @@ fn attempt(
     pending: &PendingIdentity,
     limits: TransportLimits,
 ) -> NetResult<PairChannel> {
-    let mut stream = TcpStream::connect_timeout(&sock, limits.handshake_timeout)?;
+    let stream = TcpStream::connect_timeout(&sock, limits.handshake_timeout)?;
+    // The handshake and the inviter's reply finish within one handshake
+    // timeout, however the inviter paces its bytes (audit MP-4).
+    let until = Instant::now() + limits.handshake_timeout;
+    let (remote, state) = {
+        let mut d = Deadline::new(&stream, until);
+        wire::write_preamble(&mut d, Preamble::Pair { hint })?;
+        let mut hs = noise::pairing(psk, pending.expose_noise_secret(), true)
+            .map_err(|_| NetError::Handshake("could not start the handshake"))?;
+        hs_send(&mut d, &mut hs)?;
+        hs_recv(&mut d, &mut hs)?;
+        hs_send(&mut d, &mut hs)?;
+        let remote = hs
+            .get_remote_static()
+            .ok_or(NetError::Handshake("the inviter sent no static key"))?
+            .to_vec();
+        let state = hs
+            .into_stateless_transport_mode()
+            .map_err(|_| NetError::Handshake("the handshake did not finish"))?;
+        (remote, state)
+    };
     stream.set_read_timeout(Some(limits.handshake_timeout))?;
     stream.set_write_timeout(Some(limits.handshake_timeout))?;
-    wire::write_preamble(&mut stream, Preamble::Pair { hint })?;
-    let mut hs = noise::pairing(psk, pending.expose_noise_secret(), true)
-        .map_err(|_| NetError::Handshake("could not start the handshake"))?;
-    hs_send(&mut stream, &mut hs)?;
-    hs_recv(&mut stream, &mut hs)?;
-    hs_send(&mut stream, &mut hs)?;
-    let remote = hs
-        .get_remote_static()
-        .ok_or(NetError::Handshake("the inviter sent no static key"))?
-        .to_vec();
-    let state = hs
-        .into_stateless_transport_mode()
-        .map_err(|_| NetError::Handshake("the handshake did not finish"))?;
     let (mut reader, mut writer) = wire::split(stream, state)?;
     let req = serde_json::to_vec(&pending.request())
         .map_err(|_| NetError::Session("a frame did not encode"))?;
     writer.send(&req)?;
     // The inviter's first encrypted frame is what proves it holds the token:
     // a wrong psk fails to decrypt here.
+    reader.set_deadline(Some(until));
     let reply = reader.recv().map_err(|e| match e.kind() {
         std::io::ErrorKind::InvalidData => NetError::Handshake("wrong invite"),
         _ => NetError::Refused("the inviter closed the connection"),
     })?;
+    reader.set_deadline(None);
     if reply.len() > MAX_PAIR_FRAME {
         return Err(NetError::Session("a malformed frame"));
     }
@@ -216,10 +261,13 @@ fn attempt(
 
 /// The inviter's side, after a pairing preamble with `hint` was read.
 /// Returns the new member and the channel, for the exchange that follows.
+/// The handshake and the joiner's request finish by `until`, the deadline
+/// the preamble was read under (audit MP-4).
 pub(crate) fn respond(
     stream: &mut TcpStream,
     node: &MeshNode,
     hint: [u8; HINT_LEN],
+    until: Instant,
 ) -> NetResult<(DeviceId, wire::FrameReader, wire::FrameWriter)> {
     let candidates = {
         let store = node.store();
@@ -229,30 +277,46 @@ pub(crate) fn respond(
     let Some(invite) = candidates.into_iter().next() else {
         return Err(NetError::Refused("no live invite matches"));
     };
-    let msg1 = wire::read_msg(stream, MAX_HANDSHAKE_MSG)?;
-    let mut hs = noise::pairing(&invite.psk, node.keys().expose_noise_secret(), false)
-        .map_err(|_| NetError::Handshake("could not start the handshake"))?;
-    let mut payload = [0u8; MAX_HANDSHAKE_MSG];
-    hs.read_message(&msg1, &mut payload)
-        .map_err(|_| NetError::Handshake("a malformed handshake message"))?;
-    hs_send(stream, &mut hs)?;
-    if hs_recv(stream, &mut hs).is_err() {
-        let store = node.store();
-        membership::record_failed_attempt(store.connection(), &invite.token_hash)?;
-        return Err(NetError::Handshake("wrong invite token"));
-    }
-    let remote = PublicKeyBytes(
-        hs.get_remote_static()
-            .and_then(|k| <[u8; 32]>::try_from(k).ok())
-            .ok_or(NetError::Handshake("the joiner sent no static key"))?,
-    );
-    let state = hs
-        .into_stateless_transport_mode()
-        .map_err(|_| NetError::Handshake("the handshake did not finish"))?;
+    let (remote, state) = {
+        let mut d = Deadline::new(stream, until);
+        let msg1 = wire::read_msg(&mut d, MAX_HANDSHAKE_MSG)?;
+        let mut hs = noise::pairing(&invite.psk, node.keys().expose_noise_secret(), false)
+            .map_err(|_| NetError::Handshake("could not start the handshake"))?;
+        let mut payload = [0u8; MAX_HANDSHAKE_MSG];
+        hs.read_message(&msg1, &mut payload)
+            .map_err(|_| NetError::Handshake("a malformed handshake message"))?;
+        hs_send(&mut d, &mut hs)?;
+        match hs_recv(&mut d, &mut hs) {
+            Ok(()) => {}
+            // Message 3 arrived and does not authenticate under this
+            // invite's psk: a wrong token, one of the five attempts.
+            Err(NetError::Handshake(_)) => {
+                let store = node.store();
+                membership::record_failed_attempt(store.connection(), &invite.token_hash)?;
+                return Err(NetError::Handshake("wrong invite token"));
+            }
+            // A timeout, a reset or an oversize message is no proof of a
+            // wrong token: it costs the invite nothing (audit MP-11).
+            Err(e) => return Err(e),
+        }
+        let remote = PublicKeyBytes(
+            hs.get_remote_static()
+                .and_then(|k| <[u8; 32]>::try_from(k).ok())
+                .ok_or(NetError::Handshake("the joiner sent no static key"))?,
+        );
+        let state = hs
+            .into_stateless_transport_mode()
+            .map_err(|_| NetError::Handshake("the handshake did not finish"))?;
+        (remote, state)
+    };
+    stream.set_read_timeout(Some(node.limits().handshake_timeout))?;
+    stream.set_write_timeout(Some(node.limits().handshake_timeout))?;
     let (mut reader, mut writer) = wire::split(stream.try_clone()?, state)?;
+    reader.set_deadline(Some(until));
     let bytes = reader
         .recv()
         .map_err(|_| NetError::Session("the joiner closed the connection"))?;
+    reader.set_deadline(None);
     if bytes.len() > MAX_PAIR_FRAME {
         return Err(NetError::Session("a malformed frame"));
     }

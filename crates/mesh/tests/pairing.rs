@@ -2,6 +2,7 @@
 
 mod common;
 
+use api_tracker_core::mesh::clock::SystemClock;
 use api_tracker_core::mesh::invite::{format_invite, parse_invite};
 use api_tracker_core::mesh::store::MeshStore;
 use api_tracker_core::mesh::MeshError;
@@ -259,4 +260,148 @@ fn an_invite_whose_first_address_is_dead_still_pairs_through_the_next() {
     let r = join(&b, &text, "dev-b").unwrap();
     assert!(r.exchange.aborted.is_none(), "{:?}", r.exchange);
     t.join().unwrap();
+}
+
+fn attempts(a: &Dev) -> i64 {
+    a.vault
+        .connection()
+        .query_row("SELECT attempts FROM mesh_invites", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// Dial with the right hint, send message 1, read message 2, then `finish`
+/// (drop the connection or stall), and wait for the inviter to close.
+fn abandoned_attempt(addr: &str, hint: [u8; 8], stall: bool) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    wire::write_preamble(&mut s, Preamble::Pair { hint }).unwrap();
+    let mut secret = [4u8; 32];
+    secret[0] &= 248;
+    let mut hs = noise::pairing(&[0xEE; 32], &secret, true).unwrap();
+    let mut buf = [0u8; MAX_HANDSHAKE_MSG];
+    let mut out = [0u8; MAX_HANDSHAKE_MSG];
+    let n = hs.write_message(&[], &mut buf).unwrap();
+    wire::write_msg(&mut s, &buf[..n]).unwrap();
+    let m2 = wire::read_msg(&mut s, MAX_HANDSHAKE_MSG).unwrap();
+    hs.read_message(&m2, &mut out).unwrap();
+    if !stall {
+        // The connection drops before message 3.
+        s.shutdown(std::net::Shutdown::Write).unwrap();
+    }
+    // Wait until the inviter gives up on us (its handshake deadline when
+    // stalled) and closes.
+    s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut rest = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut s, &mut rest);
+}
+
+#[test]
+fn a_dropped_connection_does_not_count_as_a_wrong_attempt() {
+    // Audit MP-11: only an authenticated failure (message 3 does not
+    // decrypt under the invite's psk) burns one of the five attempts; a
+    // connection that drops or stalls before message 3 does not.
+    let a = genesis("dev-a");
+    let limits = api_tracker_mesh::TransportLimits {
+        handshake_timeout: std::time::Duration::from_millis(400),
+        ..test_limits()
+    };
+    let server = serve_with(&a, std::sync::Arc::new(SystemClock), limits);
+    let inv = invite(&a, &server);
+    let (token, _) = parse_invite(inv.expose()).unwrap();
+    for i in 0..6 {
+        abandoned_attempt(&server.addr_string(), token.hint(), false);
+        assert_eq!(attempts(&a), 0, "dropped connection {i} burned an attempt");
+    }
+    abandoned_attempt(&server.addr_string(), token.hint(), true);
+    assert_eq!(attempts(&a), 0, "a stalled handshake burned an attempt");
+    // A wrong psk still counts...
+    wrong_psk_attempt(&server.addr_string(), token.hint());
+    assert_eq!(attempts(&a), 1);
+    // ...and the invite still pairs.
+    let b = vault();
+    let r = join(&b, &inv, "dev-b").unwrap();
+    assert!(r.exchange.aborted.is_none(), "{:?}", r.exchange);
+}
+
+#[test]
+fn join_fails_when_the_inviter_key_does_not_match_its_roster_entry() {
+    // Audit MP-12: an "inviter" that answers the pairing handshake with a
+    // static key other than the one its roster entry carries. Here it holds
+    // the real inviter's store and signing key (so the PairAccept and the
+    // exchange are genuine) but not its Noise key: the joiner must fail and
+    // keep no identity.
+    use api_tracker_core::mesh::clock::Clock;
+    use api_tracker_core::mesh::membership;
+    use api_tracker_mesh::session::{exchange, Direction};
+    let a = genesis("dev-a");
+    let inv = a.vault.mesh_invite_create(&master(), None).unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let text = format_invite(&inv.token, &[addr]).unwrap();
+    let (psk, token_hash) = (inv.token.pairing_psk(), inv.token.hash());
+    let node_a = node(&a);
+    let access = a
+        .vault
+        .mesh_vault()
+        .access_keys(a.vault.connection(), SystemClock.now_ms())
+        .unwrap()
+        .current;
+    let b = vault();
+    std::thread::scope(|scope| {
+        let fake = scope.spawn(|| {
+            let (mut s, _) = listener.accept().unwrap();
+            s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            assert!(matches!(
+                wire::read_preamble(&mut s).unwrap(),
+                Preamble::Pair { .. }
+            ));
+            // Not dev-a's Noise key.
+            let mut secret = [0x42u8; 32];
+            secret[0] &= 248;
+            let mut hs = noise::pairing(&psk, &secret, false).unwrap();
+            let mut buf = [0u8; MAX_HANDSHAKE_MSG];
+            let mut out = [0u8; MAX_HANDSHAKE_MSG];
+            let m1 = wire::read_msg(&mut s, MAX_HANDSHAKE_MSG).unwrap();
+            hs.read_message(&m1, &mut out).unwrap();
+            let n = hs.write_message(&[], &mut buf).unwrap();
+            wire::write_msg(&mut s, &buf[..n]).unwrap();
+            let m3 = wire::read_msg(&mut s, MAX_HANDSHAKE_MSG).unwrap();
+            hs.read_message(&m3, &mut out).unwrap();
+            let remote = api_tracker_core::mesh::sign::PublicKeyBytes(
+                <[u8; 32]>::try_from(hs.get_remote_static().unwrap()).unwrap(),
+            );
+            let state = hs.into_stateless_transport_mode().unwrap();
+            let (mut r, mut w) = wire::split(s, state).unwrap();
+            let req: api_tracker_core::mesh::invite::PairRequest =
+                serde_json::from_slice(&r.recv().unwrap()).unwrap();
+            let accept = {
+                let mut store = node_a.store();
+                membership::accept_pairing(
+                    &mut store,
+                    node_a.keys().signing_key(),
+                    &token_hash,
+                    &req,
+                    &remote,
+                    &access,
+                )
+                .unwrap()
+            };
+            let reply = serde_json::json!({ "t": "Accepted", "accept": accept });
+            w.send(&serde_json::to_vec(&reply).unwrap()).unwrap();
+            let joiner = api_tracker_core::mesh::sign::derive_device_id(
+                &req.sign_pub,
+                &req.noise_pub,
+                &req.seal_pub,
+            );
+            exchange(&node_a, r, w, joiner, Direction::Inbound)
+        });
+        let r = join(&b, &text, "dev-b");
+        let _ = fake.join().unwrap();
+        assert!(r.is_err(), "joined an unverified inviter: {:?}", r.ok());
+    });
+    assert!(
+        b.vault.mesh_status().unwrap().detail.is_none(),
+        "the joiner kept an identity"
+    );
 }

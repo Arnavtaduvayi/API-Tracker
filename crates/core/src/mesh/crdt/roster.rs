@@ -24,9 +24,13 @@
 //! 2. *Forks*: a `fork.report` counts when its origin is known; a device's
 //!    fork seq is the **minimum** over the reports that count.
 //! 3. *Cutoffs*: a `roster.remove` counts when its origin is known; a device's
-//!    cutoff is the **maximum** over the removes that count. Removers are
+//!    cutoff is the **minimum** over the removes that count. Removers are
 //!    judged against *known*, so two devices that remove each other
-//!    concurrently are both removed, and removal is forever.
+//!    concurrently are both removed, and removal is forever. The minimum
+//!    (audit MP-1; it was the maximum) means no remove can widen what
+//!    another remove cut off: a removed device's own `remove(self, u64::MAX)`
+//!    cannot cancel its removal. A hostile low cutoff only shrinks what
+//!    counts, which any known device can already do by removing outright.
 //! 4. *Members*: step 1 again, now requiring each add to be admitted at its
 //!    seq (below its origin's fork seq, at or below its origin's cutoff). A
 //!    removed or forked device's later adds bring no one in.
@@ -330,7 +334,7 @@ impl Roster {
         for ((target, origin), e) in &self.removes {
             if r.known.contains_key(origin) {
                 let c = r.cutoffs.entry(*target).or_insert(e.value);
-                *c = (*c).max(e.value);
+                *c = (*c).min(e.value);
             }
         }
         // 4. Members: adds that are admitted at their own seq.
@@ -524,16 +528,46 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_removals_take_the_max_cutoff() {
+    fn concurrent_removals_take_the_min_cutoff() {
         let mut m = Mesh::genesis(1);
         m.add(1, 2);
         m.add(1, 3);
         m.mint_other(3, 10);
         m.remove(1, 3, 4);
         m.remove(2, 3, 7);
+        assert_eq!(m.roster.cutoff(&dev(3)), Some(4));
+        assert!(m.roster.is_admitted(&dev(3), 4));
+        assert!(!m.roster.is_admitted(&dev(3), 5));
+        // An origin's later remove replaces its own earlier one, but never
+        // another origin's: dev(1) raising its cutoff leaves dev(2)'s 7.
+        m.remove(1, 3, 9);
         assert_eq!(m.roster.cutoff(&dev(3)), Some(7));
-        assert!(m.roster.is_admitted(&dev(3), 7));
-        assert!(!m.roster.is_admitted(&dev(3), 8));
+    }
+
+    #[test]
+    fn a_removed_devices_own_remove_cannot_raise_its_cutoff() {
+        // Audit MP-1: G adds M and removes it at cutoff 2; M then signs
+        // remove(M, u64::MAX) at seq 3 and add(S) at seq 4. M's own remove
+        // counts (its origin is known), but it can only lower the cutoff.
+        let (g, m_id, s_id) = (1, 2, 3);
+        let mut m = Mesh::genesis(g);
+        m.add(g, m_id);
+        m.mint_other(m_id, 2); // M seqs 1-2
+        m.remove(g, m_id, 2);
+        assert_eq!(m.remove(m_id, m_id, u64::MAX), 3);
+        assert_eq!(m.add(m_id, s_id), 4);
+        assert_eq!(m.roster.cutoff(&dev(m_id)), Some(2));
+        assert!(!m.roster.is_admitted(&dev(m_id), 4));
+        assert!(!m.roster.is_active(&dev(s_id)));
+        assert!(!m.roster.is_member(&dev(s_id)));
+        // Any other known device raising the cutoff is refused the same way.
+        let mut m = Mesh::genesis(g);
+        m.add(g, m_id);
+        m.add(g, 4);
+        m.remove(g, m_id, 0);
+        m.remove(4, m_id, u64::MAX);
+        assert_eq!(m.roster.cutoff(&dev(m_id)), Some(0));
+        assert!(!m.roster.is_admitted(&dev(m_id), 1));
     }
 
     #[test]
@@ -644,11 +678,11 @@ mod tests {
         assert!(m.roster.is_member(&dev(4)));
         assert!(m.roster.is_known(&dev(5)) && !m.roster.is_member(&dev(5)));
         assert!(m.roster.is_admitted(&dev(3), 1) && !m.roster.is_admitted(&dev(3), 2));
-        // 4.
+        // 4. (amended by audit MP-1: the minimum, not the maximum)
         let mut m = chain();
         m.remove(2, 3, 4);
         m.remove(1, 3, 7);
-        assert_eq!(m.roster.cutoff(&dev(3)), Some(7));
+        assert_eq!(m.roster.cutoff(&dev(3)), Some(4));
         // 5.
         let mut m = chain();
         m.remove(2, 3, 0);

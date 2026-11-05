@@ -11,11 +11,70 @@
 //!    the frame bytes, split across Noise transport messages of at most
 //!    65 535 bytes and reassembled under a hard cap. An oversize or
 //!    undecryptable message closes the session.
+//!
+//! Everything before authentication runs under one [`Deadline`]: a socket
+//! timeout bounds each read call, so a peer trickling one byte just inside
+//! it would otherwise hold a session slot indefinitely (audit MP-4).
 
 use snow::StatelessTransportState;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// A view of a stream on which every read and write must finish by one
+/// instant: before each call the socket timeout is set to the time left, and
+/// once none is left the call fails with `TimedOut`. The pre-auth phase
+/// (preamble and handshake messages) reads through one of these, so it ends
+/// at `until` however the peer paces its bytes.
+pub struct Deadline<'a> {
+    stream: &'a TcpStream,
+    until: Instant,
+}
+
+impl<'a> Deadline<'a> {
+    pub fn new(stream: &'a TcpStream, until: Instant) -> Self {
+        Self { stream, until }
+    }
+
+    /// The instant everything must finish by.
+    pub fn until(&self) -> Instant {
+        self.until
+    }
+
+    fn left(&self) -> io::Result<Duration> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the handshake deadline passed",
+            ))
+        } else {
+            Ok(left)
+        }
+    }
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.left()?))?;
+        let mut s = self.stream;
+        s.read(buf)
+    }
+}
+
+impl Write for Deadline<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.left()?))?;
+        let mut s = self.stream;
+        s.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        let mut s = self.stream;
+        s.flush()
+    }
+}
 
 pub const MAGIC: &[u8; 4] = b"TMSH";
 pub const VERSION: u8 = 1;
@@ -100,6 +159,8 @@ pub struct FrameReader {
     state: Arc<StatelessTransportState>,
     nonce: u64,
     buf: Vec<u8>,
+    /// While set, reads finish by this instant ([`Deadline`]).
+    deadline: Option<Instant>,
 }
 
 /// Split an established channel into halves that can run on two threads.
@@ -115,6 +176,7 @@ pub fn split(
             state: state.clone(),
             nonce: 0,
             buf: Vec::new(),
+            deadline: None,
         },
         FrameWriter {
             stream: w,
@@ -154,6 +216,12 @@ impl FrameReader {
         self.stream.set_read_timeout(t)
     }
 
+    /// Make every read finish by `until` (`None`: back to the socket
+    /// timeout alone). Pairing reads the joiner's request this way.
+    pub fn set_deadline(&mut self, until: Option<Instant>) {
+        self.deadline = until;
+    }
+
     /// The next complete frame.
     pub fn recv(&mut self) -> io::Result<Vec<u8>> {
         let mut plain = vec![0u8; MAX_NOISE_MSG];
@@ -169,7 +237,10 @@ impl FrameReader {
                     return Ok(frame);
                 }
             }
-            let msg = read_msg(&mut self.stream, MAX_NOISE_MSG)?;
+            let msg = match self.deadline {
+                Some(until) => read_msg(&mut Deadline::new(&self.stream, until), MAX_NOISE_MSG)?,
+                None => read_msg(&mut self.stream, MAX_NOISE_MSG)?,
+            };
             let n = self
                 .state
                 .read_message(self.nonce, &msg, &mut plain)

@@ -1,0 +1,7 @@
+# MP-9 baseline: the fix disabled in crates/core/src/mesh/proto.rs (scratch mutation), the new tests run
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_rollback_notice
+test mesh::proto::tests::a_rollback_notice_above_the_reporters_hello_is_ignored ... FAILED
+test mesh::proto::tests::a_rollback_notice_is_sent_from_the_reporters_own_hello ... FAILED
+thread 'mesh::proto::tests::a_rollback_notice_above_the_reporters_hello_is_ignored' (23426236) panicked at crates/core/src/mesh/proto.rs:1512:9:
+thread 'mesh::proto::tests::a_rollback_notice_is_sent_from_the_reporters_own_hello' (23426237) panicked at crates/core/src/mesh/proto.rs:1550:9:
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 566 filtered out; finished in 0.01s

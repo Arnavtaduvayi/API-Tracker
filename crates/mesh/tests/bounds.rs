@@ -112,6 +112,37 @@ fn a_slowloris_handshake_is_closed_at_the_handshake_timeout() {
 }
 
 #[test]
+fn a_trickled_handshake_is_closed_at_the_handshake_deadline() {
+    // Audit MP-4: one byte every 150 ms never trips a 300 ms per-read
+    // timeout, so without one deadline for the whole pre-auth phase a
+    // trickled preamble and message 1 hold a session slot for as long as
+    // the trickle lasts (here 50 bytes, 7.5 s; at 4.9 s a byte, hours).
+    let a = genesis("dev-a");
+    let server = serve_with(&a, Arc::new(SystemClock), short(test_limits()));
+    let mut s = TcpStream::connect(server.addr).unwrap();
+    let mut bytes = Vec::new();
+    wire::write_preamble(&mut bytes, Preamble::Session).unwrap();
+    bytes.extend_from_slice(&32u16.to_be_bytes());
+    bytes.extend_from_slice(&[0x5a; 32]);
+    let mut w = s.try_clone().unwrap();
+    let trickle = std::thread::spawn(move || {
+        for b in bytes {
+            if w.write_all(&[b]).is_err() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(150));
+        }
+    });
+    let (got, took) = drain(&mut s, Duration::from_secs(15));
+    assert!(got.is_empty());
+    assert!(
+        took < Duration::from_millis(1_500),
+        "a trickled handshake held its slot for {took:?}"
+    );
+    trickle.join().unwrap();
+}
+
+#[test]
 fn an_idle_session_is_closed() {
     let (_a, _sa, b) = pair_of();
     // A server with a short idle timeout on B's side.

@@ -3,7 +3,9 @@
 //! [`MeshNode::try_session`]), and a per-source-IP token bucket of 10
 //! handshakes a minute (MESH-SI-8). Only the 16-byte preamble and handshake
 //! messages of at most 1 KiB are read before a peer authenticates
-//! (MESH-SI-2). Listeners come only from [`crate::bind::bind_listener`].
+//! (MESH-SI-2), all of it by one deadline, the handshake timeout after the
+//! connection was accepted. Listeners come only from
+//! [`crate::bind::bind_listener`].
 //!
 //! The node runtime ([`crate::runtime`]) runs this beside its outbound loop;
 //! `tethra mesh invite --wait` runs it alone.
@@ -13,7 +15,7 @@ use crate::handshake;
 use crate::node::MeshNode;
 use crate::pair;
 use crate::replicate::{channel, log};
-use crate::session::{exchange, Direction};
+use crate::session::{exchange, exchange_with, Direction};
 use crate::wire::{self, Preamble};
 use std::collections::HashMap;
 use std::io;
@@ -94,13 +96,20 @@ fn handle(node: &MeshNode, mut stream: TcpStream, stats: &ServeStats) {
     {
         return;
     }
-    let outcome = match wire::read_preamble(&mut stream) {
-        Ok(Preamble::Session) => handshake::respond(&mut stream, node).and_then(|(state, peer)| {
-            let (r, w) = channel(stream, state, node)?;
-            Ok(exchange(node, r, w, peer, Direction::Inbound))
-        }),
+    // One deadline for everything before the peer authenticates: the
+    // preamble and every handshake message (audit MP-4). A per-read timeout
+    // alone lets a peer trickle a byte just inside it, indefinitely.
+    let until = Instant::now() + limits.handshake_timeout;
+    let preamble = wire::read_preamble(&mut wire::Deadline::new(&stream, until));
+    let outcome = match preamble {
+        Ok(Preamble::Session) => {
+            handshake::respond(&mut stream, node, until).and_then(|(state, peers)| {
+                let (r, w) = channel(stream, state, node)?;
+                Ok(exchange_with(node, r, w, peers, Direction::Inbound))
+            })
+        }
         Ok(Preamble::Pair { hint }) => {
-            pair::respond(&mut stream, node, hint).and_then(|(joiner, r, w)| {
+            pair::respond(&mut stream, node, hint, until).and_then(|(joiner, r, w)| {
                 stream.set_read_timeout(Some(limits.idle_timeout))?;
                 stream.set_write_timeout(Some(limits.idle_timeout))?;
                 Ok(exchange(node, r, w, joiner, Direction::Inbound))

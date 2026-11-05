@@ -1,0 +1,11 @@
+# MP-7 baseline: the fix disabled in crates/core/src/mesh/proto.rs (scratch mutation), the new tests run
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_shared_noise_key
+test mesh::proto::tests::a_shared_noise_key_resolves_by_the_hellos_device_id ... FAILED
+thread 'mesh::proto::tests::a_shared_noise_key_resolves_by_the_hellos_device_id' (23426914) panicked at crates/core/src/mesh/proto.rs:1700:9:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 567 filtered out; finished in 0.01s
+
+$ cargo test -p api-tracker-mesh --test adversarial a_ghost_device_with_a_copied_noise_key_does_not_shadow_the_real_one   # same mutation
+test a_ghost_device_with_a_copied_noise_key_does_not_shadow_the_real_one ... FAILED
+thread 'a_ghost_device_with_a_copied_noise_key_does_not_shadow_the_real_one' (23430038) panicked at crates/mesh/tests/adversarial.rs:722:5:
+ExchangeReport { peer: DeviceId(1e79973233eab16dd2e11a3714a7fad5), direction: Outbound, items_in: 0, items_out: 1, duration_ms: 1, aborted: Some("the peer ended the exchange"), hello: Some(HelloRecord { at_ms: 1793913209755, completed: false, peer_vv: {DeviceId(0b4b6c92adde48cb7e68c00f403f430c): 1, 
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.33s
