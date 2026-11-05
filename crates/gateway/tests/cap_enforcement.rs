@@ -17,7 +17,7 @@ use api_tracker_core::mesh::store::{Draft, HlcPolicy, MeshStore};
 use api_tracker_core::mesh::{projects, DeviceId, MeshProjectId};
 use api_tracker_core::secret::SecretString;
 use api_tracker_core::vault::{self, NewProject, UnlockedVault, VaultPaths};
-use api_tracker_gateway::capgate::CapGate;
+use api_tracker_gateway::capgate::{Admission, CapGate};
 use api_tracker_gateway::forward::Gateway;
 use api_tracker_gateway::routes::{
     LinkInfo, Route, RouteState, RouteTable, RouteTarget, UpstreamOrigin,
@@ -894,4 +894,149 @@ fn a_charge_moving_into_the_database_never_drops_out_under_a_published_floor() {
         in_memory,
         "persisting a charge changes nothing"
     );
+}
+
+/// `n` admissions held at once (none completes): `(admitted, serialized
+/// refusals, other refusals)`.
+fn hold(gate: &CapGate, project: &str, n: usize) -> (usize, usize, usize) {
+    let mut held = Vec::new();
+    let (mut serialized, mut refused) = (0, 0);
+    for _ in 0..n {
+        match gate.admit(Some(project)) {
+            Admission::Admit(t) => held.push(t),
+            Admission::Refuse(r) if r.serialized => serialized += 1,
+            Admission::Refuse(_) => refused += 1,
+        }
+    }
+    (held.len(), serialized, refused)
+}
+
+/// MC-1: a gate that knows no request cost for a cap (after every gateway
+/// restart, at every month start, for a new cap) cannot reserve anything,
+/// so it admits one request at a time until it knows one; a restarted gate
+/// takes the cost history from the persisted usage events.
+#[test]
+fn a_cold_gate_serializes_until_it_knows_a_request_cost() {
+    let (d, _) = capped(5 * USD, true);
+    let up = upstream();
+    let gw = gateway(&d, up.port, false);
+    assert!(
+        !gw.gate.status().caps[0].near_exhaustion,
+        "$5 is far above the floor"
+    );
+    assert_eq!(
+        hold(&gw.gate, &d.app, 50),
+        (1, 49, 0),
+        "cold: one at a time"
+    );
+    // One completed request: its cost is known at once.
+    assert!(status_line(&request(gw.port, "/v1/big")).contains("200"));
+    let (ok, serialized, refused) = hold(&gw.gate, &d.app, 50);
+    assert!((2..50).contains(&ok), "{ok} admitted once a cost is known");
+    assert_eq!((ok + serialized, refused), (50, 0));
+    // A restarted gate (a new process) knows the persisted costs.
+    wait_for("the writer", || persisted_cost(&d) > 0);
+    let restarted = CapGate::new(&d.paths.db_path());
+    restarted.refresh(&providers());
+    let (ok, _, _) = hold(&restarted, &d.app, 50);
+    assert!(ok >= 2, "{ok}: the history was seeded from the database");
+    // And it still never lets more run than the rights left cover.
+    let one = cost(&d, 100_000, 50_000) as i64;
+    assert!(avail(&restarted) - (ok as i64 - 1) * one >= 0);
+}
+
+/// MC-7: a charge whose project row vanished before the writer got to it is
+/// never written; the gate keeps it counted in memory and says its
+/// accounting is incomplete (it must not drop out at the next snapshot).
+#[test]
+fn a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete() {
+    let (d, _) = capped(5 * USD, true);
+    let up = upstream();
+    let gw = gateway(&d, up.port, false);
+    // The project goes after the snapshot that maps it was built.
+    d.v.connection()
+        .execute("DELETE FROM projects WHERE id = ?1", [&d.app])
+        .unwrap();
+    assert!(status_line(&request(gw.port, "/v1/big")).contains("200"));
+    let c = cost(&d, 100_000, 50_000) as i64;
+    assert_eq!(avail(&gw.gate), 5 * USD as i64 - c);
+    // Give the writer time to process (and skip) the record.
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(persisted_cost(&d), 0, "nothing reached the database");
+    gw.gate.refresh(&providers());
+    let st = gw.gate.status();
+    assert_eq!(st.caps[0].avail_micros, 5 * USD as i64 - c, "still counted");
+    assert!(st.caps[0].accounting_incomplete);
+}
+
+fn user_version(d: &Dev) -> i64 {
+    d.v.connection()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+/// MC-8: one failed refresh between good ones keeps the last good snapshot
+/// (enforcing) until it is stale; then the gate fails open and says why.
+#[test]
+fn one_failing_refresh_between_two_good_ones_keeps_enforcing() {
+    let (d, _) = capped(USD, true);
+    let day = api_tracker_core::mesh::kinds::Day::from_unix_ms(SystemClock.now_ms()).to_string();
+    d.v.connection()
+        .execute(
+            "INSERT INTO gateway_usage_daily (day, provider_id, project_id, model, request_count,
+                 usage_event_count, estimated_cost_micros, updated_at, split_known)
+             VALUES (?1, 'openai', ?2, 'gpt-x', 1, 1, ?3, 'x', 1)",
+            rusqlite::params![day, d.app, USD as i64],
+        )
+        .unwrap();
+    let refused = |g: &CapGate| matches!(g.admit(Some(&d.app)), Admission::Refuse(_));
+    let gate = CapGate::new(&d.paths.db_path());
+    gate.refresh(&providers());
+    assert!(refused(&gate), "spent: refused");
+    let version = user_version(&d);
+    // The database cannot be opened at this gateway's schema version.
+    d.v.connection()
+        .pragma_update(None, "user_version", 9_999)
+        .unwrap();
+    gate.refresh(&providers());
+    assert!(refused(&gate), "one failed refresh: still enforcing");
+    let st = gate.status();
+    assert!(!st.failing_open && st.inactive_reason.is_none(), "{st:?}");
+    assert!(st.last_refresh_error.unwrap().contains("schema version"));
+    d.v.connection()
+        .pragma_update(None, "user_version", version)
+        .unwrap();
+    // The cap tables cannot be read.
+    d.v.connection()
+        .execute_batch("ALTER TABLE mesh_cap_escrow RENAME TO mesh_cap_escrow_away")
+        .unwrap();
+    gate.refresh(&providers());
+    assert!(refused(&gate), "a failed read: still enforcing");
+    d.v.connection()
+        .execute_batch("ALTER TABLE mesh_cap_escrow_away RENAME TO mesh_cap_escrow")
+        .unwrap();
+    gate.refresh(&providers());
+    assert!(refused(&gate));
+    assert!(gate.status().last_refresh_error.is_none());
+    // Failing for longer than the stale bound: fail open, and say why.
+    let short =
+        CapGate::new(&d.paths.db_path()).with_stale_after_for_test(Duration::from_millis(300));
+    short.refresh(&providers());
+    assert!(refused(&short));
+    d.v.connection()
+        .pragma_update(None, "user_version", 9_999)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(350));
+    short.refresh(&providers());
+    assert!(!refused(&short), "stale: fails open");
+    let st = short.status();
+    assert!(st.failing_open);
+    let why = st.inactive_reason.unwrap();
+    assert!(
+        why.contains("schema version") && why.contains("stale"),
+        "{why}"
+    );
+    d.v.connection()
+        .pragma_update(None, "user_version", version)
+        .unwrap();
 }

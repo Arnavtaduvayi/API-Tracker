@@ -81,6 +81,13 @@ pub fn grant_amount(want: u64, avail: i128, fair: u64, overrides: u64) -> u64 {
     want.min(donatable(avail, fair, overrides))
 }
 
+/// What a holder holding `avail` gives back to the owner's reclaim: what it
+/// holds above its own local overrides. An override raised the cap for that
+/// device only and is never given away (ADR 0032 D4).
+pub fn reclaimable(avail: i128, overrides: u64) -> u64 {
+    clamp_u64(avail - i128::from(overrides))
+}
+
 /// Rights in existence beyond what the cap now allows: `supply` (minted
 /// minus burned) above the larger of the effective target (target plus
 /// overrides) and what has already been spent. Rights already spent cannot
@@ -164,6 +171,14 @@ mod tests {
         assert_eq!(donatable(100, 99, 0), 50, "the kept half rounds up");
         assert_eq!(grant_amount(30, 100, 100, 0), 30);
         assert_eq!(grant_amount(80, 100, 100, 0), 50);
+    }
+
+    #[test]
+    fn a_reclaim_gives_back_only_what_is_above_the_overrides() {
+        assert_eq!(reclaimable(70, 20), 50);
+        assert_eq!(reclaimable(20, 20), 0);
+        assert_eq!(reclaimable(10, 20), 0, "spent into its override");
+        assert_eq!(reclaimable(-5, 0), 0);
     }
 
     #[test]

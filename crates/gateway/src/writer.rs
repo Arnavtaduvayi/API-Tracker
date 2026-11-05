@@ -556,22 +556,35 @@ impl WriterThread {
         // leave an event row without its usage row, or a session without its
         // event, and must not be counted as a partial success.
         let result = match conn.unchecked_transaction() {
-            Ok(tx) => self
-                .persist_with(&tx, &record)
-                .and_then(|()| tx.commit().map_err(api_tracker_core::error::CoreError::Db)),
+            Ok(tx) => self.persist_with(&tx, &record).and_then(|usage_written| {
+                tx.commit()
+                    .map(|()| usage_written)
+                    .map_err(api_tracker_core::error::CoreError::Db)
+            }),
             Err(e) => Err(api_tracker_core::error::CoreError::Db(e)),
         };
-        if let Err(e) = result {
-            self.note_failure(&e);
-            if let Some(c) = &record.cap_charge {
+        let usage_written = match result {
+            Ok(w) => w,
+            Err(e) => {
+                self.note_failure(&e);
+                if let Some(c) = &record.cap_charge {
+                    c.lost();
+                }
+                return;
+            }
+        };
+        if let Some(c) = &record.cap_charge {
+            if usage_written {
+                // The row (and its cost) is committed: the gate stops
+                // counting this charge in memory at its next snapshot.
+                c.persisted();
+            } else {
+                // Nothing carries its cost into the database (the project
+                // row vanished): confirming it would drop it out of the
+                // gate's count. It stays counted in memory, and the cap's
+                // accounting is incomplete (MC-7).
                 c.lost();
             }
-            return;
-        }
-        // The row (and its cost) is committed: the gate stops counting this
-        // charge in memory at its next snapshot.
-        if let Some(c) = &record.cap_charge {
-            c.persisted();
         }
         self.state.written.fetch_add(1, Ordering::Relaxed);
         self.state.degraded.store(false, Ordering::Relaxed);
@@ -589,17 +602,21 @@ impl WriterThread {
         });
     }
 
-    fn persist_with(&mut self, conn: &Connection, record: &ExchangeRecord) -> Result<()> {
+    /// Persist one record. `Ok(true)` when its usage row (and so its cost)
+    /// was written; `Ok(false)` when nothing carries its cost (unlinked
+    /// traffic, a project row that vanished).
+    fn persist_with(&mut self, conn: &Connection, record: &ExchangeRecord) -> Result<bool> {
         // Unlinked traffic is counted at route level and given NO invented
         // project attribution.
         let Some(project_id) = record.project_id.clone() else {
-            return store::bump_counter(
+            store::bump_counter(
                 conn,
                 &record.route_prefix,
                 store::day_of(&record.at),
                 counters::UNLINKED_REQUESTS,
                 1,
-            );
+            )?;
+            return Ok(false);
         };
         // A project row can disappear between link time and now.
         let project_exists: bool = conn
@@ -610,7 +627,7 @@ impl WriterThread {
             )
             .unwrap_or(false);
         if !project_exists {
-            return Ok(());
+            return Ok(false);
         }
 
         let session_id = self.session_for(conn, &project_id)?;
@@ -673,7 +690,7 @@ impl WriterThread {
 
         self.attribute(conn, &event_id, record)?;
         self.write_usage(conn, &event_id, &project_id, record)?;
-        Ok(())
+        Ok(true)
     }
 
     /// Resolve the credential digest against the scoped matcher table. This

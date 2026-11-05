@@ -816,7 +816,7 @@ fn caps_removing_the_owner_freezes_the_cap_and_a_new_one_can_replace_it() {
 }
 
 #[test]
-fn caps_used_is_published_from_the_local_month_spend_and_a_decrease_bumps_the_epoch() {
+fn caps_used_is_published_from_the_local_month_spend_and_never_decreases_within_a_month() {
     let (devs, p) = mesh(2, MARCH_10);
     let (a, b) = (&devs[0], &devs[1]);
     let cap = create(a, &p, 100);
@@ -837,13 +837,29 @@ fn caps_used_is_published_from_the_local_month_spend_and_a_decrease_bumps_the_ep
         10 * u128::from(USD)
     );
     assert_eq!(reconcile(a).used_published, 0, "unchanged: nothing new");
-    // Local data deleted (a deletion tool): the decrease propagates.
+    // Local data deleted (a deletion tool, a retention sweep): rows go, the
+    // spend does not. No decrease is published; the difference is carried
+    // (MC-3), and later spend counts on top of it.
     a.v.connection()
         .execute("DELETE FROM gateway_usage_daily", [])
         .unwrap();
+    assert_eq!(reconcile(a).used_published, 0);
+    assert_eq!(
+        caps::view::carried_spend(a.v.connection(), &cap, m).unwrap(),
+        10 * USD
+    );
+    exchange(a, b);
+    assert_eq!(
+        figures(b, &cap, m).device(&id(a)).used,
+        10 * u128::from(USD)
+    );
+    spend(a, MARCH_10, 2 * USD);
     assert_eq!(reconcile(a).used_published, 1);
     exchange(a, b);
-    assert_eq!(figures(b, &cap, m).device(&id(a)).used, 0);
+    assert_eq!(
+        figures(b, &cap, m).device(&id(a)).used,
+        12 * u128::from(USD)
+    );
     let s = store(b);
     let key = format!("{cap}/{m}");
     let bytes: Vec<u8> = s
@@ -858,7 +874,7 @@ fn caps_used_is_published_from_the_local_month_spend_and_a_decrease_bumps_the_ep
         .unwrap()
         .decode_unverified()
         .unwrap();
-    assert_eq!(body.payload["epoch"], 1);
+    assert_eq!(body.payload["epoch"], 0, "never decreased: no epoch bump");
     // Unbound: what was published stays.
     spend(b, MARCH_10, 4 * USD);
     reconcile(b);
@@ -868,6 +884,13 @@ fn caps_used_is_published_from_the_local_month_spend_and_a_decrease_bumps_the_ep
         .unwrap();
     assert_eq!(reconcile(b).used_published, 0);
     assert_eq!(figures(b, &cap, m).device(&id(b)).used, 4 * u128::from(USD));
+    // Carried spend of a month that is no longer published is forgotten.
+    set_time(&[a, b], at("2027-05-02", "12:00:00"));
+    reconcile(a);
+    assert_eq!(
+        caps::view::carried_spend(a.v.connection(), &cap, m).unwrap(),
+        0
+    );
 }
 
 fn enforce(d: &Dev) {
@@ -1099,4 +1122,226 @@ fn caps_enforcement_follows_the_cap_in_force_and_all_off_clears_every_switch() {
     assert!(gate::enforced_caps(b.v.connection()).unwrap().is_empty());
     assert!(!escrow::enforcement_on(b.v.connection()).unwrap());
     assert!(!snap(b).caps[0].enforced);
+}
+
+/// The open burns (pending or acked, not yet published) for `cap`.
+fn open_burns(d: &Dev, cap: &CapId) -> u64 {
+    escrow::open_rows(store(d).connection())
+        .unwrap()
+        .iter()
+        .filter(|r| r.cap_id == *cap && r.recipient() == Some(Recipient::Burn))
+        .map(|r| r.amount_micros)
+        .sum()
+}
+
+/// MC-2: a burn waiting in escrow for the running gateway's ack already
+/// counts against the pending decrease, so a reconcile before the ack does
+/// not burn again (and the owner, absorbing a lower's remainder, does not
+/// burn its whole balance).
+#[test]
+fn caps_a_burn_awaiting_the_ack_is_not_burned_twice() {
+    let (devs, p) = mesh(1, MARCH_10);
+    let a = &devs[0];
+    let m = month("2027-03");
+    let cap = create(a, &p, 100);
+    enforce(a);
+    let keys = a.v.mesh_keys().unwrap();
+    let low = caps::lower(
+        &mut store(a),
+        keys.signing_key(),
+        &AssumeRunning,
+        &cap,
+        40 * USD,
+    )
+    .unwrap();
+    assert_eq!(low.burned_micros, 60 * USD, "reserved, not published");
+    assert_eq!(open_burns(a, &cap), 60 * USD);
+    // The node's rounds (or `mesh cap show`) before the gateway acks.
+    for _ in 0..2 {
+        let rep = reconcile_with(a, &AssumeRunning);
+        assert_eq!(rep.burned_micros, 0, "the open burn covers the decrease");
+    }
+    assert_eq!(open_burns(a, &cap), 60 * USD, "burned once");
+    assert_eq!(avail(a, &cap, m).1, 40 * USD as i128);
+    // The owner asks nobody to give back what its own open burn covers.
+    let s = store(a);
+    let l = Ledger::of(&s);
+    let c = view::cap_in(s.state(), &cap).unwrap();
+    let f = l.figures(&c, m);
+    assert_eq!(f.pending_decrease(), 60 * u128::from(USD), "the view");
+    assert_eq!(l.pending_decrease(&c, m, &f).unwrap(), 0, "net of escrow");
+    drop(s);
+    // The gateway (a fake acker) counts and acknowledges; the node publishes.
+    let ids: Vec<String> = escrow::open_rows(store(a).connection())
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    escrow::ack(store(a).connection(), &ids, 1).unwrap();
+    let rep = reconcile_with(a, &AssumeRunning);
+    assert_eq!(rep.escrow_published, 1);
+    assert_eq!(rep.burned_micros, 0);
+    let f = figures(a, &cap, m);
+    assert_eq!(f.supply(), 40 * USD as i128);
+    assert_eq!(f.pending_decrease(), 0);
+    assert_eq!(avail(a, &cap, m), (40 * USD as i128, 40 * USD as i128));
+}
+
+/// MC-6: an override raised the cap for its device only and is never given
+/// away (ADR 0032 D4): a reclaim takes back at most what a holder holds
+/// above its own overrides.
+#[test]
+fn caps_a_reclaim_never_takes_a_local_override() {
+    let (devs, p) = mesh(2, MARCH_10);
+    let (a, b) = (&devs[0], &devs[1]);
+    let cap = create(a, &p, 100);
+    let m = month("2027-03");
+    exchange(a, b);
+    // B (not the owner) raises: a labelled local override of 20.
+    let kb = b.v.mesh_keys().unwrap();
+    caps::raise(
+        &mut store(b),
+        kb.signing_key(),
+        &AssumeNotRunning,
+        &cap,
+        20 * USD,
+    )
+    .unwrap();
+    exchange(a, b);
+    assert_eq!(avail(b, &cap, m).0, 70 * USD as i128);
+    let asked = caps::reclaim(&store(a), &cap, None).unwrap();
+    assert_eq!(asked, vec![id(b)]);
+    set_time(&[a, b], MARCH_10 + policy::REQUEST_INTERVAL_MS + 1);
+    let asks = caps::rights_requests(&store(a), &id(b)).unwrap();
+    assert_eq!(asks.len(), 1);
+    assert!(asks[0].reclaim);
+    let g = caps::grant(
+        &mut store(b),
+        kb.signing_key(),
+        &AssumeNotRunning,
+        &id(a),
+        asks[0],
+    )
+    .unwrap();
+    assert_eq!(g, 50 * USD, "the share goes back, the override stays");
+    exchange(a, b);
+    assert_eq!(avail(b, &cap, m).0, 20 * USD as i128);
+    assert_eq!(avail(a, &cap, m).0, 100 * USD as i128);
+    // Holding only its override, B is not asked again.
+    set_time(&[a, b], MARCH_10 + 2 * (policy::REQUEST_INTERVAL_MS + 1));
+    assert!(caps::rights_requests(&store(a), &id(b)).unwrap().is_empty());
+    assert!(caps::reclaim(&store(a), &cap, None).unwrap().is_empty());
+}
+
+/// `(published used, gate local spend)` of `d` for the cap in force now, as
+/// the gateway's snapshot reads them.
+fn gate_spend(d: &Dev) -> (u64, u64) {
+    use api_tracker_core::mesh::caps::gate::{self, GateRead};
+    match gate::gate_snapshot(d.v.connection(), d.clock.now_ms(), &[]).unwrap() {
+        GateRead::Ready(i) => (
+            i.caps[0].published_used_micros,
+            i.caps[0].local_spend_micros,
+        ),
+        GateRead::NoMesh => panic!("no mesh"),
+    }
+}
+
+/// MC-3: deleting this device's local usage data (a privacy action) or a
+/// retention sweep removes rows, not spend. Within a month `cap.used` never
+/// decreases, the gate's local spend never drops below it, and spend after
+/// the deletion still counts on top of what was already spent.
+#[test]
+fn caps_deleting_local_usage_never_returns_spent_rights() {
+    let (devs, p) = mesh(2, MARCH_10);
+    let (a, b) = (&devs[0], &devs[1]);
+    let cap = create(a, &p, 20);
+    let m = month("2027-03");
+    exchange(a, b);
+    spend(b, MARCH_10, 10 * USD);
+    assert_eq!(reconcile(b).used_published, 1);
+    assert_eq!(avail(b, &cap, m), (0, 0), "B spent its share");
+    exchange(a, b);
+    api_tracker_core::runtime::store::delete_project_data(b.v.connection(), &b.app).unwrap();
+    assert_eq!(reconcile(b).used_published, 0, "no decrease is published");
+    assert_eq!(
+        figures(b, &cap, m).device(&id(b)).used,
+        10 * u128::from(USD)
+    );
+    assert_eq!(avail(b, &cap, m), (0, 0), "no spent rights came back");
+    assert_eq!(gate_spend(b), (10 * USD, 10 * USD), "nor to the gate");
+    exchange(a, b);
+    assert_eq!(
+        figures(a, &cap, m).device(&id(b)).used,
+        10 * u128::from(USD)
+    );
+    // Spend after the deletion counts on top of what was spent before (B
+    // holds what A granted it meanwhile, below 20% of its share).
+    let before = avail(b, &cap, m).1;
+    spend(b, MARCH_10, 3 * USD);
+    assert_eq!(gate_spend(b), (10 * USD, 13 * USD));
+    assert_eq!(reconcile(b).used_published, 1);
+    assert_eq!(
+        figures(b, &cap, m).device(&id(b)).used,
+        13 * u128::from(USD)
+    );
+    assert_eq!(avail(b, &cap, m).1, before - 3 * USD as i128);
+}
+
+/// MC-10: a cap alert says what this device's gateway actually does with the
+/// cap in force: a switch carried from a superseded cap enforces it, and a
+/// gate failing open (or not reporting) is said to be not holding.
+#[test]
+fn caps_alert_text_says_what_the_gate_does_with_the_cap_in_force() {
+    use api_tracker_core::mesh::caps::gate::{self, GateCapStatus, GateStatus};
+    let (devs, p) = mesh(2, MARCH_10);
+    let (a, b) = (&devs[0], &devs[1]);
+    let first = create(a, &p, 100);
+    b.clock.advance(5_000);
+    let second = create(b, &p, 70);
+    b.v.mesh_cap_enforce(&master_pw(), Some(&second.to_hex()), true)
+        .unwrap();
+    exchange(a, b);
+    spend(b, MARCH_10, 90 * USD);
+    let detail = |d: &Dev| -> String {
+        let got = caps::alerts::cap_alerts(&store(d)).unwrap();
+        assert!(!got.is_empty(), "the 80% alert holds");
+        got[0].detail.clone()
+    };
+    // The gate as it reports itself: enforcing the cap in force (the switch
+    // was carried over from B's superseded cap).
+    let status = |at_ms: u64, failing: Option<&str>| GateStatus {
+        at_ms,
+        generation: 3,
+        inactive_reason: failing.map(str::to_owned),
+        failing_open: failing.is_some(),
+        last_refresh_error: None,
+        caps: vec![GateCapStatus {
+            cap_id: first.to_hex(),
+            month: "2027-03".into(),
+            enforced: true,
+            ..Default::default()
+        }],
+    };
+    let now = b.clock.now_ms();
+    gate::write_status(b.v.connection(), &status(now, None)).unwrap();
+    let text = detail(b);
+    assert!(text.contains("gateway enforces the cap"), "{text}");
+    // Failing open: switched on here, but not holding, and why.
+    gate::write_status(
+        b.v.connection(),
+        &status(now, Some("the spend-cap tables could not be read")),
+    )
+    .unwrap();
+    let text = detail(b);
+    assert!(text.contains("admitting every request"), "{text}");
+    assert!(text.contains("could not be read"), "{text}");
+    assert!(!text.contains("gateway enforces the cap"), "{text}");
+    // No recent report from the gateway (not running): not holding either.
+    gate::write_status(b.v.connection(), &status(now - 10 * 60_000, None)).unwrap();
+    let text = detail(b);
+    assert!(text.contains("has not reported"), "{text}");
+    // A never switched it on: alerts only.
+    spend(a, MARCH_10, 90 * USD);
+    let text = detail(a);
+    assert!(text.contains("does not enforce it (alerts only)"), "{text}");
 }

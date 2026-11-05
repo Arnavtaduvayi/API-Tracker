@@ -358,9 +358,12 @@ pub fn reclaim(store: &SqliteStore, cap: &CapId, from: Option<DeviceId>) -> Resu
         None => {
             let mut out = std::collections::BTreeSet::new();
             for m in [Some(month), month.next()].into_iter().flatten() {
-                for (d, r) in l.figures(&c, m).view.devices {
-                    if d != l.me && r.avail > 0 {
-                        out.insert(d);
+                let f = l.figures(&c, m);
+                for (d, r) in &f.view.devices {
+                    // Only rights above its own overrides (never given away).
+                    let overrides = f.overrides_of(d, &c.owner_device);
+                    if *d != l.me && super::policy::reclaimable(r.avail, overrides) > 0 {
+                        out.insert(*d);
                     }
                 }
             }

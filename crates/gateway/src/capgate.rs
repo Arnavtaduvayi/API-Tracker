@@ -30,13 +30,22 @@
 //! rights left after every reservation stay above the near-exhaustion margin
 //! (twice that cost, or $0.50); a request alone in flight is admitted while
 //! any rights remain. Near the cap that is one request at a time, and its
-//! cost is the overshoot. A [`Ticket`] holds the reservation; dropping it
-//! releases it, on every exit path.
+//! cost is the overshoot. The rights left are read **after** the
+//! reservation is taken, so a request completing meanwhile is always seen
+//! (MC-5). While no request cost is known for a cap (a new cap, or a cold
+//! process whose persisted history has none) nothing can be reserved, so the
+//! gate admits one request at a time until the first priced response
+//! completes (MC-1); a restarted gate seeds its history once from the
+//! persisted usage events of the cap's projects. A [`Ticket`] holds the
+//! reservation; dropping it releases it, on every exit path.
 //!
-//! **Fail open, and say so.** No mesh, an unreadable or mismatched
-//! database, or a snapshot older than 60 s: the gate admits everything and
-//! reports why. An unpriced model, or a response without usage, is admitted
-//! and counted (unpriced, unmetered), never charged.
+//! **Fail open, and say so.** No mesh or a snapshot older than 60 s: the
+//! gate admits everything and reports why. A refresh that cannot open or
+//! read the database keeps the last good snapshot (still enforcing) until it
+//! is that stale, then fails open with the refresh's reason (MC-8); with no
+//! good snapshot yet it fails open at once. An unpriced model, or a response
+//! without usage, is admitted and counted (unpriced, unmetered), never
+//! charged.
 
 use crate::record::{ExchangeRecord, UsageObservation};
 use api_tracker_core::db;
@@ -48,7 +57,7 @@ use api_tracker_core::mesh::kinds::Month;
 use api_tracker_core::pricing::{self, PricingRecord};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -64,11 +73,17 @@ pub struct CapCounters {
     /// Admitted requests not completed yet, and what they reserve.
     in_flight: AtomicU64,
     reserved: AtomicU64,
-    incomplete: std::sync::atomic::AtomicBool,
+    incomplete: AtomicBool,
     unpriced: AtomicU64,
     unmetered: AtomicU64,
     refused: AtomicU64,
     p95: AtomicU64,
+    /// Some request cost is known (charged here, or seeded from the
+    /// database): until then nothing can be reserved, so the gate admits
+    /// one request at a time (MC-1).
+    cost_known: AtomicBool,
+    /// The persisted history was consulted once (it is not re-read).
+    seeded: AtomicBool,
     recent: Mutex<VecDeque<u64>>,
 }
 
@@ -98,6 +113,21 @@ impl CapCounters {
         v.sort_unstable();
         let i = (v.len() * 95).div_ceil(100).saturating_sub(1);
         self.p95.store(v[i.min(v.len() - 1)], Ordering::Relaxed);
+        self.cost_known.store(true, Ordering::Release);
+    }
+
+    /// Seed a cold history from the persisted costs (once per counters).
+    fn seed(&self, costs: impl FnOnce() -> Vec<u64>) {
+        if self.seeded.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut recent = self.recent.lock().unwrap_or_else(|e| e.into_inner());
+        if !recent.is_empty() {
+            return;
+        }
+        for c in costs().into_iter().rev().take(RECENT_COSTS).rev() {
+            recent.push_back(c);
+        }
     }
 }
 
@@ -147,6 +177,9 @@ impl Entry {
 }
 
 struct Snapshot {
+    /// Built from a successful read of the database (MC-8 keeps such a
+    /// snapshot through a failed refresh until it is stale).
+    from_db: bool,
     built_at: Instant,
     generation: u64,
     inactive: Option<&'static str>,
@@ -159,6 +192,7 @@ struct Snapshot {
 impl Snapshot {
     fn empty(reason: &'static str, failing_open: bool) -> Self {
         Self {
+            from_db: false,
             built_at: Instant::now(),
             generation: 0,
             inactive: Some(reason),
@@ -176,7 +210,8 @@ pub struct Refusal {
     pub cap: String,
     pub month: String,
     /// Rights remain, but requests already in flight hold them (near the
-    /// cap one request runs at a time).
+    /// cap, or while no request cost is known yet, one request runs at a
+    /// time).
     pub serialized: bool,
 }
 
@@ -214,6 +249,8 @@ pub struct CapGate {
     registry: Mutex<HashMap<(CapId, Month), Arc<CapCounters>>>,
     generation: AtomicU64,
     last_written: Mutex<Option<GateStatus>>,
+    /// Why the last refresh failed, if it did (cleared by a good one).
+    refresh_error: Mutex<Option<&'static str>>,
     stale_after: Duration,
 }
 
@@ -238,6 +275,7 @@ impl CapGate {
             registry: Mutex::new(HashMap::new()),
             generation: AtomicU64::new(0),
             last_written: Mutex::new(None),
+            refresh_error: Mutex::new(None),
             stale_after: Duration::from_millis(SNAPSHOT_STALE_MS),
         }
     }
@@ -268,6 +306,12 @@ impl CapGate {
     /// **The hot path.** Decide on a request for local project
     /// `project_id`: no I/O, no lock the writer takes.
     pub fn admit(&self, project_id: Option<&str>) -> Admission {
+        self.admit_with(project_id, || {})
+    }
+
+    /// [`Self::admit`], running `before_reserve` just before the reservation
+    /// (the unit tests put a concurrent completion there).
+    fn admit_with(&self, project_id: Option<&str>, before_reserve: impl FnOnce()) -> Admission {
         let snap = self.current();
         let Some(&i) = project_id.and_then(|p| snap.by_project.get(p)) else {
             return Admission::Admit(None);
@@ -291,21 +335,28 @@ impl CapGate {
                 serialized,
             })
         };
-        let avail = e.avail();
-        if avail <= 0 {
-            return refusal(false);
-        }
+        before_reserve();
         // Reserve first (atomically), then decide on what is left. Alone in
         // flight, a request is admitted while any rights remain (the
-        // one-request overshoot). Beside others, only while every
+        // one-request overshoot). Beside others, only while some request
+        // cost is known (else nothing is reserved: MC-1) and every
         // reservation still leaves the near-exhaustion margin.
+        let known = e.counters.cost_known.load(Ordering::Acquire);
         let reserve = e.counters.p95.load(Ordering::Relaxed);
         let others = e.counters.in_flight.fetch_add(1, Ordering::SeqCst);
         let held = e.counters.reserved.fetch_add(reserve, Ordering::SeqCst) + reserve;
         ticket.reserved = reserve;
         ticket.counted = true;
-        if others > 0 && avail - i128::from(held) < e.threshold() {
+        // Read AFTER the reservation (MC-5): a request that completed before
+        // it left the slot free only after charging, so it is counted here;
+        // one completing later is among `others` and covered by the margin.
+        let avail = e.avail();
+        if avail <= 0 {
             drop(ticket); // releases the reservation
+            return refusal(false);
+        }
+        if others > 0 && (!known || avail - i128::from(held) < e.threshold()) {
+            drop(ticket);
             return refusal(true);
         }
         Admission::Admit(Some(ticket))
@@ -323,26 +374,35 @@ impl CapGate {
             return;
         };
         match cost_of(&ticket.snapshot, &record.provider_id, &record.at, usage) {
-            Some(micros) => {
-                ticket.counters.charged.fetch_add(micros, Ordering::SeqCst);
-                let mut recent = ticket
-                    .counters
-                    .recent
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                if recent.len() == RECENT_COSTS {
-                    recent.pop_front();
-                }
-                recent.push_back(micros);
-                drop(recent);
-                record.cap_charge = Some(CapCharge {
-                    counters: ticket.counters.clone(),
-                    micros,
-                });
-            }
+            Some(micros) => record.cap_charge = Some(Self::charge_micros(ticket, micros)),
             None => {
                 ticket.counters.unpriced.fetch_add(1, Ordering::Relaxed);
             }
+        }
+    }
+
+    /// Charge `micros` in memory and release `ticket` (charged before the
+    /// release, so an admission that sees the slot free sees the charge).
+    fn charge_micros(ticket: Ticket, micros: u64) -> CapCharge {
+        ticket.counters.charged.fetch_add(micros, Ordering::SeqCst);
+        let mut recent = ticket
+            .counters
+            .recent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if recent.len() == RECENT_COSTS {
+            recent.pop_front();
+        }
+        recent.push_back(micros);
+        drop(recent);
+        if !ticket.counters.cost_known.load(Ordering::Acquire) {
+            // The first cost known: concurrency need not wait for the poll.
+            ticket.counters.p95.fetch_max(micros, Ordering::Relaxed);
+            ticket.counters.cost_known.store(true, Ordering::Release);
+        }
+        CapCharge {
+            counters: ticket.counters.clone(),
+            micros,
         }
     }
 
@@ -363,10 +423,10 @@ impl CapGate {
             Ok(c) => c,
             Err(_) => {
                 // Nowhere to persist the status: `gateway status` reports it.
-                self.install(Snapshot::empty(
+                self.failed(
                     "the database could not be opened at this gateway's schema version",
-                    true,
-                ));
+                    None,
+                );
                 return;
             }
         };
@@ -374,23 +434,27 @@ impl CapGate {
         let input = match read {
             Ok(GateRead::Ready(input)) => input,
             Ok(GateRead::NoMesh) => {
-                self.install(Snapshot::empty("this device is not in a mesh", false));
+                self.set_refresh_error(None);
+                let mut snap = Snapshot::empty("this device is not in a mesh", false);
+                snap.from_db = true;
+                self.install(snap);
                 self.persist_status(&conn);
                 return;
             }
             Err(_) => {
-                self.install(Snapshot::empty(
-                    "the spend-cap tables could not be read",
-                    true,
-                ));
-                self.persist_status(&conn);
+                self.failed("the spend-cap tables could not be read", Some(&conn));
                 return;
             }
         };
+        self.set_refresh_error(None);
         let mut entries = Vec::new();
         let mut by_project = HashMap::new();
         for c in &input.caps {
             let counters = self.counters(c.cap_id, c.month);
+            // A cold history (a restart, a month start) takes the persisted
+            // costs of the cap's projects, once (MC-1).
+            counters
+                .seed(|| gate::recent_costs(&conn, &c.locals, RECENT_COSTS).unwrap_or_default());
             counters.update_p95();
             for l in &c.locals {
                 by_project.insert(l.clone(), entries.len());
@@ -410,6 +474,7 @@ impl CapGate {
         let inactive = (!entries.iter().any(|e| e.enforced))
             .then_some("no spend cap is enforced on this device");
         self.install(Snapshot {
+            from_db: true,
             built_at: Instant::now(),
             generation,
             inactive,
@@ -428,12 +493,31 @@ impl CapGate {
         *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snap);
     }
 
+    fn set_refresh_error(&self, why: Option<&'static str>) {
+        *self.refresh_error.lock().unwrap_or_else(|e| e.into_inner()) = why;
+    }
+
+    /// A refresh failed. The last good snapshot stays (still enforcing, its
+    /// pending escrow acknowledged, nothing new acknowledged) until it is
+    /// stale, when admission fails open on its own; without one, fail open
+    /// at once (MC-8).
+    fn failed(&self, why: &'static str, conn: Option<&rusqlite::Connection>) {
+        self.set_refresh_error(Some(why));
+        if !self.current().from_db {
+            self.install(Snapshot::empty(why, true));
+        }
+        if let Some(conn) = conn {
+            self.persist_status(conn);
+        }
+    }
+
     fn persist_status(&self, conn: &rusqlite::Connection) {
         let mut status = self.status();
         // Rewrite only when something other than the time changed.
         let mut last = self.last_written.lock().unwrap_or_else(|e| e.into_inner());
         let unchanged = last.as_ref().is_some_and(|l| {
             l.inactive_reason == status.inactive_reason
+                && l.last_refresh_error == status.last_refresh_error
                 && l.caps == status.caps
                 && now_ms().saturating_sub(l.at_ms) < 30_000
         });
@@ -450,15 +534,21 @@ impl CapGate {
     pub fn status(&self) -> GateStatus {
         let snap = self.current();
         let stale = snap.built_at.elapsed() > self.stale_after;
+        let error = *self.refresh_error.lock().unwrap_or_else(|e| e.into_inner());
         GateStatus {
             at_ms: now_ms(),
             generation: snap.generation,
-            inactive_reason: if stale {
-                Some("the spend-cap snapshot is stale (the poller has not run for a minute)".into())
-            } else {
-                snap.inactive.map(str::to_owned)
+            inactive_reason: match (stale, error) {
+                (true, Some(why)) if snap.from_db => Some(format!(
+                    "{why}; the last good spend-cap snapshot is stale, so every request is admitted"
+                )),
+                (true, _) => Some(
+                    "the spend-cap snapshot is stale (the poller has not run for a minute)".into(),
+                ),
+                (false, _) => snap.inactive.map(str::to_owned),
             },
             failing_open: stale || snap.failing_open,
+            last_refresh_error: error.map(str::to_owned),
             caps: snap
                 .entries
                 .iter()
@@ -499,4 +589,67 @@ fn cost_of(snap: &Snapshot, provider: &str, at: &str, usage: &UsageObservation) 
         clamp(usage.output_tokens.unwrap_or(0)),
     )?;
     u64::try_from(est.micros).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const P: &str = "local-project";
+
+    /// A gate on no database with one enforced cap of `granted` micros.
+    fn gate_with(granted: i128) -> (CapGate, Arc<CapCounters>) {
+        let gate = CapGate::new(Path::new("/nonexistent/tethra-unit/vault.db"));
+        let month = Month::parse("2027-03").unwrap();
+        let counters = gate.counters(CapId::MIN, month);
+        gate.install(Snapshot {
+            from_db: true,
+            built_at: Instant::now(),
+            generation: 1,
+            inactive: None,
+            failing_open: false,
+            entries: vec![Entry {
+                cap: CapId::MIN,
+                month,
+                enforced: true,
+                granted,
+                escrowed: 0,
+                local_db: 0,
+                published: 0,
+                persisted_at_snapshot: 0,
+                counters: counters.clone(),
+            }],
+            by_project: HashMap::from([(P.to_owned(), 0)]),
+            pricing: BTreeMap::new(),
+        });
+        (gate, counters)
+    }
+
+    /// MC-5: a request that completes (charges, frees its slot) while
+    /// another is being admitted is seen by that admission: the rights left
+    /// are read after the reservation, never before.
+    #[test]
+    fn a_completion_racing_an_admission_is_seen_by_it() {
+        let (gate, counters) = gate_with(1_000_000);
+        let Admission::Admit(Some(first)) = gate.admit(Some(P)) else {
+            panic!("the first request is admitted");
+        };
+        // The first completes, spending every right, between the second's
+        // look at the snapshot and its reservation.
+        let second = gate.admit_with(Some(P), move || {
+            let _ = CapGate::charge_micros(first, 1_000_000);
+        });
+        assert!(
+            matches!(
+                second,
+                Admission::Refuse(Refusal {
+                    serialized: false,
+                    ..
+                })
+            ),
+            "admitted with the rights already spent"
+        );
+        assert_eq!(counters.in_flight.load(Ordering::SeqCst), 0);
+        assert_eq!(counters.reserved.load(Ordering::SeqCst), 0);
+    }
 }

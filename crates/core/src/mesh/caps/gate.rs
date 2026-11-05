@@ -23,7 +23,6 @@ use crate::mesh::item::SignedItem;
 use crate::mesh::kinds::{names, Month};
 use crate::mesh::projects;
 use crate::mesh::store::GenesisInfo;
-use crate::mesh::usage;
 use crate::mesh::views::{self as views_mod, State};
 use crate::pricing::PricingRecord;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -52,7 +51,9 @@ pub struct GateCapInput {
     /// This device's rights: minted + received − sent − burned.
     pub granted_micros: i128,
     /// This device's gateway rollup's month spend for the cap's projects
-    /// (`usage::local_month_spend_in`): where every persisted charge lands.
+    /// (`usage::local_month_spend_in`, where every persisted charge lands)
+    /// plus the spend carried over rollup rows that are gone
+    /// (`view::local_cap_spend`, MC-3).
     pub local_spend_micros: u64,
     /// What this device published as `cap.used`: a floor on its spend (it
     /// stays when a project is unbound or local rows are gone). The gate
@@ -131,14 +132,7 @@ pub fn gate_snapshot(conn: &Connection, now_ms: u64, providers: &[String]) -> Re
     let global = escrow::enforcement_on(&tx)?;
     let bindings = projects::bindings(&tx)?;
     let all = view::caps_in(&state);
-    // Switched on for a cap that was then superseded (or frozen and
-    // replaced): the cap in force on that project carries the switch.
-    let switched = |c: &CapInfo| {
-        enforced.contains(&c.cap_id)
-            || all
-                .iter()
-                .any(|o| o.superseded_by == Some(c.cap_id) && enforced.contains(&o.cap_id))
-    };
+    let switched = |c: &CapInfo| switch_carried(&enforced, &all, c);
     let mut caps = Vec::new();
     for c in all.iter().filter(|c| c.in_force()) {
         let f = view::month_figures(&state, c, month);
@@ -146,7 +140,9 @@ pub fn gate_snapshot(conn: &Connection, now_ms: u64, providers: &[String]) -> Re
         let granted = to_i128(mine.minted) + to_i128(mine.received)
             - to_i128(mine.sent)
             - to_i128(mine.burned);
-        let local = usage::local_month_spend_in(&tx, &state, &c.mesh_project_id, month)?;
+        // The node's figure, carried spend included (MC-3): never below
+        // what this device published within the month.
+        let local = view::local_cap_spend(&tx, &state, c, month)?;
         let published = u64::try_from(mine.used).unwrap_or(u64::MAX);
         let locals = bindings
             .iter()
@@ -188,6 +184,67 @@ pub fn gate_snapshot(conn: &Connection, now_ms: u64, providers: &[String]) -> Re
 
 fn to_i128(x: u128) -> i128 {
     i128::try_from(x).unwrap_or(i128::MAX)
+}
+
+/// Whether `c`'s enforcement is switched on here: its own switch, or one set
+/// on a cap it superseded (or a frozen cap it replaced): the cap in force on
+/// that project carries the switch.
+fn switch_carried(enforced: &BTreeSet<CapId>, all: &[CapInfo], c: &CapInfo) -> bool {
+    enforced.contains(&c.cap_id)
+        || all
+            .iter()
+            .any(|o| o.superseded_by == Some(c.cap_id) && enforced.contains(&o.cap_id))
+}
+
+/// What this device's gateway does with a cap in force, as far as this
+/// device can tell from its switches and the gate's last persisted status
+/// (alerts and reports say this, never the switch alone; MC-10).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Holding {
+    /// Not switched on here (alerts only).
+    Off,
+    /// Switched on, and the gate's recent status enforces the cap.
+    Enforcing,
+    /// Switched on, but the gate admits everything right now, for this
+    /// reason (an unreadable database, a stale snapshot).
+    FailingOpen(String),
+    /// Switched on, but no recent status from the gate enforces it (the
+    /// gateway is not running, or has not picked the switch up yet).
+    NotReporting,
+}
+
+/// [`Holding`] for `cap` (in force) at `now_ms`.
+pub fn holding(conn: &Connection, state: &State, cap: &CapInfo, now_ms: u64) -> Result<Holding> {
+    let enforced = enforced_caps(conn)?;
+    let all = view::caps_in(state);
+    if !(escrow::enforcement_on(conn)? && switch_carried(&enforced, &all, cap)) {
+        return Ok(Holding::Off);
+    }
+    let Some(status) = read_status(conn)? else {
+        return Ok(Holding::NotReporting);
+    };
+    if now_ms.saturating_sub(status.at_ms) >= view::GATE_STATUS_FRESH_MS {
+        return Ok(Holding::NotReporting);
+    }
+    if status.failing_open {
+        let mut why = status
+            .inactive_reason
+            .unwrap_or_else(|| "the gate reports it is failing open".into());
+        if let Some((i, _)) = why.char_indices().nth(200) {
+            why.truncate(i);
+        }
+        return Ok(Holding::FailingOpen(why));
+    }
+    let hex = cap.cap_id.to_hex();
+    Ok(
+        if status.inactive_reason.is_none()
+            && status.caps.iter().any(|c| c.cap_id == hex && c.enforced)
+        {
+            Holding::Enforcing
+        } else {
+            Holding::NotReporting
+        },
+    )
 }
 
 /// The caps switched on for enforcement on this device.
@@ -279,6 +336,11 @@ pub struct GateStatus {
     /// not holding.
     #[serde(default)]
     pub failing_open: bool,
+    /// The last refresh failed (an unreadable or newer database): the gate
+    /// keeps enforcing from its last good snapshot until that is stale, then
+    /// fails open with this reason (MC-8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_refresh_error: Option<String>,
     pub caps: Vec<GateCapStatus>,
 }
 
@@ -301,6 +363,31 @@ pub fn read_status(conn: &Connection) -> Result<Option<GateStatus>> {
         )
         .optional()?;
     Ok(v.and_then(|v| serde_json::from_str(&v).ok()))
+}
+
+/// The latest persisted request costs of `locals` (the cap's bound local
+/// projects), oldest first, at most `limit`: the gate seeds a cold cost
+/// history from them after a restart or at a month start (MC-1). Costs do
+/// not depend on the month, so earlier months count too.
+pub fn recent_costs(conn: &Connection, locals: &[String], limit: usize) -> Result<Vec<u64>> {
+    if locals.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+    let marks = vec!["?"; locals.len()].join(", ");
+    let mut st = conn.prepare(&format!(
+        "SELECT estimated_cost_micros FROM gateway_usage_events
+         WHERE project_id IN ({marks}) AND estimated_cost_micros IS NOT NULL
+         ORDER BY at DESC LIMIT {limit}"
+    ))?;
+    let rows = st.query_map(rusqlite::params_from_iter(locals.iter()), |r| {
+        r.get::<_, i64>(0)
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?.max(0) as u64);
+    }
+    out.reverse();
+    Ok(out)
 }
 
 /// Acknowledge, as the gateway, the pending escrow rows a snapshot counted

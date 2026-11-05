@@ -903,6 +903,7 @@ impl CapsWorld {
                 );
             }
         }
+        self.not_over_burned()?;
         if let Some((forger, month, amount)) = self.forged {
             let m = expected.cap_months.get(&(self.cap, month));
             let r = m.and_then(|m| m.devices.get(&forger));
@@ -915,6 +916,60 @@ impl CapsWorld {
             }
         }
         self.settled()
+    }
+
+    /// After quiescence, on the converged view (MC-4): a lower never burns
+    /// below what the cap allows. While the month's total spend is within
+    /// the effective target, the supply is at least `min(effective target,
+    /// minted)`. The target here is the lowest any device wrote for the
+    /// month (two concurrent lowers each burn toward their own; a stale view
+    /// may over-burn toward the lower one, which is safe and documented, ADR
+    /// 0032), and `minted` counts what was minted (a frozen cap's month may
+    /// never be). Burns honoured beyond a holder's budget are clamped and
+    /// never counted, so a forger cannot lower the supply. Each holder keeps
+    /// the integer fair share `target / n` (rounded down), so the supply may
+    /// settle up to `n - 1` micros below the floor: that remainder is the
+    /// only slack allowed (one micro per holder in the view), far below any
+    /// burn counted twice.
+    fn not_over_burned(&self) -> Res<()> {
+        let Some(&n) = self.up().iter().find(|&&n| !self.devs[n].forger) else {
+            return Ok(());
+        };
+        let s = self.store(n);
+        let l = Ledger::of(s);
+        let Some(c) = l.caps().into_iter().find(|c| c.cap_id == self.cap) else {
+            return Ok(());
+        };
+        let m = l.month();
+        for month in [Some(m), m.next()].into_iter().flatten() {
+            let f = l.figures(&c, month);
+            let Some(lowest) = s
+                .state()
+                .cap_targets
+                .register(&(self.cap, month))
+                .and_then(|r| r.entries().map(|(_, e)| e.value.value).min())
+            else {
+                continue;
+            };
+            let floor = u128::from(lowest) + f.overrides;
+            if f.view.total_used > floor {
+                continue; // spent past it: cap safety bounds the supply
+            }
+            let want = floor.min(f.view.total_minted);
+            let supply = u128::try_from(f.supply().max(0)).unwrap_or(0);
+            let rounding = f.view.devices.len().saturating_sub(1) as u128;
+            if supply.saturating_add(rounding) < want {
+                return self.fail(
+                    "not over-burned",
+                    format!(
+                        "device {n} {month}: supply {supply} < min(lowest target {lowest} + \
+                         overrides {}, minted {}) with {} used and {} burned",
+                        f.overrides, f.view.total_minted, f.view.total_used, f.view.total_burned
+                    ),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// After quiescence: a lower has settled (unless the cap is frozen and

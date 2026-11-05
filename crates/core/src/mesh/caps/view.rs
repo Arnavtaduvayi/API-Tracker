@@ -14,7 +14,7 @@ use crate::error::Result;
 use crate::mesh::crdt::bounded::{BoundedView, DeviceRights};
 use crate::mesh::dot::{CapId, DeviceId, MeshProjectId};
 use crate::mesh::hlc::Hlc;
-use crate::mesh::kinds::{Day, Month};
+use crate::mesh::kinds::{Day, Month, Recipient};
 use crate::mesh::projects;
 use crate::mesh::sqlite_store::SqliteStore;
 use crate::mesh::store::MeshStore;
@@ -236,9 +236,10 @@ impl<'a> Ledger<'a> {
     }
 
     /// What this device's gateway recorded against the cap's project this
-    /// month (Increment 06's single "local month spend").
+    /// month (Increment 06's single "local month spend"), plus the spend
+    /// carried over rows that are gone ([`local_cap_spend`]).
     pub fn local_spend(&self, cap: &CapInfo, month: Month) -> Result<u64> {
-        usage::local_month_spend_in(self.conn, self.state, &cap.mesh_project_id, month)
+        local_cap_spend(self.conn, self.state, cap, month)
     }
 
     /// This device's spend against the cap: the larger of what it published
@@ -255,6 +256,26 @@ impl<'a> Ledger<'a> {
         let used = i128::from(self.own_used(cap, month, f)?);
         let reserved = i128::from(escrow::open_amount(self.conn, &cap.cap_id, month)?);
         Ok(r.avail + to_i128(r.used) - used - reserved)
+    }
+
+    /// The pending decrease as this device must act on it: the view's
+    /// ([`MonthFigures::pending_decrease`]) with this device's own spend not
+    /// yet published counted as used, and its own **open burns** (escrow
+    /// rows waiting for the running gateway's ack, MESH-SI-10) counted as
+    /// burned. Without the second, every round before the ack would burn
+    /// (or ask holders to give back) the same decrease again.
+    pub fn pending_decrease(&self, cap: &CapInfo, month: Month, f: &MonthFigures) -> Result<u128> {
+        let Some(eff) = f.effective_target() else {
+            return Ok(0);
+        };
+        let used = self.own_used(cap, month, f)?;
+        let unpublished = u128::from(used).saturating_sub(f.device(&self.me).used);
+        let burning = escrow::open_amount_to(self.conn, &cap.cap_id, month, &Recipient::Burn)?;
+        Ok(policy::pending_decrease(
+            f.supply() - i128::from(burning),
+            eff,
+            f.view.total_used + unpublished,
+        ))
     }
 
     /// The devices that get a share when the owner mints: this one, and
@@ -296,6 +317,59 @@ impl<'a> Ledger<'a> {
 
 fn to_i128(x: u128) -> i128 {
     i128::try_from(x).unwrap_or(i128::MAX)
+}
+
+const CARRIED_PREFIX: &str = "cap_used_carried/";
+
+pub(crate) fn carried_key(cap: &CapId, month: Month) -> String {
+    format!("{CARRIED_PREFIX}{cap}/{month}")
+}
+
+/// Spend this device already published for `(cap, month)` whose rollup rows
+/// are gone (local usage data deleted, a retention sweep, a project unbound
+/// or rebound): local only (`mesh_meta`), never replicated. The reconciler
+/// records it when the rollup falls below what this device published
+/// (`reconcile::publish_used`), so `cap.used` never decreases within a month
+/// and spend after the deletion counts on top of it (MC-3).
+pub fn carried_spend(conn: &Connection, cap: &CapId, month: Month) -> Result<u64> {
+    use rusqlite::OptionalExtension;
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM mesh_meta WHERE key = ?1 AND typeof(value) = 'integer'",
+            [carried_key(cap, month)],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(v.map_or(0, |v| v.max(0) as u64))
+}
+
+pub(crate) fn set_carried_spend(
+    conn: &Connection,
+    cap: &CapId,
+    month: Month,
+    micros: u64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO mesh_meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![
+            carried_key(cap, month),
+            i64::try_from(micros).unwrap_or(i64::MAX)
+        ],
+    )?;
+    Ok(())
+}
+
+/// **The** local spend against a cap for a month, for the node and the
+/// gateway alike: its gateway's month spend for the cap's bound projects
+/// (`usage::local_month_spend_in`) plus [`carried_spend`].
+pub fn local_cap_spend(
+    conn: &Connection,
+    state: &State,
+    cap: &CapInfo,
+    month: Month,
+) -> Result<u64> {
+    let rollup = usage::local_month_spend_in(conn, state, &cap.mesh_project_id, month)?;
+    Ok(rollup.saturating_add(carried_spend(conn, &cap.cap_id, month)?))
 }
 
 /// One device's row in a cap month.

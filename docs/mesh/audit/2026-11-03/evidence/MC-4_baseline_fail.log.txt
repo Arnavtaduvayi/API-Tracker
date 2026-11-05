@@ -1,0 +1,9 @@
+# MC-4 baseline: base commit 70ebeb1 had no over-burn invariant (the git grep below finds none), so an over-burn passed every caps check. With the invariant added (this remediation's sim/caps.rs) and a deliberate over-burn mutant in caps::policy::burn_after_lower (a holder burns below its keep, up to the pending decrease), the caps CI seeds fail on the new invariant:
+$ git grep -n 'not over-burned' 70ebeb1 -- crates/core/src/mesh/sim/caps.rs
+(none)
+$ cargo test -p api-tracker-core --test mesh_sim caps_ci_seeds   # with the mutant
+thread 'caps_ci_seeds' (23498750) panicked at crates/core/tests/mesh_sim.rs:257:5:
+MESH_SIM_SEED=6 MESH_SIM_STEPS=240: caps invariant 'not over-burned' failed at step 239: device 0 2027-02: supply 476667 < min(lowest target 590000 + overrides 0, minted 1000000) with 470406 used and 523333 burned
+MESH_SIM_SEED=7 MESH_SIM_STEPS=240: caps invariant 'not over-burned' failed at step 239: device 0 2027-02: supply 350000 < min(lowest target 460000 + overrides 0, minted 1000000) with 99753 used and 650000 burned
+MESH_SIM_SEED=9 MESH_SIM_STEPS=240: caps invariant 'not over-burned' failed at step 239: device 1 2027-02: supply 166666 < min(lowest target 370000 + overrides 0, minted 1000000) with 0 used and 833334 burned
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 7.30s

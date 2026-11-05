@@ -6,6 +6,7 @@
 //! as the last exchange with each device; the alert says so. Budgets
 //! (`crate::budget`) are not involved (SI-19).
 
+use super::gate::{self, Holding};
 use super::policy::ALERT_THRESHOLDS;
 use super::view::{used_pct, Ledger};
 use crate::alerts::{AlertKind, NewAlert, Severity};
@@ -20,7 +21,6 @@ pub fn cap_alerts(store: &SqliteStore) -> Result<Vec<NewAlert>> {
     let l = Ledger::of(store);
     let month = l.month();
     let observed_at = crate::clock::now_rfc3339();
-    let enforced = super::gate::enforced_caps(l.conn)?;
     let mut out = Vec::new();
     for cap in l.caps().into_iter().filter(|c| c.in_force()) {
         let f = l.figures(&cap, month);
@@ -43,6 +43,25 @@ pub fn cap_alerts(store: &SqliteStore) -> Result<Vec<NewAlert>> {
             });
             stale += usize::from(!fresh);
         }
+        // What the gate does with the cap in force, not the switch alone: a
+        // switch carried from a superseded cap enforces, and a gate failing
+        // open or not reporting does not hold (MC-10).
+        let holding = match gate::holding(l.conn, l.state, &cap, l.now_ms)? {
+            Holding::Enforcing => "This device's gateway enforces the cap: it refuses requests \
+                                   once this device's rights are used up."
+                .to_owned(),
+            Holding::FailingOpen(why) => format!(
+                "Enforcement is switched on here, but this device's gateway is admitting every \
+                 request right now ({why}); see `tethra gateway status`."
+            ),
+            Holding::NotReporting => "Enforcement is switched on here, but this device's gateway \
+                                      has not reported enforcing it recently (it may not be \
+                                      running), so requests may not be refused."
+                .to_owned(),
+            Holding::Off => "This device's gateway does not enforce it (alerts only); switch \
+                             that on with `tethra mesh cap enforce`."
+                .to_owned(),
+        };
         let name = projects::get(store, &cap.mesh_project_id)
             .map_or_else(|| cap.mesh_project_id.to_hex()[..8].to_owned(), |p| p.name);
         for t in ALERT_THRESHOLDS.into_iter().filter(|t| pct >= *t) {
@@ -64,13 +83,7 @@ pub fn cap_alerts(store: &SqliteStore) -> Result<Vec<NewAlert>> {
                     crate::usage::format_micros(i64::try_from(used).unwrap_or(i64::MAX)),
                     crate::usage::format_micros(i64::try_from(effective).unwrap_or(i64::MAX)),
                     f.view.devices.len(),
-                    if enforced.contains(&cap.cap_id) {
-                        "This device's gateway enforces the cap: it refuses requests once this \
-                         device's rights are used up."
-                    } else {
-                        "This device's gateway does not enforce it (alerts only); switch that \
-                         on with `tethra mesh cap enforce`."
-                    }
+                    holding
                 ),
                 evidence: format!(
                     "cap={} month={month} used_micros={used} cap_micros={effective} \

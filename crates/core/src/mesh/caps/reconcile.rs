@@ -5,7 +5,8 @@
 //! it ([`SqliteStore::mint_with`]):
 //! 1. **used** — publish `cap.used` for this device and month as its
 //!    gateway's month spend for the cap's bound projects (Increment 06's
-//!    single function); a decrease (local data deleted) bumps the epoch;
+//!    single function); it never decreases within a month: rollup rows that
+//!    are gone (local data deleted) are carried as spend (MC-3);
 //! 2. **escrow** — publish acknowledged (or no longer fenced) transfers;
 //!    cancel those whose month ended or that no longer fit;
 //! 3. **mint** — on the owner: mint the current month if it has not been,
@@ -254,15 +255,25 @@ fn publish_used(store: &mut SqliteStore, signing: &SigningKeyPair) -> Result<Vec
             for m in [month.prev(), Some(month)].into_iter().flatten() {
                 let local = l.local_spend(&cap, m)?;
                 let (epoch, published) = own_used_entry(l, &cap.cap_id, m)?;
+                if local < published {
+                    // Rollup rows are gone (local data deleted, a retention
+                    // sweep, a project rebound), not the spend: publishing
+                    // the decrease would hand back rights already spent
+                    // (MC-3). Carry the difference, so `cap.used` never
+                    // decreases within a month and later spend counts on
+                    // top of it.
+                    let carried = view::carried_spend(l.conn, &cap.cap_id, m)?;
+                    view::set_carried_spend(
+                        l.conn,
+                        &cap.cap_id,
+                        m,
+                        carried.saturating_add(published - local),
+                    )?;
+                    continue;
+                }
                 if local == published {
                     continue;
                 }
-                // Local data was deleted: the decrease propagates (D8).
-                let epoch = if local < published {
-                    epoch.saturating_add(1)
-                } else {
-                    epoch
-                };
                 out.push(Draft::of(
                     &CapUsed {
                         cap: cap.cap_id,
@@ -459,13 +470,13 @@ pub(crate) fn burn_after_lower(
         for cap in l.caps().into_iter().filter(CapInfo::in_force) {
             for m in [Some(month), month.next()].into_iter().flatten() {
                 let f = l.figures(&cap, m);
-                let (Some(target), Some(eff)) = (f.target, f.effective_target()) else {
+                let Some(target) = f.target else {
                     continue;
                 };
                 let used = l.own_used(&cap, m, &f)?;
-                let unpublished = u128::from(used).saturating_sub(f.device(&l.me).used);
-                let pending =
-                    policy::pending_decrease(f.supply(), eff, f.view.total_used + unpublished);
+                // Net of this device's open burns: a burn waiting for the
+                // gateway's ack is not burned again (MC-2).
+                let pending = l.pending_decrease(&cap, m, &f)?;
                 if pending == 0 {
                     continue;
                 }
@@ -539,22 +550,30 @@ pub fn reconcile(
     Ok(rep)
 }
 
-/// Forget what ended months left behind: closed escrow rows and rate-limit
-/// slots (local rows only; the items stay).
+/// Forget what ended months left behind: closed escrow rows, rate-limit
+/// slots, and carried spend of months `cap.used` is no longer published for
+/// (local rows only; the items stay).
 fn prune(conn: &Connection, month: Month) -> Result<()> {
     escrow::prune_before(conn, month)?;
     let mut st = conn.prepare(
-        "SELECT key FROM mesh_meta WHERE key LIKE 'cap_rq_sent/%' OR key LIKE 'cap_rq_granted/%'",
+        "SELECT key FROM mesh_meta WHERE key LIKE 'cap_rq_sent/%' OR key LIKE 'cap_rq_granted/%'
+             OR key LIKE 'cap_used_carried/%'",
     )?;
     let keys: Vec<String> = st
         .query_map([], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     for k in keys {
+        // `publish_used` still publishes the previous month.
+        let floor = if k.starts_with("cap_used_carried/") {
+            month.prev().unwrap_or(month)
+        } else {
+            month
+        };
         let ended = k
             .split('/')
             .nth(2)
             .and_then(Month::parse)
-            .is_none_or(|m| m < month);
+            .is_none_or(|m| m < floor);
         if ended {
             conn.execute("DELETE FROM mesh_meta WHERE key = ?1", [k])?;
         }
@@ -626,7 +645,9 @@ pub fn rights_requests(store: &SqliteStore, peer: &DeviceId) -> Result<Vec<Right
         let mut asks: Vec<(Month, u64, bool)> = Vec::new();
         if cap.owner_device == l.me && reclaiming(l.conn, &cap.cap_id, peer, l.now_ms)? {
             for m in [Some(month), month.next()].into_iter().flatten() {
-                if l.figures(&cap, m).device(peer).avail > 0 {
+                let f = l.figures(&cap, m);
+                let overrides = f.overrides_of(peer, &cap.owner_device);
+                if policy::reclaimable(f.device(peer).avail, overrides) > 0 {
                     asks.push((m, u64::MAX, true));
                 }
             }
@@ -642,17 +663,25 @@ pub fn rights_requests(store: &SqliteStore, peer: &DeviceId) -> Result<Vec<Right
             let fair = policy::fair_share(target, n);
             let mine = l.local_avail(&cap, month, &f)?;
             let theirs = f.device(peer).avail;
-            let pending = f.pending_decrease();
+            let overrides = f.overrides_of(peer, &cap.owner_device);
+            let reclaimable = policy::reclaimable(theirs, overrides);
+            // Net of this device's open burns (MC-2): what its own escrow
+            // already takes out is not asked back from a holder too.
+            let pending = l.pending_decrease(&cap, month, &f)?;
             let keep = policy::keep_after_lower(fair, l.own_used(&cap, month, &f)?, 0);
-            if cap.owner_device == l.me && pending > 0 && mine <= i128::from(keep) && theirs > 0 {
+            if cap.owner_device == l.me
+                && pending > 0
+                && mine <= i128::from(keep)
+                && reclaimable > 0
+            {
                 // The remainder of a lower: holders burned their excess; take
-                // back what is still above the cap (the owner burns it).
-                let want = u64::try_from(pending.min(theirs as u128)).unwrap_or(u64::MAX);
+                // back what is still above the cap (the owner burns it), never
+                // a holder's own overrides (MC-6).
+                let want = u64::try_from(pending.min(u128::from(reclaimable))).unwrap_or(u64::MAX);
                 asks.push((month, want, true));
             } else if pending > 0 {
                 // The cap is coming down: no rebalancing until it has.
             } else if let Some(want) = policy::wants(mine, fair) {
-                let overrides = f.overrides_of(peer, &cap.owner_device);
                 if policy::donatable(theirs, fair, overrides) > 0 {
                     asks.push((month, want, false));
                 }
@@ -703,7 +732,12 @@ pub fn grant(
             if *peer != cap.owner_device {
                 return Ok(Vec::new());
             }
-            ask.want
+            // Never this device's own overrides (ADR 0032 D4, MC-6).
+            let overrides = f.overrides_of(&l.me, &cap.owner_device);
+            ask.want.min(policy::reclaimable(
+                plan.avail(&cap, ask.month, &f)?,
+                overrides,
+            ))
         } else {
             if cap.owner_device == l.me && reclaiming(l.conn, &cap.cap_id, peer, l.now_ms)? {
                 return Ok(Vec::new());
