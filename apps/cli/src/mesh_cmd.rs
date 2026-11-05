@@ -38,6 +38,15 @@ use std::time::Duration;
 /// source address (DESIGN §D12).
 const MIN_INTERVAL_SECS: u64 = 5;
 
+/// What removing a device does not take back (MD-3): it keeps every value it
+/// already holds, and a removed device's late transfers stop counting.
+const REMOVE_CREDENTIALS_NOTE: &str = "Removal takes nothing back from that device. \
+     Credentials it imported, and shares sealed to it that it already holds, stay usable \
+     there: rotate them at the provider (`tethra rotation plan <credential>`).";
+const REMOVE_CAP_NOTE: &str = "If the device holds spend-cap rights, return them before you \
+     remove it: on the cap's owner, `tethra mesh cap reclaim <cap> --from <device>`, then let \
+     the two exchange once.";
+
 #[derive(Subcommand)]
 pub enum MeshCmd {
     /// Start a new mesh with this device as its only member.
@@ -158,8 +167,9 @@ pub enum MeshCmd {
     /// Mesh-wide settings (replicated to every device).
     #[command(subcommand)]
     Settings(SettingsCmd),
-    /// Monthly spend caps on mesh projects, kept across your devices
-    /// (alerts only in this version).
+    /// Monthly spend caps on mesh projects, kept across your devices: alerts
+    /// everywhere, and refusals by this device's gateway where you switch
+    /// enforcement on (`cap enforce`).
     #[command(subcommand)]
     Cap(crate::mesh_cap_cmd::CapCmd),
     /// Share one credential with chosen devices (sealed to each, imported
@@ -214,8 +224,18 @@ pub enum ProjectCmd {
 #[derive(Subcommand)]
 pub enum SettingsCmd {
     List,
-    Get { name: String },
-    Set { name: String, value: String },
+    Get {
+        name: String,
+    },
+    /// Set a mesh-wide setting. Lowering `retention.usage_days` deletes older
+    /// counters on every device, so it asks first.
+    Set {
+        name: String,
+        value: String,
+        /// Skip the confirmation a lower retention asks for.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -328,10 +348,14 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
         }
         MeshCmd::Remove { device, yes } => {
             let (vault, _token) = ctx.unlocked()?;
+            // Shown even with --yes, before anything changes (MD-3).
+            eprintln!("{REMOVE_CAP_NOTE}");
             if !ctx::confirm(
-                "Remove this device from the mesh? This device refuses it at once and the \
-                 others as they hear of it; its records up to now stay. It cannot rejoin \
-                 under the same identity.",
+                &format!(
+                    "Remove this device from the mesh? This device refuses it at once and the \
+                     others as they hear of it; its records up to now stay. It cannot rejoin \
+                     under the same identity. {REMOVE_CREDENTIALS_NOTE}"
+                ),
                 yes,
             )? {
                 bail!("aborted");
@@ -339,13 +363,18 @@ pub fn run(ctx: &Ctx, cmd: MeshCmd) -> Result<()> {
             eprintln!("Reauthentication required to remove a device.");
             let master = ctx::master_password()?;
             let (removed, epoch) = vault.mesh_device_remove(&master, &device)?;
-            let out = serde_json::json!({ "removed": removed, "access_key_epoch": epoch });
+            let out = serde_json::json!({
+                "removed": removed,
+                "access_key_epoch": epoch,
+                "note": REMOVE_CREDENTIALS_NOTE,
+            });
             render::emit(ctx.json, &out, || {
                 println!("Removed device {}.", short(&removed.to_hex()));
                 println!(
                     "The mesh access key rotated to epoch {epoch}; the other devices receive \
                      it in their next exchanges."
                 );
+                println!("{REMOVE_CREDENTIALS_NOTE}");
             });
         }
         MeshCmd::Leave { peer, yes } => leave(ctx, peer, yes)?,
@@ -850,7 +879,8 @@ fn settings_cmd(ctx: &Ctx, cmd: SettingsCmd) -> Result<()> {
                 }
             });
         }
-        SettingsCmd::Set { name, value } => {
+        SettingsCmd::Set { name, value, yes } => {
+            confirm_retention_lower(&vault, name.trim(), &value, yes)?;
             let v = vault.mesh_setting_set(name.trim(), &value)?;
             let out = serde_json::json!({ "name": name.trim(), "value": v });
             render::emit(ctx.json, &out, || {
@@ -862,6 +892,51 @@ fn settings_cmd(ctx: &Ctx, cmd: SettingsCmd) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Lowering the replicated retention horizon deletes usage counters older
+/// than it on every device (two days after the next exchanges), so it asks
+/// first; non-interactive runs need --yes (MD-8). Raising it, or a value core
+/// will refuse anyway, asks nothing.
+fn confirm_retention_lower(
+    vault: &api_tracker_core::vault::UnlockedVault,
+    name: &str,
+    value: &str,
+    yes: bool,
+) -> Result<()> {
+    use api_tracker_core::mesh::publish::{MAX_RETENTION_DAYS, RETENTION_SETTING};
+    if name != RETENTION_SETTING {
+        return Ok(());
+    }
+    let Some(new) = value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|d| (1..=MAX_RETENTION_DAYS).contains(d))
+    else {
+        return Ok(());
+    };
+    let current = vault
+        .mesh_settings()?
+        .into_iter()
+        .find(|(n, _, _)| n == RETENTION_SETTING)
+        .and_then(|(_, v, _)| v.as_u64());
+    match current {
+        Some(cur) if new < cur => {
+            // Printed even when the question cannot be asked, so a refused
+            // non-interactive run says why.
+            eprintln!(
+                "Lowering {RETENTION_SETTING} from {cur} to {new} days drops the mesh usage \
+                 counters older than {new} days (plus two) on every device, as each hears of \
+                 the change; they cannot be brought back. Local gateway data is not touched."
+            );
+            if !ctx::confirm("Lower it?", yes)? {
+                bail!("aborted");
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn peer_cmd(ctx: &Ctx, cmd: PeerCmd) -> Result<()> {
@@ -1229,12 +1304,8 @@ fn join(ctx: &Ctx, invite: &str, name: Option<String>) -> Result<()> {
             }
         );
     });
-    if !report.inviter_verified && report.exchange.aborted.is_none() {
-        eprintln!(
-            "warning: the inviting device's key does not match its roster entry; \
-             leave this mesh and pair again from a device you trust."
-        );
-    }
+    // A join whose inviter key does not match its roster entry fails and
+    // keeps nothing (audit MP-12), so a report here is always verified.
     Ok(())
 }
 
@@ -1251,7 +1322,14 @@ fn leave(ctx: &Ctx, peers: Vec<String>, yes: bool) -> Result<()> {
     let master = ctx::master_password()?;
     let report = api_tracker_mesh::replicate::leave_mesh(&vault, &master, peers)?;
     render::emit(ctx.json, &report, || {
-        if report.delivered {
+        if let Some(why) = report.not_announced_because {
+            // MI-2: an untrusted or held identity mints nothing; the local
+            // wipe still happened.
+            println!(
+                "Left the mesh without announcing it ({why}). The other devices still list \
+                 this one until one of them removes it (`tethra mesh remove`)."
+            );
+        } else if report.delivered {
             println!("Left the mesh; a peer received this device's departure.");
         } else {
             println!(
@@ -1350,13 +1428,15 @@ fn print_status(out: &StatusOut) {
     if let Some(s) = out.shares.as_ref() {
         if s.incoming_available + s.incoming_imported + s.outgoing_live + s.reseal_offers > 0 {
             println!(
-                "Credentials:  {} shared with this device to import, {} imported, {} shared                  from here; `tethra mesh credential list`",
+                "Credentials:  {} shared with this device to import, {} imported, {} shared \
+                 from here; `tethra mesh credential list`",
                 s.incoming_available, s.incoming_imported, s.outgoing_live
             );
         }
         if s.reseal_offers > 0 {
             println!(
-                "Reseal:       {} credential(s) could be sealed to devices that lack the                  current value; `tethra mesh credential list` (needs your master password)",
+                "Reseal:       {} credential(s) could be sealed to devices that lack the \
+                 current value; `tethra mesh credential list` (needs your master password)",
                 s.reseal_offers
             );
         }

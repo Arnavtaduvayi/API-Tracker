@@ -239,11 +239,18 @@ up. What your SDK sees:
   the header. Retry when the first completes.
 
 The request never reaches the provider. Cost is known only when a response
-completes, so the request that crosses the cap is allowed to finish (one
-request's worth of overshoot at most). A model with no price, or a response
+completes, so the request that crosses the cap is allowed to finish, and spend
+can go over the cap. Near the cap, and while no request cost is known (after a
+gateway restart or at the start of a month), requests run one at a time, so
+that is one request's cost. Otherwise each request in flight reserves the
+cap's typical (95th-percentile) cost, so several requests that each cost far
+more than that can together go over by more than one request, and a gateway
+restart can forget spend it had not saved yet
+([limitations](../mesh/KNOWN_LIMITATIONS.md#spend-caps)). A model with no price, or a response
 that reports no usage (an OpenAI stream without `stream_options:
-{"include_usage": true}`), is never blocked; it is counted as unpriced or
-unmetered, and `status` shows how many. If the gateway cannot read the caps (no
+{"include_usage": true}`), is never charged against the cap; it is counted as
+unpriced or unmetered, and `status` shows how many (while a cap has seen no
+priced request, its requests still run one at a time). If the gateway cannot read the caps (no
 mesh, a database it cannot open, a stuck poller), it forwards everything and
 `tethra gateway status` says why. `status` also shows what each enforced cap
 still admits. Anything that does not go through the gateway is not capped.

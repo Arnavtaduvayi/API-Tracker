@@ -20,7 +20,8 @@
       "verdict": "confirmed",
       "title": "Peer-supplied dot hashes and unbounded ChainReply seqs yield fork evidence (even against oneself)",
       "remediation_track": "R1",
-      "decision": "Fork evidence needs two verified signed items; an unsigned mismatch ends the session; ChainReply seqs bounded to (lo, hi]; never report a fork against oneself from a peer's word."
+      "decision": "ChainReply entries bounded to the queried (lo, hi]; a device never reports its own origin forked from a peer's chain claim. Amended at remediation (2026-11-05): the broader 'fork evidence needs two verified signed items' was not adopted, because superseded items survive only as dot hashes (requiring signed items would leave real forks in superseded history unreported) and any known device's fork.report already counts (PROTOCOL 6.3), so tricking an honest device into reporting gains a member nothing it cannot do directly. Residual documented in KNOWN_LIMITATIONS (Membership) and ADR 0031.",
+      "decision_original": "Fork evidence needs two verified signed items; an unsigned mismatch ends the session; ChainReply seqs bounded to (lo, hi]; never report a fork against oneself from a peer's word."
     },
     {
       "id": "MP-3",
@@ -92,7 +93,7 @@
       "verdict": "confirmed",
       "title": "Any member can revoke another device's share",
       "remediation_track": "R1",
-      "decision": "A revoke counts only from the share's sharer or its recipient (PROTOCOL \u00a75.6)."
+      "decision": "A revoke counts only from the share's sharer or its recipient (PROTOCOL §5.6)."
     },
     {
       "id": "MP-11",
@@ -227,7 +228,8 @@
       "verdict": "confirmed",
       "title": "The caps simulator never runs the escrow fence and has no over-burn invariant",
       "remediation_track": "R3",
-      "decision": "Add an over-burn invariant at quiescence; the fence-mode simulation is recorded as remaining work."
+      "decision": "Add an over-burn invariant at quiescence; the fence-mode simulation is recorded as remaining work.",
+      "decision_note": "The invariant allows the integer fair-share remainder (fewer than one micro per holder): seed 6 settled 2 micros under the target on the base commit too (3 holders x floor(590000/3)), reproduced on HEAD 70ebeb1 with only the invariant applied."
     },
     {
       "id": "MC-5",
@@ -434,7 +436,7 @@
       "verdict": "accepted",
       "title": "Invite copies in plain Strings for the response",
       "remediation_track": "-",
-      "decision": "The invite must reach the user once; short-lived (\u2264 60 min, single use); documented."
+      "decision": "The invite must reach the user once; short-lived (≤ 60 min, single use); documented."
     }
   ]
 }

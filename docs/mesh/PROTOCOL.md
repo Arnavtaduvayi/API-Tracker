@@ -136,7 +136,7 @@ month).
 
 | Kind | Key | Payload members | Extra rules |
 |---|---|---|---|
-| `roster.add` | added `device_id` | `added_by`, `name`, `noise_pub`, `seal_pub`, `sign_pub` | `added_by` MUST equal `origin`. `sign_pub` MUST be a valid, non-small-order Ed25519 point. The key MUST equal `derive_device_id(sign_pub, noise_pub, seal_pub)` (§6.1). |
+| `roster.add` | added `device_id` | `added_by`, `name`, `noise_pub`, `seal_pub`, `sign_pub` | `added_by` MUST equal `origin`. `sign_pub` MUST be a valid, non-small-order Ed25519 point. `noise_pub` and `seal_pub` MUST NOT be small-order X25519 points (the seven encodings of libsodium's blocklist, bit 255 ignored; amended in 12, audit MP-5: a share sealed to such a key is readable by anyone). The key MUST equal `derive_device_id(sign_pub, noise_pub, seal_pub)` (§6.1). |
 | `roster.remove` | removed `device_id` | `cutoff_seq` (u64) | |
 | `device.info` | `device_id` | `listen_addrs` (≤ 16 strings of 1-255 bytes, no whitespace or controls), `name` | key MUST equal `origin`. |
 | `mesh.setting` | setting name (slug) | `value` (any canonical JSON) | |
@@ -406,9 +406,12 @@ One instance per `(cap_id, month)` (UTC calendar month). Amounts are micro-USD.
   or forwarding). Any device can also self-mint a labelled override, so
   colluding devices gain nothing they could not get openly.
 - **Invariant** (honest operation, any partitions, any merge order):
-  `Σ_i U[i] ≤ Σ minted − Σ burned`, and `avail(i) ≥ 0` for every device; with
-  gateway overshoot, `Σ U` may exceed that by at most one request's cost per cap
-  per device.
+  `Σ_i U[i] ≤ Σ minted − Σ burned`, and `avail(i) ≥ 0` for every device. With
+  gateway overshoot, `Σ U` may exceed that by what each enforcing device's
+  gateway admitted past its rights: one request's cost where requests run one
+  at a time (near exhaustion, and while no request cost is known), more where
+  concurrent requests each cost far more than the reserved p95, plus spend a
+  gateway restart forgot (MESH-SI-9, KNOWN_LIMITATIONS "Spend caps").
 
 **Worked example.** Ids order `A < B < O`; O is the owner.
 `R[O][O] = 100`, `R[O][burn] = 10`, `R[O][A] = 30`, `R[O][B] = 20`,
@@ -454,7 +457,11 @@ the last 30 days.
   month `m` only. The effective target is `target + Σ overrides`.
 - **Lower.** `cap.target := x` (LWW) for `m`, and for `m + 1` when a larger
   target is already written there. `pending = supply − max(effective target,
-  total used)` (never negative). A holder with `pending > 0` burns
+  total used)` (never negative), where a device deciding counts its own **open
+  burns** (escrow rows waiting for its running gateway's acknowledgement) as
+  already burned — otherwise every round before the acknowledgement burned, or
+  asked holders to give back, the same decrease again (amended in 12, audit
+  MC-2). A holder with `pending > 0` burns
   `min(local_avail − keep, pending)`, `keep = max(0, fair − own used) + own
   overrides`. The **owner** also burns, from its own keep, the part of
   `pending` the other holders cannot cover: `pending − own burn − Σ` over the
@@ -475,13 +482,21 @@ the last 30 days.
   grant per requester, cap and month, per 5 minutes.
 - **Reclaim (`reclaim = true`, owner only).** A lower's remainder: once the
   owner's own `local_avail ≤ keep`, it asks a holder for `min(pending, its
-  avail)`; a holder honours `reclaim` only from the cap's owner, giving
-  `min(want, local_avail)` to it. A manual `cap reclaim` asks for everything
+  avail above its overrides)`; a holder honours `reclaim` only from the cap's
+  owner, giving `min(want, local_avail − own overrides)` to it — an override
+  raised the cap for that device only and is never given back (amended in 12,
+  audit MC-6). A manual `cap reclaim` asks for everything
   for 24 hours (current and next month), and the owner grants those devices
   nothing meanwhile.
 - **`cap.used`.** A device with a binding to the cap's root publishes, for the
-  current and previous month, its local month spend whenever it differs from
-  what it published; a decrease bumps the epoch.
+  current and previous month, its local month spend whenever it exceeds what
+  it published. It never publishes a decrease within a month: when the local
+  rollup falls below the published figure (local usage deleted, a retention
+  sweep, a binding changed) the difference is carried locally as spend
+  (`mesh_meta` `cap_used_carried/<cap>/<month>`), and later spend counts on top
+  of it. (Amended in 12, audit MC-3: a decrease handed back rights already
+  spent. The protocol's epoch rule for `cap.used` is unchanged; honest
+  devices no longer use it.)
 - **Every give** (distribution, grant, burn, reclaim) is a local escrow row
   first and is decided inside the transaction that publishes it (ADR 0032 D8,
   D9).
@@ -505,7 +520,7 @@ per §6.4. Then:
 | `usage` | For each `usage.counter` key with at least one admitted entry: each admitted origin's `(epoch, totals)`. |
 | `caps` | For each `cap.def` key with at least one admitted entry: `Conflicted` if admitted entries come from more than one origin; otherwise `Defined` with that entry's `mesh_project_id`, `owner_device`, `created_hlc`, and `frozen` = the owner device is removed. |
 | `cap_months` | For each `(cap_id, month)` that has an admitted `cap.rights` or `cap.used` entry, or an admitted `cap.target` entry: `target` = the LWW `target_micros` of `<cap_id>/<month>` (or none); `devices` and totals = the bounded-counter view (§5.5) over the admitted `cap.rights` entries (`from` = origin, `to` = the key's recipient, amount = `amount_micros`) and admitted `cap.used` entries (`U[origin] = used_micros`). `devices` lists every device that is the origin or device-recipient of an admitted rights entry or the origin of an admitted used entry. |
-| `shares` | For each `<credential_ref>/<recipient>` whose recipient is **not removed**: let *S* be the admitted `share.sealed` entry with the greatest `(hlc, origin)`. If *S* exists, the value is `Revoked` (revoker = the origin of the greatest `(hlc, origin)` admitted `share.revoke` whose `share_id` equals *S*'s, and that `share_id`) when such a revoke exists, whatever the HLCs, and otherwise `Sealed` (sharer = *S*'s origin, and its payload fields). A revoke naming any other share id ends nothing. If no *S* exists, the value is `Revoked` by the greatest admitted revoke, if any. Keys with no admitted entry are absent. (Amended in 11: the rule was the greatest `(hlc, origin, rank)` over both kinds, under which a revoke of an older share, written by a device that had not seen a newer one, hid the newer share.) |
+| `shares` | For each `<credential_ref>/<recipient>` whose recipient is **not removed**: let *S* be the admitted `share.sealed` entry with the greatest `(hlc, origin)`. If *S* exists, the value is `Revoked` (revoker = the origin of the greatest `(hlc, origin)` admitted `share.revoke` whose `share_id` equals *S*'s **and whose origin is *S*'s origin or the key's recipient**, and that `share_id`) when such a revoke exists, whatever the HLCs, and otherwise `Sealed` (sharer = *S*'s origin, and its payload fields). A revoke naming any other share id, or by any other device, ends nothing. If no *S* exists, the value is `Revoked` by the recipient's greatest admitted revoke, if any. (Amended in 12, audit MP-10: any member could end another device's share.) Keys with no admitted entry are absent. (Amended in 11: the rule was the greatest `(hlc, origin, rank)` over both kinds, under which a revoke of an older share, written by a device that had not seen a newer one, hid the newer share.) |
 
 **Valid items**, as a model with every item ever minted (the simulator's
 oracle) must judge them:
@@ -592,7 +607,11 @@ is within its cutoff and so still admitted) is not imported: a device removed
 because it was lost or stolen may have shared a value of its choosing.
 Nothing is stored on any refusal.
 
-**Revoking.** `share.revoke` names the share id it ends. It deletes nothing:
+**Revoking.** `share.revoke` names the share id it ends, and counts only when
+its origin is that share's sharer or the key's recipient (amended in 12, audit
+MP-10). A sharer asking whether its own share was revoked names itself as the
+sharer: share ids are readable metadata, so a member that copies one into its
+own `share.sealed` does not become a sharer of another device's share. It deletes nothing:
 a device that imported the value keeps it, and the credential stays valid at
 its provider. Replaying a superseded or revoked share changes no view (the
 store already holds that entry or a later one of its origin). An
@@ -656,7 +675,10 @@ A pure function of the state, in this fixed order (so nothing is circular):
 2. **Forks**: a `fork.report` counts when its origin is known. A device's fork
    seq is the **minimum** `seq` over the reports about it that count.
 3. **Cutoffs**: a `roster.remove` counts when its origin is known. A device's
-   cutoff is the **maximum** `cutoff_seq` over the removes that count. A device
+   cutoff is the **minimum** `cutoff_seq` over the removes that count
+   (amended in 12, audit MP-1: with the maximum, a removed device's own
+   `remove(self, u64::MAX)` cancelled its removal; a low cutoff only shrinks
+   what counts, which any known device can already do by removing). A device
    with a cutoff is **removed**. Removers are judged against *known*, so two
    devices that remove each other concurrently are both removed, a removed or
    forked device's removes still count (a compromised member can remove others;
@@ -734,6 +756,12 @@ every later one, so the first difference can be found by bisection.
   and `ChainReply { origin, entries: [[seq, chain, hash]] }`, narrowing
   `(lo, hi]` — chains equal at `lo`, different at `hi` — until `hi = lo + 1`.
   The fork seq is `hi`; the two hashes at `hi` are its own and the peer's.
+  Reply entries outside the queried `(lo, hi]` are ignored, and a device
+  never reports **its own** origin forked from a peer's chain claim: it knows
+  what it signed, and other devices still find a real clone of it between
+  themselves. (Amended in 12, audit MP-2. The peer's hash at `hi` is a claim,
+  not a signed item; a fork report always rests on the reporting member's
+  word, as any known device's `fork.report` counts, KNOWN_LIMITATIONS.)
 - A direct collision also proves a fork: an item **or a dot hash** arriving for
   a dot already in the dot log but with a different hash. At commit a receiver
   MUST compare every hash the batch carries for an already-logged dot — the
@@ -779,7 +807,11 @@ the sender's history past what the sender remembers — MUST send
 `Direct RollbackNotice { held_seq }` (its `vv` for the sender). The sender MUST
 NOT mint again until its own `vv[self] ≥ held_seq`; it recovers its own items
 through ordinary exchanges (a device accepts its own origin's items like any
-other), and its next seq then follows them.
+other), and its next seq then follows them. The reporter sends `held_seq` from
+the VV its own `Hello` advertised, and a receiver ignores a notice whose
+`held_seq` exceeds the reporter's `Hello` `vv` for the receiver: it is no
+evidence of a rollback and would only stop the receiver minting. (Amended in
+12, audit MP-9.)
 
 **Status: implemented (05)** (ADR 0031 R22). The receiver stores the notice per
 reporting device (`mesh_meta.rollback_hold/<reporter>`), so every process that
@@ -791,24 +823,30 @@ it too. A fork report found while held is left for a later exchange.
 ### 7.5 Clone marker
 
 `<data-dir>/mesh/identity.marker` (a 0600 file in a 0700 directory) holds
-`{"v":1, "device_id", "marker_nonce", "seq_high_water"}`. `marker_nonce` is 16
-random bytes, also stored in `mesh_self`. Identity creation writes the marker
-before the identity's first seq is used.
+`{"v":2, "device_id", "marker_nonce", "seq_high_water", "seq_floor"}`.
+`marker_nonce` is 16 random bytes, also stored in `mesh_self`. Identity
+creation writes the marker before the identity's first seq is used.
+`seq_floor` is the `vv[self]` the database had durably committed when the
+marker was written (amended in 12, audit MI-1; a version-1 marker, without it,
+reads with `seq_floor = seq_high_water − 64`, the rule version 1 applied).
 
 - Before a store mints a seq above the mark, it MUST re-read the marker,
   require it to vouch for this database (below), and replace it with
-  `seq_high_water = seq + 63` — temp file, fsync, rename, fsync of the
+  `seq_high_water = seq + 63` and `seq_floor` = the `vv[self]` its write
+  transaction started from — temp file, fsync, rename, fsync of the
   directory — so one durable write covers a block of 64 seqs. Only then is
-  the seq used.
+  the seq used. After a transaction that minted past a block commits, the
+  store raises `seq_floor` to the committed `vv[self]` (best effort, under the
+  write lock), so detection stays one block tight.
 - A database's identity `(device_id, marker_nonce)`, whose own log reaches
   `vv[self]`, is classified against the marker:
   - **missing** — no marker (the database was copied without it);
   - **mismatch** — the marker names another device id or nonce (copied into a
     directory with another identity's marker);
-  - **rolled back** — `seq_high_water > vv[self] + 64`: the database is older
-    than seqs it already reserved and may have used (a crash between the
-    marker write and the mint leaves exactly one block, so honest databases
-    never exceed this);
+  - **rolled back** — `vv[self] < seq_floor`: the database is older than a
+    state it had already committed. (Amended in 12, audit MI-1: the rule was
+    `seq_high_water > vv[self] + 64`, under which a batch that reserved
+    several blocks and then rolled back locked the identity for good.)
   - **ok** otherwise.
 - Anything but **ok** means the store MUST NOT mint, and the node MUST NOT run
   (05). `mesh status` and `doctor` show the reason; recovery is `mesh leave`
@@ -946,13 +984,19 @@ the other then drops, as for usage.
 `Hello.digests` maps every origin in the sender's VV to
 `BLAKE3-derive_key("tethra-mesh v1 origin digest", concatenation of the hashes
 of the sender's held items of that origin, sorted ascending)`. After the
-`Hello` exchange, a side streams **all** its held items of origin `o` as repair
+`Hello` exchange, a side streams its held items of origin `o` as repair
 items (`Items.repair = true`) when its digest for `o` differs from the peer's
 and either
 
 - `own.vv[o] == peer.vv[o]` — the main path has nothing to send, yet the two
   devices hold different items, which honest operation never produces; or
 - `o` is forked in its own roster (§7.3).
+
+Repair items fit in what the main path left of the session's staging bound
+(`max_staged`, §11): the main path goes first, and a repair cut short continues
+in the next session, whose digests still differ. (Amended in 12, audit MP-3:
+unbounded repair pushed a session with a device far behind past the bound, so
+that device never caught up while any repair was due.)
 
 A receiver checks repair items like any other (§3.3, without the gap check)
 and commits them with the main path, as entries only: repair never changes the
@@ -988,11 +1032,16 @@ of an origin that is not forked is a bug signal: count it
   (`mesh_meta.write_gen`) with the one the store last saw. If another process
   wrote, the store reloads its in-memory state inside the transaction before it
   decides anything.
-- **Restore and leave.** Restoring a backup deletes every `mesh_*` row (identity,
-  keys, items, VV, dots, peers, invites, bindings, cursors, escrow, logs),
-  turns cap enforcement off, and removes the marker if it names the wiped
-  identity. The restored vault must pair again. `mesh leave` (04) performs the
-  same local wipe.
+- **Restore and leave.** Backups carry no `mesh_*` row, only the device id the
+  vault had, and a restore skips any `mesh_*` table a backup from an older
+  build carries (never inserted). The restore then deletes any `mesh_*` row,
+  turns cap enforcement off, and removes the marker if it names the backup's
+  identity. The restored vault must pair again. (Amended in 12, audits MI-3,
+  MI-4: restore inserted the rows and wiped them in separate transactions,
+  and backups held the wrapped keys, access keys and invite psks.) `mesh
+  leave` (04) performs the same local wipe; when this device's identity is
+  untrusted (marker missing, mismatched, rolled back or unreadable) or held by
+  a rollback notice, it mints no self-removal and still wipes (audit MI-2).
 
 ## 9. Pairing, sessions, rotation, removal
 
@@ -1016,7 +1065,10 @@ Every connection is TCP. Bytes, in order:
    `u16`-length-prefixed) with nonces counting from 0 per direction. A frame
    over 1 MiB, or a message that does not decrypt, ends the session.
 
-Timeouts: 5 s for the preamble and handshake, 30 s idle once authenticated,
+Timeouts: 5 s for the preamble and the whole handshake together — one
+deadline from accepting the connection (dialling, for the initiator), however
+the peer paces its bytes (amended in 12, audit MP-4: a per-read timeout let a
+peer trickle bytes and hold a slot indefinitely) — 30 s idle once authenticated,
 10 minutes per exchange. A listener runs at most 8 connections at once and
 accepts at most 10 new connections per source IP per minute (token bucket);
 more are closed at once (§11).
@@ -1057,7 +1109,9 @@ joiner                                             inviter
   msg1  -> e                     ──►
                                  ◄──  msg2  <- e, ee, s, es       (inviter's
                                                                     static key)
-  msg3  -> s, se, psk            ──►  fails ⇒ attempts += 1 (5 ⇒ dead), close
+  msg3  -> s, se, psk            ──►  does not authenticate ⇒ attempts += 1
+                                      (5 ⇒ dead), close; a timeout or reset
+                                      costs nothing (audit MP-11)
   frame PairRequest              ──►  {name, sign_pub, noise_pub, seal_pub}:
                                       noise_pub MUST equal the handshake's
                                       static key; claim the invite in one
@@ -1077,7 +1131,9 @@ live invite. Refusal reasons come from a fixed list, and a joiner shows only
 reasons on that list. Two joiners holding the same token race for the claim
 transaction, and exactly one wins. After its first exchange the joiner checks
 that the inviter's roster entry carries the Noise key that answered the
-pairing (`inviter_verified`).
+pairing; if it does not (or the exchange delivered no roster entry to check),
+the join fails and the joiner keeps no identity (amended in 12, audit MP-12:
+the check was only reported).
 
 ### 9.4 Member sessions
 
@@ -1100,7 +1156,11 @@ initiator                                          responder
 
 The initiator tries its current key, then (on a handshake failure) its
 previous one within the grace period, on a new connection. Neither side sends a
-frame until both checks have passed (MESH-SI-2). A running node re-reads its
+frame until both checks have passed (MESH-SI-2). When several active devices
+carry the static key that answered (a member added a device with a copied
+`noise_pub`), the session's peer is the one the `Hello` names among them;
+only the holder of that Noise secret completes the handshake, whichever id it
+names (amended in 12, audit MP-7: the first match shadowed the real device). A running node re-reads its
 roster before every check, so a removal made by another process applies at the
 next handshake.
 

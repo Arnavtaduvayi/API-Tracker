@@ -14,6 +14,16 @@ import { ReauthDialog } from "./ReauthDialog";
 import { MeshPairDialog } from "./MeshPairDialog";
 import { meshErrText, scrubbed, shortId } from "./MeshCommon";
 
+/**
+ * What removal does not take back (MD-3): the removed device keeps every
+ * value it already holds, and spend-cap rights are best returned first.
+ */
+export const REMOVE_KEEPS_NOTE =
+  "Removal takes nothing back from that device. Credentials it already imported, and shares " +
+  "sealed to it that it already holds, stay usable: rotate them at the provider. If it holds " +
+  "spend-cap rights, reclaim them first on the cap's owner (Reclaim on the project's cap " +
+  "panel, or `tethra mesh cap reclaim <cap> --from <device>`) and let the two exchange once.";
+
 function deviceLabel(d: MeshDevice): string {
   return `${d.name ?? "unnamed"} (${d.short_id || shortId(d.device_id)})`;
 }
@@ -205,7 +215,8 @@ export function MeshDeviceList(props: { refreshKey: number; onChanged: () => voi
           body={
             "This device refuses it at once, and the other devices as they hear of it. Its " +
             "records up to now stay. It cannot rejoin under the same identity; to use it " +
-            "again, it leaves and pairs again."
+            "again, it leaves and pairs again. " +
+            REMOVE_KEEPS_NOTE
           }
           confirmLabel="Remove"
           danger

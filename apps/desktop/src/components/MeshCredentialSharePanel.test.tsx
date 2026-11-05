@@ -182,6 +182,16 @@ describe("MeshCredentialSharePanel", () => {
     await user.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(mockApi.meshShareRevoke).toHaveBeenCalledWith(SHARE_ID));
     expect(await screen.findByText(/Revoked 1 share\(s\)/)).toBeInTheDocument();
+    // Cutting a device off is revoke first, then rotate: a reseal after a
+    // rotation would otherwise seal the new value to that device too (MD-4).
+    const notices = screen.getAllByText(
+      /To cut a device off, revoke its share first, then rotate/,
+    );
+    expect(notices.length).toBeGreaterThan(0);
+    for (const n of notices) {
+      expect(n).toHaveTextContent(/a reseal never offers a device whose share you revoked/);
+      expect(n).not.toHaveTextContent(/To cut a device off, rotate the credential\./);
+    }
     await user.click(screen.getByRole("button", { name: "Open Rotation" }));
     expect(onOpenRotation).toHaveBeenCalled();
   });

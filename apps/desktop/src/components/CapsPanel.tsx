@@ -38,9 +38,14 @@ export const ENFORCE_EXPLANATION =
   "With enforcement on, this device's gateway refuses requests to this project with HTTP 403 " +
   "(not 429, so SDKs do not retry them) once this device's share of the cap for the month is " +
   "used up; a refused request never reaches the provider. A request's cost is known only after " +
-  "its response, so near the cap the gateway lets one request through at a time and the " +
-  "overshoot is at most one request. Models without a price and responses without usage are " +
-  "never blocked (they are counted as unpriced or unmetered). It is a self-limit on traffic " +
+  "its response, so spend can go over the cap. Near the cap, and while no request cost is known " +
+  "(after a gateway restart or at the start of a month), the gateway lets one request through " +
+  "at a time; otherwise each request in flight reserves the cap's typical (95th-percentile) " +
+  "cost, so several requests that each cost far more than that can together go over by more " +
+  "than one request, and a gateway restart can forget spend it has not saved yet. Models " +
+  "without a price and responses without usage are " +
+  "never charged against the cap (they are counted as unpriced or unmetered). It is a " +
+  "self-limit on traffic " +
   "through Tethra's gateway, not a security boundary: requests that do not go through the " +
   "gateway are not capped. It applies to this device only, and no other device can change it.";
 

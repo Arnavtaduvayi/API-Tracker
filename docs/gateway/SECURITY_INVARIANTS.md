@@ -145,9 +145,15 @@ reporting a blocker.
   is a non-retryable `403` (never `429`, which SDKs retry) with a
   provider-shaped JSON body and an `x-tethra-cap` header, written before any
   upstream connect; it carries static text, the cap id and the month only.
-  Every in-flight request reserves the cap's recent p95 cost; near
-  exhaustion one request at a time is admitted per cap (overshoot ≤ one
-  request's cost), and the reservation is released on every exit path. The
+  Every in-flight request reserves the cap's recent p95 cost, and a request
+  is admitted beside others only while those reservations leave the margin;
+  near exhaustion, and while no request cost is known (after a restart or at
+  the start of a month), one request at a time is admitted per cap. The
+  overshoot is therefore one request's cost when requests run one at a time,
+  but several concurrent requests that each cost far more than the p95 can
+  together go over by more, and spend not yet persisted is forgotten by a
+  restart (`docs/mesh/KNOWN_LIMITATIONS.md` "Spend caps"). The reservation is
+  released on every exit path. The
   unread request body is drained (bounded) after the 403, so the client reads
   the refusal rather than a connection reset.
   The gate **fails open** and reports why (no mesh, an unreadable or newer

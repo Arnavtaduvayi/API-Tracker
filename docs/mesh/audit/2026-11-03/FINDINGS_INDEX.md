@@ -6,7 +6,7 @@ Verdicts: **41 confirmed** (each fixed failing-test-first, evidence in `evidence
 | Id | Severity | Verdict | Finding | Decision |
 |---|---|---|---|---|
 | MP-1 | high | confirmed | A removed device's own roster.remove can raise its cutoff to u64::MAX and cancel its removal | Cutoff becomes the minimum over counting removes; a hostile low cutoff only shrinks what counts. |
-| MP-2 | medium | confirmed | Peer-supplied dot hashes and unbounded ChainReply seqs yield fork evidence (even against oneself) | Fork evidence needs two verified signed items; an unsigned mismatch ends the session; ChainReply seqs bounded to (lo, hi]; never report a fork against oneself from a peer's word. |
+| MP-2 | medium | confirmed | Peer-supplied dot hashes and unbounded ChainReply seqs yield fork evidence (even against oneself) | ChainReply seqs bounded to (lo, hi]; never report a fork against oneself from a peer's word. *Amended at remediation:* "fork evidence needs two verified signed items" not adopted (superseded items survive only as dot hashes, so it would hide real forks; any known device's `fork.report` already counts); residual in KNOWN_LIMITATIONS. |
 | MP-3 | medium | confirmed | A device far behind never catches up while any repair is due (repair items push past max_staged) | The sender's plan budgets repair items inside max_staged, main path first. |
 | MP-4 | medium | confirmed | A trickled handshake holds a session slot far past the handshake timeout | One deadline for the whole handshake. |
 | MP-5 | medium | confirmed | noise_pub and seal_pub in roster.add are not checked for small-order points; a share to such a key is readable by anyone | Refuse small-order X25519 keys at parse (R10: invalid payload rejected). |

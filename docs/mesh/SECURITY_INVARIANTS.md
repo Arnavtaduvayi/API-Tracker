@@ -68,6 +68,17 @@ NN)** otherwise.
   a_token_is_single_use_even_for_two_concurrent_joiners,
   a_typo_fails_before_any_connection_and_a_wrong_mesh_cannot_talk}`,
   `noise_spike::a_wrong_access_key_fails_at_message_one`.
+  *Audit (12):* a removed device's own remove cannot raise its cutoff (MP-1,
+  `roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff`, the
+  oracle's twin); small-order Noise and sealing keys are invalid (MP-5,
+  `kinds::tests::roster_add_refuses_small_order_noise_and_seal_keys`,
+  `mesh_audit_protocol::a_small_order_seal_key_is_refused_so_no_share_can_be_sealed_to_it`);
+  a copied Noise key cannot shadow a device (MP-7,
+  `proto::tests::a_shared_noise_key_resolves_by_the_hellos_device_id`,
+  `adversarial::a_ghost_device_with_a_copied_noise_key_does_not_shadow_the_real_one`);
+  pairing counts only authenticated failures and enforces the inviter check
+  (MP-11, MP-12, `pairing::{a_dropped_connection_does_not_count_as_a_wrong_attempt,
+  join_fails_when_the_inviter_key_does_not_match_its_roster_entry}`).
 - **MESH-SI-12 No third parties.** No Tethra server, relay, rendezvous or
   third-party NAT service. *Enforced by:* there is no such code; reachability is
   the user's LAN or VPN. *Status:* implemented (01) as a design rule.
@@ -125,10 +136,17 @@ NN)** otherwise.
   items are back (ADR 0031 R22):
   - Forks are detected by dot-log chains and reported at their true divergence
     point (02); rollbacks get a `RollbackNotice` (02).
-  - Restore deletes every `mesh_*` row and the marker that names the wiped
-    identity (`identity::on_restore`, called by `backup::restore_backup`).
-  - A store whose marker is missing, foreign or more than one block ahead of
-    its log refuses to mint, and does not trust the old mark.
+  - Backups carry no `mesh_*` row (only the device id); restore never inserts
+    one (an older backup's are skipped), deletes any, and removes the marker
+    that names the backup's identity (`identity::on_restore_after_skipping`,
+    called by `backup::restore_backup`; audit MI-3, MI-4).
+  - A store whose marker is missing, foreign or unreadable, or whose log is
+    below the marker's committed floor, refuses to mint and does not trust the
+    old mark (marker v2, audit MI-1: a failed multi-block batch no longer
+    looks like a rollback).
+  - `mesh leave` always wipes, minting no self-removal when the identity is
+    untrusted or held (audit MI-2); a rollback notice above the reporter's own
+    `Hello` is ignored (audit MP-9).
   - Two stores on one database never reuse a seq.
   - `identity::preflight` fails on a bad marker or a fork report naming this
     device. The node (05) runs it before starting.
@@ -148,15 +166,26 @@ NN)** otherwise.
   `mesh_cli::a_restored_backup_leaves_the_mesh_and_can_start_a_new_one`,
   `sqlite_store::tests::a_rollback_hold_refuses_every_mint_until_the_own_log_is_back`,
   `replication::a_rolled_back_device_recovers_its_own_items_before_minting_again`,
-  `doctor::a_marker_mismatch_is_found_and_the_node_refuses_to_start`.
+  `doctor::a_marker_mismatch_is_found_and_the_node_refuses_to_start`,
+  `mesh_audit_identity::{a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok,
+  a_failed_mint_batch_in_another_store_never_stops_this_one,
+  a_rollback_past_a_committed_multi_block_batch_is_still_detected,
+  leave_succeeds_on_a_missing_mismatched_or_rolled_back_marker,
+  leave_succeeds_under_a_rollback_hold, backup_payload_carries_no_mesh_rows,
+  restore_never_imports_mesh_rows_from_an_older_backup,
+  a_failed_rotation_after_removal_is_completed_by_a_retry,
+  every_mesh_writing_connection_uses_fullfsync}`,
+  `marker::tests::{the_floor_not_the_mark_decides_a_rollback,
+  version_1_markers_still_read_with_the_rule_they_had}`,
+  `proto::tests::{a_rollback_notice_above_the_reporters_hello_is_ignored,
+  a_rollback_notice_is_sent_from_the_reporters_own_hello}`.
 - **MESH-SI-8 Bounds.** Every frame, batch, stage, session, rate and transaction
-  is bounded (PROTOCOL §11). *Status:* partial (02): items, bodies, payload
+  is bounded (PROTOCOL §11). *Status:* implemented (01-05): items, bodies, payload
   depth, `kind`/`key` (01); per session ≤ 50 000 staged items and dots,
   batches ≤ 512 items, frames ≤ 1 MiB, a 50 000-seq gap bound, 10 000 items per
   origin per hour, `ChainQuery` ≤ 64 seqs (02, `proto::Limits`); write
   transactions chunked by whole origins (03, `SqliteStore`, ~2 000 rows a
-  chunk; one origin's range is one transaction). Concurrency and timeouts land
-  in 04-05. Transport (04): frames ≤ 1 MiB, handshake messages ≤ 1 KiB, a
+  chunk; one origin's range is one transaction). Transport (04): frames ≤ 1 MiB, handshake messages ≤ 1 KiB, a
   5 s handshake, 30 s idle and 10 min exchange timeout, ≤ 8 connections at once,
   ≤ 10 new connections per source IP per minute, ≤ 5 pairing attempts per
   invite. The node (05): the 8 session slots are shared by inbound and
@@ -171,6 +200,14 @@ NN)** otherwise.
   `codec::tests::oversize_is_refused_both_ways`, `codec::tests::depth_limit`,
   `codec::tests::envelope_field_validation`,
   `item::tests::short_and_oversize_wire_items_are_refused`.
+  *Audit (12):* one deadline covers the preamble and the whole handshake
+  (MP-4, `bounds::a_trickled_handshake_is_closed_at_the_handshake_deadline`);
+  repair fits in the staging bound after the main path (MP-3,
+  `proto::tests::repair_fits_in_what_the_main_path_leaves_of_max_staged`);
+  `ChainReply` entries outside the queried range are ignored (MP-2,
+  `proto::tests::{a_chain_reply_outside_the_queried_range_is_ignored,
+  a_peers_chain_claim_never_reports_this_device_forked}`); the adversarial
+  suite (`crates/mesh/tests/adversarial.rs`, Phase A).
 
 ## Keys and secrets
 
@@ -208,6 +245,12 @@ NN)** otherwise.
   (CLI stdout and stderr, human and `--json`), smoke's sharing block,
   `kinds::tests::share_debug_never_prints_the_sealed_bytes`,
   `MeshCredentialSharePanel.test.tsx`, `MeshIncomingShares.test.tsx`.
+  *Audit (12):* only the sharer or the recipient can revoke a share (MP-10,
+  `views::tests::{a_revoke_by_neither_sharer_nor_recipient_ends_nothing,
+  copying_a_share_id_does_not_make_a_member_its_sharer}`, the oracle's twin);
+  no share can be sealed to a small-order key (MP-5); a credential with live
+  outgoing shares cannot be deleted until they are revoked (MI-8,
+  `mesh_audit_identity::deleting_a_credential_with_live_shares_is_refused_until_they_are_revoked`).
 - **MESH-SI-7 Key lifetime.** Mesh private keys are in memory only while the
   vault is unlocked or the CLI session lives; the sealing key is used only
   inside a reauth-gated import. Key types never print secret material.
@@ -262,10 +305,17 @@ NN)** otherwise.
 
 - **MESH-SI-9 Enforcement.** Cap enforcement is local and opt-in, peers cannot
   toggle it, the forward path never waits on the database or network for a cap
-  decision, and overshoot is ≤ one in-flight request's cost per cap per device.
+  decision, and overshoot is bounded only as far as costs are known: near
+  exhaustion, and while no request cost is known (after a gateway restart or
+  at the start of a month), requests run one at a time per cap; beside other
+  in-flight requests a request is admitted only while every in-flight
+  request's reserved typical (p95) cost still leaves the margin, so several
+  requests that each cost far more than typical can together go over by more
+  than one request; and spend the gateway has not saved yet can be forgotten
+  by a restart (KNOWN_LIMITATIONS "Spend caps").
   *Status:* implemented (08): `crates/gateway::capgate` decides from an `Arc`
-  snapshot and atomics only, admits one request at a time per cap near
-  exhaustion, refuses with a pre-upstream 403, fails open with a reason; the
+  snapshot and atomics only, serializes per cap as above, refuses with a
+  pre-upstream 403, fails open with a reason; the
   switch is `mesh_meta` `cap_enforce/<cap>` (local, set only by the
   reauthenticated `UnlockedVault::mesh_cap_enforce`), never a replicated item
   (gateway SI-22). *Tests:* `cap_enforcement::at_exhaustion_a_non_retryable_403_is_sent_before_any_upstream_byte`,
@@ -274,17 +324,21 @@ NN)** otherwise.
   `the_gate_fails_open_and_says_why`, `perf::perf_cap_admission_overhead`.
   *Implemented (10), the desktop:* the cap panel's **Enforce on this device**
   goes through the same reauthenticated core method (`mesh_cap_enforce`); the
-  dialog explains the 403, the one-request overshoot and the self-limit before
-  it asks; the panel says when enforcement is inactive and why. *Tests:*
+  dialog explains the 403, when and how far spend can go over the cap, and the
+  self-limit before it asks; the panel says when enforcement is inactive and why. *Tests:*
   `tauri_command_authz::mesh::mesh_cap_enforce_requires_correct_reauth`,
   `desktop_flow::a_project_shared_in_the_app_shows_the_cli_devices_usage_and_its_cap`
   (a switch on one device stays off on the other), `CapsPanel.test.tsx`.
-- **MESH-SI-10 No double spending.** Rights are never spent twice; transfers are
-  fenced against the running gateway's snapshot (escrow). *Status:* implemented
+- **MESH-SI-10 No double spending.** Rights a device gives away are fenced
+  against its running gateway's snapshot (escrow), so the same rights are not
+  both spent here and given away, within two limits (KNOWN_LIMITATIONS "Spend
+  caps"): a transfer can slip past spend the gateway's writer has not saved
+  yet, and a gateway restart can forget recent spend. *Status:* implemented
   (07 node half, 08 gateway half: each snapshot deducts every open escrow row,
   then acknowledges the pending ones it counted, `caps::gate::ack_counted`;
-  spend is `persisted + (charged − persisted at the snapshot)`, so a request is
-  never missed and never counted twice across the writer). The bounded
+  spend is `persisted + (charged − persisted at the snapshot)`, so while the
+  gateway runs a request is neither missed nor counted twice across the
+  writer). The bounded
   counter refuses spends and transfers beyond `avail`, and its view clamps a
   device's outgoing rows to what it held (01). Every transfer, burn and grant
   is decided inside the write transaction that publishes it, against this
@@ -305,6 +359,25 @@ NN)** otherwise.
   `cap_enforcement::the_fence_reserves_before_a_transfer_publishes_and_never_subtracts_twice`,
   `cap_enforcement::under_the_cap_requests_forward_and_spend_is_counted_once_across_the_writer`,
   `cap_enforcement::a_charge_the_writer_never_persists_stays_counted_and_marks_accounting_incomplete`.
+  *Audit (12):* a burn waiting for the gateway's ack counts against the
+  pending decrease, so it is not burned twice (MC-2,
+  `mesh_caps::caps_a_burn_awaiting_the_ack_is_not_burned_twice`); `cap.used`
+  never decreases within a month, so deleting local usage returns no spent
+  rights (MC-3, `mesh_caps::{caps_deleting_local_usage_never_returns_spent_rights,
+  caps_used_is_published_from_the_local_month_spend_and_never_decreases_within_a_month}`);
+  a reclaim never takes a local override (MC-6,
+  `mesh_caps::caps_a_reclaim_never_takes_a_local_override`); the caps
+  simulator checks "not over-burned" at quiescence (MC-4, `mesh_sim::caps_ci_seeds`).
+  The gate (MESH-SI-9): a cold gate serializes until it knows a cost (MC-1,
+  `cap_enforcement::a_cold_gate_serializes_until_it_knows_a_request_cost`),
+  reads rights after reserving (MC-5,
+  `capgate::tests::a_completion_racing_an_admission_is_seen_by_it`), flags a
+  charge for a vanished project (MC-7,
+  `cap_enforcement::a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete`),
+  keeps enforcing through one failed refresh (MC-8,
+  `cap_enforcement::one_failing_refresh_between_two_good_ones_keeps_enforcing`),
+  and alerts say what it does (MC-10,
+  `mesh_caps::caps_alert_text_says_what_the_gate_does_with_the_cap_in_force`).
 
 ## Honesty and scope
 
@@ -351,7 +424,12 @@ NN)** otherwise.
   desktop's Devices view maps to no analytics screen, so opening it sends no
   `screen_view`, and its `mesh_*` commands produce no product event. *Tests:*
   `MeshAppNav.test.tsx` (the Devices view tracks nothing with consent
-  granted); 12 adds a grep guard.
+  granted); `MeshNoAnalytics.test.tsx` (12): binding to a new project from
+  Devices (only `invoke` mocked, consent granted, the App's listener mounted)
+  sends no event, with a positive control for the ordinary create; and a
+  source guard that no mesh component imports the analytics module, calls
+  `trackAnalytics`/`gtag` or an `api` method that sends a product signal, and
+  that no `mesh_*` command maps to one.
 - **MESH-SI-15 No unsafe code.** `#![forbid(unsafe_code)]` in `crates/mesh`, and
   core keeps its crate-level `#![forbid(unsafe_code)]`. *Status:* implemented
   (01) for core (`core::mesh` is inside core), (04) for `crates/mesh`. The

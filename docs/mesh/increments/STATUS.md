@@ -21,7 +21,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | done | 2026-11-03 | 2026-11-03 | `1e3e387` | CI `41682903354` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); its macOS service run `41682903236` was **cancelled** (superseded by the next push), and the service run on `c8c019f`, which contains all of 11, `41684406424` succeeded |
-| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | in-progress (Phase A part-done) | 2026-11-03 | | (this checkpoint) | |
+| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | in-progress (Phases A-C done; D, E next) | 2026-11-03 | | `fb55b07`, `d7accf6`, `70ebeb1`, the four Phase C `fix(mesh)` commits | |
 
 Sizes are rough context cost for a 1M-token session:
 - **M** is about 15-25% of the session.
@@ -40,6 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
+| 12 Phase C (audit remediation) | **1,920 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New since 11 (+53): Phase A's `adversarial` suite (11 with the MP-7 ghost test) and the store's hole test, and the audit's failing-first tests (core `mesh_audit_identity`, `mesh_audit_protocol`, `mesh_caps`, `proto`, `views`, `roster`, `oracle`, `kinds`, `marker`, `policy`, `sqlite_store`; gateway `cap_enforcement`, `capgate`; mesh `bounds`, `pairing`) | **413 passed** in 38 files (`npm test`; +6): `MeshNoAnalytics` 5 (MD-5), `DevicesView` +1 (MI-2) | **186 passed** (`bash scripts/smoke.sh`) |
 | 11 (this increment) | **1,867 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (25): core `--test mesh_share` 18 (6 of them the review's regressions), `mesh::share` unit 3, `mesh_schema` 11 (+1 v24), `tauri_command_authz` 24 (+1 share/import/reseal reauth), `-p api-tracker-mesh --test share_wire` 1, `cli --test mesh_cli` 11 (+1); the oracle's share-rule test rewritten (same count) | **407 passed** in 37 files (`npm test`; +15): `MeshCredentialSharePanel` 8, `MeshIncomingShares` 5, `DevicesView` +2 | **186 passed** (`bash scripts/smoke.sh`; 7 sharing checks) |
 | 10 `aa63799` | **1,842 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (2): `tauri_command_authz` `mesh::mesh_cap_enforce_requires_correct_reauth` (23 in the file), `-p api-tracker-mesh --test desktop_flow` 1 | **392 passed** in 35 files (`npm test`; +45): `CapsPanel` 17, `MeshUsageCard` 10, `MeshProjectPanel` 8, `MeshAvailableProjects` 7, `MeshCapAlerts` 1, `DevicesView` +2 | **179 passed** (`bash scripts/smoke.sh`) |
 | 09 `771b7ed` | **1,840 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`: 1,839 in the full run, plus `supervisor::a_device_pairs_with_the_in_process_node…` added after it and run with its file, 11/11). New (17): core `--test tauri_command_authz` `mesh::*` 4 (22 in the file), `mesh::node_settings` unit 2, `-p api-tracker-mesh --test supervisor` 11 | **347 passed** in 30 files (`npm test` in apps/desktop; base 308 in 25): `DevicesView` 16, `MeshThisDevice` 8, `MeshSetup` 7, `MeshPeersHealth` 7, `MeshAppNav` 1 | **179 passed** (`bash scripts/smoke.sh`) |
@@ -117,7 +118,7 @@ pending CI runs to check first.)_
 
 ### Increment 12 — Hardening, audit & ship (started 2026-11-03; in progress)
 
-The session hit its usage limit during Phase A. **Read this first.**
+Phases A, B and C are done; D (verification) and E (ship) remain. **Read this first.**
 
 **Done (committed in this checkpoint):**
 - `crates/mesh/tests/adversarial.rs`, 10 tests, all passing
@@ -194,40 +195,53 @@ and decision. The high-severity findings are:
 - MC-1: a cold gate admits unbounded concurrency;
 - MC-2: an escrowed burn is burned again.
 
-**Phase C, IN PROGRESS: the tree is dirty and may not compile.** Four
-remediation subagents worked in parallel in this worktree, each owning
-disjoint files. All four were stopped part-way by the account's usage limit
-on 2026-11-04. Their partial, **uncommitted** edits are in the working tree
-(about 90 files).
+**Phase C, done (2026-11-05).** The four remediation tracks' partial work
+(left uncommitted on 2026-11-04) was reviewed, finished and committed as four
+`fix(mesh)` commits after `70ebeb1`, one per track, each built and tested on
+its own in a scratch worktree before the next (all targets build; that
+track's suites pass):
+- **R1 protocol** (MP-1, 2, 3, 4, 5, 7, 9, 10, 11, 12). Finished here: MP-2,
+  MP-3, MP-7 and MP-9 (not started by the track), and a tightening of MP-10
+  (`State::share_revoked_by` takes the sharer: a member copying a share id
+  into its own `share.sealed` must not become its sharer). MP-7 has an
+  end-to-end test (`adversarial::a_ghost_device_with_a_copied_noise_key_…`).
+  **MP-2's decision was narrowed** (findings.json `decision`, KNOWN_LIMITATIONS,
+  ADR 0031): bounded `ChainReply` ranges and no self-report from a peer's
+  claim; "two signed items" as fork evidence was not adopted (it would hide
+  real forks in superseded history, and any known device's `fork.report`
+  already counts).
+- **R2 persistence** (MI-1, 2, 3, 4, 5, 8, 9). Finished here: backups record
+  the vault's mesh **device id only** (`BackupPayloadV2.mesh_device`, optional,
+  ignored by older builds), so a restore still says the copy must pair again
+  and removes a marker naming it (MI-4 had lost both; caught by
+  `mesh_cli::a_restored_backup_…` and two `mesh_schema` tests); `mesh leave`'s
+  unannounced case is shown by the CLI and the desktop (MI-2).
+- **R3 caps** (MC-1, 2, 3, 4, 5, 6, 7, 8, 10). Finished here: the MC-4
+  "not over-burned" invariant allows the integer fair-share remainder (< 1
+  micro per holder): caps seed 6 settled 2 micros under the target **on the
+  base commit too** (reproduced on `70ebeb1` with only the invariant), and a
+  real over-burn mutant still fails 3 of the 16 CI seeds
+  (`evidence/MC-4_baseline_fail.log.txt`).
+- **R4 docs/UX** (MD-1 to MD-14, MC-12). Finished here: MD-14 (the Tauri
+  command inventory's revoke and list rows), "never blocked" → "never charged
+  against the cap" for unpriced traffic (it is serialized while no cost is
+  known), and the protocol/ADR/SECURITY_INVARIANTS deltas of every track.
+- Evidence: `docs/mesh/audit/2026-11-03/evidence/` has a baseline log for
+  every confirmed finding (code findings: the test failing with the fix
+  disabled; doc findings: the stale text at `70ebeb1`).
 
-Where each track stopped:
+**Checks on the Phase C head (2026-11-05):** `cargo fmt --check` clean;
+clippy `-D warnings` clean on 1.96 and 1.99.1 (core, CLI, observe, gateway,
+tracking, mesh) and on the desktop crate; **1 920 Rust tests passed, 0 failed,
+14 ignored** (README §3 command plus `-p api-tracker-mesh`); desktop
+format/lint/typecheck clean, **413 passed in 38 files**, build ok; **smoke
+186 passed, 0 failed**.
 
-| Track | Findings | Last step |
-|---|---|---|
-| R1 protocol | MP-1, 2, 3, 4, 5, 7, 9, 10, 11, 12 | roster/kinds/views/oracle done or mid-way; starting serve.rs and pair.rs (MP-4, MP-11, MP-12) |
-| R2 persistence | MI-1, 2, 3, 4, 5, 8, 9 | sqlite_store/marker/identity/backup changes; updating migration_safety comments (keep 9 tests) and mesh_schema assertions |
-| R3 caps | MC-1, 2, 3, 4, 5, 6, 7, 8, 10 | MC-1, MC-2 and MC-3 under way; starting the MC-4 over-burn invariant |
-| R4 docs/UX | MD-1 to MD-14, MC-12, accepted-risk docs | desktop and CLI copy and most docs done; finishing KNOWN_LIMITATIONS (status header, caps, sharing, retention, accepted risks) |
+**Next session, do this first:** finish Phase C step 3 (the 10-minute soak
+and the mutants on a clean tree, if not recorded below), then Phase D (one
+fresh verification subagent, `FINAL_VERDICT.md`) and Phase E (ship docs,
+`REVIEW_HANDOFF.md`, CI green, `gh pr ready`).
 
-Evidence logs written so far: `docs/mesh/audit/2026-11-03/evidence/`.
-
-**Next session, do this first:**
-1. `git status`. The uncommitted diff is the remediation work in progress,
-   so do not discard it.
-2. Read `findings.json` (the `remediation_track` field) and review the diff
-   track by track.
-3. Finish each confirmed finding failing-test-first, with an evidence log.
-4. Run the full README §3 suite, smoke, the desktop checks, both clippies, the
-   mutants and a 10-minute soak.
-5. Commit one track (or one finding) at a time, as `fix(mesh): <ids> — …`.
-6. Apply each track's doc deltas to PROTOCOL, ADRs and SECURITY_INVARIANTS:
-   - MP-1: the cutoff is the minimum over counting removes.
-   - MP-10: a revoke counts only from the sharer or the recipient.
-   - MC-2: open escrow burns count against the pending decrease.
-7. Then do Phase D (the verification agent) and Phase E (ship).
-
-If the same orchestrator session continues, resume the four agents with
-`SendMessage` instead; their transcripts are saved.
 3. (Done, see above.) **The ten mutants were not yet in `scripts/mutation_checks.sh`.** Anchors
    found so far:
    - signature check: `proto.rs`

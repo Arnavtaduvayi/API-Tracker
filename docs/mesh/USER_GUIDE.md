@@ -5,7 +5,10 @@ with each other, peer to peer. There is no Tethra server, relay or cloud: your
 devices talk to each other directly, on your LAN or over a VPN you run, such as
 Tailscale or WireGuard. Everything they exchange is signed and travels inside an
 encrypted Noise channel that only your paired devices can open
-([ADR 0031](../decisions/0031-device-mesh.md)).
+([ADR 0031](../decisions/0031-device-mesh.md)). The encryption is per
+connection, between two of your devices: each device reads what it relays for
+the others, so everything that replicates is readable by every device in the
+mesh (only a shared credential's value is sealed to its recipients).
 
 This guide covers what exists today: pairing, the node that keeps devices
 converged, shared projects and cross-device usage, monthly spend caps (alerts,
@@ -24,7 +27,10 @@ archived, merged), the daily usage counters of those projects, spend caps
 (their target, each device's rights and spend), and the mesh settings.
 Credential values never replicate on their own: only a credential you share
 explicitly, one at a time, sealed to the devices you choose
-([section 5b](#5b-share-a-credential-with-your-devices)).
+([section 5b](#5b-share-a-credential-with-your-devices)). Only the value is
+sealed: a share's details (the credential's name and provider, the shared
+project, the value's version, the recipient device) are readable by every
+device in the mesh, which relays them.
 
 ## 1. Pair your devices
 
@@ -55,6 +61,14 @@ peer. From here on, each running node exchanges with every peer it knows about
 every 30 seconds, and learns the addresses your other devices publish, so the
 inviting device starts dialling the new one too. Add other addresses with
 `tethra mesh peer add HOST:PORT` (for example a device that moved).
+
+**Removing a device** (`tethra mesh remove <device>`, which asks you to confirm
+and then for your master password) has every device refuse it as it hears of
+the removal, and rotates the mesh access key. It takes nothing back from that
+device: credentials it imported, and shares sealed to it that it already
+holds, stay usable there, so rotate them at the provider (`tethra rotation plan
+<credential>`). If it holds spend-cap rights, reclaim them on the cap's owner
+first ([section 5](#5-spend-caps)).
 
 ### On Tailscale (or another VPN)
 
@@ -197,11 +211,12 @@ How to read it:
 
 ```bash
 tethra mesh settings list
-tethra mesh settings set retention.usage_days 30
+tethra mesh settings set retention.usage_days 30   # lowering it asks first (--yes for scripts)
 ```
 
 Older days are not published, and two days past the horizon every device
-drops them.
+drops them; a dropped counter cannot be brought back, which is why lowering
+the setting asks you to confirm.
 
 ## 5. Spend caps
 
@@ -228,9 +243,11 @@ tethra mesh cap enforce app on            # this device's gateway refuses over t
 **How it works, without a server.** The cap is split into *rights*: each
 device holds some and counts its spend against its own. On a device whose
 gateway enforces the cap, requests are refused once that device's rights are
-used up, so where every device enforces it the total stays within the cap even
-while your devices cannot reach each other (each device may go over by at most
-one request, whose cost is known only when it completes). The device that created
+used up, so where every device enforces it the total stays close to the cap
+even while your devices cannot reach each other. It can go over: a request's
+cost is known only when it completes, requests running at the same time can
+together cost more than the gateway reserved for them, and a gateway restart
+can forget spend it had not saved yet (details below, under enforcement). The device that created
 the cap is its **owner**: at the start of each month it hands every device that
 was active in the last 30 days an equal share and keeps the rest. A device that
 runs low (below a fifth of its share) asks a device with spare rights for some
@@ -285,9 +302,18 @@ your SDK reports and does not retry, before the request reaches the provider
 ([what SDKs see](../gateway/USER_GUIDE.md#spend-caps-tethra-mesh)). It applies
 within 5 seconds. Each device decides for itself: your other devices enforce
 only if you switch it on there too, and no device can switch it on for
-another. Near the cap the gateway lets one request through at a time, because
-a request's cost is known only when it completes; a model with no price is
-never blocked (it is counted as unpriced). If the gateway cannot read the caps
+another. A request's cost is known only when it completes, so spend can go
+over the cap. Near the cap, and while no request cost is known (after a
+gateway restart or at the start of a month), the gateway lets one request
+through at a time. Otherwise each request in flight reserves the cap's typical
+(95th-percentile) cost, and a request is admitted only while those
+reservations leave room, so several requests that each cost far more than
+typical can together go over by more than one request. Spend the gateway has
+not saved yet can also be forgotten by a gateway restart
+([limitations](KNOWN_LIMITATIONS.md#spend-caps)). A model with no price is
+never charged against the cap (it is counted as unpriced); while a cap has
+seen no priced request, its requests still run one at a time. If the gateway
+cannot read the caps
 it forwards everything and says why. `tethra mesh cap show` and `tethra
 gateway status` show what each enforced cap still admits. Requests that do not
 go through Tethra's gateway are not capped; `off` switches it off again.
@@ -326,13 +352,17 @@ tethra mesh credential import 5e1f0a2b --project app           # the share id (8
 - **Revoking** (`tethra mesh credential revoke <share>`, or `--credential
   <credential>` for every share of it) asks first. It stops a device that has
   not imported the share yet. It **does not** remove the value from a device
-  that imported it, and it **does not** revoke the key at its provider: to
-  cut a device off, rotate the credential (`tethra rotation plan
-  <credential>`, or the Rotation view).
+  that imported it, and it **does not** revoke the key at its provider. To
+  cut a device off, **revoke its share first, then rotate** the credential
+  (`tethra rotation plan <credential>`, or the Rotation view): after a
+  rotation the reseal offer lists every device that held the old value,
+  except a device whose share you revoked, so a reseal never sends it the new
+  one.
   A device revokes only the shares it made.
-- A removed device gets no new shares, and shares addressed to it are
-  dropped everywhere. Anything it already imported stays on it: rotate those
-  credentials. A share *from* a removed device is listed but cannot be
+- A removed device gets no new shares and no reseal offer, and shares
+  addressed to it are dropped everywhere. Anything it already imported, and
+  any share sealed to it that it already holds, stays usable on it: rotate
+  those credentials. A share *from* a removed device is listed but cannot be
   imported (it may have been removed because it was lost or stolen).
 - There is no forward secrecy: shares are sealed to each device's long-lived
   key. A value is at most 15 KiB.
@@ -438,7 +468,10 @@ of 6 and 7 without a terminal; a project's page covers sections 4 and 5
   **stale** (no exchange with it for over 24 hours, or never), **removed**,
   **forked** or **not admitted**, the last exchange, and how much it lacked at
   the last exchange. **Remove** asks you to confirm and then for your master
-  password, like `tethra mesh remove`.
+  password, like `tethra mesh remove`; the confirmation says that what the
+  device already imported (and shares sealed to it that it holds) stays
+  usable until you rotate it at the provider, and to reclaim its spend-cap
+  rights first.
 - **Peers.** The addresses the node dials, where each came from, the last
   success, failures and when it retries; add or remove addresses as with
   `tethra mesh peer`.
@@ -455,10 +488,12 @@ The app sends no analytics about any of this.
 ### Shared projects, usage and spend caps in the app
 
 - **Share a project.** On a project's page, the **Devices** panel offers
-  **Share with my devices**. What replicates is that project's daily usage
-  counters (requests, tokens, estimated cost), never individual requests,
-  their content, routes or credentials. Nothing is shared or bound
-  automatically.
+  **Share with my devices**. What replicates is that project's name and its
+  daily usage counters (requests, tokens, estimated cost), never individual
+  requests, their content, routes or credentials. After their next exchange
+  every device in the mesh lists it by name and can see its usage; a device
+  counts its own traffic for it only once you bind it there. Nothing is
+  shared or bound automatically.
 - **Bind it on another device.** On that device, **Devices → Available from
   your devices** lists mesh projects that have no local project here;
   **Bind to…** picks an existing project or creates one. Unbinding (on the
@@ -483,9 +518,11 @@ The app sends no analytics about any of this.
 - **Enforce on this device** asks for your master password and explains what
   it does: this device's gateway answers requests to the project with HTTP
   403 (not 429, so SDKs do not retry) once this device's share for the month
-  is used; near the cap one request runs at a time, so it goes over by at
-  most one request; unpriced models and responses without usage are never
-  blocked. It is a self-limit on traffic through Tethra's gateway, not a
+  is used; near the cap, and while no request cost is known (after a gateway
+  restart or at the start of a month), one request runs at a time; requests
+  that each cost far more than typical can together go over by more than one
+  request, and a gateway restart can forget spend not yet saved; unpriced
+  models and responses without usage are never charged against the cap. It is a self-limit on traffic through Tethra's gateway, not a
   security boundary. When the gateway cannot enforce (it is not running, or
   it reports a reason), the panel says "Enforcement inactive" and why.
 
@@ -496,7 +533,8 @@ The app sends no analytics about any of this.
   devices (and future ones, as a reseal offer) or tick specific ones, then
   confirm your master password. The panel lists where the credential is
   shared, with **Revoke** (it asks first) and **Reseal…** when a device lacks
-  the current value. The notice under it says what revoking does not do and
+  the current value. The notice under it says what revoking does not do, that
+  cutting a device off means revoking its share first and then rotating, and
   links to the **Rotation** view.
 - **Import one.** On **Devices**, **Credentials shared with this device**
   lists what other devices sealed to this one: available, imported (and as

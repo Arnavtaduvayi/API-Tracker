@@ -247,10 +247,24 @@ export function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
 }
 
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+interface CallOptions {
+  /**
+   * `false` sends no product analytics signal for this call, whatever the
+   * command. The mesh paths use it (MESH-SI-14: the mesh emits no analytics).
+   */
+  productAnalytics?: boolean;
+}
+
+async function call<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  options: CallOptions = {},
+): Promise<T> {
   try {
     const result = await invoke<T>(command, args);
-    publishProductAnalytics(productAnalyticsSignal(command, args, result));
+    if (options.productAnalytics !== false) {
+      publishProductAnalytics(productAnalyticsSignal(command, args, result));
+    }
     return result;
   } catch (raw) {
     const err: ApiError = isApiError(raw) ? raw : { code: "unknown", message: String(raw) };
@@ -328,6 +342,18 @@ export const api = {
     environments: Environment[];
     repoPaths: string[];
   }) => call<Project>("project_create", args),
+  /**
+   * The same `project_create`, for "Devices → Available from your devices →
+   * Bind to… → a new project": no product analytics signal, so no
+   * `project_created` or inventory event (MESH-SI-14).
+   */
+  projectCreateForMesh: (args: {
+    name: string;
+    description: string;
+    notes: string;
+    environments: Environment[];
+    repoPaths: string[];
+  }) => call<Project>("project_create", args, { productAnalytics: false }),
   projectUpdate: (
     ident: string,
     args: {

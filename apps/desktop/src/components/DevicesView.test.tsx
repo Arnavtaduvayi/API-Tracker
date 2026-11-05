@@ -45,7 +45,7 @@ vi.mock("../api", async () => {
       meshSharesList: vi.fn(),
       meshProjectBind: vi.fn(),
       projectList: vi.fn(),
-      projectCreate: vi.fn(),
+      projectCreateForMesh: vi.fn(),
     },
   };
 });
@@ -176,7 +176,19 @@ describe("DevicesView rendering", () => {
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create mesh" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Join mesh" })).toBeInTheDocument();
-    expect(screen.getByText(/Credential values do not replicate/)).toBeInTheDocument();
+    // Since Increment 11 a value replicates only when the user shares that one
+    // credential (MD-2); every hop is encrypted, but members read what they
+    // relay, so the intro never says "end to end" (MD-12).
+    expect(screen.queryByText(/Credential values do not replicate/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /A credential's value goes to another device only when you share that one credential/,
+      ),
+    ).toHaveTextContent(/sealed to the devices you choose, and imported there only when asked/);
+    expect(screen.queryByText(/end to end/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/encrypted on every connection between your devices/),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Leave mesh" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Pair a device" })).not.toBeInTheDocument();
     expect(mockApi.meshDevices).not.toHaveBeenCalled();
@@ -415,6 +427,11 @@ describe("Remove a device", () => {
     // Cancelling the confirmation never reaches the API or the password step.
     await user.click(removeButton);
     expect(screen.getByText(/It cannot rejoin under the same identity/)).toBeInTheDocument();
+    // Removal does not take back what the device already holds (MD-3).
+    const warning = screen.getByText(/Credentials it already imported/);
+    expect(warning).toHaveTextContent(/shares sealed to it that it already holds/);
+    expect(warning).toHaveTextContent(/stay usable: rotate them at the provider/);
+    expect(warning).toHaveTextContent(/tethra mesh cap reclaim/);
     expect(screen.queryByLabelText(/master password/i)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(screen.queryByText(/It cannot rejoin/)).not.toBeInTheDocument();
@@ -471,6 +488,8 @@ describe("Leave the mesh", () => {
     const user = userEvent.setup();
     mockApi.meshLeave.mockResolvedValue({
       delivered: true,
+      announced: true,
+      not_announced_because: null,
       wipe: { identity: SELF_ID, rows_deleted: 12, marker: "removed" },
     });
     render(<DevicesView />);
@@ -507,6 +526,8 @@ describe("Leave the mesh", () => {
     const user = userEvent.setup();
     mockApi.meshLeave.mockResolvedValue({
       delivered: false,
+      announced: true,
+      not_announced_because: null,
       wipe: { identity: SELF_ID, rows_deleted: 12, marker: "removed" },
     });
     render(<DevicesView />);
@@ -517,6 +538,30 @@ describe("Leave the mesh", () => {
     buttons = screen.getAllByRole("button", { name: "Leave mesh" });
     await user.click(buttons[buttons.length - 1]);
     expect(await screen.findByText(/No other device was reachable/)).toBeInTheDocument();
+  });
+
+  it("says why when an untrusted identity left without announcing it (MI-2)", async () => {
+    const user = userEvent.setup();
+    mockApi.meshLeave.mockResolvedValue({
+      delivered: false,
+      announced: false,
+      not_announced_because:
+        "its identity marker is missing, so this database is probably a copy",
+      wipe: { identity: SELF_ID, rows_deleted: 12, marker: "absent" },
+    });
+    render(<DevicesView />);
+    await user.click(await screen.findByRole("button", { name: "Leave mesh" }));
+    let buttons = screen.getAllByRole("button", { name: "Leave mesh" });
+    await user.click(buttons[buttons.length - 1]);
+    await user.type(passwordField(), PASSWORD);
+    buttons = screen.getAllByRole("button", { name: "Leave mesh" });
+    await user.click(buttons[buttons.length - 1]);
+    expect(
+      await screen.findByText(
+        /Left the mesh without announcing it \(its identity marker is missing/,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No other device was reachable/)).not.toBeInTheDocument();
   });
 });
 

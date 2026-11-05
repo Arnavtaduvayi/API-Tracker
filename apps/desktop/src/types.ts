@@ -2120,6 +2120,13 @@ export interface MeshRemoveResult {
 export interface MeshLeaveResult {
   /** A peer received this device's departure before the local wipe. */
   delivered: boolean;
+  /**
+   * Whether a departure was minted at all: `false` when this device's
+   * identity was untrusted or held, in which case only the local wipe ran.
+   */
+  announced: boolean;
+  /** Why the departure was not announced, when it was not. */
+  not_announced_because: string | null;
   wipe: { identity: string | null; rows_deleted: number; marker: string };
 }
 

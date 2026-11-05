@@ -32,8 +32,13 @@ export function MeshSetup(props: { onDone: (outcome?: MeshSetupOutcome) => void 
         other over your LAN or a VPN you run, such as Tailscale.
       </p>
       <p>
-        There is no Tethra server: devices only talk to each other, encrypted end to end.
-        Credential values do not replicate.
+        There is no Tethra server: devices only talk to each other, encrypted on every
+        connection between your devices. Each device can read what it relays for the others, so
+        everything that replicates is readable by every device in the mesh.
+      </p>
+      <p>
+        A credential&apos;s value goes to another device only when you share that one
+        credential: it is sealed to the devices you choose, and imported there only when asked.
       </p>
       <p>
         <button type="button" className="text-link" onClick={openGuide}>

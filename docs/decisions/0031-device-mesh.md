@@ -424,6 +424,54 @@ Smaller usage decisions (Increment 06):
 - **`local_month_spend_micros`** (`core::mesh::usage`) is the single function
   for "this device's spend this month on a mesh project", for 07 and 08.
 
+### Amendments from the independent audit (Increment 12)
+
+Four auditors reviewed the mesh (`docs/mesh/audit/2026-11-03/`). These
+findings changed protocol or storage rules; each fix has a test that failed
+first (`evidence/<id>_baseline_fail.log.txt`):
+
+- **Cutoffs are the minimum (MP-1).** A device's cutoff is the minimum
+  `cutoff_seq` over the removes that count, not the maximum: with the maximum,
+  a removed device's own `remove(self, u64::MAX)` cancelled its removal. A low
+  cutoff from a hostile member only shrinks what counts, which it could do by
+  removing outright. Honest concurrent removes now keep the smaller view.
+- **Small-order X25519 keys are invalid (MP-5).** `roster.add` refuses a
+  `noise_pub` or `seal_pub` on libsodium's small-order list (bit 255
+  ignored): a share sealed to such a key is readable by anyone.
+- **A copied Noise key does not shadow a device (MP-7).** The handshake
+  returns every active device carrying the static key that answered, and the
+  session's `Hello` picks among them (`proto::Session::with_candidates`).
+- **Rollback notices are bounded by the reporter's Hello (MP-9).** A
+  reporter sends `held_seq` from the VV its own `Hello` advertised; a
+  receiver ignores a notice above what the reporter's `Hello` claimed for it.
+- **Bisection and self-reports (MP-2).** `ChainReply` entries outside the
+  queried `(lo, hi]` are ignored, and a device never reports its own origin
+  forked from a peer's chain claim. The broader decision ("fork evidence needs
+  two signed items") was not adopted: superseded items survive only as dot
+  hashes, so it would leave real forks in superseded history unreported, and
+  any known device's `fork.report` already counts (§6.3), so a member gains
+  nothing by tricking an honest device into writing one. Recorded in
+  KNOWN_LIMITATIONS.
+- **Repair is budgeted (MP-3)** inside the session's staging bound, after the
+  main path.
+- **One handshake deadline (MP-4)** covers the preamble and every handshake
+  message; pairing counts only a message that fails to authenticate as an
+  attempt (MP-11); a join whose inviter key does not match its roster entry
+  fails and keeps no identity (MP-12).
+- **Marker version 2 (MI-1).** The marker records `seq_floor`, the `vv[self]`
+  durably committed when it was written; a database is rolled back iff its
+  `vv[self]` is below it. A batch that reserved several blocks and rolled back
+  no longer locks the identity. Version-1 markers still read.
+- **No mesh rows in backups (MI-3, MI-4).** Backups carry only the device id;
+  restore never inserts `mesh_*` rows (older backups' are skipped).
+- **`mesh leave` always wipes (MI-2)**, minting no self-removal when the
+  identity is untrusted or held.
+- **Removal and rotation commit together (MI-5)**, and every vault-connection
+  mesh write runs with `synchronous=FULL` and F_FULLFSYNC (MI-9).
+- **A credential with live outgoing shares cannot be deleted (MI-8)** until
+  they are revoked.
+- **A revoke counts only from the sharer or the recipient (MP-10)**; ADR 0033.
+
 ### Dependencies
 
 | Crate | Version | Increment | Why |
@@ -524,6 +572,10 @@ multicast sockets only when a user passes `--discover`.
   as for the gateway (ADR 0019 D8).
 * Credential shares (Increment 11) have no forward secrecy (static sealing keys).
 * Fork-evidence propagation is finalized in Increment 02 (PROTOCOL §7).
-* The identity marker sees a rollback only when it spans more than one block of
-  64 seqs; a smaller rollback, or a copy of the whole data directory, is caught
-  only when the diverging histories meet on the wire (Increment 03, R17).
+* The identity marker sees a rollback only below the floor it recorded (at
+  most one block of 64 seqs behind, or one batch whose floor raise did not
+  happen); a smaller rollback, or a copy of the whole data directory, is caught
+  only when the diverging histories meet on the wire (Increment 03, R17;
+  Increment 12, MI-1).
+* Fork reports rest on the reporting member's word (Increment 12, MP-2): any
+  known device can report any other device forked.

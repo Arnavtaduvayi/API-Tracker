@@ -142,6 +142,22 @@ too, which is correct because that exclusion covers every item at the key,
 from every origin, independently of seq. Details: `docs/mesh/increments/STATUS.md`,
 Increment 11.
 
+## Amendments from the independent audit (Increment 12)
+
+- **Only the sharer or the recipient revokes (MP-10).** A `share.revoke`
+  counts when its origin is the share's sharer or the key's recipient; before,
+  any member could end another device's share. A sharer's own check names
+  itself as the sharer, so copying a share id (readable metadata) into another
+  `share.sealed` does not make a member its sharer.
+- **Small-order sealing keys are invalid (MP-5)**: a box sealed to one can be
+  opened by anyone, so `roster.add` refuses them.
+- **A shared credential cannot be deleted while its shares are live (MI-8)**:
+  the delete would cascade away `mesh_share_outgoing`, the only link that lets
+  this device revoke them by credential.
+- **Removal and rotation guidance (MD-3, MD-4).** Removing a device does not
+  take back what it imported; to cut a device off, revoke its share first,
+  then rotate (a reseal never offers a device whose share was revoked).
+
 ## Alternatives considered
 
 - **A shared mesh-wide symmetric key for credentials.** Simple: encrypt once,

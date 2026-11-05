@@ -1,7 +1,7 @@
 // Spend-cap panel (Tethra Mesh, Increment 10; ADR 0032). Create; raise on
 // the owner, and the local-override confirmation on a non-owner; lower with
 // confirmation; the reauthenticated "Enforce on this device" switch with its
-// explanation (403 not 429, one request of overshoot, a self-limit); the
+// explanation (403 not 429, the qualified overshoot, a self-limit); the
 // enforcement warnings; frozen caps. Dollar amounts go to core as typed
 // text. Fake values only.
 
@@ -356,8 +356,15 @@ describe("CapsPanel enforcement", () => {
       name: "Enforce this spend cap on this device",
     }).parentElement as HTMLElement;
     expect(dialog).toHaveTextContent(/HTTP 403 \(not 429, so SDKs do not retry them\)/);
-    expect(dialog).toHaveTextContent(/the overshoot is at most one request/);
-    expect(dialog).toHaveTextContent(/never blocked/);
+    // The overshoot is qualified, never "at most one request" (MD-1).
+    expect(dialog).not.toHaveTextContent(/at most one request/);
+    expect(dialog).toHaveTextContent(
+      /while no request cost is known \(after a gateway restart or at the start of a month\)/,
+    );
+    expect(dialog).toHaveTextContent(/typical \(95th-percentile\) cost/);
+    expect(dialog).toHaveTextContent(/can together go over by more than one request/);
+    expect(dialog).toHaveTextContent(/a gateway restart can forget spend it has not saved yet/);
+    expect(dialog).toHaveTextContent(/never charged against the cap/);
     expect(dialog).toHaveTextContent(/self-limit on traffic through Tethra's gateway/);
     expect(dialog).toHaveTextContent(/not a security boundary/);
     expect(dialog).toHaveTextContent(/no other device can change it/);

@@ -59,8 +59,9 @@ function BindDialog(props: {
             "usage for it from its next round.",
         );
       } else {
-        // The same project creation the project form uses, name only.
-        const created = await api.projectCreate({
+        // The same project creation the project form uses, name only, but
+        // with no product analytics signal (MESH-SI-14).
+        const created = await api.projectCreateForMesh({
           name: newName.trim(),
           description: "",
           notes: "",

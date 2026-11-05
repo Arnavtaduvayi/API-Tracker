@@ -11,8 +11,9 @@
 // - Nothing is shared, revoked or resealed on render: opening the panel only
 //   reads (collecting shares addressed to removed devices first); every
 //   change is one explicit click, and revoke asks first.
-// - Revoking never revokes the credential at its provider: the notice says so
-//   and links to the Rotation view.
+// - Revoking never revokes the credential at its provider: the notice says so,
+//   says to revoke before rotating (a reseal offers every device holding the
+//   old value unless its share was revoked; MD-4), and links to Rotation.
 // - No analytics (MESH-SI-14).
 
 import { useCallback, useEffect, useId, useState } from "react";
@@ -25,7 +26,8 @@ import { meshDeviceLabel, meshErrText, scrubbed, shortId } from "./MeshCommon";
 /** Shown wherever a share can be revoked (ADR 0033). */
 export const REVOKE_NOTICE =
   "Revoking a share does not revoke the credential at its provider, and a device keeps " +
-  "whatever it already imported. To cut a device off, rotate the credential.";
+  "whatever it already imported. To cut a device off, revoke its share first, then rotate " +
+  "the credential: a reseal never offers a device whose share you revoked.";
 
 type Step =
   | { kind: "choose" }

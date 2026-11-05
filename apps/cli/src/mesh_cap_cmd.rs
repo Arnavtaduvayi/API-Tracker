@@ -274,10 +274,15 @@ pub fn run(ctx: &Ctx, cmd: CapCmd) -> Result<()> {
                 eprintln!(
                     "With enforcement on, this device's gateway refuses requests for the \
                      capped project once this device's rights for the month are used up: a \
-                     403 your SDK reports, never retried automatically. A request in flight \
-                     can go over by its own cost. Your other devices enforce only if you \
-                     switch it on there too, and anything that does not go through Tethra's \
-                     gateway is not capped."
+                     403 your SDK reports, never retried automatically. A request's cost is \
+                     known only when it completes, so it can go over: near the cap, and while \
+                     no request cost is known yet (after a gateway restart or at the start of \
+                     a month), requests run one at a time; otherwise each request in flight \
+                     reserves the cap's typical (95th-percentile) cost, so several requests \
+                     that each cost far more than that can together go over by more than one \
+                     request, and a gateway restart can forget spend it has not saved yet. \
+                     Your other devices enforce only if you switch it on there too, and \
+                     anything that does not go through Tethra's gateway is not capped."
                 );
             }
             eprintln!("Reauthentication required to change cap enforcement.");

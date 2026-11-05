@@ -298,6 +298,15 @@ fn invite_join_devices_remove_and_leave_across_three_devices() {
     let (ok, out, err) = run(&a, &["mesh", "remove", &c_id[..10], "--yes"]);
     assert!(ok, "{err}");
     assert!(out.contains("epoch 2"), "{out}");
+    // Removal takes nothing back from the device (MD-3): even with --yes it
+    // says to rotate what it imported, and to reclaim cap rights first.
+    assert!(
+        out.contains("Credentials it imported, and shares sealed to it that it already holds"),
+        "{out}"
+    );
+    assert!(out.contains("rotate them at the provider"), "{out}");
+    assert!(err.contains("tethra mesh cap reclaim"), "{err}");
+    assert!(err.contains("before you remove it"), "{err}");
     let (ok, _, err) = run(&c, &["mesh", "replicate", "--peer", &server.addr]);
     assert!(!ok, "a removed device must be refused");
     later.push_str(&err);
@@ -664,13 +673,45 @@ fn share_bind_and_read_usage_across_two_devices_from_the_cli() {
     let s = json(&a, &["mesh", "settings", "list"]);
     assert_eq!(s[0]["name"], "retention.usage_days");
     assert_eq!(s[0]["default"], true);
-    json(
+    // Lowering it deletes counters on every device (MD-8): non-interactive
+    // runs are refused without --yes and nothing changes.
+    let (ok, _, err) = run(
         &a,
         &["mesh", "settings", "set", "retention.usage_days", "30"],
+    );
+    assert!(!ok && err.contains("--yes"), "{err}");
+    assert!(err.contains("on every device"), "{err}");
+    let s = json(&a, &["mesh", "settings", "get", "retention.usage_days"]);
+    assert_eq!(s[0]["value"], 90, "{s}");
+    assert_eq!(s[0]["default"], true, "{s}");
+    json(
+        &a,
+        &[
+            "mesh",
+            "settings",
+            "set",
+            "retention.usage_days",
+            "30",
+            "--yes",
+        ],
     );
     assert_eq!(
         json(&a, &["mesh", "settings", "get", "retention.usage_days"])[0]["value"],
         30
+    );
+    // Raising it deletes nothing and asks nothing; neither does setting the
+    // same value again.
+    json(
+        &a,
+        &["mesh", "settings", "set", "retention.usage_days", "45"],
+    );
+    json(
+        &a,
+        &["mesh", "settings", "set", "retention.usage_days", "45"],
+    );
+    assert_eq!(
+        json(&a, &["mesh", "settings", "get", "retention.usage_days"])[0]["value"],
+        45
     );
     let (ok, _, err) = run(
         &a,
@@ -1057,7 +1098,16 @@ fn share_a_credential_and_import_it_on_another_device_over_a_real_node() {
     let (ok, out, err) = run(&a, &["mesh", "credential", "revoke", &share[..8], "--yes"]);
     assert!(ok, "{err}");
     assert!(out.contains("Revoked 1 share(s)"), "{out}");
-    assert!(out.contains("rotate the credential"), "{out}");
+    // Revoke first, then rotate: a reseal never offers a revoked device, so
+    // the new value does not follow (MD-4).
+    assert!(
+        out.contains("to cut a device off, revoke its share first, then rotate"),
+        "{out}"
+    );
+    assert!(
+        out.contains("a reseal never offers a device whose share you revoked"),
+        "{out}"
+    );
     outputs.push(out + &err);
     let list = json(&a, &["mesh", "credential", "list"]);
     let revoked = list["outgoing"]
@@ -1072,6 +1122,63 @@ fn share_a_credential_and_import_it_on_another_device_over_a_real_node() {
     outputs.push(doctor + &derr);
     let (_, status, serr) = run(&b, &["mesh", "status"]);
     outputs.push(status + &serr);
+
+    // A share from a device since removed is listed but cannot be imported,
+    // so `status` does not count it as one to import (MD-13).
+    a.cmd()
+        .args([
+            "key",
+            "add",
+            "--project",
+            "app",
+            "--name",
+            "LATER_KEY",
+            "--provider",
+            "openai",
+            "--value-stdin",
+        ])
+        .write_stdin("sk-test-FAKE-mesh-later-0001")
+        .assert()
+        .success();
+    let (ok, _, err) = run(
+        &a,
+        &[
+            "mesh",
+            "credential",
+            "share",
+            "app/LATER_KEY",
+            "--to",
+            "dev-b",
+            "--yes",
+        ],
+    );
+    assert!(ok, "{err}");
+    json(&b, &["mesh", "replicate"]);
+    let st = json(&b, &["mesh", "status"]);
+    assert_eq!(st["shares"]["incoming_available"], 1, "{st}");
+    let a_id = json(&a, &["mesh", "status"])["device_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (ok, out, err) = run(&b, &["mesh", "remove", &a_id[..10], "--yes"]);
+    assert!(ok, "{err}");
+    outputs.push(out + &err);
+    let st = json(&b, &["mesh", "status"]);
+    assert_eq!(st["shares"]["incoming_available"], 0, "{st}");
+    let (_, text, _) = run(&b, &["mesh", "status"]);
+    assert!(
+        !text.contains("1 shared with this device to import"),
+        "{text}"
+    );
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("Credentials:"))
+        .unwrap_or_else(|| panic!("no Credentials line: {text}"));
+    assert!(
+        !line["Credentials:".len()..].trim_start().contains("  "),
+        "a run of spaces inside the sentence: {line:?}"
+    );
+    outputs.push(text);
 
     for (i, text) in outputs.iter().enumerate() {
         assert_no_canary(&format!("output #{i}"), text);

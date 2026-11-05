@@ -132,13 +132,16 @@ If a provider cannot programmatically change permissions, display the permission
 This section amends §4. Team collaboration and shared cloud vaults remain
 non-goals. **Tethra Mesh** lets one developer's *own* devices — laptop, desktop,
 home server — replicate shared projects, cross-device API usage and monthly
-spend caps **peer-to-peer and end-to-end encrypted**, directly or over the
-user's LAN or VPN. It is **single-user and serverless**: there is no Tethra
+spend caps **peer-to-peer, encrypted on every connection between member
+devices**, directly or over the user's LAN or VPN. Encryption is per hop:
+every member device reads what it relays, so replicated data is readable by
+all of the user's paired devices. It is **single-user and serverless**: there is no Tethra
 server, relay or cloud, and every device keeps working fully offline and
 converges when it reconnects. Each device's gateway can enforce a shared spend
 cap even while the devices cannot reach each other. Credential values replicate
-only later (Increment 11), opt-in per credential, after reauthentication, sealed
-to specific devices. The mesh is in development on the `feat/device-mesh` branch
+only when the user shares one credential (Increment 11): opt-in per
+credential, after reauthentication, with the value sealed to specific devices
+and imported there only on request. The mesh is in development on the `feat/device-mesh` branch
 (`docs/mesh/`, ADR 0031).
 
 ## 5. Recommended technical architecture

@@ -4,10 +4,13 @@ What the mesh does not do, stated plainly
 ([ADR 0031](../decisions/0031-device-mesh.md)). Each entry says whether it is a
 permanent design choice or something a later increment changes.
 
-> **Status.** The mesh is in development on `feat/device-mesh`. As of Increment
-> 04, devices pair (`mesh invite`/`join`), serve (`mesh serve --listen`),
-> replicate on demand (`mesh replicate --peer`), and remove or leave; the
-> automatic node loop arrives in 05. These limitations describe the design the increments build.
+> **Status.** The mesh is in development on `feat/device-mesh`. Increments
+> 01-11 are built: pairing, the node, shared projects and cross-device usage,
+> spend caps with gateway enforcement, the desktop app's Devices view and
+> project panels, and opt-in credential sharing; Increment 12 (hardening and
+> the audit of 2026-11-03) is in progress. These limitations describe what is
+> built; the ones the audit accepted rather than fixed are marked
+> "(accepted, audit 2026-11-03)".
 
 ## Reachability
 
@@ -25,10 +28,18 @@ permanent design choice or something a later increment changes.
   next handshake after hearing.
 - **Leaving without a reachable peer.** `mesh leave` wipes this device either
   way. If no peer was reachable to receive the departure, the other devices
-  keep listing it until one of them removes it.
+  keep listing it until one of them removes it. The same holds when this
+  device's identity is untrusted (its marker missing, mismatched, rolled back
+  or unreadable) or held by a rollback notice: it then announces nothing, and
+  only wipes (audit MI-2).
 - **The invite is a bearer secret.** Anyone who has it during its lifetime can
   add a device. On the command line it ends up in shell history; pass `-` to
   read it from standard input instead.
+- **The shown invite passes through ordinary strings** (accepted, audit
+  2026-11-03, MD-15). To reach you once, the invite is formatted and returned
+  (CLI output, the desktop dialog) in plain, non-zeroized strings, which can
+  stay in freed memory. It is single use and expires (10 minutes by default,
+  at most 60), which bounds what a later memory read gains.
 - **Pairing reveals the inviter's static key to a client that knows a live
   invite's hint** (message 2 of `XXpsk3` comes before the psk is mixed in). The
   hint is derived from the token, so in practice that means someone who saw
@@ -46,8 +57,40 @@ permanent design choice or something a later increment changes.
   impersonating another device, key-derived device ids stop it taking
   over another device's identity, and the spend-cap clamp stops it creating
   rights in other devices' views beyond what it held.
+- **A compromised member can pin a replicated setting** (accepted, audit
+  2026-11-03, MP-6). Last-writer-wins values (a cap's target, a shared
+  project's name, archived flag and merge, the retention setting) are ordered
+  by their hybrid-clock timestamp, then the writing device. A member that writes one at a far-future timestamp, up to
+  the clock's maximum, wins against every later honest write. A fixed
+  timestamp ceiling would only move where such a write pins the value; the
+  real fix is for each write to name the entry it replaces, a payload change
+  for every such kind, and is not built. Recovery: remove the device and
+  replace the pinned object (a new cap, a new shared project, or, for a mesh
+  setting, a new mesh).
+- **The access key does not withstand a member** (accepted, audit 2026-11-03,
+  MP-8). Two rotations to the same epoch converge on the key with the larger
+  hash, which a device can choose (grind) for its own rotation, and the epoch
+  ceiling counts removals, including removals of device ids a member made
+  up. The access key is defense in depth only: the roster check after the
+  handshake is what refuses a removed device.
 - **Mutual removal removes both.** If two devices remove each other at the same
   time, both are removed.
+- **Concurrent removals keep the smaller cutoff.** When two devices remove the
+  same device having seen different amounts of its history, the removed
+  device's items count only up to the lower of the two cutoffs (audit MP-1:
+  the larger one let a removed device cancel its own removal).
+- **A fork report rests on the reporting member's word.** Any known device's
+  `fork.report` counts, and the hashes in it are not signed items: a
+  compromised member can report any device forked, directly or by feeding an
+  honest device false chain hashes. A device never reports itself forked from
+  a peer's claim (audit MP-2), and a falsely reported device recovers like a
+  forked one (leave and pair again, after removing the member that lied).
+- **A join that cannot verify its inviter keeps nothing.** If the first
+  exchange does not deliver an inviter roster entry with the Noise key that
+  answered the pairing (a dropped connection, or a mismatch), `mesh join`
+  fails and wipes the new identity (audit MP-12). The inviter has already
+  added the device, so its list shows a device that never connects: remove it
+  there (`tethra mesh remove`) and pair again with a new invite.
 - **Only a device's latest value per key is kept.** When a removed device's
   latest write to a value came after its removal cutoff, that value stops
   counting, and its *earlier* value is not restored: the value falls back to the
@@ -65,20 +108,29 @@ permanent design choice or something a later increment changes.
 
 ## Identity and storage
 
-- **A restored backup leaves the mesh.** Restore deletes every mesh row
-  (identity, keys, items, peers) because a restored vault is a copy: if it kept
-  minting as the original device, the two would reuse item numbers. Pair the
-  restored device again.
+- **A restored backup leaves the mesh.** Backups carry no mesh rows (identity,
+  keys, items, peers, invites), only the device id the vault had, because a
+  restored vault is a copy: if it kept minting as the original device, the two
+  would reuse item numbers. Pair the restored device again. A backup made by
+  an older build still holds those rows inside its encryption; restore skips
+  them.
 - **The identity marker sees large rollbacks, not small ones.** The marker
-  reserves item numbers in blocks of 64, so a database rolled back by less than
-  one block, or a copy of the whole data directory (database and marker
-  together), is not caught locally. It is caught as a fork when the diverging
-  histories meet another device, and the copy's later items stop counting.
+  reserves item numbers in blocks of 64 and records the log length committed
+  when it was written, so a database rolled back by less than about one block
+  (or past one large batch whose follow-up marker write failed), or a copy of
+  the whole data directory (database and marker together), is not caught
+  locally. It is caught as a fork when the diverging histories meet another
+  device, and the copy's later items stop counting.
 - **A power loss can look like a rollback.** Every write is synced
   (`synchronous=FULL`, and F_FULLFSYNC on macOS). But if a disk still loses more
   than 64 of this device's most recent writes while the marker survives, the
   device refuses to mint until it leaves and pairs again. That is the safe side
   of the error.
+- **Fork evidence can be reported one exchange late** (accepted, audit
+  2026-11-03, MI-7). A large exchange commits in several chunks; if a chunk
+  after the one that noted a fork fails, the fork is not reported from that
+  exchange. The evidence is found again at the next exchange's chain
+  comparison.
 - **One device's batch is one transaction.** A large exchange is written in
   several short transactions, but everything received from one origin in one
   exchange is a single transaction (at most the 50 000-row session limit), so
@@ -124,6 +176,12 @@ permanent design choice or something a later increment changes.
   single-instance check (a live node answering on the port recorded in the nonce
   file) is weaker than the Unix socket lock: two nodes started in the same
   instant could both start.
+- **Two nodes started at the same instant on a stale socket** (accepted, audit
+  2026-11-03, MI-6). On Unix the single-instance check replaces a control
+  socket nobody answers on; two nodes started in the same instant against a
+  stale socket can both get past it. The database stays consistent (one writer
+  per transaction, and a node reloads its views when another process has
+  committed); stop one of them with `tethra mesh stop`.
 - **Data directory paths are limited** to about 100 bytes on Unix, because the
   control socket lives inside it (`<data-dir>/mesh/node.sock`), as for the
   gateway's socket. A longer `TETHRA_DIR` makes `serve` fail with a clear error.
@@ -193,6 +251,8 @@ permanent design choice or something a later increment changes.
   old figures until it next exchanges.
 - **Retention drops data on every device.** After `retention.usage_days` plus
   two days, counters are dropped everywhere; there is no per-device override.
+  Lowering it in the CLI asks first (`--yes` for scripts); a dropped counter
+  cannot be brought back. The desktop app has no retention control.
 
 ## Spend caps
 
@@ -210,20 +270,38 @@ permanent design choice or something a later increment changes.
   the gateway bypasses the cap. The figure is the gateway's estimate (priced
   requests only, cached-read tokens excluded), priced on each device with its
   own pricing table.
-- **Overshoot is bounded, not zero.** Cost is known only after a response, so
-  an enforcing device may exceed its rights by at most one in-flight request's
-  cost per cap (near the cap one request runs at a time).
-- **Unpriced or unmetered traffic is never blocked.** A model with no pricing
+- **Overshoot is limited, not zero, and not "one request".** Cost is known
+  only after a response. Near the cap, and while no request cost is known
+  (after a gateway restart or at the start of a month), requests run one at a
+  time, so a device goes over by that request's cost. Otherwise see the next
+  entries: concurrent requests far above the typical cost, and spend a
+  restart forgets, can take it further.
+- **Unpriced or unmetered traffic is never charged.** A model with no pricing
   record, or a response that reported no usage (an OpenAI stream without
   `stream_options.include_usage`, a route without usage extraction), is
   admitted and counted as unpriced or unmetered, not against the cap; `cap
-  show` and `gateway status` show the counts.
-- **Concurrency is bounded by the typical request.** Requests in flight each
-  reserve the cap's recent 95th-percentile cost; ones much larger than that
-  can together exceed what the reservations covered.
+  show` and `gateway status` show the counts. It is still subject to the
+  one-at-a-time rule: while no request cost is known for the cap, which stays
+  true if all its traffic so far is unpriced, a second request in flight gets
+  the serialized 403.
+- **Concurrency is bounded by the typical request.** Beside other in-flight
+  requests, a request is admitted only while every in-flight request's
+  reserved cost (the cap's recent 95th-percentile) still leaves the margin;
+  several requests that each cost far more than that can together go over by
+  more than one request.
 - **The gate fails open.** No mesh, a database the gateway cannot open or that
   is newer than it, or a poller stuck for a minute: the gateway forwards
   everything and reports why.
+- **A refused request can hold a connection for up to 5 s** (accepted, audit
+  2026-11-03, MC-11). After the 403 the gateway reads and discards the unread
+  request body (at most 5 s and 64 MiB) so the client sees the refusal rather
+  than a reset; a client sending refused requests can keep connection threads
+  busy that long each.
+- **A transfer can be decided against a gateway that is just starting**
+  (accepted, audit 2026-11-03, MC-9). The node checks whether the gateway runs
+  before its write transaction, not inside it. A gateway that starts in
+  between can, until its next refresh (5 s), admit spend against rights the
+  node has just given away without its acknowledgement.
 - **A restart can forget recent spend.** Spend the writer had not persisted
   (records dropped under load, or recording paused) is counted in memory only;
   after a gateway restart it is gone. `gateway status` flags it as accounting
@@ -270,8 +348,11 @@ permanent design choice or something a later increment changes.
 - **A recipient keeps what it imported.** Revoking a share stops a device that
   has not imported it yet; it never removes a value from a vault, and it
   **does not revoke the credential at its provider**. To cut a device off,
-  rotate the credential (`tethra rotation`, the Rotation view). The same holds
-  for a removed or stolen device.
+  revoke its share first, then rotate the credential (`tethra rotation`, the
+  Rotation view): after a rotation the sharing device offers a reseal of the
+  new value to every device that held the old one, except devices whose share
+  was revoked. For a removed or stolen device, rotate: removed devices are
+  never offered a reseal.
 - **Nothing is imported or resealed automatically.** Every share, import and
   reseal needs the master password. A device paired after a share to "all my
   devices", or a credential whose value changed, only gets a reseal *offer*

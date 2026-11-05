@@ -118,7 +118,14 @@ describe("MeshProjectPanel not shared", () => {
     expect(why).toHaveTextContent(
       /never individual requests, request content, routes or credentials/,
     );
-    expect(why).toHaveTextContent(/only after you bind it there/);
+    // Every member lists it by name and sees its usage after the next
+    // exchange; binding decides only what that device counts (MD-7).
+    expect(why).not.toHaveTextContent(/Your other devices see it only after/);
+    expect(why).toHaveTextContent(/name and its daily usage counters/);
+    expect(why).toHaveTextContent(
+      /After their next exchange, every device in the mesh lists the project by name and can see its usage/,
+    );
+    expect(why).toHaveTextContent(/counts its own traffic for it only after you bind it there/);
 
     mockApi.meshProjectsList.mockResolvedValue([shared()]);
     await user.click(button);

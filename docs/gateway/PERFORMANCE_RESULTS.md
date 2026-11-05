@@ -99,16 +99,28 @@ the implementation evidence behind the change.
 
 `perf_cap_admission_overhead`: the same linked route, keep-alive, n=400,
 through a gateway with no cap gate and one enforcing a cap with plenty of
-rights (the upstream reports no usage, so only admission differs). Darwin
-25.5.0 arm64, 2026-10-29, the whole suite 9 passed:
+rights. Darwin 25.5.0 arm64, 2026-10-29, the whole suite 9 passed.
+
+**What this measures, exactly.** Admission alone, far from the cap:
+
+- the figures are **printed, not asserted**: the test passes whatever the
+  numbers are, so a regression would not fail it;
+- the two gateways run **one after the other, ungated first, then gated**,
+  on the same machine, so the second run benefits from a warmer machine;
+- the mock upstream's response carries **no usage**, so the gate never
+  charges a cost (the charge path, pricing and the p95 update are not
+  measured), and the gate's snapshot is loaded once by the test (no poller
+  runs, so a poller's refresh competing with requests is not measured);
+- nothing near exhaustion is measured (the one-at-a-time path, or a 403).
 
 | path | p50 | p95 | p99 |
 |---|---|---|---|
 | no gate | 125 µs | 243 µs | 253 µs |
 | enforced gate | 121 µs | 139 µs | 147 µs |
 
-The difference is inside the run-to-run noise (the second run benefits from
-a warmer machine): admission is an `Arc` read and a few atomics. The small
+The difference is inside the run-to-run noise (the gated run came second, on
+a warmer machine): admission is an `Arc` read and a few atomics. This supports
+"no measurable admission cost far from the cap", nothing more. The small
 JSON path in the same run was 86 / 199 / 204 µs through the gateway (p50 /
 p95 / p99), against 98 / 177 / 208 µs above: no regression beyond the noise
 this page describes.

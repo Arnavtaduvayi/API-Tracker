@@ -27,7 +27,7 @@ vi.mock("../api", async () => {
       meshProjectBind: vi.fn(),
       meshProjectShare: vi.fn(),
       projectList: vi.fn(),
-      projectCreate: vi.fn(),
+      projectCreateForMesh: vi.fn(),
     },
   };
 });
@@ -90,7 +90,7 @@ describe("MeshAvailableProjects", () => {
     await waitFor(() => expect(mockApi.meshProjectsList).toHaveBeenCalledTimes(2));
     expect(mockApi.meshProjectBind).not.toHaveBeenCalled();
     expect(mockApi.meshProjectShare).not.toHaveBeenCalled();
-    expect(mockApi.projectCreate).not.toHaveBeenCalled();
+    expect(mockApi.projectCreateForMesh).not.toHaveBeenCalled();
     expect(mockApi.projectList).not.toHaveBeenCalled();
   });
 
@@ -134,7 +134,7 @@ describe("MeshAvailableProjects", () => {
 
   it("creates a new project by name, then binds it", async () => {
     const user = userEvent.setup();
-    mockApi.projectCreate.mockResolvedValue(
+    mockApi.projectCreateForMesh.mockResolvedValue(
       localProject({ id: "local-new", name: "fake-new" }),
     );
     mockApi.meshProjectBind.mockResolvedValue(MESH_A);
@@ -146,13 +146,13 @@ describe("MeshAvailableProjects", () => {
     const name = screen.getByLabelText("New project name");
     // Pre-filled with the shared project's name, but nothing happens yet.
     expect(name).toHaveValue("fake-shared");
-    expect(mockApi.projectCreate).not.toHaveBeenCalled();
+    expect(mockApi.projectCreateForMesh).not.toHaveBeenCalled();
     await user.clear(name);
     await user.type(name, "fake-new");
     await user.click(screen.getByRole("button", { name: "Bind" }));
 
     await waitFor(() =>
-      expect(mockApi.projectCreate).toHaveBeenCalledWith({
+      expect(mockApi.projectCreateForMesh).toHaveBeenCalledWith({
         name: "fake-new",
         description: "",
         notes: "",
@@ -170,7 +170,7 @@ describe("MeshAvailableProjects", () => {
 
   it("says the project was created when only the bind failed", async () => {
     const user = userEvent.setup();
-    mockApi.projectCreate.mockResolvedValue(
+    mockApi.projectCreateForMesh.mockResolvedValue(
       localProject({ id: "local-new", name: "fake-new" }),
     );
     mockApi.meshProjectBind.mockRejectedValue({

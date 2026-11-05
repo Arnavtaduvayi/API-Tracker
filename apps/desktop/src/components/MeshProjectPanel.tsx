@@ -18,10 +18,11 @@ import { meshDeviceLabel, meshErrText, shortId } from "./MeshCommon";
 
 /** Exactly what sharing a project replicates; shown before the click. */
 export const SHARE_EXPLANATION =
-  "Sharing replicates this project's daily usage counters (requests, tokens, estimated cost) " +
-  "to your paired devices, never individual requests, request content, routes or " +
-  "credentials. Your other devices see it only after you bind it there to one of their own " +
-  "projects.";
+  "Sharing replicates this project's name and its daily usage counters (requests, tokens, " +
+  "estimated cost) to your paired devices, never individual requests, request content, routes " +
+  "or credentials. After their next exchange, every device in the mesh lists the project by " +
+  "name and can see its usage. Another device counts its own traffic for it only after you " +
+  "bind it there to one of its own projects.";
 
 type Dialog =
   | { kind: "unbind" }

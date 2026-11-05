@@ -1,21 +1,23 @@
 # Tethra Mesh — Architecture
 
-Tethra Mesh replicates a small, fixed set of data **peer-to-peer and end-to-end
-encrypted between one developer's own paired devices**, with no server, relay or
-cloud of any kind. Decision record: [ADR 0031](../decisions/0031-device-mesh.md).
+Tethra Mesh replicates a small, fixed set of data **peer-to-peer between one
+developer's own paired devices, encrypted on every connection between them**,
+with no server, relay or cloud of any kind. The encryption is per hop: every
+member device reads what it holds and relays, so everything that replicates is
+readable by every member; only a shared credential's value is sealed to its
+recipient devices. Decision record: [ADR 0031](../decisions/0031-device-mesh.md).
 Normative protocol: [PROTOCOL.md](PROTOCOL.md).
 
 > **Status.** In development on `feat/device-mesh`, built in twelve increments
-> (`increments/STATUS.md`). As of Increment 03, `crates/core/src/mesh/` holds the
-> pure foundations (01) and the replication protocol as a sans-IO state machine
-> (02). That protocol is proven by a deterministic simulator against an
-> independently written oracle, over in-memory stores and, since 03, over the
-> SQLite store. A device has a real identity (keys encrypted in the vault, a
-> clone/rollback marker). Since 04, `crates/mesh` carries the protocol over Noise
-> on TCP. Devices pair with a one-time invite, serve, replicate on demand, relay
-> through one another, remove a device (with access-key rotation) and leave,
-> all from `tethra mesh …`. The automatic node loop arrives in 05. Each section
-> below says what is implemented and what is specified.
+> (`increments/STATUS.md`); 01-11 are done and 12 (hardening and the
+> 2026-11-03 audit) is in progress. `crates/core/src/mesh/` holds the pure
+> foundations (01) and the replication protocol as a sans-IO state machine
+> (02), proven by a deterministic simulator against an independently written
+> oracle over in-memory and SQLite stores (03). `crates/mesh` carries it over
+> Noise on TCP (04) and runs the node loop (05). On top: shared projects and
+> cross-device usage (06), spend caps (07) and their gateway enforcement (08),
+> the desktop app's Devices view and project panels (09-10), and opt-in
+> credential sharing (11). Each section below says what is implemented.
 
 ## Vocabulary
 
@@ -46,7 +48,7 @@ Nothing outside this table ever replicates.
 | Usage counters per (origin device, mesh project, UTC day, provider, model) | yes | Counts, tokens and an estimated-cost split; **no** request-level data (`usage.counter`) |
 | Spend caps, rights, used totals | yes | `cap.def`, `cap.target`, `cap.rights`, `cap.used` |
 | Mesh settings (retention horizon) | yes | `mesh.setting` |
-| Credential shares (Increment 11) | yes, opt-in | One credential at a time, sealed to each chosen device's key and imported only on request (`share.sealed`, `share.revoke`; ADR 0033) |
+| Credential shares (Increment 11) | yes, opt-in | One credential at a time, imported only on request (`share.sealed`, `share.revoke`; ADR 0033). Only the value is sealed, to each chosen device's key; the share's credential name, provider, mesh project, value version and recipient are readable by every member device, which relays them |
 | Which local credential a share came from, imports, the "all my devices" intent | **no** | `mesh_share_outgoing`, `mesh_share_imports` (device-local) |
 | Local project ids, bindings, peers, invites, keys, cursors, enforcement switch | **no** | Device-local only |
 | Gateway request events, routes, paths, endpoints, scan findings, alerts, audit rows, provider admin keys, destinations | **no** | Never |

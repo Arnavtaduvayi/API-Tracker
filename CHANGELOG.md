@@ -21,8 +21,12 @@ Credentials shared with this device**)
   paired later, or a changed value, gets a reseal offer you act on.
 - **Revoking is not rotating.** A revoke stops devices that have not imported
   the share; a device that imported it keeps the value, and the credential
-  stays valid at its provider until you rotate it. The CLI and app say so
-  wherever you revoke, and link to rotation.
+  stays valid at its provider until you rotate it. To cut a device off, revoke
+  its share first, then rotate: the reseal offered after a rotation never
+  includes a device whose share you revoked. The CLI and app say so wherever
+  you revoke, and link to rotation. Removing a device (CLI and app) now warns
+  that what it imported stays usable until you rotate it, and suggests `cap
+  reclaim` first.
 
 ### Security — credential sharing (Tethra Mesh)
 
@@ -51,8 +55,10 @@ usage across them, and hold a monthly spend cap, without a terminal
 
 - **Share and bind, never automatically.** Share a project from its page; on
   another device, bind it to a project from **Devices → Available from your
-  devices**. Only daily usage counters replicate, never requests or
-  credentials.
+  devices**. Only the project's name and daily usage counters replicate,
+  never requests or credentials; every device in the mesh lists it and sees
+  its usage after the next exchange. Creating a project there to bind sends no
+  analytics event.
 - **Honest cross-device usage.** One row per device with "as of", stale and
   removed labels, "no data from" for devices that published nothing, unpriced
   and not-extracted requests counted separately, and a total that says what
@@ -60,8 +66,8 @@ usage across them, and hold a monthly spend cap, without a terminal
 - **Spend caps from the app.** Create, raise (a labelled local override on a
   device that does not own the cap), lower, reclaim, and see each device's
   rights. **Enforce on this device** asks for your master password and
-  explains the 403, the bounded overshoot, and that a cap is a self-limit,
-  not a security boundary; the panel says when enforcement is inactive and
+  explains the 403, when and how far spend can go over the cap, and that a
+  cap is a self-limit, not a security boundary; the panel says when enforcement is inactive and
   why.
 
 ### Added — Tethra Mesh: pair and manage your devices from the desktop app (in development)
@@ -98,19 +104,28 @@ used up ([ADR 0032](docs/decisions/0032-spend-caps.md),
 - **A clear, non-retried refusal.** HTTP 403 (not 429, which SDKs retry) with
   an error in the provider's own shape and an `x-tethra-cap` header, sent
   before the request reaches the provider. No credential is ever echoed.
-- **Bounded overshoot.** Cost is known only when a response completes, so
-  near the cap one request runs at a time: a device goes over by at most one
-  request. Models without a price, and responses that report no usage, are
-  never blocked; they are counted and shown.
+- **Limited overshoot, not zero.** Cost is known only when a response
+  completes. Near the cap, and while no request cost is known (after a gateway
+  restart or at the start of a month), requests run one at a time; beside
+  other requests in flight, a request is admitted only while their reserved
+  typical (p95) cost leaves room, so several requests that each cost far more
+  than typical can together go over by more than one request, and a gateway
+  restart can forget spend not yet saved
+  ([limitations](docs/mesh/KNOWN_LIMITATIONS.md#spend-caps)). Models without a
+  price, and responses that report no usage, are never charged against the
+  cap; they are counted and shown.
 - **Per device, behind your master password.** Each device decides for
   itself; no other device can switch it on or off. If the gateway cannot read
   the caps it forwards everything and `tethra gateway status` says why;
   `status` and `tethra mesh cap show` show what each enforced cap still admits.
-- **No double spending across devices.** Rights a device gives away are held
-  back from its gateway first and published only after the gateway has
-  stopped counting them.
-- The admission check adds no measurable latency
-  ([measurements](docs/gateway/PERFORMANCE_RESULTS.md)). A cap is a
+- **Rights given away are fenced against the gateway.** Rights a device gives
+  away are held back from its gateway first and published only after the
+  gateway has stopped counting them. Two gaps remain: a transfer can slip past
+  spend the gateway has not saved yet, and a gateway restart can forget recent
+  spend ([limitations](docs/mesh/KNOWN_LIMITATIONS.md#spend-caps)).
+- In a benchmark of admission alone (no response cost charged, no running
+  poller; printed, not asserted), the check added no latency beyond run-to-run
+  noise ([measurements](docs/gateway/PERFORMANCE_RESULTS.md)). A cap is a
   self-limit: traffic that does not go through the gateway is not capped.
 
 ### Added — Tethra Mesh: spend caps across your devices, alerts only (in development)
@@ -167,7 +182,8 @@ usage from all of them in one place
 - **Deletion follows.** Deleting gateway data, or letting it expire, removes
   it from your other devices at their next exchange.
 - **Retention.** `tethra mesh settings set retention.usage_days <n>` (default
-  90) sets how long every device keeps the counters.
+  90) sets how long every device keeps the counters. Lowering it deletes
+  older counters on every device, so it asks first (`--yes` for scripts).
 - `tethra usage` is unchanged; when this device is in a mesh it points to
   `tethra mesh usage`.
 

@@ -1,0 +1,6 @@
+# MD-9 baseline: the text at HEAD 70ebeb1 before remediation (documentation finding; the 'failing test' is this stale text)
+$ git grep stale status lines
+70ebeb1:docs/mesh/ARCHITECTURE.md:17:> all from `tethra mesh …`. The automatic node loop arrives in 05. Each section
+70ebeb1:docs/mesh/SECURITY_INVARIANTS.md:158:  chunk; one origin's range is one transaction). Concurrency and timeouts land
+70ebeb1:docs/mesh/SECURITY_INVARIANTS.md:354:  granted); 12 adds a grep guard.
+70ebeb1:docs/mesh/THREAT_MODEL.md:23:> mDNS discovery and the node loop are specified (05). See

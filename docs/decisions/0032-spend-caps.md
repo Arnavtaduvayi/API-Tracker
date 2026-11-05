@@ -215,6 +215,37 @@ the views agree that they have none, the decrease settles. The cost falls on
 the cap's owner, which is the authority that minted the rights; a lower below
 what was spent still caps every device for the rest of the month, as D4 says.
 
+### Amendments from the independent audit (Increment 12)
+
+Each with a test that failed first (`docs/mesh/audit/2026-11-03/evidence/`):
+
+- **Open burns count against the pending decrease (MC-2).** A burn waiting
+  for the running gateway's acknowledgement (an open escrow row) is counted as
+  burned when a device works out a lower's pending decrease
+  (`Ledger::pending_decrease`), for its own burns and for the reclaim it asks;
+  before, every round until the ack burned the same decrease again.
+- **`cap.used` never decreases within a month (MC-3).** When local rollup
+  rows go (usage deleted, a retention sweep, a binding changed), the
+  difference is carried locally (`view::local_cap_spend`, used by the node and
+  the gateway alike), so deleting data never hands back spent rights.
+- **Reclaims leave overrides alone (MC-6).** A holder gives the owner's
+  reclaim only what it holds above its own overrides (`policy::reclaimable`).
+- **The gate (MC-1, MC-5, MC-7, MC-8).** While no request cost is known for a
+  cap (a new cap, or a restarted gate whose persisted history has none), it
+  admits one request at a time; a restarted gate seeds its cost history from
+  the persisted usage events of the cap's projects. Rights are read after the
+  reservation is taken. A charge whose project row vanished stays counted and
+  flags the accounting incomplete. A failed refresh keeps the last good
+  snapshot until it is stale.
+- **Alerts say what the gate does (MC-10)**, from its persisted status: a
+  switch carried from a superseded cap, a gate failing open, a gate not
+  reporting.
+- **The caps simulator checks "not over-burned" at quiescence (MC-4)**: the
+  supply never ends below `min(lowest target + overrides, minted)` while the
+  total spend is within it, less the integer fair-share remainder (fewer than
+  one micro per holder). Running the escrow fence inside the simulator remains
+  future work.
+
 ## Alternatives considered
 
 - **Consensus (Raft) on each spend or each cap change.** Rejected for the
@@ -287,3 +318,8 @@ what was spent still caps every device for the rest of the month, as D4 says.
   waits for its next exchanges.
 - On Windows the node cannot yet probe whether the gateway runs (no control
   channel): with enforcement on, every transfer waits for the gateway's ack.
+- The caps simulator does not run the escrow fence (Increment 12, MC-4); the
+  fence is covered by core and gateway integration tests.
+- A cap's projects whose traffic is all unpriced keep the gate in its
+  one-request-at-a-time mode while enforcement is on (no request cost is ever
+  known).

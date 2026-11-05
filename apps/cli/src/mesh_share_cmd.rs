@@ -54,7 +54,9 @@ pub enum CredentialCmd {
     },
     /// Revoke one share, or every share of a credential (it asks first).
     /// This does NOT revoke the credential at its provider, and a device
-    /// that imported it keeps the value: rotate the credential to cut it off.
+    /// that imported it keeps the value: to cut a device off, revoke its
+    /// share first, then rotate the credential (a reseal never offers a
+    /// device whose share you revoked).
     Revoke {
         /// The share id (or at least its first 8 characters).
         #[arg(required_unless_present = "credential", conflicts_with = "credential")]
@@ -148,9 +150,13 @@ fn resolve_device(devices: &[DeviceRow], ident: &str) -> Result<DeviceId> {
     }
 }
 
+/// Revoke first, then rotate: a reseal offers every device holding the old
+/// value unless its share was revoked, so rotating alone would let a reseal
+/// send the new value to the device being cut off (MD-4).
 const REVOKE_NOTE: &str = "Revoking a share later does not revoke the credential at its provider, \
-     and a device keeps whatever it imported: to cut a device off, rotate the credential \
-     (`tethra rotation plan <credential>`).";
+     and a device keeps whatever it imported: to cut a device off, revoke its share first, \
+     then rotate the credential (`tethra rotation plan <credential>`); a reseal never offers \
+     a device whose share you revoked.";
 
 fn share(ctx: &Ctx, credential: &str, to: &[String], yes: bool) -> Result<()> {
     let (vault, _token) = ctx.unlocked()?;
@@ -457,10 +463,12 @@ fn reseal(ctx: &Ctx, credential: &str, yes: bool) -> Result<()> {
 pub fn status_summary(vault: &UnlockedVault) -> Result<SharesSummary> {
     let l = vault.mesh_shares_peek()?;
     Ok(SharesSummary {
+        // A share from a device since removed is listed but cannot be
+        // imported (MD-13).
         incoming_available: l
             .incoming
             .iter()
-            .filter(|r| !r.revoked && r.imported.is_none())
+            .filter(|r| !r.revoked && r.imported.is_none() && r.sharer_active)
             .count(),
         incoming_imported: l.incoming.iter().filter(|r| r.imported.is_some()).count(),
         outgoing_live: l.outgoing.iter().filter(|r| !r.revoked).count(),

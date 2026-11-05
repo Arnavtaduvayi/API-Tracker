@@ -73,10 +73,14 @@ export function DevicesView() {
     try {
       const r = await api.meshLeave(password);
       setOutcome({
-        notice: r.delivered
-          ? "Left the mesh; another device received this device's departure."
-          : "Left the mesh. No other device was reachable, so they still list this one " +
-            "until one of them removes it.",
+        notice: !r.announced
+          ? `Left the mesh without announcing it (${
+              r.not_announced_because ?? "this device could not record its departure"
+            }). The other devices still list this one until one of them removes it.`
+          : r.delivered
+            ? "Left the mesh; another device received this device's departure."
+            : "Left the mesh. No other device was reachable, so they still list this one " +
+              "until one of them removes it.",
       });
     } catch (e) {
       throw scrubbed(e, [password]);

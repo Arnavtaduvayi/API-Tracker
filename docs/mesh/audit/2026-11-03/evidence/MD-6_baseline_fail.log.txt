@@ -1,0 +1,9 @@
+# MD-6 baseline: the text at HEAD 70ebeb1 before remediation (documentation finding; the 'failing test' is this stale text)
+70ebeb1:CHANGELOG.md:109:- **No double spending across devices.** Rights a device gives away are held
+70ebeb1:apps/desktop/src/components/CapsPanel.test.tsx:359:    expect(dialog).toHaveTextContent(/the overshoot is at most one request/);
+70ebeb1:apps/desktop/src/components/CapsPanel.tsx:42:  "overshoot is at most one request. Models without a price and responses without usage are " +
+70ebeb1:docs/mesh/PROTOCOL.md:410:  gateway overshoot, `Σ U` may exceed that by at most one request's cost per cap
+70ebeb1:docs/mesh/PROTOCOL.md:474:  while `pending > 0`. At most one request per peer, cap and month, and one
+70ebeb1:docs/mesh/SECURITY_INVARIANTS.md:282:- **MESH-SI-10 No double spending.** Rights are never spent twice; transfers are
+70ebeb1:docs/mesh/increments/DESIGN.md:829:    is at most one request's cost (MESH-SI-9). The docs state the bounded-overshoot rule
+70ebeb1:docs/mesh/increments/DESIGN.md:993:10. **No double spending.** Rights are never spent twice; transfers are fenced against the
