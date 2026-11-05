@@ -141,8 +141,14 @@ converges when it reconnects. Each device's gateway can enforce a shared spend
 cap even while the devices cannot reach each other. Credential values replicate
 only when the user shares one credential (Increment 11): opt-in per
 credential, after reauthentication, with the value sealed to specific devices
-and imported there only on request. The mesh is in development on the `feat/device-mesh` branch
-(`docs/mesh/`, ADR 0031).
+and imported there only on request (ADR 0033). Spend caps are a self-limit on
+traffic through the gateway: enforcement is per device and opt-in, and
+overshoot is limited, not zero (ADR 0032). Built in twelve increments
+(`docs/mesh/increments/`), with an independent audit whose confirmed
+findings are fixed and whose accepted residual risks are documented
+(`docs/mesh/audit/`, `docs/mesh/KNOWN_LIMITATIONS.md`). Not built: NAT
+traversal or relays (by design), a background service for the node,
+multi-user meshes, mobile clients.
 
 ## 5. Recommended technical architecture
 

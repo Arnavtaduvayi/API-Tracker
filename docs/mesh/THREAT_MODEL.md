@@ -5,7 +5,7 @@ This extends the root [`THREAT_MODEL.md`](../../THREAT_MODEL.md) for Tethra Mesh
 still holds; this document adds one trust boundary and the adversaries that
 come with it.
 
-> **Status.** Increments 01-11 are built and tested:
+> **Status.** All twelve increments are built and tested:
 > - item signing and verification, and the canonical codec (01);
 > - roster admission: removal cutoffs, fork reports, key-derived device ids
 >   (01-02);
@@ -21,10 +21,11 @@ come with it.
 >   node's half of the escrow fence (07), and gateway enforcement (08);
 > - the desktop app's in-process node and its Devices, project, usage and cap
 >   panels (09-10);
-> - opt-in credential sharing, sealed per recipient device (11).
+> - opt-in credential sharing, sealed per recipient device (11);
+> - hardening and an independent audit (12, 2026-11-03): 41 findings fixed
+>   with failing-first tests, 7 accepted (`audit/2026-11-03/`).
 >
-> Increment 12 (hardening and the audit of 2026-11-03) is in progress. See
-> `SECURITY_INVARIANTS.md` for per-invariant status and `KNOWN_LIMITATIONS.md`
+> See `SECURITY_INVARIANTS.md` for per-invariant status and `KNOWN_LIMITATIONS.md`
 > for the residual risks the audit accepted.
 
 ## Assets

@@ -40,7 +40,7 @@ rule (README §1 step 12).
 
 | 03 `6a8213f` | **1,682 passed, 0 failed, 11 ignored** (12 ignored after the `commit_timing` addition in the record commit) (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking`; one run had 1 failure in the unrelated `git_execution_canaries::each_canary_is_armed_against_unhardened_git`, which passed 5/5 on rerun, see handoff). Of these: 171 mesh unit tests (`cargo test -p api-tracker-core --lib mesh`), `--test mesh_store_conformance` 5 (+2 ignored: `soak`, `commit_timing`), `--test mesh_schema` 7, `--test migration_safety` still 9, `-p api-tracker-cli --test mesh_cli` 4 | unchanged (not touched) | **151 passed** (`bash scripts/smoke.sh`; 11 new mesh checks) |
 
-| 12 Phase C (audit remediation) | **1,920 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New since 11 (+53): Phase A's `adversarial` suite (11 with the MP-7 ghost test) and the store's hole test, and the audit's failing-first tests (core `mesh_audit_identity`, `mesh_audit_protocol`, `mesh_caps`, `proto`, `views`, `roster`, `oracle`, `kinds`, `marker`, `policy`, `sqlite_store`; gateway `cap_enforcement`, `capgate`; mesh `bounds`, `pairing`) | **413 passed** in 38 files (`npm test`; +6): `MeshNoAnalytics` 5 (MD-5), `DevicesView` +1 (MI-2) | **186 passed** (`bash scripts/smoke.sh`) |
+| 12 Phase C + D (audit remediation and verification follow-up) | **1,921 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New since 11 (+54): Phase A's `adversarial` suite (11 with the MP-7 ghost test) and the store's hole test, and the audit's failing-first tests (core `mesh_audit_identity`, `mesh_audit_protocol`, `mesh_caps`, `proto`, `views`, `roster`, `oracle`, `kinds`, `marker`, `policy`, `sqlite_store`; gateway `cap_enforcement`, `capgate`; mesh `bounds`, `pairing`) | **413 passed** in 38 files (`npm test`; +6): `MeshNoAnalytics` 5 (MD-5), `DevicesView` +1 (MI-2) | **186 passed** (`bash scripts/smoke.sh`) |
 | 11 (this increment) | **1,867 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (25): core `--test mesh_share` 18 (6 of them the review's regressions), `mesh::share` unit 3, `mesh_schema` 11 (+1 v24), `tauri_command_authz` 24 (+1 share/import/reseal reauth), `-p api-tracker-mesh --test share_wire` 1, `cli --test mesh_cli` 11 (+1); the oracle's share-rule test rewritten (same count) | **407 passed** in 37 files (`npm test`; +15): `MeshCredentialSharePanel` 8, `MeshIncomingShares` 5, `DevicesView` +2 | **186 passed** (`bash scripts/smoke.sh`; 7 sharing checks) |
 | 10 `aa63799` | **1,842 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`). New (2): `tauri_command_authz` `mesh::mesh_cap_enforce_requires_correct_reauth` (23 in the file), `-p api-tracker-mesh --test desktop_flow` 1 | **392 passed** in 35 files (`npm test`; +45): `CapsPanel` 17, `MeshUsageCard` 10, `MeshProjectPanel` 8, `MeshAvailableProjects` 7, `MeshCapAlerts` 1, `DevicesView` +2 | **179 passed** (`bash scripts/smoke.sh`) |
 | 09 `771b7ed` | **1,840 passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh`: 1,839 in the full run, plus `supervisor::a_device_pairs_with_the_in_process_node…` added after it and run with its file, 11/11). New (17): core `--test tauri_command_authz` `mesh::*` 4 (22 in the file), `mesh::node_settings` unit 2, `-p api-tracker-mesh --test supervisor` 11 | **347 passed** in 30 files (`npm test` in apps/desktop; base 308 in 25): `DevicesView` 16, `MeshThisDevice` 8, `MeshSetup` 7, `MeshPeersHealth` 7, `MeshAppNav` 1 | **179 passed** (`bash scripts/smoke.sh`) |
@@ -237,10 +237,27 @@ tracking, mesh) and on the desktop crate; **1 920 Rust tests passed, 0 failed,
 format/lint/typecheck clean, **413 passed in 38 files**, build ok; **smoke
 186 passed, 0 failed**.
 
-**Next session, do this first:** finish Phase C step 3 (the 10-minute soak
-and the mutants on a clean tree, if not recorded below), then Phase D (one
-fresh verification subagent, `FINAL_VERDICT.md`) and Phase E (ship docs,
-`REVIEW_HANDOFF.md`, CI green, `gh pr ready`).
+**Phase C step 3 (2026-11-05):** mutants on the clean head: **13 killed, 0
+skipped** (10 updated for moved anchors plus 3 new for MP-1, MI-1, MC-2;
+`evidence/phase_c_mutants.log.txt`). Protocol soak: **63 000 seeds × 3 000
+steps in 616 s, 0 failing**. Caps soak: **832 seeds in 626 s, 1 failing,
+seed 5000331** — a conflict between MC-6 and the "lower settles" invariant
+(see FINAL_VERDICT); the invariant now settles down to rights held under a
+device's own overrides, the seed is in `caps_regression_seeds`, and the
+re-soak result is below.
+
+**Phase D, done (2026-11-05).** One fresh verification agent (read-only,
+`findings.json` and the code only) returned **REOPEN**: 39 of 41 fixed;
+MP-2 partial (a peer's dot hash for the receiver's own origin still made it
+report itself forked) and MD-1 partial (one ADR 0032 sentence), plus low
+wording items. All remediated in the Phase D follow-up commit, with the
+failing-first test the agent described. `audit/2026-11-03/FINAL_VERDICT.md`
+records both passes. Re-soak and checks after the follow-up: caps soak **704 seeds × 240 steps in 640 s, 0 failing** (5000331 included); **1 921 Rust tests passed, 0 failed, 14 ignored**; clippy clean on 1.96, 1.99.1 and the desktop crate; desktop **413 passed** in 38 files (an earlier run under the soak's CPU load timed out 4 unrelated tests, all of which pass alone and in the unloaded full run); smoke **186 passed**; `documentation_claims` passes.
+
+**Phase E:** README feature list, CHANGELOG consolidated into one Added and
+one Security section, root SECURITY/THREAT_MODEL, PRODUCT_SPEC, USER_GUIDE,
+TEST_PLAN, `docs/mesh/REVIEW_HANDOFF.md`, `BACKUP_RECOVERY.md`; then CI on
+the final head and `gh pr ready 19`.
 
 3. (Done, see above.) **The ten mutants were not yet in `scripts/mutation_checks.sh`.** Anchors
    found so far:

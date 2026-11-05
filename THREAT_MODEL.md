@@ -153,7 +153,7 @@ integrations land.
   to a user-chosen URL is the same egress posture as provider syncs — the
   tool acts for its local user and never for a third party.
 
-- **Device mesh (in development, ADR 0031).** Tethra Mesh adds one trust
+- **Device mesh (opt-in, ADR 0031).** Tethra Mesh adds one trust
   boundary: the LAN or user-run VPN between a user's own paired devices. Paired
   devices exchange signed items directly over Noise-encrypted sessions; no
   Tethra server, relay or rendezvous is involved, and nothing listens unless the
@@ -164,7 +164,12 @@ integrations land.
   imported there only on request with the master password again, after every
   sealed field is checked against the sharer's signed envelope (ADR 0033). A
   device keeps what it imported: revoking a share is not a provider-side
-  revocation, so rotate a credential to cut a device off. Full model:
+  revocation, so to cut a device off revoke its share, then rotate the
+  credential. Encryption is per connection: every paired device reads what
+  it holds and relays, so everything that replicates (names, usage counters,
+  cap figures, share metadata) is readable by every paired device. An
+  independent audit (2026-11-03, `docs/mesh/audit/`) found 48 issues: 41
+  fixed with failing-first tests, 7 accepted and documented. Full model:
   [`docs/mesh/THREAT_MODEL.md`](docs/mesh/THREAT_MODEL.md).
 
 ## Adversaries and outcomes
@@ -180,16 +185,16 @@ integrations land.
 | Compromised OS, debugger, cold-boot/memory dump | **Not defended.** Zeroization is best-effort; plaintext exists in memory during use. |
 | Malicious dependency in the user's own projects | Out of scope — once you paste a key into your app's environment, its safety is that app's problem. (Future scanning features reduce *accidental* exposure, not malicious exfiltration.) |
 
-### Device mesh adversaries (in development, ADR 0031)
+### Device mesh adversaries (opt-in, ADR 0031)
 
 | Adversary | Outcome |
 | --- | --- |
 | Passive LAN observer | Sees only Noise ciphertext; opt-in mDNS publishes a daily-rotating HMAC, no names. |
 | Active LAN prober | Without the mesh access key the handshake fails at its first message, so it never learns a device's static key; handshakes are rate-limited and only the handshake is parsed before authentication. |
 | Holder of a stolen invite token | Can pair one device within the token's lifetime (10 minutes by default, single use, 5 attempts); the user sees and removes it. |
-| Removed or stolen paired device | Removal cuts its later items off and rotates the access key, eventually consistently. Credentials it already imported stay compromised: rotate them. |
-| Malicious paired device (your own, compromised) | Cannot impersonate another device, create spend-cap rights in others' views, or plant a credential under another device's name (sealed-field bindings); can remove other devices, report false usage about itself, raise its own cap with a labelled override and share a value of its own under its own name. Recovery is re-pairing; rotate anything it imported. |
-| Cloned or rolled-back data directory | Restore wipes mesh identity; a marker file and on-the-wire fork evidence stop a clone from reusing an identity. |
+| Removed or stolen paired device | Removal cuts its later items off and rotates the access key, eventually consistently; its own later remove cannot cancel its removal (audit MP-1). Credentials it already imported stay compromised: revoke its shares, then rotate them. |
+| Malicious paired device (your own, compromised) | Reads everything that replicates. Cannot impersonate another device, shadow one with a copied key, revoke shares between other devices, create spend-cap rights in others' views, or plant a credential under another device's name (sealed-field bindings); can remove other devices, report any device forked, report false usage about itself, raise its own cap with a labelled override, pin a last-writer-wins value with a far-future timestamp, and share a value of its own under its own name. Recovery is re-pairing; rotate anything it imported. |
+| Cloned or rolled-back data directory | Backups carry no mesh identity and restore wipes any; a marker file (recording the committed log length) and on-the-wire fork evidence stop a clone or rollback from reusing an identity. |
 
 Details, residual risks and status: [`docs/mesh/THREAT_MODEL.md`](docs/mesh/THREAT_MODEL.md).
 

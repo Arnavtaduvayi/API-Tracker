@@ -185,6 +185,27 @@ Implemented and tested today:
   re-wraps the vault key; setting/changing/removing a project password
   rotates the project key and re-encrypts its values, and the WAL is
   checkpointed so old material does not linger.
+- **Tethra Mesh: your own devices, peer to peer (opt-in)** — pair your
+  devices with a one-time invite and they replicate directly over your LAN or
+  a VPN you run, with no Tethra server, relay or cloud
+  ([ADR 0031](docs/decisions/0031-device-mesh.md)). Share a project and see
+  its gateway-observed usage per device; hold a monthly **spend cap** across
+  devices that raises alerts everywhere and, where you switch it on, is
+  enforced by that device's gateway with a non-retried 403
+  ([ADR 0032](docs/decisions/0032-spend-caps.md)); share **one credential at
+  a time** with chosen devices, sealed to each device's key and imported only
+  on request with the master password
+  ([ADR 0033](docs/decisions/0033-credential-sharing.md)). `tethra mesh …` and
+  the desktop app's **Devices** view and project/credential pages. Every
+  connection is encrypted and authenticated, but every paired device can read
+  what replicates (only a shared credential's value is sealed); a cap is a
+  self-limit whose overshoot is limited, not zero; there is no NAT traversal
+  and no background service (the node runs while `tethra mesh serve` or the
+  unlocked desktop app does). An independent four-auditor review found 48
+  issues, 41 fixed with failing-first tests and 7 accepted as documented
+  limits ([audit](docs/mesh/audit/2026-11-03/FINDINGS_INDEX.md),
+  [limitations](docs/mesh/KNOWN_LIMITATIONS.md),
+  [user guide](docs/mesh/USER_GUIDE.md)).
 
 Not implemented yet (planned, see `docs/PRODUCT_SPEC.md`): programmatic
 permission *changes* (no provider offers a safe documented per-key method
@@ -197,235 +218,6 @@ provided); and **signed/notarized** installers (the alpha artifacts are
 unsigned except for the manually signed and notarized macOS DMG served from
 the Tethra landing site — see [docs/PACKAGING.md](docs/PACKAGING.md)).
 
-In development, not yet a feature: **Tethra Mesh**, peer-to-peer replication of
-usage, shared projects and spend caps between your own paired devices, with no
-server. It is being built on the `feat/device-mesh` branch. So far devices can
-start a mesh, pair with a one-time invite, and run a node that keeps them in
-step on its own over your LAN or VPN
-(`tethra mesh init|invite|join|serve|stop|peer|replicate|status|doctor|devices|remove|leave`);
-share projects and see their gateway-observed usage across devices
-(`tethra mesh project|usage|settings`); and set monthly spend caps that hold
-across devices, raise alerts, and are enforced by a device's gateway where you
-switch that on (`tethra mesh cap`); and share one credential at a time with
-chosen devices, sealed to each and imported only on request with the master
-password (`tethra mesh credential`). The desktop app's **Devices** view does
-the device workflow (create, pair, devices, peers, health, leave, importing
-shared credentials) and runs the node in-process while Tethra is open and
-unlocked; a project's page shares it, shows its usage across devices and
-manages its spend cap; a credential's page shares it. See the
-[user guide](docs/mesh/USER_GUIDE.md), [docs/mesh/](docs/mesh/ARCHITECTURE.md),
-[ADR 0031](docs/decisions/0031-device-mesh.md),
-[ADR 0032](docs/decisions/0032-spend-caps.md) and
-[ADR 0033](docs/decisions/0033-credential-sharing.md).
-
-## Install and build
-
-Prerequisites:
-
-- Rust (stable, 1.85+) — <https://rustup.rs>
-- Node.js 20+ and npm (for the desktop UI)
-- Platform build tools: Xcode Command Line Tools on macOS; on Linux the
-  [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/)
-  (webkit2gtk 4.1 etc.); on Windows the MSVC build tools + WebView2.
-
-```bash
-git clone https://github.com/Arnavtaduvayi/API-Tracker
-cd API-Tracker
-
-# CLI
-cargo build --release -p api-tracker-cli
-# binary at target/release/tethra
-
-# Desktop app
-cd apps/desktop
-npm install
-npx tauri build          # bundles the app (unsigned unless signing is configured)
-npx tauri dev            # or run it in development mode
-```
-
-## See your APIs in action (the main workflow)
-
-Tethra's primary job is showing you what your APIs are actually doing.
-Turning that on takes one screen in the desktop app, or one command:
-
-```bash
-tethra track .          # detect this project's APIs, configure, verify
-```
-
-`track` scans only the folder you point it at, shows you every API it
-found and the exact `.env` diff it proposes, asks once, then installs the
-local tracking service, creates the provider routes, applies the file
-edits, and turns on credential attribution — in one go. It reports
-"Tracking verified" only after a real request from your project has been
-observed.
-
-```bash
-tethra track . --dry-run   # show the plan and diff, change nothing
-tethra track status        # state and per-API freshness
-tethra track doctor        # ranked diagnosis when nothing arrives
-tethra track undo          # restore the files, remove what track made
-```
-
-In the desktop app this lives on the project itself. Open **Projects**, open or
-create a project, and click **Select project folder**. Tethra scans the folder,
-shows one disclosure of exactly what it will change, and on your confirmation
-sets everything up — then the live request, token, latency and cost activity
-appears on that same page and refreshes itself. No terminal, no route forms, no
-separate attribution step, and the folder is linked once. Full walkthrough:
-[docs/projects-first/PRODUCT_BEHAVIOR.md](docs/projects-first/PRODUCT_BEHAVIOR.md).
-
-The older standalone flow remains under **Advanced → Tracking setup (advanced)**
-for the decisions the project page deliberately does not make for you: approving
-a destination discovered in your own project files, per-step apply diagnostics,
-and undoing managed file changes
-([docs/activity-onboarding/USER_GUIDE.md](docs/activity-onboarding/USER_GUIDE.md)).
-
-Tethra records metadata only — provider, endpoint template, status,
-latency, sizes, and token counts and model names when responses carry
-them. It never records API keys, authorization headers, cookies, query
-values, prompts, request bodies, or response bodies. Only traffic whose
-base URL points at Tethra is observed;
-[known limitations](docs/activity-onboarding/KNOWN_LIMITATIONS.md) are
-stated plainly.
-
-## Try it in two minutes (no real keys needed)
-
-```bash
-bash scripts/demo.sh --keep   # isolated demo vault, fake credentials only
-bash scripts/smoke.sh         # automated end-to-end smoke test
-```
-
-The demo builds a throwaway vault with a development project, a
-password-locked production project, credentials in every interesting state
-(active, expired, expiring soon, unused, reused across projects), synthetic
-usage with an over-budget alert, an encrypted verified backup, and a secure
-process-injection run — then prints the exact commands to explore it from
-the CLI and desktop app. Your real vault is never touched. See
-[docs/DEMO.md](docs/DEMO.md).
-
-## CLI quick start
-
-> The legacy `api-tracker` command remains available as a compatibility alias
-> for `tethra` (same program), and the legacy `API_TRACKER_*` environment
-> variable names still work — see
-> [docs/rebrand/TETHRA_MIGRATION_GUIDE.md](docs/rebrand/TETHRA_MIGRATION_GUIDE.md).
-
-```bash
-tethra init                     # create the encrypted vault
-tethra unlock                   # prints an export TETHRA_SESSION=... line
-export TETHRA_SESSION="..."     # paste it (or: eval "$(tethra unlock --print-export)")
-
-tethra project create my-app --env development --env production \
-    --repo ~/code/my-app
-tethra key add --project my-app --name openai-main --provider openai \
-    --environment production --expires 2027-01-01
-# (the secret is prompted, hidden; it is never a command-line argument)
-
-tethra key list                 # masked values only
-tethra key status my-app/openai-main   # explainable status report
-tethra key reveal my-app/openai-main   # asks for the master password again
-
-tethra backup create ~/tethra-backup.json
-tethra backup verify ~/tethra-backup.json
-
-# Provider catalog
-tethra provider list
-tethra provider capabilities openai       # honest support matrix
-tethra provider docs anthropic
-
-# Scan a repository and install the pre-commit hook
-tethra scan --staged ~/code/my-app        # or --history N, or a dir
-tethra hooks install ~/code/my-app        # blocks high-confidence secrets
-tethra suppress add <suppression-key> --reason "test fixture"
-
-# Monitoring, alerts, and documentation watches
-tethra monitor                            # evaluate and raise alerts
-tethra alerts list
-tethra alerts acknowledge <id> && tethra alerts resolve <id>
-tethra provider watch-docs openai         # watch official docs pages
-tethra provider check-docs openai         # conditional request, direct
-
-# Validate, sync usage, budget, and inspect permissions
-tethra key validate my-app/openai-main    # direct provider request
-tethra key permissions my-app/gh --sync   # e.g. GitHub scopes
-tethra provider connect openai            # prompts for an Admin key
-tethra provider connection-status openai  # status, freshness, last error
-tethra provider sync openai               # usage + provider-reported costs
-tethra provider sync openai --from 2026-07-01 --to 2026-07-15
-tethra provider keys openai               # provider-side keys + link state
-tethra provider link openai key_abc123 --credential my-app/openai-main
-tethra usage report --provider openai --source provider
-tethra usage report --project my-app      # usage + estimated cost
-tethra budget set --project my-app --amount 50.00
-tethra budget source provider_reported    # which cost source budgets use
-tethra provider disconnect openai         # remove local admin access
-tethra activity list
-
-# Govern .env files: discover, import into the vault, migrate off plaintext
-tethra env discover --project my-app
-tethra env import --project my-app .env          # preview + confirm
-tethra env migrate --project my-app .env         # guided plaintext removal
-tethra env drift --project my-app
-tethra env export --project my-app --to .env --ttl 60   # reauth-gated escape hatch
-
-# Deploy destinations and synchronization plans
-tethra destination kinds
-tethra destination add github_actions --name ci --owner me --repo app --auth-stdin
-tethra destination attach my-app/openai-main ci --secret-name OPENAI_API_KEY
-tethra sync plan my-app/openai-main              # dry run
-tethra sync run <plan-id>                        # confirm + reauth
-tethra key versions my-app/openai-main
-
-# Rotate a credential safely (dry run first, everything confirmed + reauthed)
-tethra rotation plan my-app/openai-main --grace-minutes 60
-tethra rotation approve <rotation-id>
-tethra rotation advance <rotation-id>      # repeat until completed
-tethra rotation schedule set my-app/openai-main --every-days 90
-
-# Pricing, templates, and stack detection
-tethra pricing list                       # versioned, effective-dated records
-tethra pricing propose openai --out p.json   # review against the official page
-tethra pricing import p.json              # validated; history preserved
-tethra template list
-tethra template apply openai-app --project my-app --write-example ~/code/my-app
-tethra template detect --repo ~/code/my-app   # evidence + confidence; local only
-tethra provider account github --sync     # provider-reported identity only
-
-# Temporary local access (bounds what THIS machine injects; not provider-side)
-tethra access grant --project my-app --one-time --ttl-minutes 30
-tethra run --grant <grant-id> -- npm test
-tethra access end <grant-id> --kill
-
-# Lifecycle, permissions, test keys
-tethra key history my-app/openai-main
-tethra key permissions-diff my-app/gh-token
-tethra key test-create --project my-app --provider openai     --provider-project proj_abc --name probe --ttl-minutes 240
-
-# Run a command with exactly one credential injected (never written to disk)
-tethra run --project my-app --credential my-app/openai-main \
-    --env OPENAI_API_KEY -- npm run dev
-
-tethra lock
-```
-
-Useful details:
-
-- The vault lives in the platform data directory (macOS:
-  `~/Library/Application Support/api-tracker` — the directory keeps its
-  historical name so existing vaults are found); `--data-dir` or
-  `TETHRA_DIR` override it. The desktop app uses the same location, so
-  both frontends see the same data.
-- For scripts/CI, `TETHRA_PASSWORD`, `TETHRA_PROJECT_PASSWORD`,
-  and `TETHRA_BACKUP_PASSWORD` replace interactive prompts, and
-  `--value-stdin` feeds secrets on stdin. Prefer sessions interactively:
-  environment variables are visible to other processes you run.
-- `--json` makes the inspection commands (`doctor`, `settings show`,
-  `provider list`, `project list`/`show`, `key list`/`show`/`status`, and the
-  `key add`/`project create` results) emit machine-readable output. Purely
-  action commands (`lock`, `archive`, `remove`, …) print a plain status line.
-- `tethra doctor` checks vault health without unlocking anything (it
-  reads only unencrypted metadata: counts, schema version, integrity).
-
 ## Security in one paragraph
 
 Credential values are encrypted with XChaCha20-Poly1305 under random
@@ -433,7 +225,9 @@ per-project keys, wrapped by a vault key, wrapped by an Argon2id-stretched
 master password; every ciphertext is bound to the record it belongs to, so
 database tampering and ciphertext swaps are detected. Values are redacted
 everywhere by default, revealing/copying/exporting requires re-entering the
-master password, and nothing is ever sent anywhere. Read
+master password, and nothing is sent to any Tethra server. If you turn on
+Tethra Mesh, a fixed set of data replicates to the devices you paired, and a
+credential's value only when you share it, sealed to the devices you chose. Read
 [SECURITY.md](SECURITY.md) and [THREAT_MODEL.md](THREAT_MODEL.md) — including
 what this does **not** protect against (malware running as you, an unlocked
 machine, memory inspection). **If you lose your master password, your vault

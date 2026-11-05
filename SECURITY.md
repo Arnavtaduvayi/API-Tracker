@@ -42,7 +42,10 @@ versions, and use only fake credentials in reproductions.
   session frame, every database column, errors and CLI output and assert the
   value appears in none of them. Revoking a share does not remove the value
   from a device that imported it, and does not revoke the credential at its
-  provider: rotate it. There is no forward secrecy (static device keys).
+  provider: revoke that device's share, then rotate the credential. There is
+  no forward secrecy (static device keys). Only the value is sealed: a
+  share's name, provider and recipient are readable by every paired device.
+  Backups never carry mesh keys or items; a restored vault pairs again.
 - Duplicate detection uses a *keyed* fingerprint (BLAKE3 keyed hash with a
   vault-specific wrapped key), so database access alone does not enable
   offline guess-confirmation of credential values.

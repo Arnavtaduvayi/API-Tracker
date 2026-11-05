@@ -8,9 +8,9 @@ readable by every member; only a shared credential's value is sealed to its
 recipient devices. Decision record: [ADR 0031](../decisions/0031-device-mesh.md).
 Normative protocol: [PROTOCOL.md](PROTOCOL.md).
 
-> **Status.** In development on `feat/device-mesh`, built in twelve increments
-> (`increments/STATUS.md`); 01-11 are done and 12 (hardening and the
-> 2026-11-03 audit) is in progress. `crates/core/src/mesh/` holds the pure
+> **Status.** Built in twelve increments (`increments/STATUS.md`); the last
+> (hardening and the independent audit of 2026-11-03, `audit/`) fixed 41
+> findings and documented 7 accepted ones. `crates/core/src/mesh/` holds the pure
 > foundations (01) and the replication protocol as a sans-IO state machine
 > (02), proven by a deterministic simulator against an independently written
 > oracle over in-memory and SQLite stores (03). `crates/mesh` carries it over
