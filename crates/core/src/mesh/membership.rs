@@ -19,7 +19,7 @@ use super::invite::{
     MAX_ATTEMPTS, MAX_TTL_MINUTES,
 };
 use super::kinds::{DeviceInfo, RosterAdd, RosterRemove};
-use super::marker::{self, MarkerContents};
+use super::marker::{self, MarkerContents, MarkerStatus};
 use super::sign::{derive_device_id, PublicKeyBytes, SigningKeyPair};
 use super::sqlite_store::{self, MarkerConfig, SqliteStore, StoreParams};
 use super::store::{Draft, GenesisInfo, HlcPolicy, MeshStore};
@@ -197,7 +197,7 @@ pub(crate) fn join(
         state: "active".into(),
         created_at: created_at.clone(),
     };
-    conn.pragma_update(None, "synchronous", "FULL")?;
+    identity::make_durable(conn)?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     if identity::read_self(&tx)?.is_some() {
         return Err(MeshError::AlreadyInMesh.into());
@@ -740,9 +740,12 @@ pub fn publish_listen_addrs(
 
 /// Remove another device: mint `roster.remove` with this device's view of
 /// its log as the cutoff, and rotate the access key to a new epoch, which
-/// sessions then deliver to every remaining member (PROTOCOL.md §9).
+/// sessions then deliver to every remaining member (PROTOCOL.md §9). The
+/// removal, the new key and the audit row commit in ONE transaction (the
+/// store's, `synchronous=FULL` with F_FULLFSYNC): a failed rotation leaves
+/// nothing removed, so a retry does both, and a removal can never be
+/// committed with the removed device's key still current.
 pub(crate) fn remove(
-    conn: &Connection,
     vault_key: &SecretBytes,
     vault_id: &str,
     store: &mut SqliteStore,
@@ -768,34 +771,64 @@ pub(crate) fn remove(
     // A member that keeps reporting a rollback that never comes back would
     // otherwise block its own removal (PROTOCOL.md §7.4).
     store.settle_rollback_holds(target)?;
-    let cutoff = store.vv().get(&target);
-    store.mint(
-        signing,
-        Draft::of(
+    // The rotation's own error, kept whole (`mint_with` speaks MeshError).
+    let mut failure: Option<CoreError> = None;
+    let mut epoch = 0;
+    let minted = store.mint_with(signing, |tx, state| {
+        // Decided again inside the write lock: another process may have
+        // removed it since the checks above.
+        if state.roster.is_removed(&target) {
+            return Err(MeshError::AlreadyRemoved);
+        }
+        // This device's view of the target's log, as committed now.
+        let cutoff = tx
+            .query_row(
+                "SELECT max_seq FROM mesh_vv WHERE origin = ?1",
+                [target.to_hex()],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|_| MeshError::Storage("reading mesh_vv"))?
+            .map_or(0, |s| u64::try_from(s).unwrap_or(0));
+        let rotated = rotate_access_key(tx, vault_key, vault_id).and_then(|e| {
+            audit::record(
+                tx,
+                "mesh_device_removed",
+                None,
+                None,
+                &format!(
+                    "device {} at cutoff {cutoff}; access key epoch {e}",
+                    short(&target)
+                ),
+            )?;
+            Ok(e)
+        });
+        match rotated {
+            Ok(e) => epoch = e,
+            Err(e) => {
+                failure = Some(e);
+                return Err(MeshError::Storage("rotating the mesh access key"));
+            }
+        }
+        Ok(vec![Draft::of(
             &RosterRemove {
                 device: target,
                 cutoff_seq: cutoff,
             },
             HlcPolicy::Now,
-        ),
-    )?;
-    let epoch = rotate_access_key(conn, vault_key, vault_id)?;
-    audit::record(
-        conn,
-        "mesh_device_removed",
-        None,
-        None,
-        &format!(
-            "device {} at cutoff {cutoff}; access key epoch {epoch}",
-            short(&target)
-        ),
-    )?;
-    Ok(epoch)
+        )])
+    });
+    match (minted, failure) {
+        (Ok(_), _) => Ok(epoch),
+        (Err(_), Some(e)) => Err(e),
+        (Err(e), None) => Err(e.into()),
+    }
 }
 
+/// Store a new access key at the next epoch and make it current, on `conn`
+/// inside the caller's write transaction.
 fn rotate_access_key(conn: &Connection, vault_key: &SecretBytes, vault_id: &str) -> Result<u32> {
-    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let row = identity::read_self(&tx)?.ok_or(MeshError::NotInitialized)?;
+    let row = identity::read_self(conn)?.ok_or(MeshError::NotInitialized)?;
     let epoch = row
         .info
         .access_key_epoch
@@ -807,24 +840,43 @@ fn rotate_access_key(conn: &Connection, vault_key: &SecretBytes, vault_id: &str)
         &aad::mesh_access_key(vault_id, &row.info.mesh_id.to_hex(), epoch),
         &key[..],
     )?;
-    tx.execute(
+    conn.execute(
         "INSERT OR REPLACE INTO mesh_access_keys (epoch, wrapped_key, created_at)
          VALUES (?1, ?2, ?3)",
         params![i64::from(epoch), wrapped, wall::now_rfc3339()],
     )?;
-    tx.execute(
+    conn.execute(
         "UPDATE mesh_self SET access_key_epoch = ?1",
         [i64::from(epoch)],
     )?;
-    tx.commit()?;
     Ok(epoch)
 }
 
+/// Why a self-removal minted under a rollback hold is refused.
+const HELD: &str = "a peer reported holding this device's own items past what this database has, so it mints nothing until they are back";
+
 /// Mint this device's self-removal (the first half of `mesh leave`).
-pub(crate) fn mint_self_remove(store: &mut SqliteStore, signing: &SigningKeyPair) -> Result<()> {
+/// Returns `Some(reason)`, minting nothing, when this device must not mint
+/// at all — its identity is untrusted (the marker is missing, belongs to
+/// another installation, records a rollback, or cannot be read) or held by
+/// a rollback notice. Those are exactly the states `status`, `doctor` and
+/// every refusal tell the user to leave from, so `mesh leave` then wipes
+/// without announcing the departure. Any other failure is an error.
+pub(crate) fn mint_self_remove(
+    store: &mut SqliteStore,
+    signing: &SigningKeyPair,
+) -> Result<Option<&'static str>> {
+    match store.marker_status() {
+        Ok(MarkerStatus::Ok) => {}
+        Ok(status) => return Ok(status.problem()),
+        Err(_) => return Ok(MarkerStatus::Unreadable.problem()),
+    }
+    if store.rollback_hold().is_some() {
+        return Ok(Some(HELD));
+    }
     let me = store.self_id();
     let cutoff = store.vv().get(&me);
-    store.mint(
+    let minted = store.mint(
         signing,
         Draft::of(
             &RosterRemove {
@@ -833,8 +885,14 @@ pub(crate) fn mint_self_remove(store: &mut SqliteStore, signing: &SigningKeyPair
             },
             HlcPolicy::Now,
         ),
-    )?;
-    Ok(())
+    );
+    match minted {
+        Ok(_) => Ok(None),
+        // The marker or a hold changed since the checks above.
+        Err(MeshError::IdentityMismatch(problem)) => Ok(Some(problem)),
+        Err(MeshError::RollbackHold) => Ok(Some(HELD)),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// One exchange, for `mesh_exchange_log` (kept to the last 1 000 rows).

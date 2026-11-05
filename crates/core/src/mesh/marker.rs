@@ -7,28 +7,42 @@
 //! identity holds `<data-dir>/mesh/identity.marker`:
 //!
 //! ```json
-//! {"v":1,"device_id":"…","marker_nonce":"…","seq_high_water":128}
+//! {"v":2,"device_id":"…","marker_nonce":"…","seq_high_water":128,"seq_floor":64}
 //! ```
 //!
-//! `marker_nonce` is random and also stored in `mesh_self`. `seq_high_water`
-//! is the highest seq this installation may have used: before the store
-//! mints a seq above it, it rewrites the marker with a mark one block of
-//! [`SEQ_BLOCK`] seqs higher — temp file, fsync, rename, fsync of the
-//! directory — so the fsync cost is paid once per block, not once per item.
+//! `marker_nonce` is random and also stored in `mesh_self`. Two numbers
+//! describe this installation's own log:
+//! - `seq_high_water` is the highest seq it may have used: before the store
+//!   mints a seq above it, it rewrites the marker with a mark one block of
+//!   [`SEQ_BLOCK`] seqs higher — temp file, fsync, rename, fsync of the
+//!   directory — so the fsync cost is paid once per block, not once per item.
+//! - `seq_floor` is how far the database's own log (`vv[self]`) durably
+//!   reached when the marker was written: the store writes the `vv[self]`
+//!   its write transaction started from (what is committed), never a seq
+//!   that transaction is still minting. An honest database never has less,
+//!   whatever happened to a transaction after the marker was written (rolled
+//!   back, crashed, refused by the publisher's conflict check).
 //!
 //! [`check`] then classifies a database against its directory's marker:
 //! - **Missing**: the database was copied without its marker;
 //! - **Mismatch**: the marker belongs to another identity, or to another
 //!   copy of this one;
-//! - **RolledBack**: the marker records seqs more than one block above what
-//!   the database has, so the database is older than seqs it already used.
+//! - **RolledBack**: the database's own log is below the marker's floor, so
+//!   the database is older than a state it already committed.
 //!
-//! A rollback within the current block, and a copy of the whole data
+//! A transaction that mints across several blocks leaves the floor where it
+//! started; after it commits, the store raises the floor to the committed
+//! `vv[self]` (best effort, under the write lock), so detection stays as
+//! tight as one block. A rollback within the current block (or within one
+//! batch whose floor raise did not happen), and a copy of the whole data
 //! directory (database and marker together), are invisible here; the wire
-//! catches those as forks (PROTOCOL.md §7.2). The marker holds no secret, but
-//! it is written 0600 in a 0700 directory like everything else in the data
-//! directory. On Windows the directory inherits the data directory's ACLs
-//! and the directory itself is not fsynced (see `docs/mesh/KNOWN_LIMITATIONS.md`).
+//! catches those as forks (PROTOCOL.md §7.2) and rollback notices (§7.4).
+//! A version-1 marker (no floor) reads with the floor one block below its
+//! high-water mark, which is exactly the rule version 1 applied. The marker
+//! holds no secret, but it is written 0600 in a 0700 directory like
+//! everything else in the data directory. On Windows the directory inherits
+//! the data directory's ACLs and the directory itself is not fsynced (see
+//! `docs/mesh/KNOWN_LIMITATIONS.md`).
 
 use super::dot::{DeviceId, MarkerNonce};
 use super::error::MeshError;
@@ -43,25 +57,93 @@ pub const MARKER_FILE: &str = "identity.marker";
 pub const SEQ_BLOCK: u64 = 64;
 /// The marker never needs more than this; a larger file is not ours.
 const MAX_MARKER_BYTES: u64 = 4096;
-const MARKER_VERSION: u32 = 1;
+/// The version this build writes. Version 1 (no floor) is still read.
+const MARKER_VERSION: u32 = 2;
+const MARKER_VERSION_1: u32 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct MarkerContents {
     pub v: u32,
     pub device_id: DeviceId,
     pub marker_nonce: MarkerNonce,
     /// The highest seq this installation may have used.
     pub seq_high_water: u64,
+    /// The database's own log durably reached at least this seq when the
+    /// marker was written; an honest database never has less.
+    pub seq_floor: u64,
+}
+
+/// The file's shape: `seq_floor` is absent from version 1 only.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMarker {
+    v: u32,
+    device_id: DeviceId,
+    marker_nonce: MarkerNonce,
+    seq_high_water: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seq_floor: Option<u64>,
 }
 
 impl MarkerContents {
+    /// A marker whose floor is one block below its mark: what a single mint
+    /// at the block's first seq writes, and what a version-1 marker means.
     pub fn new(device_id: DeviceId, marker_nonce: MarkerNonce, seq_high_water: u64) -> Self {
+        Self::with_floor(
+            device_id,
+            marker_nonce,
+            seq_high_water,
+            seq_high_water.saturating_sub(SEQ_BLOCK),
+        )
+    }
+
+    /// A marker with an explicit floor (`seq_floor <= seq_high_water`).
+    pub fn with_floor(
+        device_id: DeviceId,
+        marker_nonce: MarkerNonce,
+        seq_high_water: u64,
+        seq_floor: u64,
+    ) -> Self {
         Self {
             v: MARKER_VERSION,
             device_id,
             marker_nonce,
             seq_high_water,
+            seq_floor: seq_floor.min(seq_high_water),
+        }
+    }
+
+    fn from_raw(raw: RawMarker) -> Result<Self, MeshError> {
+        let floor = match (raw.v, raw.seq_floor) {
+            (MARKER_VERSION_1, None) => raw.seq_high_water.saturating_sub(SEQ_BLOCK),
+            (MARKER_VERSION, Some(f)) if f <= raw.seq_high_water => f,
+            (MARKER_VERSION_1 | MARKER_VERSION, _) => {
+                return Err(MeshError::IdentityMismatch(
+                    "the identity marker is malformed",
+                ))
+            }
+            _ => {
+                return Err(MeshError::IdentityMismatch(
+                    "the identity marker has an unknown version",
+                ))
+            }
+        };
+        Ok(Self {
+            v: raw.v,
+            device_id: raw.device_id,
+            marker_nonce: raw.marker_nonce,
+            seq_high_water: raw.seq_high_water,
+            seq_floor: floor,
+        })
+    }
+
+    fn to_raw(self) -> RawMarker {
+        RawMarker {
+            v: MARKER_VERSION,
+            device_id: self.device_id,
+            marker_nonce: self.marker_nonce,
+            seq_high_water: self.seq_high_water,
+            seq_floor: Some(self.seq_floor.min(self.seq_high_water)),
         }
     }
 
@@ -79,6 +161,9 @@ pub enum MarkerStatus {
     Missing,
     Mismatch,
     RolledBack,
+    /// The marker file exists but cannot be read or parsed (`status` only;
+    /// [`check`] returns the error).
+    Unreadable,
 }
 
 impl MarkerStatus {
@@ -88,6 +173,7 @@ impl MarkerStatus {
             MarkerStatus::Missing => "missing",
             MarkerStatus::Mismatch => "mismatch",
             MarkerStatus::RolledBack => "rolled_back",
+            MarkerStatus::Unreadable => "unreadable",
         }
     }
 
@@ -103,6 +189,9 @@ impl MarkerStatus {
             ),
             MarkerStatus::RolledBack => Some(
                 "its identity marker records items this database does not have, so the database was rolled back",
+            ),
+            MarkerStatus::Unreadable => Some(
+                "its identity marker cannot be read or is malformed, so nothing vouches for this database",
             ),
         }
     }
@@ -143,14 +232,9 @@ pub fn read(data_dir: &Path) -> Result<Option<MarkerContents>, MeshError> {
     }
     let bytes = std::fs::read(&path)
         .map_err(|_| MeshError::Storage("the identity marker cannot be read"))?;
-    let contents: MarkerContents = serde_json::from_slice(&bytes)
+    let raw: RawMarker = serde_json::from_slice(&bytes)
         .map_err(|_| MeshError::IdentityMismatch("the identity marker is malformed"))?;
-    if contents.v != MARKER_VERSION {
-        return Err(MeshError::IdentityMismatch(
-            "the identity marker has an unknown version",
-        ));
-    }
-    Ok(Some(contents))
+    MarkerContents::from_raw(raw).map(Some)
 }
 
 /// Classify the database's identity `(device_id, nonce)`, whose own log
@@ -179,13 +263,12 @@ pub fn classify(
     match marker {
         None => MarkerStatus::Missing,
         Some(m) if !m.matches(device_id, nonce) => MarkerStatus::Mismatch,
-        // A mark is written one block ahead before the database uses the
-        // block's first seq, so an honest database is never more than one
-        // block behind its marker (a crash between the two leaves exactly
-        // one block).
-        Some(m) if m.seq_high_water > last_seq.saturating_add(SEQ_BLOCK) => {
-            MarkerStatus::RolledBack
-        }
+        // The floor is a `vv[self]` the database had already committed when
+        // the marker was written, and `vv[self]` never goes down: only an
+        // older database is below it. A transaction that reserved blocks and
+        // then rolled back (or crashed) leaves the database at or above the
+        // floor, however far ahead the high-water mark went.
+        Some(m) if last_seq < m.seq_floor => MarkerStatus::RolledBack,
         Some(_) => MarkerStatus::Ok,
     }
 }
@@ -198,7 +281,7 @@ pub fn write(data_dir: &Path, contents: &MarkerContents) -> Result<(), MeshError
     std::fs::create_dir_all(&dir)
         .map_err(|_| MeshError::Storage("the mesh directory cannot be created"))?;
     restrict_dir(&dir)?;
-    let bytes = serde_json::to_vec(contents)
+    let bytes = serde_json::to_vec(&contents.to_raw())
         .map_err(|_| MeshError::Storage("the identity marker cannot be encoded"))?;
     let path = dir.join(MARKER_FILE);
     let tmp = dir.join(format!(".{MARKER_FILE}.tmp-{}", MarkerNonce::random()));
@@ -362,6 +445,53 @@ mod tests {
         assert_eq!(classify(Some(&m), &d, &n, 127), MarkerStatus::RolledBack);
         assert!(MarkerStatus::RolledBack.to_error().is_some());
         assert!(MarkerStatus::Ok.to_error().is_none());
+    }
+
+    #[test]
+    fn the_floor_not_the_mark_decides_a_rollback() {
+        let (d, n) = ids();
+        // A transaction starting at seq 3 reserved up to 320 and rolled back.
+        let m = MarkerContents::with_floor(d, n, 320, 3);
+        assert_eq!(classify(Some(&m), &d, &n, 3), MarkerStatus::Ok);
+        assert_eq!(classify(Some(&m), &d, &n, 200), MarkerStatus::Ok);
+        assert_eq!(classify(Some(&m), &d, &n, 2), MarkerStatus::RolledBack);
+        // A floor is never above the mark.
+        assert_eq!(MarkerContents::with_floor(d, n, 64, 500).seq_floor, 64);
+    }
+
+    #[test]
+    fn version_1_markers_still_read_with_the_rule_they_had() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(mesh_dir(dir.path())).unwrap();
+        std::fs::write(
+            marker_path(dir.path()),
+            br#"{"v":1,"device_id":"07070707070707070707070707070707","marker_nonce":"09090909090909090909090909090909","seq_high_water":192}"#,
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        assert_eq!((m.v, m.seq_floor), (1, 128));
+        let (d, n) = ids();
+        assert_eq!(classify(Some(&m), &d, &n, 128), MarkerStatus::Ok);
+        assert_eq!(classify(Some(&m), &d, &n, 127), MarkerStatus::RolledBack);
+        // Rewritten, it is a version-2 marker with the same meaning.
+        write(dir.path(), &m).unwrap();
+        let raw = std::fs::read_to_string(marker_path(dir.path())).unwrap();
+        assert!(
+            raw.contains(r#""v":2"#) && raw.contains(r#""seq_floor":128"#),
+            "{raw}"
+        );
+        assert_eq!(read(dir.path()).unwrap().unwrap().seq_floor, 128);
+        // A version-2 marker must carry a floor, at or below its mark; a
+        // version-1 marker must not.
+        for bad in [
+            br#"{"v":2,"device_id":"07070707070707070707070707070707","marker_nonce":"09090909090909090909090909090909","seq_high_water":64}"#.as_slice(),
+            br#"{"v":2,"device_id":"07070707070707070707070707070707","marker_nonce":"09090909090909090909090909090909","seq_high_water":64,"seq_floor":65}"#,
+            br#"{"v":1,"device_id":"07070707070707070707070707070707","marker_nonce":"09090909090909090909090909090909","seq_high_water":64,"seq_floor":0}"#,
+            br#"{"v":3,"device_id":"07070707070707070707070707070707","marker_nonce":"09090909090909090909090909090909","seq_high_water":64,"seq_floor":0}"#,
+        ] {
+            std::fs::write(marker_path(dir.path()), bad).unwrap();
+            assert!(read(dir.path()).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 
     #[test]

@@ -320,6 +320,27 @@ impl UnlockedVault {
         share::revoke(&mut store, keys.signing_key(), RevokeTarget::Share(id))
     }
 
+    /// How many live (not revoked) shares this device made of local
+    /// credential `credential_id`; 0 when it never shared it or is not in a
+    /// mesh. `delete_credential` refuses while any exist: the delete would
+    /// cascade away `mesh_share_outgoing`, the only link from the shares'
+    /// reference back to this credential, leaving them live on their
+    /// recipients and unrevocable by credential from here.
+    pub(super) fn live_outgoing_shares(&self, credential_id: &str) -> Result<usize> {
+        let Some(cref) = share::outgoing_ref(&self.conn, credential_id)? else {
+            return Ok(0);
+        };
+        if crate::mesh::identity::self_info(&self.conn)?.is_none() {
+            return Ok(0);
+        }
+        let store = self.mesh_open_store()?;
+        Ok(share::list(&store)?
+            .outgoing
+            .iter()
+            .filter(|r| r.credential_ref == cref && !r.revoked)
+            .count())
+    }
+
     /// Revoke every live share this device made of local credential
     /// `credential` (`tethra mesh credential revoke --credential`).
     pub fn mesh_credential_revoke(&self, credential: &str) -> Result<Vec<RevokedShare>> {

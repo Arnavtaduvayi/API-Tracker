@@ -34,7 +34,11 @@
 //! `fullfsync` on macOS), so every commit and mint is on disk when it
 //! returns. `hlc_high_water` is written with every write transaction. Before a
 //! mint uses a seq above the identity marker's mark, the marker is advanced a
-//! block of 64 seqs (module `marker`).
+//! block of 64 seqs (module `marker`), with the `vv[self]` the transaction
+//! started from as its floor: a transaction that reserves several blocks and
+//! then rolls back leaves an honest database at that floor, never below it.
+//! When such a transaction commits instead, the floor is raised to the
+//! committed `vv[self]` right after, under the write lock.
 //!
 //! **Several processes.** Every write transaction (`BEGIN IMMEDIATE`) first
 //! compares `mesh_meta.write_gen` with the generation this store last saw;
@@ -172,13 +176,39 @@ struct MarkerState {
     /// The highest seq known to be covered by the marker on disk.
     mark: u64,
     writes: u64,
+    /// `vv[self]` as committed when the open write transaction began: the
+    /// floor every marker written inside it records (module `marker`).
+    tx_base: u64,
+    /// The marker's floor as this store last saw or wrote it (another store
+    /// may have raised it since; after a failed raise, a block below
+    /// `vv[self]`, so the raise waits for the next block). When the committed
+    /// `vv[self]` is more than a block above it, the floor is raised
+    /// ([`SqliteStore::raise_marker_floor`]).
+    floor: u64,
 }
 
 impl MarkerState {
+    fn new(cfg: Option<MarkerConfig>, mark: u64, floor: u64) -> Self {
+        Self {
+            cfg,
+            mark,
+            writes: 0,
+            tx_base: 0,
+            floor,
+        }
+    }
+
+    /// A write transaction begins on a database whose own log is committed
+    /// up to `base`.
+    fn begin(&mut self, base: u64) {
+        self.tx_base = base;
+    }
+
     /// Make sure the marker covers `seq` before it is used (DESIGN §D5):
-    /// re-read it, require it to vouch for this database, and advance it by
-    /// a block if needed. Every write is durable before this returns.
-    fn reserve(&mut self, self_id: &DeviceId, seq: u64, last_seq: u64) -> Result<(), MeshError> {
+    /// re-read it, require it to vouch for this database as committed, and
+    /// advance it by a block if needed, with the transaction's base as its
+    /// floor. Every write is durable before this returns.
+    fn reserve(&mut self, self_id: &DeviceId, seq: u64) -> Result<(), MeshError> {
         let Some(cfg) = &self.cfg else {
             return Ok(());
         };
@@ -186,22 +216,25 @@ impl MarkerState {
             return Ok(());
         }
         let current = marker::read(&cfg.data_dir)?;
-        let status = marker::classify(current.as_ref(), self_id, &cfg.nonce, last_seq);
+        let status = marker::classify(current.as_ref(), self_id, &cfg.nonce, self.tx_base);
         if let Some(e) = status.to_error() {
             return Err(e);
         }
-        let on_disk = current.map_or(0, |c| c.seq_high_water);
+        let (on_disk, floor) = current.map_or((0, 0), |c| (c.seq_high_water, c.seq_floor));
+        self.floor = floor;
         if on_disk >= seq {
-            // Another store on this database reserved it already.
+            // Another store on this database (or a transaction that rolled
+            // back) reserved it already.
             self.mark = on_disk;
             return Ok(());
         }
         let mark = seq.saturating_add(SEQ_BLOCK - 1);
         marker::write(
             &cfg.data_dir,
-            &MarkerContents::new(*self_id, cfg.nonce, mark),
+            &MarkerContents::with_floor(*self_id, cfg.nonce, mark, self.tx_base),
         )?;
         self.mark = mark;
+        self.floor = self.tx_base;
         self.writes += 1;
         Ok(())
     }
@@ -651,7 +684,7 @@ fn mint_in(
             "this device has used every seq",
         ));
     }
-    marker.reserve(&me, seq, last)?;
+    marker.reserve(&me, seq)?;
     let hlc = match draft.hlc {
         HlcPolicy::Now => m.hlc.now(),
         HlcPolicy::After(winner) => m.hlc.local_write_ts(winner),
@@ -693,11 +726,8 @@ pub(crate) fn mint_genesis(
 ) -> Result<Vec<SignedItem>, MeshError> {
     let mut m = Mirror::new(params.genesis, params.self_id, clock);
     load(conn, &mut m)?;
-    let mut marker = MarkerState {
-        cfg: params.marker.clone(),
-        mark: 0,
-        writes: 0,
-    };
+    let mut marker = MarkerState::new(params.marker.clone(), 0, 0);
+    marker.begin(m.vv.get(&params.self_id));
     let mut out = Vec::with_capacity(drafts.len());
     for d in drafts {
         out.push(mint_in(conn, &mut m, &mut marker, key, d)?);
@@ -776,23 +806,19 @@ impl SqliteStore {
         // database as it is now. Otherwise start from 0, so the first mint
         // re-checks the marker and refuses: a rolled-back database still
         // names the right identity, and must not mint below the mark.
-        let mark = match &params.marker {
+        let (mark, floor) = match &params.marker {
             Some(cfg) => {
                 let current = marker::read(&cfg.data_dir).ok().flatten();
                 let last = m.vv.get(&params.self_id);
                 match marker::classify(current.as_ref(), &params.self_id, &cfg.nonce, last) {
-                    MarkerStatus::Ok => current.map_or(0, |c| c.seq_high_water),
-                    _ => 0,
+                    MarkerStatus::Ok => current.map_or((0, 0), |c| (c.seq_high_water, c.seq_floor)),
+                    _ => (0, 0),
                 }
             }
-            None => 0,
+            None => (0, 0),
         };
         Ok(Self {
-            marker: MarkerState {
-                cfg: params.marker.clone(),
-                mark,
-                writes: 0,
-            },
+            marker: MarkerState::new(params.marker.clone(), mark, floor),
             conn,
             params,
             m,
@@ -1299,19 +1325,8 @@ impl SqliteStore {
         &mut self,
         f: impl FnOnce(&Connection, &mut Mirror, &mut MarkerState) -> Result<T, MeshError>,
     ) -> Result<T, MeshError> {
-        let result = (|| {
-            let tx = begin(&self.conn, TransactionBehavior::Immediate)?;
-            sync_generation(&tx, &mut self.m)?;
-            let out = f(&tx, &mut self.m, &mut self.marker)?;
-            finish(&tx, &mut self.m)?;
-            tx.commit().map_err(sql("committing"))?;
-            Ok(out)
-        })();
-        if result.is_err() {
-            // The mirror may hold changes the database rolled back.
-            let _ = self.reload();
-        }
-        result
+        self.write_or_idle(|tx, m, marker| f(tx, m, marker).map(Some))
+            .map(|out| out.expect("`write` never idles"))
     }
 
     /// [`Self::write`], except that `f` returning `None` rolls the
@@ -1323,6 +1338,9 @@ impl SqliteStore {
         let result = (|| {
             let tx = begin(&self.conn, TransactionBehavior::Immediate)?;
             sync_generation(&tx, &mut self.m)?;
+            // With the write lock held, the mirror's `vv[self]` is what is
+            // committed: the floor of any marker this transaction writes.
+            self.marker.begin(self.m.vv.get(&self.m.self_id));
             let Some(out) = f(&tx, &mut self.m, &mut self.marker)? else {
                 return Ok(None); // dropping `tx` rolls it back
             };
@@ -1331,9 +1349,72 @@ impl SqliteStore {
             Ok(Some(out))
         })();
         if result.is_err() {
-            let _ = self.reload();
+            // The mirror may hold changes the database rolled back. If even
+            // the reload fails, force one at the next transaction, so no
+            // later decision (or marker floor) comes from a stale mirror.
+            if self.reload().is_err() {
+                self.m.generation = i64::MIN;
+            }
+        } else if self.marker.cfg.is_some()
+            && self.m.vv.get(&self.m.self_id) > self.marker.floor.saturating_add(SEQ_BLOCK)
+        {
+            // Single mints never get here (each block's marker is floored
+            // one block below its mark); a batch, or seqs minted under a
+            // reservation a rolled-back transaction made, do.
+            self.raise_marker_floor();
         }
         result
+    }
+
+    /// After a commit that left the committed `vv[self]` more than a block
+    /// above the marker's floor, raise the floor to it, so that a later
+    /// rollback of the database past this commit is still detected as
+    /// tightly as before (one block). Done under the write lock (every
+    /// marker writer holds it), and only ever upward. Best effort by design:
+    /// the write is already durable and the marker already covers it, so a
+    /// failure here leaves a valid marker with an older floor (a rollback
+    /// across this commit is then left to the wire, PROTOCOL.md §7.2 and
+    /// §7.4) and is not retried until the log passes another block.
+    fn raise_marker_floor(&mut self) {
+        let Some(cfg) = self.marker.cfg.clone() else {
+            return;
+        };
+        let me = self.m.self_id;
+        // The result is deliberately not propagated (see above): the caller's
+        // write succeeded and is durable.
+        let _best_effort = (|| -> Result<(), MeshError> {
+            let tx = begin(&self.conn, TransactionBehavior::Immediate)?;
+            let committed = tx
+                .prepare_cached("SELECT max_seq FROM mesh_vv WHERE origin = ?1")
+                .and_then(|mut st| {
+                    st.query_row([me.to_hex()], |r| r.get::<_, i64>(0))
+                        .optional()
+                })
+                .map_err(sql("reading mesh_vv"))?
+                .map(to_u64)
+                .transpose()?
+                .unwrap_or(0);
+            let Some(current) = marker::read(&cfg.data_dir)? else {
+                return Ok(());
+            };
+            let trusted =
+                marker::classify(Some(&current), &me, &cfg.nonce, committed) == MarkerStatus::Ok;
+            if trusted && current.seq_floor < committed && committed <= current.seq_high_water {
+                marker::write(
+                    &cfg.data_dir,
+                    &MarkerContents::with_floor(me, cfg.nonce, current.seq_high_water, committed),
+                )?;
+                self.marker.floor = committed;
+            } else {
+                self.marker.floor = self.marker.floor.max(current.seq_floor);
+            }
+            // Nothing was written to the database: dropping `tx` rolls back.
+            drop(tx);
+            Ok(())
+        })();
+        // Not retried before the log passes another block (see above).
+        let committed = self.m.vv.get(&me);
+        self.marker.floor = self.marker.floor.max(committed.saturating_sub(SEQ_BLOCK));
     }
 
     fn commit_chunk(
@@ -2214,6 +2295,57 @@ mod tests {
             .unwrap();
         assert_eq!(g.store.marker_writes(), 2, "the retry reuses the block");
         assert_eq!(g.store.vv().get(&g.id), 65);
+    }
+
+    fn settings(n: u64) -> Vec<Draft> {
+        (0..n)
+            .map(|i| {
+                Draft::of(
+                    &MeshSetting {
+                        name: format!("b{i}"),
+                        value: json!(i),
+                    },
+                    HlcPolicy::Now,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_multi_block_batch_floors_its_marker_at_what_is_committed() {
+        let root = tempfile::tempdir().unwrap();
+        let mut g = dev(root.path(), 1, None);
+        add(&mut g, 1);
+        // Rolled back after reserving four blocks: the floor stays at the
+        // committed seq 1, so the identity is still trusted.
+        assert!(g
+            .store
+            .mint_batch(&g.key, settings(200), |_| Err(MeshError::Storage(
+                "refused"
+            )))
+            .is_err());
+        let m = marker::read(&g.dir).unwrap().unwrap();
+        assert_eq!((m.seq_high_water, m.seq_floor), (256, 1));
+        assert_eq!(g.store.vv().get(&g.id), 1);
+        assert_eq!(g.store.marker_status().unwrap(), MarkerStatus::Ok);
+        // Committed: the floor is raised to the committed seq right after,
+        // with the mark unchanged (it already covers the batch).
+        g.store
+            .mint_batch(&g.key, settings(200), |_| Ok(()))
+            .unwrap();
+        let m = marker::read(&g.dir).unwrap().unwrap();
+        assert_eq!((m.seq_high_water, m.seq_floor), (256, 201));
+        // A single mint at a block's first seq writes a floor one block
+        // below its mark, and needs no raise.
+        for i in 0..55 {
+            setting(&mut g, "s", i);
+        }
+        assert_eq!(g.store.vv().get(&g.id), 256);
+        let writes = g.store.marker_writes();
+        setting(&mut g, "s", 99);
+        let m = marker::read(&g.dir).unwrap().unwrap();
+        assert_eq!((m.seq_high_water, m.seq_floor), (320, 256));
+        assert_eq!(g.store.marker_writes(), writes + 1);
     }
 
     #[test]

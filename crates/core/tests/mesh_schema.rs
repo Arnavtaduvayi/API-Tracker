@@ -258,7 +258,8 @@ fn backup_then_restore_wipes_mesh_state_and_mints_nothing() {
     let info = backup::restore_backup(&file, &backup_pw, &target, false).unwrap();
     let wipe = info.mesh_wipe.unwrap();
     assert_eq!(wipe.identity, Some(source_marker.device_id));
-    assert!(wipe.rows_deleted > 0);
+    // Backups carry no mesh rows (audit MI-3, MI-4), only the device id.
+    assert_eq!(wipe.rows_deleted, 0, "no mesh row was restored");
     assert_eq!(wipe.marker, MarkerRemoval::Absent, "a fresh directory");
 
     let restored = vault::unlock_vault(&target, &master_pw()).unwrap();

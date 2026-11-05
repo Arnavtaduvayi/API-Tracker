@@ -16,7 +16,9 @@
 //! - [`on_restore`] and [`leave_local_wipe`] delete every row of every
 //!   `mesh_*` table and turn cap enforcement off: a restored or departed vault
 //!   must never act as the device it was copied from (MESH-SI-5). The marker
-//!   is removed only when it names the identity that was wiped.
+//!   is removed only when it names the identity that was wiped. Backups carry
+//!   no mesh rows, and a restore skips any an older backup carries
+//!   ([`on_restore_after_skipping`]), so a restore never inserts them.
 //!
 //! Nothing here performs network I/O.
 
@@ -230,6 +232,16 @@ fn mesh_tables(conn: &Connection) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Make every later commit on `conn` durable when it returns: the same
+/// `synchronous=FULL` and F_FULLFSYNC (macOS; recorded but unused elsewhere)
+/// the store's own connection runs with. For the vault-connection mesh writes
+/// (init, join, the wipe); the setting stays for the connection's life.
+pub(crate) fn make_durable(conn: &Connection) -> Result<()> {
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "fullfsync", true)?;
+    Ok(())
+}
+
 pub(crate) fn delete_mesh_rows(conn: &Connection) -> Result<u64> {
     let mut rows = 0u64;
     for t in mesh_tables(conn)? {
@@ -303,7 +315,7 @@ pub(crate) fn init(
         }),
     };
 
-    conn.pragma_update(None, "synchronous", "FULL")?;
+    make_durable(conn)?;
     // The write lock is held from the "not in a mesh yet" check to the
     // commit, so two concurrent inits cannot both pass it.
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -624,7 +636,8 @@ pub(crate) fn status(
             fork_seq: roster.fork_seq(d),
         })
         .collect();
-    let marker = store.marker_status()?;
+    // An unreadable marker is a problem to show, not a reason to fail.
+    let marker = store.marker_status().unwrap_or(MarkerStatus::Unreadable);
     let stats = store.stats();
     let mesh_hex = row.info.mesh_id.to_hex();
     Ok(MeshStatus {
@@ -658,16 +671,27 @@ pub(crate) fn status(
 /// What a wipe removed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct WipeReport {
-    /// The identity that was wiped, if there was one.
+    /// The identity that was wiped (or, on restore, that the backup carried
+    /// and was not restored), if there was one.
     pub identity: Option<DeviceId>,
+    /// Mesh rows deleted, plus, on restore, the rows a backup from an older
+    /// build carried and the restore skipped.
     pub rows_deleted: u64,
     pub marker: MarkerRemoval,
 }
 
-fn wipe(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {
+fn wipe(
+    conn: &Connection,
+    data_dir: &Path,
+    skipped_identity: Option<DeviceId>,
+    skipped_rows: u64,
+) -> Result<WipeReport> {
+    make_durable(conn)?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
-    let identity = read_self(&tx)?.map(|r| r.info.device_id);
-    let rows_deleted = delete_mesh_rows(&tx)?;
+    let identity = read_self(&tx)?
+        .map(|r| r.info.device_id)
+        .or(skipped_identity);
+    let rows_deleted = delete_mesh_rows(&tx)? + skipped_rows;
     tx.execute(
         "UPDATE gateway_config SET cap_enforcement = 0 WHERE cap_enforcement <> 0",
         [],
@@ -681,12 +705,25 @@ fn wipe(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {
     })
 }
 
-/// Called by `backup::restore_backup` right after the restored rows are in:
-/// a restored vault is a copy, so it keeps no mesh identity and must pair
-/// again (DESIGN §D5). Works on every backup format; a backup without mesh
-/// rows (v1, or made before v21) leaves nothing to delete. Never mints.
+/// The wipe a restore runs on its database: a restored vault is a copy, so
+/// it keeps no mesh identity and must pair again (DESIGN §D5). Deletes any
+/// mesh row and turns cap enforcement off. Never mints.
 pub fn on_restore(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {
-    let report = wipe(conn, data_dir)?;
+    on_restore_after_skipping(conn, data_dir, None, 0)
+}
+
+/// Called by `backup::restore_backup` right after the restored rows are in.
+/// Backups carry no mesh rows; one from an older build may, and the restore
+/// skipped them (never inserted): `skipped_identity` is the device its
+/// `mesh_self` row named, so a marker naming it is still removed and the
+/// report still says which identity was not restored.
+pub fn on_restore_after_skipping(
+    conn: &Connection,
+    data_dir: &Path,
+    skipped_identity: Option<DeviceId>,
+    skipped_rows: u64,
+) -> Result<WipeReport> {
+    let report = wipe(conn, data_dir, skipped_identity, skipped_rows)?;
     if let Some(d) = report.identity {
         audit::record(
             conn,
@@ -701,7 +738,7 @@ pub fn on_restore(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {
 
 /// The local half of `mesh leave` (Increment 04): the same wipe.
 pub fn leave_local_wipe(conn: &Connection, data_dir: &Path) -> Result<WipeReport> {
-    wipe(conn, data_dir)
+    wipe(conn, data_dir, None, 0)
 }
 
 /// The marker check for a store that exists (used by `status` and, from

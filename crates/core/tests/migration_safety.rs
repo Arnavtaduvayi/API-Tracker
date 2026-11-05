@@ -410,10 +410,10 @@ fn backup_captures_every_table_and_restore_preserves_all_rows() {
             assert!(restored_count >= *count, "audit trail must be preserved");
         } else if name.starts_with("mesh_") {
             // Exempt by design (ADR 0031, DESIGN §D5, MESH-SI-5): a restored
-            // vault is a copy, so restore deletes every mesh row — identity,
-            // keys, items, peers — and the user pairs it again. They are in
-            // the backup (it copies every table) and empty after restore.
-            assert_eq!(restored_count, 0, "restore must wipe '{name}'");
+            // vault is a copy and pairs again, so its mesh rows — identity,
+            // keys, items, peers — are never backed up nor restored; the
+            // tables exist (the schema is current) and are empty.
+            assert_eq!(restored_count, 0, "restore must not carry '{name}'");
         } else {
             assert_eq!(
                 restored_count, *count,

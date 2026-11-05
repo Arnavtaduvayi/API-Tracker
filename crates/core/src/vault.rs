@@ -1969,7 +1969,9 @@ impl UnlockedVault {
     /// destination removal — it re-verifies the master password in core
     /// rather than trusting a UI confirmation. Refuses while other records
     /// reference it or a rotation is in flight (deleting would cascade away
-    /// the tracking of a still-live provider-side key).
+    /// the tracking of a still-live provider-side key), and while this device
+    /// has live mesh shares of it (deleting would cascade away the record
+    /// that lets this device revoke them).
     pub fn delete_credential(
         &mut self,
         selector: &str,
@@ -1997,6 +1999,16 @@ impl UnlockedVault {
         )?;
         if reference_count > 0 {
             return Err(CoreError::HasLinkedReferences(reference_count as usize));
+        }
+        let live_shares = self.live_outgoing_shares(&row.id)?;
+        if live_shares > 0 {
+            return Err(CoreError::InvalidInput(format!(
+                "this credential has {live_shares} live mesh share(s) from this device; deleting \
+                 it would leave them live on the devices they were sealed to, with no way to \
+                 revoke them from here. Revoke them first with `tethra mesh credential revoke \
+                 --credential {}`, then delete it",
+                row.id
+            )));
         }
         let model = self.credential_model(&row)?;
         self.conn
@@ -9553,7 +9565,6 @@ impl UnlockedVault {
         let mut store = self.mesh_open_store()?;
         let target = crate::mesh::membership::resolve_device(&store, device)?;
         let epoch = crate::mesh::membership::remove(
-            &self.conn,
             &self.vault_key,
             &self.vault_id,
             &mut store,
@@ -9566,7 +9577,12 @@ impl UnlockedVault {
     /// Leave the mesh (`tethra mesh leave`). Reauthenticated; the caller
     /// asks for confirmation first. Mints this device's self-removal, lets
     /// `deliver` try to hand it to a peer (best effort), then wipes every
-    /// local mesh row and the identity marker.
+    /// local mesh row and the identity marker. When this device must not
+    /// mint — its identity is untrusted (marker missing, mismatched, rolled
+    /// back or unreadable) or held by a rollback notice, the very states in
+    /// which every message tells the user to leave — nothing is minted or
+    /// delivered and the local wipe still happens; the report says the
+    /// departure was not announced (another device removes this one).
     pub fn mesh_leave(
         &self,
         master_password: &SecretString,
@@ -9575,8 +9591,9 @@ impl UnlockedVault {
         self.verify_master_password(master_password)?;
         let keys = self.mesh_keys()?;
         let mut store = self.mesh_open_store()?;
-        crate::mesh::membership::mint_self_remove(&mut store, keys.signing_key())?;
-        let delivered = deliver(&mut store);
+        let unannounced =
+            crate::mesh::membership::mint_self_remove(&mut store, keys.signing_key())?;
+        let delivered = unannounced.is_none() && deliver(&mut store);
         drop(store);
         drop(keys);
         let wipe = crate::mesh::identity::leave_local_wipe(&self.conn, &self.paths.data_dir)?;
@@ -9585,13 +9602,20 @@ impl UnlockedVault {
             "mesh_left",
             None,
             None,
-            if delivered {
-                "self-removal delivered to a peer"
-            } else {
-                "self-removal not delivered (no peer reachable)"
+            match (unannounced, delivered) {
+                (Some(_), _) => {
+                    "self-removal not minted (this device's identity was untrusted or held)"
+                }
+                (None, true) => "self-removal delivered to a peer",
+                (None, false) => "self-removal not delivered (no peer reachable)",
             },
         )?;
-        Ok(MeshLeaveReport { delivered, wipe })
+        Ok(MeshLeaveReport {
+            delivered,
+            announced: unannounced.is_none(),
+            not_announced_because: unannounced,
+            wipe,
+        })
     }
 }
 
@@ -10061,6 +10085,12 @@ impl UnlockedVault {
 pub struct MeshLeaveReport {
     /// Whether a peer received the self-removal before the wipe.
     pub delivered: bool,
+    /// Whether a self-removal was minted at all. `false` when this device's
+    /// identity was untrusted or held: the other devices keep listing it
+    /// until one of them removes it (`tethra mesh remove`).
+    pub announced: bool,
+    /// Why it was not minted, when it was not (static text).
+    pub not_announced_because: Option<&'static str>,
     pub wipe: crate::mesh::identity::WipeReport,
 }
 
