@@ -70,7 +70,7 @@ bash scripts/smoke.sh                                               PASS 186 pas
 (apps/desktop) npm run build                                        PASS
 API_TRACKER_INSECURE_FAST_KDF=1 bash scripts/mutation_checks.sh <13 mesh mutants>  PASS 13 killed / 0 skipped / 0 survived
 bash scripts/mesh_soak.sh --minutes 10 (protocol, release)          PASS 63 000 seeds x 3 000 steps / 0 failing
-bash scripts/mesh_soak.sh --scenario caps --minutes 10 (release)    PASS 704 seeds x 240 steps / 0 failing (after seed 5000331 below)
+bash scripts/mesh_soak.sh --scenario caps --minutes 10 (release)    PASS 832 seeds (5000000-5000831) x 240 steps / 0 failing (the range that found seed 5000331 below; final invariant)
 ```
 
 The first 10-minute caps soak on the remediated head failed one seed of 832,
@@ -99,17 +99,17 @@ failing; caps soak 3 136 seeds, 2 failing (a real policy bug, fixed in
 
 ## CI on the final head
 
-Head `24eb4a4` (the last commit with code; later commits only record
-results in docs):
+Head `92e5530` (the last commit with code; the record commit after it
+changes docs only):
 
 | Workflow | Run | Result |
 |---|---|---|
-| CI (Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, desktop frontend, desktop backend, packaged app on macOS) | `42121555608` | success |
-| Packaged macOS service lifecycle | `42121555601` | success |
+| CI (Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, desktop frontend, desktop backend, packaged app on macOS) | `42154484846` | success |
+| Packaged macOS service lifecycle | `42154484849` | success |
 
 Earlier remediation heads: `9e1eaf6` CI `42113513995`, service
-`42113514032`; `6a279d4` CI `42113920148`, service `42113919915` (all
-success). The record commit's own runs are listed in `increments/STATUS.md`.
+`42113514032`; `6a279d4` CI `42113920148`, service `42113919915`;
+`24eb4a4` CI `42121555608`, service `42121555601` (all success). The record commit's own runs are listed in `increments/STATUS.md`.
 
 ## Please look hardest at
 

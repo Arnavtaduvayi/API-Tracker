@@ -21,7 +21,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | done | 2026-11-03 | 2026-11-03 | `1e3e387` | CI `41682903354` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); its macOS service run `41682903236` was **cancelled** (superseded by the next push), and the service run on `c8c019f`, which contains all of 11, `41684406424` succeeded |
-| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | in-progress (Phases A-C done; D, E next) | 2026-11-03 | | `fb55b07`, `d7accf6`, `70ebeb1`, the four Phase C `fix(mesh)` commits | |
+| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | done | 2026-11-03 | 2026-11-06 | `c8c019f`, `798be3e`, `d7accf6`, `fb55b07`, `70ebeb1` (Phase A-B); `bd49ebf`, `0b569ae`, `e2999b7`, `9e1eaf6`, `6a279d4` (Phase C); `fadb4a0`, `92e5530` (Phase D); `24eb4a4` + this record (Phase E) | Final code head `92e5530`: CI `42154484846` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `42154484849` (success). Earlier: `9e1eaf6` CI `42113513995` / service `42113514032`, `6a279d4` CI `42113920148` / service `42113919915`, `24eb4a4` CI `42121555608` / service `42121555601`, all success |
 
 Sizes are rough context cost for a 1M-token session:
 - **M** is about 15-25% of the session.
@@ -116,9 +116,9 @@ also update DESIGN.md and the affected increment files; README §7.)_
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
 
-### Increment 12 — Hardening, audit & ship (started 2026-11-03; in progress)
+### Increment 12 — Hardening, audit & ship (2026-11-03 → 2026-11-06)
 
-Phases A, B and C are done; D (verification) and E (ship) remain. **Read this first.**
+All five phases are done; the PR is marked ready for the owner's review. **Read this first.**
 
 **Done (committed in this checkpoint):**
 - `crates/mesh/tests/adversarial.rs`, 10 tests, all passing
@@ -262,38 +262,25 @@ CHANGELOG sentence. Fixed exactly as it specified, each failing first
 (`store::validate_commit` now ignores own-origin dots inside the commit's
 transaction; `sim::caps::unsettled` floors at `max(effective target, used +
 override-held rights)`). The second pass was interrupted once by the
-account's 5-hour usage limit and resumed with `SendMessage`. Checks:
-SECOND_PASS_CHECKS
+account's 5-hour usage limit and resumed with `SendMessage`. Checks on the final code head `92e5530`: **1 923 Rust tests passed, 0
+failed, 14 ignored**; clippy clean (1.96); smoke **186 passed**; caps soak
+under the final invariant over the same range the failing soak covered,
+**832 seeds (5000000-5000831) × 240 steps, 0 failing** (192 + 64 in two
+10-minute `mesh_soak.sh` runs, then 576 in one `caps_family_long` run; the
+release rebuild took most of each window). CI on `92e5530`: CI `42154484846`
+success, macOS service `42154484849` success.
 
-**Phase E:** README feature list, CHANGELOG consolidated into one Added and
-one Security section, root SECURITY/THREAT_MODEL, PRODUCT_SPEC, USER_GUIDE,
-TEST_PLAN, `docs/mesh/REVIEW_HANDOFF.md`, `BACKUP_RECOVERY.md`; then CI on
-the final head and `gh pr ready 19`.
+**Phase E, done (2026-11-06).** README feature list, CHANGELOG consolidated
+into one Added and one Security section, root SECURITY/THREAT_MODEL,
+PRODUCT_SPEC, USER_GUIDE, TEST_PLAN, `docs/mesh/REVIEW_HANDOFF.md`,
+`BACKUP_RECOVERY.md`; CI green on the final code head; PR #19 marked ready,
+not merged.
 
-3. (Done, see above.) **The ten mutants were not yet in `scripts/mutation_checks.sh`.** Anchors
-   found so far:
-   - signature check: `proto.rs`
-     `if p.item.verify_with(&vk, &store.genesis().mesh_id).is_err() {`;
-   - drift clamp: `hlc.rs` `self.last = self.last.max(remote.min(bound));`;
-   - removal cutoff: `roster.rs`
-     `self.cutoff(origin).is_none_or(|c| seq <= c)`;
-   - view clamp: `bounded.rs` `let honoured = amount.min(*remaining);`;
-   - escrow fence: `caps/escrow.rs`
-     `if enforcement_on(conn)? && probe.gateway_running() {`;
-   - one-in-flight: `capgate.rs`
-     `if others > 0 && avail - i128::from(held) < e.threshold() {`;
-   - 403 → 429: `forward.rs` `respond_cap_refused` `403,`;
-   - share bindings: `share.rs`
-     `verify_bindings(&plain, mesh, me, incoming.sharer, &incoming.value)?;`;
-   - restore wipe: `backup.rs` the `on_restore` call;
-   - VV before commit: still to choose (candidates: the proto gap check in
-     `on_commit`, `if !stage.items.contains_key(&s) && !stage.dots.contains_key(&s) {`,
-     killed by `adversarial::a_commit_claiming_more_…` or `mesh_sim`).
+**For the owner, not changed here:** `CLAUDE.md`'s local-first exception
+still says the mesh is "end-to-end encrypted"; the docs now say encryption is
+per connection and every paired device reads what replicates (the
+verification agent flagged it; it is the owner's instruction file).
 
-   Run the mutants only on a clean tree, with no soak running: both use the
-   same source.
-4. Phases B to E as the 12 file describes (four auditors, triage, the
-   verification agent, ship docs, `gh pr ready`).
 
 ### Increment 11 — Opt-in credential sharing (2026-11-03)
 
