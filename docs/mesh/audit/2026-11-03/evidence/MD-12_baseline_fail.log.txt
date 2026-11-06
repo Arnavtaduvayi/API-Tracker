@@ -1,0 +1,2 @@
+# MD-12 baseline: the text at HEAD 70ebeb1 before remediation (documentation finding; the 'failing test' is this stale text)
+70ebeb1:docs/mesh/ARCHITECTURE.md:49:| Credential shares (Increment 11) | yes, opt-in | One credential at a time, sealed to each chosen device's key and imported only on request (`share.sealed`, `share.revoke`; ADR 0033) |

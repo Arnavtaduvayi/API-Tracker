@@ -1,0 +1,21 @@
+# MD-13 baseline (before the fix): CARGO_TARGET_DIR=<scratch>/target-r4 API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-cli --test mesh_cli share_a_credential
+# HEAD fb55b07 + the new assertions; mesh_share_cmd.rs has only the MD-4 note fix, status_summary unchanged
+# B removed A (devices[1].active=false), yet status still counts A's share as one to import
+
+test share_a_credential_and_import_it_on_another_device_over_a_real_node ... FAILED
+
+failures:
+
+---- share_a_credential_and_import_it_on_another_device_over_a_real_node stdout ----
+
+thread 'share_a_credential_and_import_it_on_another_device_over_a_real_node' (21510398) panicked at apps/cli/tests/mesh_cli.rs:1167:5:
+assertion `left == right` failed: {"address_changes":[],"caps":{"count":0,"escrow_open":0,"frozen":0,"last_run":{"at_ms":1793774811887,"burned_micros":0,"distributed_micros":0,"escrow_cancelled":0,"escrow_published":0,"escrow_waiting":0,"months_minted":0,"used_published":0}},"clock_skew":{},"device_id":"0d64312c7e33441e1f006984857613d6","device_name":"dev-b","devices":[{"active":true,"cutoff_seq":null,"device_id":"0d
+  left: Number(1)
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+  …(status JSON trimmed)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 3.22s
+
+# The 18-space run: apps/cli/src/mesh_cmd.rs format strings at HEAD
+1353:                "Credentials:  {} shared with this device to import, {} imported, {} shared                  from here; `tethra mesh credential list`",
+1359:                "Reseal:       {} credential(s) could be sealed to devices that lack the                  current value; `tethra mesh credential list` (needs your master password)",

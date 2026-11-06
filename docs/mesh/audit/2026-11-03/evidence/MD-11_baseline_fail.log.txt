@@ -1,0 +1,2 @@
+# MD-11 baseline: the text at HEAD 70ebeb1 before remediation (documentation finding; the 'failing test' is this stale text)
+70ebeb1:docs/mesh/THREAT_MODEL.md:56:| Someone with a recipient's unlocked session | Every import, share and reseal asks for the master password again in core; nothing imports by itself. | The session can list shares (names, devices, share ids; never values). |

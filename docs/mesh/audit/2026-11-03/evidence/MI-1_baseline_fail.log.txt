@@ -1,0 +1,17 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok stdout ----
+
+thread 'a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok' (21508714) panicked at crates/core/tests/mesh_audit_identity.rs:179:5:
+assertion `left == right` failed
+  left: RolledBack
+ right: Ok
+
+---- a_failed_mint_batch_in_another_store_never_stops_this_one stdout ----
+
+thread 'a_failed_mint_batch_in_another_store_never_stops_this_one' (21508713) panicked at crates/core/tests/mesh_audit_identity.rs:209:13:
+the node's mint 61 was refused: this device's mesh identity cannot be trusted: its identity marker records items this database does not have, so the database was rolled back; run `tethra mesh leave` and pair again
+
+Guard (passes on baseline and after the fix): a_rollback_past_a_committed_multi_block_batch_is_still_detected ... ok

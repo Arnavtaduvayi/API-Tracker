@@ -45,6 +45,15 @@ is imported at its original schema version and then upgraded to the current
 one automatically. A backup made by a **newer** version is refused with a
 clear error — restore it with that newer version instead.
 
+**Tethra Mesh.** A restored vault keeps everything except its mesh identity.
+Backups never contain the device's mesh keys, records or pairings (only which
+device it was), and a restore of an older backup that does contain them skips
+them, because a restored vault is a copy: if it kept acting as the original
+device, the two would reuse each other's record numbers. The restore output says so,
+and `tethra mesh status` shows "not part of a mesh". Pair the restored device
+again (or start a new mesh with `tethra mesh init`). See
+[ADR 0031](decisions/0031-device-mesh.md).
+
 ## Recovery limits (by design)
 
 - Restoring needs the **backup password**.

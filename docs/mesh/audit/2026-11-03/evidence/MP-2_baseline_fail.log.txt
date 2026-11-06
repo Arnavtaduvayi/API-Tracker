@@ -1,0 +1,21 @@
+# MP-2 baseline: the fix disabled in crates/core/src/mesh/proto.rs (scratch mutation), the new tests run
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_chain_reply_outside_the_queried_range_is_ignored
+test mesh::proto::tests::a_chain_reply_outside_the_queried_range_is_ignored ... FAILED
+thread 'mesh::proto::tests::a_chain_reply_outside_the_queried_range_is_ignored' (23427686) panicked at crates/core/src/mesh/proto.rs:1655:9:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 567 filtered out; finished in 0.01s
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_chain_claim_never_reports_this_device_forked
+test mesh::proto::tests::a_peers_chain_claim_never_reports_this_device_forked ... FAILED
+thread 'mesh::proto::tests::a_peers_chain_claim_never_reports_this_device_forked' (23427714) panicked at crates/core/src/mesh/proto.rs:1675:9:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 567 filtered out; finished in 0.00s
+
+# Verification follow-up (Phase D): a peer's dot hash for this device's own origin, committed beside genuine items with `upto` naming this device's seq 1; the own-origin dot filter in Session::on_items disabled
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked
+test mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked ... FAILED
+thread 'mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked' panicked at crates/core/src/mesh/proto.rs:1758:17:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 568 filtered out; finished in 0.01s
+
+# Second verification pass (Phase D): the race — a dot for this device's next seq arrives, this device mints that seq, then the Commit lands; the own-origin check in store::validate_commit disabled (the session's filter alone cannot see it)
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints
+test mesh::proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints ... FAILED
+thread 'mesh::proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints' panicked at crates/core/src/mesh/proto.rs:1817:17:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 570 filtered out; finished in 0.01s

@@ -92,6 +92,15 @@ pub fn usage(ctx: &Ctx, cmd: UsageCmd) -> Result<()> {
                 "manual" => usage::SourceFilter::Manual,
                 other => anyhow::bail!("unknown --source '{other}' (use all, provider, or manual)"),
             };
+            if !ctx.json
+                && api_tracker_core::mesh::membership::mesh_of(vault.connection())?.is_some()
+            {
+                // SI-19: kept apart, never summed; only pointed to.
+                eprintln!(
+                    "Gateway-observed usage from your paired devices is separate: \
+                     `tethra mesh usage`."
+                );
+            }
             let start = budget::period_start(clock::now());
             let (totals, rows) = vault.usage_report(
                 &start,

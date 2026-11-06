@@ -2848,7 +2848,7 @@ cover the primary workflow. Use fake credentials only.
 ## U — Card-based interface and first run (ADR 0030)
 
 Supersedes earlier cases wherever labels differ. Run against a scratch vault
-(`TETHRA_DATA_DIR` pointed somewhere disposable), never a real one.
+(`TETHRA_DIR` pointed somewhere disposable), never a real one.
 
 ### U1 — First run, from nothing
 
@@ -2913,3 +2913,75 @@ Supersedes earlier cases wherever labels differ. Run against a scratch vault
 | U6.4 | System → Reduce motion on | No card lift, no button transform, no chart animation |
 | U6.5 | Resize the window to ~700px, then ~560px | Grids collapse; the content pane never scrolls sideways |
 | U6.6 | Check every status dot | Each sits beside a word — colour never carries the meaning alone |
+
+---
+
+## D — Devices (Tethra Mesh, Increment 09)
+
+Run against **two scratch data directories**, never a real vault. The app:
+`cd apps/desktop && TETHRA_DIR="$(mktemp -d)/tethra" TETHRA_INSECURE_FAST_KDF=1 npx tauri dev`
+(never `tauri dev` without `TETHRA_DIR`: it opens the real vault). The second
+device is the CLI with its own `TETHRA_DIR`, `TETHRA_INSECURE_FAST_KDF=1` and a
+fake `TETHRA_PASSWORD`. Listen on `127.0.0.1` only on a development machine.
+
+| # | Step | Expected |
+|---|---|---|
+| D1 | Unlock, open **Devices** | Two or three sentences on what the mesh does and does not do, a user-guide link, **Create mesh** and **Join a mesh**. No analytics event fires for the view |
+| D2 | **Create mesh** with a name | This device, Devices (one row, "this device"), Peers, Health and Leave appear |
+| D3 | Add listen `127.0.0.1:0`, turn on **Run mesh while Tethra is open**, save | No password asked (loopback). The node shows as running with its bound `127.0.0.1:<port>` |
+| D4 | Turn on **Allow all interfaces** or **Find devices on this network**, or add `192.168.x.y:7420`; save | A LAN-exposure warning is on screen before saving; saving asks for the master password; a wrong one is refused and nothing changes |
+| D5 | **Pair a device** | Master password first; then the invite, shown once, with copy, a countdown and the "treat this like a password" warning |
+| D6 | Close the dialog | The invite is gone (reopening needs a new invite and the password again) |
+| D7 | In a terminal: `TETHRA_DIR=<second> tethra mesh join -` and paste the invite | Joins; within a round the new device appears in Devices with a last exchange |
+| D8 | **Remove** the new device | Confirmation first, then the master password; the row shows **removed** |
+| D9 | Lock the app (or wait for auto-lock), then `TETHRA_DIR=<app's dir> tethra mesh status` | "not running": the node stopped with the lock |
+| D10 | Unlock again | The node starts again by itself (the setting is on) |
+| D11 | Quit the app; `tethra mesh status` against its data dir | Not running |
+| D12 | **Leave mesh** | Confirmation, then the password; back to the not-in-a-mesh screen |
+| D13 | Stale and errors | A device not exchanged with for over 24 h shows **stale**; every error shows a plain message, never an invite or a password |
+
+### D-P — Shared projects, cross-device usage and spend caps (Increment 10)
+
+Continue from §D with the app (scratch dir A) and a CLI device (scratch dir B,
+`tethra mesh serve --listen 127.0.0.1:0` running) paired. Seed B's usage the
+way `scripts/smoke.sh` does (its "mesh usage" block inserts
+`gateway_usage_daily` rows with `sqlite3` into B's scratch vault only). The
+403 check uses B's **foreground** gateway (`tethra gateway serve` with B's
+`TETHRA_DIR`) and a fake upstream, never the machine's real gateway.
+
+| # | Step | Expected |
+|---|---|---|
+| DP1 | Open a project in the app | A **Devices** panel with **Share with my devices** and one sentence on what replicates. Nothing is shared by opening it |
+| DP2 | Share it | The panel shows the mesh project, its devices and **Unbind** |
+| DP3 | On B: `tethra mesh project bind <mesh> <local>` (or, in a second app, **Devices → Available from your devices → Bind to…**) | Nothing binds until this step |
+| DP4 | Seed B's usage, wait for an exchange, then **Refresh** the usage card | B's row with requests, tokens, estimated cost, unpriced and not-extracted counts, "as of"; the total labelled "estimated, gateway-observed, across N device(s) …"; no provider-reported figure in the card |
+| DP5 | Stop B's node for over 24 h (or use a clock-skewed scratch run) | B's row is labelled **stale**, never shown as 0 |
+| DP6 | **Create a spend cap** ($1) | Target, used, this device's available, the per-device rights table |
+| DP7 | On B, raise it | The CLI asks for `--yes` (override). In the app on a non-owner, **Raise** explains the local override before it acts |
+| DP8 | **Lower** it | A confirmation first; then "pending decrease" until devices burn rights |
+| DP9 | On B: `tethra mesh cap enforce <cap> on`, drive B's foreground gateway past its share | B's gateway answers 403 with the spend-cap JSON; after the next exchange the app shows B's used amount rising |
+| DP10 | In the app, **Enforce on this device** | The master password first, with the 403 / one-request overshoot / self-limit explanation; a wrong password changes nothing |
+| DP11 | With no gateway running | "Enforcement inactive" or "the gateway does not seem to be running" on an enforced cap |
+| DP12 | Merge two shared projects that both have caps | A confirmation, then the refusal message |
+| DP13 | Alerts | A cap at 80% / 100% shows in Alerts with a readable title |
+
+### D-S — Sharing one credential with your devices (Increment 11)
+
+Continue from §D-P (the app on scratch dir A with a shared, bound project; a
+CLI device on scratch dir B, its node running, its own project bound to the
+same mesh project). Use only fake values such as `sk-test-FAKE-manual-0001`.
+
+| # | Step | Expected |
+|---|---|---|
+| DS1 | Open a credential in an **unshared** project | **Shared with my devices** says to share the project first; no Share button |
+| DS2 | Open a credential in the shared project; **Share with my devices…** | The revoke notice (does not revoke at the provider; a device keeps what it imported) before anything; **All my devices** or **Only these devices** with a checklist; **Continue** is disabled with no device ticked |
+| DS3 | Continue, then a wrong master password | Refused; nothing listed as shared |
+| DS4 | The right password | A notice naming the device; the table lists it as shared with its share id |
+| DS5 | On B: `tethra mesh replicate`, `tethra mesh credential list` | The share is listed as available; nothing imported |
+| DS6 | On B: `tethra mesh credential import <share> --project <local>` | The masked value only, never the value |
+| DS7 | In the app: **Revoke** | A confirmation with the same notice; then "revoked"; **Open Rotation** opens the Rotation view |
+| DS8 | On B: `tethra mesh credential share <cred> --to <app device>`; in the app, **Devices → Credentials shared with this device** | The share listed as available; opening the view imports nothing |
+| DS9 | **Import into…** a project, then a wrong password, then the right one | The wrong one is refused with no password on screen; the right one shows "Imported <project>/<name> (<masked>)" and the row becomes "imported as …" |
+| DS10 | Pair a third device after sharing with **All my devices** | The credential's panel shows a reseal offer; nothing is sent until **Reseal…** and the master password |
+
+

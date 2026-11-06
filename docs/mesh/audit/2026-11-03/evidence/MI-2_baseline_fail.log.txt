@@ -1,0 +1,14 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- leave_succeeds_on_a_missing_mismatched_or_rolled_back_marker stdout ----
+
+thread 'leave_succeeds_on_a_missing_mismatched_or_rolled_back_marker' (21508720) panicked at crates/core/tests/mesh_audit_identity.rs:306:46:
+missing: leave failed: this device's mesh identity cannot be trusted: its identity marker is missing, so this database is probably a copy; run `tethra mesh leave` and pair again
+
+---- leave_succeeds_under_a_rollback_hold stdout ----
+
+thread 'leave_succeeds_under_a_rollback_hold' (21508721) panicked at crates/core/tests/mesh_audit_identity.rs:332:63:
+called `Result::unwrap()` on an `Err` value: Mesh(RollbackHold)
+

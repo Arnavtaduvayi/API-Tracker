@@ -1,0 +1,8 @@
+# MP-3 baseline: the fix disabled in crates/core/src/mesh/proto.rs (scratch mutation), the new tests run
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::repair_fits
+test mesh::proto::tests::repair_fits_in_what_the_main_path_leaves_of_max_staged ... FAILED
+thread 'mesh::proto::tests::repair_fits_in_what_the_main_path_leaves_of_max_staged' (23425555) panicked at crates/core/src/mesh/proto.rs:1600:9:
+assertion `left == right` failed: [Send(Frame { n: 1, body: Items(Items { batch: [], dots: [(DeviceId(256c9384088c8be9637a764b1d2870fc), 3, ItemHash(b3cf494ae5a6446c)), (DeviceId(256c9384088c8be9637a764b1d2870fc), 4, ItemHash(46b9ea8ed0726f98)), (DeviceId(256c9384088c8be9637a764b1d2870fc), 5, ItemHash(9d273bc272f8f1b7)), (DeviceId(256c9384088c8be9637a764b1d2870fc), 6, ItemHash(31bcccea1a037edc)), 
+  left: (5, 1)
+ right: (5, 0)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 567 filtered out; finished in 0.01s

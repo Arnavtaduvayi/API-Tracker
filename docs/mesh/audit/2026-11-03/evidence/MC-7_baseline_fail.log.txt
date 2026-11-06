@@ -1,0 +1,23 @@
+# MC-7 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-gateway --test cap_enforcement a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete
+# The writer skipped the record (project row gone) but confirmed the charge: at the next snapshot it dropped out of the gate's count.
+
+running 1 test
+test a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete ... FAILED
+
+failures:
+
+---- a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete stdout ----
+
+thread 'a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete' (21527955) panicked at crates/gateway/tests/cap_enforcement.rs:961:5:
+assertion `left == right` failed: still counted
+  left: 5000000
+ right: 4250000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_charge_for_a_vanished_project_stays_counted_and_marks_accounting_incomplete
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 1.94s
+
+error: test failed, to rerun pass `-p api-tracker-gateway --test cap_enforcement`

@@ -286,13 +286,22 @@ Sensitive user information must remain on the user’s computer, including:
 * Audit records
 * Provider connection details
 
+**Exception — the user's own paired devices (ADR 0031).** Tethra Mesh may replicate
+the data listed in `docs/mesh/ARCHITECTURE.md` "What replicates" between devices the
+user has explicitly paired, peer-to-peer and end-to-end encrypted, with no Tethra
+server, relay, or rendezvous involved. Credential values replicate only when the user
+explicitly shares a specific credential, after reauthentication, sealed to specific
+recipient devices. This is not cloud synchronization: no third party ever holds or
+forwards the data.
+
 Do not add:
 
 * Analytics or telemetry outside the consent-first, fixed nonsensitive schema
   documented in `docs/ANALYTICS.md`
 * Advertising
 * Cross-site or advertising tracking
-* Cloud synchronization
+* Cloud synchronization (peer-to-peer replication between the user's own paired
+  devices is governed by ADR 0031 and is not cloud synchronization)
 * Hosted crash reporting
 * Requests carrying vault or project data to a Tethra-owned server
 

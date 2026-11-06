@@ -127,6 +127,29 @@ If a provider cannot expose usage per key, show the most precise supported level
 
 If a provider cannot programmatically change permissions, display the permissions that can be discovered and provide a manual action or official dashboard link.
 
+## Device mesh (ADR 0031)
+
+This section amends §4. Team collaboration and shared cloud vaults remain
+non-goals. **Tethra Mesh** lets one developer's *own* devices — laptop, desktop,
+home server — replicate shared projects, cross-device API usage and monthly
+spend caps **peer-to-peer, encrypted on every connection between member
+devices**, directly or over the user's LAN or VPN. Encryption is per hop:
+every member device reads what it relays, so replicated data is readable by
+all of the user's paired devices. It is **single-user and serverless**: there is no Tethra
+server, relay or cloud, and every device keeps working fully offline and
+converges when it reconnects. Each device's gateway can enforce a shared spend
+cap even while the devices cannot reach each other. Credential values replicate
+only when the user shares one credential (Increment 11): opt-in per
+credential, after reauthentication, with the value sealed to specific devices
+and imported there only on request (ADR 0033). Spend caps are a self-limit on
+traffic through the gateway: enforcement is per device and opt-in, and
+overshoot is limited, not zero (ADR 0032). Built in twelve increments
+(`docs/mesh/increments/`), with an independent audit whose confirmed
+findings are fixed and whose accepted residual risks are documented
+(`docs/mesh/audit/`, `docs/mesh/KNOWN_LIMITATIONS.md`). Not built: NAT
+traversal or relays (by design), a background service for the node,
+multi-user meshes, mobile clients.
+
 ## 5. Recommended technical architecture
 
 First inspect the existing repository. Preserve useful existing work if any exists. If the repository is empty, initialize it cleanly.

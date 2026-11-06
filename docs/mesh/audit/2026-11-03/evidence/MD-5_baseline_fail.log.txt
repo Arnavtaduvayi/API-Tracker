@@ -1,0 +1,13 @@
+# MD-5 baseline (before the fix): cd apps/desktop && npx vitest run src/components/MeshNoAnalytics.test.tsx
+# HEAD fb55b07 + the new/updated assertions only; the component code is unchanged
+
+ FAIL  src/components/MeshNoAnalytics.test.tsx > MESH-SI-14: binding to a new project from Devices > creates the project without any analytics event, with consent granted
+AssertionError: expected [ 'project_created', …(1) ] to not include 'project_created'
+ ❯ src/components/MeshNoAnalytics.test.tsx:121:30
+    119|     // Let any listener-triggered inventory read settle before looking.
+    120|     await new Promise((r) => setTimeout(r, 20));
+    121|     expect(eventNames()).not.toContain("project_created");
+       |                              ^
+    122|     expect(eventNames()).not.toContain("inventory_snapshot");
+    123|     expect(track).not.toHaveBeenCalled();
+

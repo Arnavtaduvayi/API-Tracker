@@ -1,0 +1,4 @@
+# MD-14 baseline: the rows at HEAD 70ebeb1 (documentation finding; the 'failing test' is these labels): revokes mint irreversible replicated items yet are marked non-destructive read-only (structural_unlock_gate); mesh_shares_list(purge=true) deletes held share items yet is marked a read
+{"command": "mesh_shares_list", "security_relevance": "low", "destructive": false, "secret_bearing": false, "reauth_required": "no", "backend_enforcement": "structural_unlock_gate", "test_status": "covered:mesh_share"}
+{"command": "mesh_share_revoke", "security_relevance": "medium", "destructive": false, "secret_bearing": false, "reauth_required": "no", "backend_enforcement": "structural_unlock_gate", "test_status": "covered:mesh_share"}
+{"command": "mesh_credential_revoke", "security_relevance": "medium", "destructive": false, "secret_bearing": false, "reauth_required": "no", "backend_enforcement": "structural_unlock_gate", "test_status": "covered:mesh_share"}

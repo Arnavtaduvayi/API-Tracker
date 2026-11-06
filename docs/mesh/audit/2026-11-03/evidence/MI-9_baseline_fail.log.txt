@@ -1,0 +1,12 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- every_mesh_writing_connection_uses_fullfsync stdout ----
+
+thread 'every_mesh_writing_connection_uses_fullfsync' (21508719) panicked at crates/core/tests/mesh_audit_identity.rs:617:5:
+assertion `left == right` failed: init
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+

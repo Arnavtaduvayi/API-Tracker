@@ -13,6 +13,11 @@ blake3 = { version = "1.8.5", features = ["zeroize"] }
 chacha20poly1305 = "0.11.0"
 crypto_box = { version = "0.9.1", features = ["seal"] }
 directories = "6.0.0"
+# Tethra Mesh item signatures (ADR 0031). The 2.x line reuses the
+# curve25519-dalek 4.1.3 already locked for crypto_box; `fast` enables its
+# precomputed basepoint tables, `zeroize` wipes signing keys on drop. No
+# `rand_core`: keys are generated from 32 getrandom bytes like every other key.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["fast", "std", "zeroize"] }
 getrandom = "0.4.3"
 hex = "0.4.3"
 hmac = "0.12"
@@ -35,8 +40,18 @@ zeroize = { version = "1.9.0", features = ["derive"] }
 # audited dependency; this crate itself stays forbid(unsafe_code).
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
+[features]
+# Tethra Mesh's deterministic simulator and its seeded PRNG
+# (`mesh::sim`, ADR 0031). OFF by default so release builds carry no
+# simulator; the self dev-dependency below turns it on for tests/.
+mesh-sim = []
+
 [dev-dependencies]
 tempfile = "3.27.0"
+# Self-dependency with the feature on: integration tests under tests/ link the
+# crate as an external dependency and do NOT get `cfg(test)`, so this is how
+# they reach `mesh::sim` (the pattern crates/tracking/Cargo.toml uses).
+api-tracker-core = { path = ".", features = ["mesh-sim"] }
 # Same pinned version/features as the main dependency: concurrency tests use
 # a raw connection to probe SQLite's write lock deterministically.
 rusqlite = { version = "0.40.1", features = ["bundled"] }

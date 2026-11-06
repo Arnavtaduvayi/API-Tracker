@@ -1960,3 +1960,543 @@ export interface ProjectRestoreEntry {
   project_id: string;
   tracking: boolean;
 }
+
+// --- Tethra Mesh (ADR 0031, Increment 09): mirrors apps/desktop/src-tauri/src/mesh_cmds.rs.
+// Device and mesh ids are lowercase hex strings. Nothing here is key material;
+// `MeshInvite.invite` is the only bearer secret and is shown once.
+
+export type MeshMarkerStatus = "ok" | "missing" | "mismatch" | "rolled_back";
+
+export interface MeshDeviceSummary {
+  device_id: string;
+  name: string | null;
+  is_self: boolean;
+  member: boolean;
+  active: boolean;
+  removed: boolean;
+  cutoff_seq: number | null;
+  fork_seq: number | null;
+}
+
+export interface MeshStatusDetail {
+  mesh_id: string;
+  mesh_id_short: string;
+  genesis_device: string;
+  device_id: string;
+  device_name: string;
+  state: string;
+  next_seq: number;
+  marker: MeshMarkerStatus;
+  /** Why the identity marker check failed; the node refuses to run then. */
+  marker_problem: string | null;
+  self_forked: boolean;
+  roster_size: number;
+  devices: MeshDeviceSummary[];
+  vv: Record<string, number>;
+  items_by_kind: Record<string, number>;
+  rejected_items: number;
+  clock_skew: Record<string, number>;
+  fork_evidence: number;
+  forked_devices: number;
+  regressions: number;
+  repairs_changed: number;
+  rollback_hold: number | null;
+}
+
+/** What a running node reports about itself (`api_tracker_mesh::instance::NodeStatus`). */
+export interface MeshNodeStatus {
+  pid: number;
+  device_id: string;
+  started_at: string;
+  /** The addresses its listeners are bound to. */
+  listen: string[];
+  /** The addresses it publishes to the other devices (and names in invites). */
+  advertised: string[];
+  interval_ms: number;
+  discovery: boolean;
+  rounds: number;
+  last_round_at: string | null;
+  active_sessions: number;
+  hooks: string[];
+  last_hook_error: string | null;
+  last_publish_error: string | null;
+  stopping: boolean;
+}
+
+export type MeshStopReason =
+  | "requested"
+  | "session_ended"
+  | "session_expired"
+  | "deadline"
+  | "locked"
+  | "forked"
+  | "removed"
+  | "left";
+
+export interface MeshStopInfo {
+  reason: MeshStopReason;
+  description: string;
+  keys_dropped: boolean;
+  at: string;
+}
+
+export interface MeshNodeState {
+  /** This app's in-process node, while it runs. */
+  running: MeshNodeStatus | null;
+  /** A node is still finishing its exchanges after a stop. */
+  stopping: boolean;
+  /** Why the last start failed. */
+  last_error: string | null;
+  last_stop: MeshStopInfo | null;
+  /** A node another process runs for this data directory (`tethra mesh serve`), when this app runs none. */
+  external: MeshNodeStatus | null;
+}
+
+export type MeshStatus = (
+  { initialized: false } | ({ initialized: true } & MeshStatusDetail)
+) & {
+  node: MeshNodeState;
+};
+
+export interface MeshInitResult {
+  mesh_id: string;
+  device_id: string;
+  device_name: string;
+  created_at: string;
+}
+
+/** Shown once; a bearer secret for its lifetime. Drop it when the dialog closes. */
+export interface MeshInvite {
+  invite: string;
+  expires_at: string;
+  ttl_minutes: number;
+  addresses: string[];
+}
+
+export interface MeshJoinResult {
+  mesh_id: string;
+  device_id: string;
+  device_name: string;
+  items_in: number;
+  first_exchange_completed: boolean;
+  /** False: the inviter's key did not match its roster entry (tell the user to leave and pair again). */
+  inviter_verified: boolean;
+}
+
+export interface MeshPeerLag {
+  at: string;
+  completed: boolean;
+  at_hello: Record<string, number>;
+  peer_behind: number;
+  peer_ahead: number;
+  /** Items this device holds that the peer still lacks, as far as this device knows. */
+  peer_behind_now: number;
+  digest_mismatches: number;
+}
+
+export interface MeshDevice {
+  device_id: string;
+  short_id: string;
+  name: string | null;
+  is_self: boolean;
+  added_by: string | null;
+  member: boolean;
+  active: boolean;
+  removed: boolean;
+  cutoff_seq: number | null;
+  fork_seq: number | null;
+  /** The last successful exchange with it (RFC 3339), if any. */
+  last_exchange: string | null;
+  /** Active, not this device, and no exchange for over 24 h (or never). */
+  stale: boolean;
+  lag: MeshPeerLag | null;
+}
+
+export interface MeshRemoveResult {
+  removed: string;
+  access_key_epoch: number;
+}
+
+export interface MeshLeaveResult {
+  /** A peer received this device's departure before the local wipe. */
+  delivered: boolean;
+  /**
+   * Whether a departure was minted at all: `false` when this device's
+   * identity was untrusted or held, in which case only the local wipe ran.
+   */
+  announced: boolean;
+  /** Why the departure was not announced, when it was not. */
+  not_announced_because: string | null;
+  wipe: { identity: string | null; rows_deleted: number; marker: string };
+}
+
+export type MeshPeerSource = "manual" | "gossip" | "mdns";
+
+export interface MeshPeer {
+  addr: string;
+  device_id: string | null;
+  source: MeshPeerSource;
+  last_attempt_at: string | null;
+  last_success_at: string | null;
+  failures: number;
+  unreachable_since: string | null;
+  last_error: string | null;
+  device_name: string | null;
+  /** Approximate end of the current retry backoff, when one applies. */
+  backoff_until: string | null;
+}
+
+export interface MeshPeerAddResult {
+  addr: string;
+  added: boolean;
+}
+
+export interface MeshPeerRemoveResult {
+  removed: boolean;
+  source: MeshPeerSource | null;
+}
+
+export interface MeshExchangeSummary {
+  addr: string;
+  device: string | null;
+  items_in: number;
+  items_out: number;
+  duration_ms: number;
+  error: string | null;
+}
+
+export interface MeshReplicateResult {
+  via: "app_node" | "external_node" | "one_shot";
+  exchanges: MeshExchangeSummary[];
+  repairs_changed: number;
+  notes: string[];
+}
+
+export type MeshSeverity = "ok" | "info" | "warning" | "problem";
+
+export interface MeshDoctorFinding {
+  check: string;
+  severity: MeshSeverity;
+  summary: string;
+  fix?: string;
+}
+
+export interface MeshDoctorReport {
+  worst: MeshSeverity;
+  initialized: boolean;
+  findings: MeshDoctorFinding[];
+}
+
+/** Local-only node settings. Widening the LAN surface needs the master password (enforced in core). */
+export interface MeshNodeSettings {
+  run_while_open: boolean;
+  /** IP:PORT literals, such as 127.0.0.1:7420 or 100.64.1.2:7420. */
+  listen: string[];
+  /** Allow 0.0.0.0 / [::] in `listen`. */
+  all_interfaces: boolean;
+  /** Announce and find this mesh's devices with mDNS. */
+  discover: boolean;
+}
+
+export interface MeshNodeSettingsResult {
+  settings: MeshNodeSettings;
+  outcome: "started" | "already_running" | "off" | null;
+  /** Why the node did not start; the settings are saved either way. */
+  start_error: string | null;
+}
+
+// --- Tethra Mesh shared projects, usage and spend caps (Increment 10): mirrors
+// apps/desktop/src-tauri/src/mesh_project_cmds.rs. Ids are lowercase hex; months
+// are "YYYY-MM", days "YYYY-MM-DD"; money is integer micro-USD (display only).
+
+export interface MeshProjectRow {
+  mesh_project_id: string;
+  name: string;
+  archived: boolean;
+  merged_into: string | null;
+  /** The project its counters fold into (itself unless merged). */
+  root: string;
+  /** The local project bound to it on this device, if any. */
+  bound_local_project: string | null;
+  bound_local_project_name: string | null;
+  /** Devices that have published usage for it. */
+  publishing_devices: string[];
+}
+
+export interface MeshShareResult {
+  mesh_project_id: string;
+  name: string;
+}
+
+export interface MeshMergeResult {
+  root: string;
+  merged: string;
+}
+
+export interface MeshUsageFilter {
+  project: string | null;
+  month: string | null;
+  day: string | null;
+}
+
+/** One usage counter's totals; `estimated_cost_micros` covers priced requests only. */
+export interface MeshUsageTotals {
+  requests: number;
+  priced_requests: number;
+  unpriced_requests: number;
+  unextracted_requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_input_tokens: number;
+  estimated_cost_micros: number;
+}
+
+export interface MeshDeviceUsage {
+  device_id: string;
+  device_name: string | null;
+  is_self: boolean;
+  /** The last exchange with it; null for this device (current) or never exchanged. */
+  as_of: string | null;
+  stale: boolean;
+  removed: boolean;
+  totals: MeshUsageTotals;
+  split_unknown_requests: number;
+  split_known_since: string | null;
+}
+
+export interface MeshProjectUsage {
+  mesh_project_id: string;
+  name: string;
+  archived: boolean;
+  merged: string[];
+  devices: MeshDeviceUsage[];
+  /** Active devices with no figures in range: unknown, not zero. [device id, name]. */
+  no_data_from: [string, string | null][];
+  /** The sum over `devices`; only ever shown with `total_label`. */
+  total: MeshUsageTotals;
+  /** Core's label for the sum, e.g. "estimated, gateway-observed, across 2 device(s); 0 stale; 1 with no data". */
+  total_label: string;
+}
+
+export interface MeshUsageReport {
+  period: string;
+  projects: MeshProjectUsage[];
+  horizon_start: string;
+  /** The fixed honesty notes; show them with the figures. */
+  notes: string[];
+  /** Why this device's usage was not published first (when asked). */
+  publish_error: string | null;
+}
+
+export interface MeshCapDeviceRow {
+  device_id: string;
+  device_name: string | null;
+  is_self: boolean;
+  is_owner: boolean;
+  removed: boolean;
+  as_of: string | null;
+  stale: boolean;
+  minted: number;
+  is_override: boolean;
+  received: number;
+  sent: number;
+  burned: number;
+  /** Outgoing amounts the view ignored (more than the device held). */
+  clamped: number;
+  used: number;
+  avail: number;
+}
+
+export interface MeshCapMonthRow {
+  month: string;
+  target: number | null;
+  /** The target plus every override. */
+  effective_target: number | null;
+  owner_minted: number;
+  overrides: number;
+  burned: number;
+  total_used: number;
+  supply: number;
+  /** Rights beyond what the cap now allows, until holders burn them. */
+  pending_decrease: number;
+  used_pct: number | null;
+  devices: MeshCapDeviceRow[];
+  /** This device's spend including what its gateway has not published (null: nothing bound here). */
+  local_spend: number | null;
+  /** What this device may still spend (null: nothing bound here). */
+  local_avail: number | null;
+  escrow_open: number;
+  total_label: string;
+}
+
+export interface MeshCapRow {
+  /** This device's gateway enforces this cap (switched on here). */
+  enforced_here: boolean;
+  cap_id: string;
+  mesh_project_id: string;
+  project_name: string | null;
+  owner_device: string;
+  owner_name: string | null;
+  owned_here: boolean;
+  bound_here: boolean;
+  frozen: boolean;
+  superseded_by: string | null;
+  months: MeshCapMonthRow[];
+}
+
+export interface MeshGateCapStatus {
+  cap_id: string;
+  month: string;
+  enforced: boolean;
+  avail_micros: number;
+  near_exhaustion: boolean;
+  accounting_incomplete: boolean;
+  unpriced_requests: number;
+  unmetered_requests: number;
+  refused_requests: number;
+}
+
+/** The gateway's last report of its spend-cap gate. */
+export interface MeshGateStatus {
+  at_ms: number;
+  generation: number;
+  /** Why the gate admits everything right now, if it does. */
+  inactive_reason: string | null;
+  /** The reason is a failure: caps switched on are not holding. */
+  failing_open: boolean;
+  caps: MeshGateCapStatus[];
+}
+
+export interface MeshCapReport {
+  month: string;
+  caps: MeshCapRow[];
+  gate: MeshGateStatus | null;
+  /** The gate status is recent enough to mean the gateway is running. */
+  gate_fresh: boolean;
+  /** The fixed honesty notes; show them with the figures. */
+  notes: string[];
+  /** Why the reconciler did not run first (when asked). */
+  reconcile_error: string | null;
+}
+
+export interface MeshCapCreated {
+  cap_id: string;
+  mesh_project_id: string;
+  month: string;
+  monthly_micros: number;
+  distributed_micros: number;
+}
+
+export interface MeshCapChanged {
+  cap_id: string;
+  owner: boolean;
+  /** A raise on a device that does not own the cap: a labelled local override for this month. */
+  is_override: boolean;
+  months: string[];
+  amount_micros: number;
+  burned_micros: number;
+  distributed_micros: number;
+}
+
+export interface MeshReclaimResult {
+  cap_id: string;
+  devices: string[];
+}
+
+export interface MeshEnforceResult {
+  caps: string[];
+  on: boolean;
+}
+
+// --- Tethra Mesh credential sharing (Increment 11, ADR 0033) ---------------
+// Mirrors core's `mesh::share` and `vault::ImportReceipt`, returned by
+// apps/desktop/src-tauri/src/mesh_share_cmds.rs. No type here carries a
+// credential value or sealed bytes.
+
+export interface MeshSharedTo {
+  device_id: string;
+  device_name: string | null;
+  share_id: string;
+}
+
+export interface MeshShareReceipt {
+  credential_ref: string;
+  credential_id: string;
+  credential_name: string;
+  provider: string;
+  value_version: number;
+  mesh_project_id: string;
+  /** "All my current devices": devices paired later get a reseal offer. */
+  all_current: boolean;
+  recipients: MeshSharedTo[];
+}
+
+export interface MeshImportedAs {
+  credential_id: string;
+  credential_name: string;
+  project_id: string;
+  project_name: string;
+  imported_at: string;
+}
+
+export interface MeshShareRow {
+  share_id: string;
+  credential_ref: string;
+  credential_name: string;
+  provider: string;
+  mesh_project_id: string;
+  mesh_project_name: string | null;
+  sharer: string;
+  sharer_name: string | null;
+  /** False for a device since removed or forked: its share cannot be imported. */
+  sharer_active: boolean;
+  recipient: string;
+  recipient_name: string | null;
+  value_version: number;
+  revoked: boolean;
+  revoked_by: string | null;
+  /** Outgoing: another device's share holds this key now (a reseal sends this device's again). */
+  superseded_by: string | null;
+  /** Incoming: what this device imported it as, if it did. */
+  imported: MeshImportedAs | null;
+  /** Outgoing: the local credential it came from, and its value version now. */
+  local_credential_id: string | null;
+  current_value_version: number | null;
+}
+
+export interface MeshResealOffer {
+  credential_ref: string;
+  credential_id: string;
+  credential_name: string;
+  project_name: string;
+  current_value_version: number;
+  /** Devices paired after a share to "all my current devices". */
+  new_devices: string[];
+  /** Devices holding an older value version. */
+  stale_devices: string[];
+}
+
+export interface MeshSharesList {
+  incoming: MeshShareRow[];
+  outgoing: MeshShareRow[];
+  reseal_offers: MeshResealOffer[];
+}
+
+export interface MeshImportReceipt {
+  /** The stored credential, masked. */
+  credential: Credential;
+  share_id: string;
+  sharer: string;
+  sharer_name: string | null;
+  /** An existing credential's value was replaced (the old one kept as a version). */
+  replaced: boolean;
+  reuse_warnings: ReuseWarning[];
+}
+
+export interface MeshRevokedShare {
+  share_id: string;
+  credential_ref: string;
+  credential_name: string;
+  recipient: string;
+  recipient_name: string | null;
+}

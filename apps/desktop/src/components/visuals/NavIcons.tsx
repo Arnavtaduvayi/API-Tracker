@@ -93,6 +93,14 @@ const PATHS: Record<string, JSX.Element> = {
     </>
   ),
   // System
+  devices: (
+    <>
+      <circle cx="3.8" cy="4.4" r="1.7" />
+      <circle cx="12.2" cy="4.4" r="1.7" />
+      <circle cx="8" cy="12" r="1.7" />
+      <path d="M5.5 4.4h5M4.7 5.9l2.4 4.5M11.3 5.9l-2.4 4.5" />
+    </>
+  ),
   templates: (
     <>
       <path d="m8 2.2 5.6 3-5.6 3-5.6-3Z" />

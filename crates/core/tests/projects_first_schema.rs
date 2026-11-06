@@ -29,15 +29,20 @@ fn columns(conn: &Connection, table: &str) -> Vec<String> {
 }
 
 #[test]
-fn v20_is_the_current_version_and_migrations_stay_append_only() {
+fn v20_is_applied_and_migrations_stay_append_only() {
     let conn = mem();
-    assert_eq!(db::user_version(&conn).unwrap(), 20);
-    assert_eq!(db::current_schema_version(), 20);
+    let current = db::current_schema_version();
+    assert!(current >= 20, "v20 is part of the schema");
+    assert_eq!(db::user_version(&conn).unwrap(), current);
     // The released prefix must be untouched: versions are contiguous from 1 and
     // strictly increasing, which is what makes replaying a prefix meaningful for
-    // backup restore.
+    // backup restore. Later migrations (v21: Tethra Mesh, ADR 0031) append.
     let versions: Vec<i64> = db::MIGRATIONS.iter().map(|m| m.version).collect();
-    assert_eq!(versions, (1..=20).collect::<Vec<_>>());
+    assert_eq!(versions, (1..=current).collect::<Vec<_>>());
+    assert_eq!(
+        db::MIGRATIONS[19].name,
+        "projects-first folder linkage, detected credential stubs, unknown API labels"
+    );
 }
 
 #[test]
@@ -274,7 +279,7 @@ fn a_populated_v19_database_upgrades_to_v20() {
     )
     .unwrap();
 
-    db::migrate(&mut conn).unwrap();
+    db::migrate_with(&mut conn, &db::MIGRATIONS[..20]).unwrap();
     assert_eq!(db::user_version(&conn).unwrap(), 20);
     let kept: i64 = conn
         .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
@@ -287,4 +292,16 @@ fn a_populated_v19_database_upgrades_to_v20() {
         [],
     )
     .unwrap();
+    // Every later migration keeps them too.
+    db::migrate(&mut conn).unwrap();
+    assert_eq!(
+        db::user_version(&conn).unwrap(),
+        db::current_schema_version()
+    );
+    let links: i64 = conn
+        .query_row("SELECT COUNT(*) FROM project_folder_links", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(links, 1);
 }

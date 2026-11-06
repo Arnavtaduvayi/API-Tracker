@@ -435,6 +435,126 @@ mutate "row-labels-use-the-headline-precedence" \
       "        if false && self.confidence < DetectionConfidence::Likely {")' \
   -p api-tracker-tracking --test detect_coverage
 
+# ---------------------------------------------------------------------------
+# Tethra Mesh (Increment 12, DESIGN §D21): the protocol, storage, cap and
+# share invariants each have a test that must fail without them.
+# ---------------------------------------------------------------------------
+
+# MESH-SI-4: a commit advances the VV only over seqs it carries an item or a
+# dot for. The store's dense-range check is the load-bearing layer (the
+# session's own clamp in proto.rs sits above it, so a mutant there is caught
+# by the store and an end-to-end test cannot see it): the mutant lets the VV
+# advance over a seq nothing carried.
+mutate "mesh_vv_before_commit" \
+  "crates/core/src/mesh/store.rs" \
+  's = s.replace(
+      "                None => {\n                    return Err(MeshError::InvalidOperation(\n                        \"commit is missing a dot in its range\",\n                    ))\n                }",
+      "                None => hashes.push(ItemHash([0; 32])),")' \
+  -p api-tracker-core --lib mesh::sqlite_store::tests::a_batch_with_a_hole_in_its_range_is_refused_and_writes_nothing
+
+# MESH-SI-3: every item is verified against its origin's key before storage.
+mutate "mesh_skip_sig_verify" \
+  "crates/core/src/mesh/proto.rs" \
+  's = s.replace(
+      "        if p.item.verify_with(&vk, &store.genesis().mesh_id).is_err() {",
+      "        if false && p.item.verify_with(&vk, &store.genesis().mesh_id).is_err() {")' \
+  -p api-tracker-core --test mesh_sim each_adversary_alone_is_exercised_and_defended
+
+# D7: an observation never moves the clock past now + MAX_DRIFT.
+mutate "mesh_drift_clamp_removed" \
+  "crates/core/src/mesh/hlc.rs" \
+  's = s.replace(
+      "        self.last = self.last.max(remote.min(bound));",
+      "        self.last = self.last.max(remote);")' \
+  -p api-tracker-core --lib mesh::hlc::tests::observe_clamps_at_now_plus_max_drift_and_reports_skew
+
+# D10: a removed device's items above its cutoff stop counting.
+mutate "mesh_cutoff_ignored" \
+  "crates/core/src/mesh/crdt/roster.rs" \
+  's = s.replace(
+      "        self.cutoff(origin).is_none_or(|c| seq <= c)",
+      "        self.cutoff(origin).is_none_or(|_| true)")' \
+  -p api-tracker-core --lib mesh::crdt::roster::tests::removal_cuts_off_later_items_but_keeps_earlier_ones
+
+# D8: views clamp a device'"'"'s transfers to what it holds.
+mutate "mesh_view_clamp_removed" \
+  "crates/core/src/mesh/crdt/bounded.rs" \
+  's = s.replace(
+      "            let honoured = amount.min(*remaining);\n            *remaining -= honoured;",
+      "            let honoured = amount;\n            *remaining = remaining.saturating_sub(honoured);")' \
+  -p api-tracker-core --lib mesh::crdt::bounded::tests::the_clamped_view_ignores_a_forged_over_transfer
+
+# MESH-SI-10: with enforcement on and a gateway running, a transfer waits
+# for the gateway'"'"'s acknowledgement.
+mutate "mesh_escrow_fence_skipped" \
+  "crates/core/src/mesh/caps/escrow.rs" \
+  's = s.replace(
+      "    Ok(if enforcement_on(conn)? && probe.gateway_running() {",
+      "    Ok(if false && enforcement_on(conn)? && probe.gateway_running() {")' \
+  -p api-tracker-core --test mesh_caps caps_escrow_publishes_at_once_unfenced_and_waits_for_the_gateway_ack_when_fenced
+
+# MESH-SI-9: near exhaustion (and while no request cost is known, audit
+# MC-1) only one request per cap runs at a time.
+mutate "mesh_one_in_flight_never_set" \
+  "crates/gateway/src/capgate.rs" \
+  's = s.replace(
+      "        if others > 0 && (!known || avail - i128::from(held) < e.threshold()) {",
+      "        if false && others > 0 && (!known || avail - i128::from(held) < e.threshold()) {")' \
+  -p api-tracker-gateway --test cap_enforcement near_exhaustion_one_request_at_a_time_and_the_slot_clears_on_every_exit
+
+# D15: a spend-cap refusal is a non-retryable 403, never 429.
+mutate "mesh_cap_403_becomes_429" \
+  "crates/gateway/src/forward.rs" \
+  's = s.replace(
+      "        403,\n        \"Forbidden\",\n        &cap_refusal_body(provider_id, r),",
+      "        429,\n        \"Too Many Requests\",\n        &cap_refusal_body(provider_id, r),")' \
+  -p api-tracker-gateway --test cap_enforcement at_exhaustion_a_non_retryable_403_is_sent_before_any_upstream_byte
+
+# ADR 0033: an import checks every sealed field against the signed envelope.
+mutate "mesh_share_bindings_skipped" \
+  "crates/core/src/mesh/share.rs" \
+  's = s.replace(
+      "    verify_bindings(&plain, mesh, me, incoming.sharer, &incoming.value)?;",
+      "    let _ = verify_bindings(&plain, mesh, me, incoming.sharer, &incoming.value);")' \
+  -p api-tracker-core --test mesh_share a_member_cannot_plant_a_credential_in_the_name_of_another_device
+
+# MESH-SI-5: a restored backup never keeps the mesh identity it came from
+# (the wipe turns cap enforcement off and removes the marker naming it;
+# since audit MI-3/MI-4 the backup carries no mesh rows at all).
+mutate "mesh_restore_wipe_skipped" \
+  "crates/core/src/mesh/identity.rs" \
+  's = s.replace(
+      "    let report = wipe(conn, data_dir, skipped_identity, skipped_rows)?;",
+      "    let _ = (conn, data_dir, skipped_identity, skipped_rows);\n    let report = WipeReport { identity: None, rows_deleted: 0, marker: MarkerRemoval::Absent };")' \
+  -p api-tracker-core --test mesh_schema backup_then_restore_wipes_mesh_state_and_mints_nothing
+
+# Audit MP-1: a device's cutoff is the minimum over counting removes, so a
+# removed device's own remove cannot raise it.
+mutate "mesh_cutoff_takes_the_max" \
+  "crates/core/src/mesh/crdt/roster.rs" \
+  's = s.replace(
+      "                *c = (*c).min(e.value);",
+      "                *c = (*c).max(e.value);")' \
+  -p api-tracker-core --lib mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff
+
+# Audit MI-1: a rollback is judged against the committed floor, so a failed
+# multi-block batch does not lock the identity.
+mutate "mesh_marker_floor_ignored" \
+  "crates/core/src/mesh/marker.rs" \
+  's = s.replace(
+      "        Some(m) if last_seq < m.seq_floor => MarkerStatus::RolledBack,",
+      "        Some(m) if m.seq_high_water > last_seq.saturating_add(SEQ_BLOCK) => MarkerStatus::RolledBack,")' \
+  -p api-tracker-core --test mesh_audit_identity a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok
+
+# Audit MC-2: a burn waiting for the gateway's ack counts against the
+# pending decrease, so it is not burned again.
+mutate "mesh_open_burns_ignored" \
+  "crates/core/src/mesh/caps/view.rs" \
+  's = s.replace(
+      "            f.supply() - i128::from(burning),",
+      "            f.supply(),")' \
+  -p api-tracker-core --test mesh_caps caps_a_burn_awaiting_the_ack_is_not_burned_twice
+
 echo
 echo "========================================================"
 echo "killed (protection is genuinely pinned): $PASSED"

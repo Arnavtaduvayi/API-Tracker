@@ -1,0 +1,19 @@
+# MD-7 baseline (before the fix): cd apps/desktop && npx vitest run src/components/MeshProjectPanel.test.tsx
+# HEAD fb55b07 + the new/updated assertions only; the component text is unchanged
+
+ FAIL  src/components/MeshProjectPanel.test.tsx > MeshProjectPanel not shared > explains what replicates, then shares on the explicit click
+Error: expect(element).not.toHaveTextContent()
+
+Expected element not to have text content:
+  /only after you bind it there/
+Received:
+  Sharing replicates this project's daily usage counters (requests, tokens, estimated cost) to your paired devices, never individual requests, request content, routes or credentials. Your other devices see it only after you bind it there to one of their own projects.
+ ❯ src/components/MeshProjectPanel.test.tsx:123:21
+    121|     // Every member lists it by name and sees its usage after the next
+    122|     // exchange; binding decides only what that device counts (MD-7).
+    123|     expect(why).not.toHaveTextContent(/only after you bind it there/);
+       |                     ^
+    124|     expect(why).toHaveTextContent(/name and its daily usage counters/);
+    125|     expect(why).toHaveTextContent(
+
+# Note: the negative assertion was later narrowed to the old sentence's opening (/Your other devices see it only after/), because the corrected text keeps the clause "only after you bind it there" for what a device counts; the old text fails both the narrowed negative and the new positive assertions.

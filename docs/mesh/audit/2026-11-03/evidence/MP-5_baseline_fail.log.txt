@@ -1,0 +1,46 @@
+# MP-5 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --lib small_order
+# HEAD fb55b07 + the new tests; roster.add parse does not check noise_pub/seal_pub (is_small_order_x25519 stubbed to false)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.64s
+     Running unittests src/lib.rs (<scratch>/target-r1/debug/deps/api_tracker_core-adc27cd358eaf2b3)
+
+running 2 tests
+test mesh::kinds::tests::the_small_order_list_is_exactly_the_keys_whose_shared_secret_ignores_the_secret ... FAILED
+test mesh::kinds::tests::roster_add_refuses_small_order_noise_and_seal_keys ... FAILED
+
+failures:
+
+---- mesh::kinds::tests::the_small_order_list_is_exactly_the_keys_whose_shared_secret_ignores_the_secret stdout ----
+
+thread 'mesh::kinds::tests::the_small_order_list_is_exactly_the_keys_whose_shared_secret_ignores_the_secret' (21284159) panicked at crates/core/src/mesh/kinds.rs:1454:13:
+0000000000000000000000000000000000000000000000000000000000000000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- mesh::kinds::tests::roster_add_refuses_small_order_noise_and_seal_keys stdout ----
+
+thread 'mesh::kinds::tests::roster_add_refuses_small_order_noise_and_seal_keys' (21284158) panicked at crates/core/src/mesh/kinds.rs:1412:17:
+accepted noise 0000000000000000000000000000000000000000000000000000000000000000 seal 0808080808080808080808080808080808080808080808080808080808080808
+
+
+failures:
+    mesh::kinds::tests::roster_add_refuses_small_order_noise_and_seal_keys
+    mesh::kinds::tests::the_small_order_list_is_exactly_the_keys_whose_shared_secret_ignores_the_secret
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 554 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p api-tracker-core --lib`
+
+# Share-level check, same baseline: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_protocol
+
+---- a_small_order_seal_key_is_refused_so_no_share_can_be_sealed_to_it stdout ----
+
+thread 'a_small_order_seal_key_is_refused_so_no_share_can_be_sealed_to_it' (21502863) panicked at crates/core/tests/mesh_audit_protocol.rs:76:13:
+assertion failed: store.mint(keys.signing_key(), Draft::of(&add, HlcPolicy::Now)).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_small_order_seal_key_is_refused_so_no_share_can_be_sealed_to_it
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+error: test failed, to rerun pass `-p api-tracker-core --test mesh_audit_protocol`

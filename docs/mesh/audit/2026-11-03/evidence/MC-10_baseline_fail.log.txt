@@ -1,0 +1,21 @@
+# MC-10 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_caps caps_alert_text_says_what_the_gate_does_with_the_cap_in_force
+# With the enforcement switch carried from a superseded cap and the gate reporting it enforced, the alert said the gateway does not enforce the cap.
+
+running 1 test
+test caps_alert_text_says_what_the_gate_does_with_the_cap_in_force ... FAILED
+
+failures:
+
+---- caps_alert_text_says_what_the_gate_does_with_the_cap_in_force stdout ----
+
+thread 'caps_alert_text_says_what_the_gate_does_with_the_cap_in_force' (21511859) panicked at crates/core/tests/mesh_caps.rs:1309:5:
+Estimated gateway-observed spend across your devices is $90.00 of a $100.00 cap this month (2 device(s), 0 not heard from in 24 hours). It is this device's view as of the last exchange with each device, priced by each device's own pricing table; a device not heard from may have spent more. This device's gateway does not enforce it (alerts only); switch that on with `tethra mesh cap enforce`.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    caps_alert_text_says_what_the_gate_does_with_the_cap_in_force
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.31s
+
+error: test failed, to rerun pass `-p api-tracker-core --test mesh_caps`
