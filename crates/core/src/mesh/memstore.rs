@@ -219,9 +219,10 @@ impl MeshStore for MemStore {
     }
 
     fn commit(&mut self, batch: CommitBatch) -> Result<CommitOutcome, MeshError> {
-        let Validated { ranges, forks } = validate_commit(&batch, &self.vv, |o, s| {
-            Ok(self.logged(o, s).map(|(h, _)| h))
-        })?;
+        let Validated { ranges, forks } =
+            validate_commit(&batch, &self.vv, &self.self_id, |o, s| {
+                Ok(self.logged(o, s).map(|(h, _)| h))
+            })?;
         // Nothing below can fail.
         let mut out = CommitOutcome::default();
         for ev in forks {

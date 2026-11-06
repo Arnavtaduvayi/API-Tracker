@@ -217,9 +217,16 @@ pub(crate) struct Validated {
 /// is the last chance to see a second branch before it is appended on top of
 /// the first (PROTOCOL.md §7.2). Such an origin's log is not extended by this
 /// commit; its items still apply as entries, as repair would apply them.
+///
+/// `me` is the store's own device: a dot hash for its own origin at or below
+/// its own log (as committed now, inside the caller's transaction) is a
+/// peer's unsigned claim about what this device signed, and is ignored
+/// rather than compared (audit MP-2). A signed item of its own origin with
+/// another hash is still fork evidence: only its key could have signed it.
 pub(crate) fn validate_commit(
     batch: &CommitBatch,
     vv: &VersionVector,
+    me: &DeviceId,
     mut dot_hash: impl FnMut(&DeviceId, u64) -> Result<Option<ItemHash>, MeshError>,
 ) -> Result<Validated, MeshError> {
     let mut incoming: BTreeMap<DeviceId, BTreeMap<u64, ItemHash>> = BTreeMap::new();
@@ -241,6 +248,9 @@ pub(crate) fn validate_commit(
         put(o, s, v.item.hash())?;
     }
     for (o, s, h) in &batch.dots {
+        if o == me && *s <= vv.get(o) {
+            continue;
+        }
         if *s >= 1 && *s <= batch.upto.get(o).max(vv.get(o)) {
             put(*o, *s, *h)?;
         }

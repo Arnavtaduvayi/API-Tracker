@@ -7,3 +7,14 @@ MESH_SIM_SEED=6 MESH_SIM_STEPS=240: caps invariant 'not over-burned' failed at s
 MESH_SIM_SEED=7 MESH_SIM_STEPS=240: caps invariant 'not over-burned' failed at step 239: device 0 2027-02: supply 350000 < min(lowest target 460000 + overrides 0, minted 1000000) with 99753 used and 650000 burned
 MESH_SIM_SEED=9 MESH_SIM_STEPS=240: caps invariant 'not over-burned' failed at step 239: device 1 2027-02: supply 166666 < min(lowest target 370000 + overrides 0, minted 1000000) with 0 used and 833334 burned
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 7.30s
+
+# Phase D second pass: the 'lower settles' amendment for seed 5000331 first subtracted override-held rights outright, which masked a real under-burn when nobody overspent. With that first formula restored in sim::caps::unsettled:
+$ cargo test -p api-tracker-core --lib mesh::sim::caps::unsettled_tests
+test mesh::sim::caps::unsettled_tests::override_rights_are_excused_only_past_the_spend ... FAILED
+---- mesh::sim::caps::unsettled_tests::override_rights_are_excused_only_past_the_spend stdout ----
+thread 'mesh::sim::caps::unsettled_tests::override_rights_are_excused_only_past_the_spend' panicked at crates/core/src/mesh/sim/caps.rs:1120:9:
+assertion `left == right` failed
+  left: 0
+ right: 10
+    mesh::sim::caps::unsettled_tests::override_rights_are_excused_only_past_the_spend
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 570 filtered out; finished in 0.00s

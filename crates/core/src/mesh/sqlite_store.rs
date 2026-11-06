@@ -1435,7 +1435,7 @@ impl SqliteStore {
                 // chunk against the same state is checking the batch).
                 for c in all {
                     if let Chunk::Main(b) = c {
-                        validate_commit(b, &m.vv, |o, s| dot_hash_in(tx, o, s))?;
+                        validate_commit(b, &m.vv, &m.self_id, |o, s| dot_hash_in(tx, o, s))?;
                     }
                 }
             }
@@ -1444,7 +1444,7 @@ impl SqliteStore {
                     // Re-validated in this transaction: another process may
                     // have written since the batch was checked.
                     let Validated { ranges, forks } =
-                        validate_commit(&batch, &m.vv, |o, s| dot_hash_in(tx, o, s))?;
+                        validate_commit(&batch, &m.vv, &m.self_id, |o, s| dot_hash_in(tx, o, s))?;
                     for ev in forks {
                         note_fork(tx, m, ev, now, out)?;
                     }

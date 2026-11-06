@@ -13,3 +13,9 @@ $ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_dot_hash_neve
 test mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked ... FAILED
 thread 'mesh::proto::tests::a_peers_dot_hash_never_makes_this_device_report_itself_forked' panicked at crates/core/src/mesh/proto.rs:1758:17:
 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 568 filtered out; finished in 0.01s
+
+# Second verification pass (Phase D): the race — a dot for this device's next seq arrives, this device mints that seq, then the Commit lands; the own-origin check in store::validate_commit disabled (the session's filter alone cannot see it)
+$ cargo test -p api-tracker-core --lib mesh::proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints
+test mesh::proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints ... FAILED
+thread 'mesh::proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints' panicked at crates/core/src/mesh/proto.rs:1817:17:
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 570 filtered out; finished in 0.01s

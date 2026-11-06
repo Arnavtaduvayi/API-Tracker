@@ -759,8 +759,10 @@ every later one, so the first difference can be found by bisection.
   Reply entries outside the queried `(lo, hi]` are ignored, and a device
   never reports **its own** origin forked from a peer's chain claim or dot
   hash (a receiver drops `Items.dots` for its own origin at or below its own
-  `vv[self]`; a signed item of its own origin with another hash still counts,
-  since only its key could sign it): it knows what it signed, and other devices still find a real clone of it between
+  `vv[self]`, and its store's commit ignores them again against `vv[self]` as
+  committed inside the commit's transaction, since the device may mint
+  between the two; a signed item of its own origin with another hash still
+  counts, since only its key could sign it): it knows what it signed, and other devices still find a real clone of it between
   themselves. (Amended in 12, audit MP-2. The peer's hash at `hi` is a claim,
   not a signed item; a fork report always rests on the reporting member's
   word, as any known device's `fork.report` counts, KNOWN_LIMITATIONS.)

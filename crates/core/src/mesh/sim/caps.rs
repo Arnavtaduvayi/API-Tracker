@@ -175,6 +175,25 @@ fn step_of(ms: u64) -> u64 {
     ms.saturating_sub(T0) / STEP_MS
 }
 
+/// What a lower has left to settle at quiescence ("lower settles"): the
+/// supply above its floor, less rights held by devices that do not run the
+/// policy (`stuck`). The floor is the effective target (which counts every
+/// override), or, when the total spend plus the rights held under each
+/// device's own overrides (`protected`, never burned or reclaimed, ADR 0032
+/// D4) is higher, that sum: override rights are excused only past the
+/// spend, never twice (Phase D second pass).
+fn unsettled(
+    supply: u128,
+    effective_target: u128,
+    used: u128,
+    protected: u128,
+    stuck: u128,
+) -> u128 {
+    supply
+        .saturating_sub(effective_target.max(used.saturating_add(protected)))
+        .saturating_sub(stuck)
+}
+
 impl CapsWorld {
     fn fail<T>(&self, invariant: &'static str, detail: impl Into<String>) -> Res<T> {
         Err(CapsFailure {
@@ -1016,10 +1035,18 @@ impl CapsWorld {
                     held.min(u128::from(f.overrides_of(d, &c.owner_device)))
                 })
                 .sum();
-            let pending = f
-                .pending_decrease()
-                .saturating_sub(stuck)
-                .saturating_sub(protected);
+            // The floor rises by `protected` only past the spend: with no
+            // overspend, the effective target (which already counts every
+            // override) is the floor, so an override holder that fails to
+            // burn its excess above it is still caught (Phase D, second
+            // pass: subtracting `protected` outright masked that).
+            let pending = unsettled(
+                u128::try_from(f.supply().max(0)).unwrap_or(0),
+                f.effective_target().unwrap_or(0),
+                f.view.total_used,
+                protected,
+                stuck,
+            );
             if pending > 0 && !c.frozen {
                 return self.fail(
                     "lower settles",
@@ -1074,4 +1101,23 @@ impl CapsWorld {
 /// Run one seed under `base` (a fresh directory the caller removes).
 pub fn run_caps(cfg: &CapsConfig, base: &Path) -> Result<CapsReport, CapsFailure> {
     CapsWorld::new(cfg, base)?.run()
+}
+
+#[cfg(test)]
+mod unsettled_tests {
+    use super::unsettled;
+
+    #[test]
+    fn override_rights_are_excused_only_past_the_spend() {
+        // Soak seed 5000331: others overspent (843 279 > 790 000); the 1 556
+        // left is held under a device's own override, so nothing is unsettled.
+        assert_eq!(unsettled(844_835, 790_000, 843_279, 1_556, 0), 0);
+        // Nobody overspent: a cap of 100 with a 20 override (effective 100),
+        // lowered to 80 (effective 100 after the override), supply 110: the
+        // override holder failing to burn its 10 above the effective target
+        // is still unsettled (subtracting the 20 outright reported 0).
+        assert_eq!(unsettled(110, 100, 0, 20, 0), 10);
+        // Rights held by a device that does not run the policy are excused.
+        assert_eq!(unsettled(110, 100, 0, 0, 10), 0);
+    }
 }

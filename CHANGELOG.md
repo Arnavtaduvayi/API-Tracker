@@ -43,8 +43,11 @@ catches up when it reconnects. Opt-in: nothing happens until you start a mesh
   lowering it asks first.
 - **Spend caps across devices.** `tethra mesh cap create <project> --monthly
   <usd>` gives each active device a share of the cap (its rights), counted
-  against its own gateway's estimate, so the total holds even while devices
-  cannot reach each other. From the 20th the owner hands out next month's
+  against its own gateway's estimate, so devices that cannot reach each other
+  can still each hold to their share. The total holds only as far as each
+  device enforces it (below), within the limited overshoot, and above it by
+  what a device's own overrides allow
+  ([limitations](docs/mesh/KNOWN_LIMITATIONS.md#spend-caps)). From the 20th the owner hands out next month's
   shares in advance; a device running low asks one with spare rights during
   an exchange. `raise` (a labelled local override on a device that does not
   own the cap), `lower`, `reclaim`, `show` and `rights`; alerts at 80% and

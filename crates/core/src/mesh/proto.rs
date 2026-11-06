@@ -1766,6 +1766,62 @@ mod tests {
     }
 
     #[test]
+    fn a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints() {
+        // Audit MP-2 (second verification pass): a dot for this device's
+        // next seq passes the session's filter on arrival; this device then
+        // mints that seq before the peer's Commit lands. The store's own
+        // check, inside its commit, must not compare the claim either.
+        let (g, mut b) = pair();
+        setting(&mut b, 1);
+        let mut sb = Session::new(Limits::default(), Some(g.id));
+        let _ = sb.start(&b.store);
+        let (_, hello_g) = hello_of(&g);
+        let _ = sb.on_frame(hello_g, &b.store);
+        let genuine = g.store.held_items(&g.id, 0, u64::MAX).unwrap();
+        let mut hasher = blake3::Hasher::new();
+        let batch: Vec<B64> = genuine
+            .iter()
+            .map(|i| {
+                let w = i.to_wire();
+                hasher.update(&ItemHash::of(&w).0);
+                B64(w)
+            })
+            .collect();
+        let count = batch.len() as u64;
+        let claim = Frame {
+            n: 1,
+            body: Body::Items(Items {
+                batch,
+                dots: vec![(b.id, 2, ItemHash([0xEE; 32]))],
+                repair: false,
+            }),
+        };
+        let _ = sb.on_frame(claim, &b.store);
+        setting(&mut b, 2); // the race: b mints seq 2 meanwhile
+        let mut upto = VersionVector::new();
+        upto.advance_to(g.id, g.store.vv().get(&g.id));
+        upto.advance_to(b.id, 2);
+        let commit = Frame {
+            n: 2,
+            body: Body::Commit(Commit {
+                upto,
+                count,
+                batch_hash: Hash32(*hasher.finalize().as_bytes()),
+            }),
+        };
+        let mut committed = false;
+        for a in sb.on_frame(commit, &b.store) {
+            if let Action::Commit(batch) = a {
+                committed = true;
+                let out = b.store.commit(batch).unwrap();
+                assert!(out.forks.iter().all(|f| f.origin != b.id), "{out:?}");
+            }
+        }
+        assert!(committed, "the genuine items commit");
+        assert_eq!(b.store.vv().get(&b.id), 2);
+    }
+
+    #[test]
     fn a_shared_noise_key_resolves_by_the_hellos_device_id() {
         // Audit MP-7: when several active devices share the Noise key that
         // answered, the session accepts a Hello naming any of them, and

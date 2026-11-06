@@ -63,7 +63,7 @@ cargo +1.99.1 clippy (same packages, CI's newer stable) -D warnings PASS
 cargo clippy -p api-tracker-desktop -D warnings                     PASS
 API_TRACKER_INSECURE_FAST_KDF=1 cargo test --no-fail-fast \
   -p api-tracker-core -p api-tracker-cli -p api-tracker-observe \
-  -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh  PASS 1 921 passed / 0 failed / 14 ignored
+  -p api-tracker-gateway -p api-tracker-tracking -p api-tracker-mesh  PASS 1 923 passed / 0 failed / 14 ignored
 bash scripts/smoke.sh                                               PASS 186 passed / 0 failed
 (apps/desktop) npm ci, format:check, lint, typecheck                PASS
 (apps/desktop) npm test                                             PASS 413 passed / 38 files
@@ -99,7 +99,17 @@ failing; caps soak 3 136 seeds, 2 failing (a real policy bug, fixed in
 
 ## CI on the final head
 
-CI_FINAL
+Head `24eb4a4` (the last commit with code; later commits only record
+results in docs):
+
+| Workflow | Run | Result |
+|---|---|---|
+| CI (Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, desktop frontend, desktop backend, packaged app on macOS) | `42121555608` | success |
+| Packaged macOS service lifecycle | `42121555601` | success |
+
+Earlier remediation heads: `9e1eaf6` CI `42113513995`, service
+`42113514032`; `6a279d4` CI `42113920148`, service `42113919915` (all
+success). The record commit's own runs are listed in `increments/STATUS.md`.
 
 ## Please look hardest at
 

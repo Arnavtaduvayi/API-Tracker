@@ -74,4 +74,44 @@ ADR 0032 and KNOWN_LIMITATIONS.
 
 ## Second pass
 
-SECOND_PASS
+Against `24eb4a4` (the follow-up `fadb4a0` and the ship docs `24eb4a4`), the
+same agent returned **REOPEN** for three narrow items, and **resolved**
+everything else: MD-1; the MP-3, cold-gate, TEST_PLAN, benchmark-scope and
+limitation wording; the ship docs (README, root SECURITY and THREAT_MODEL,
+REVIEW_HANDOFF) apart from the items below; `mesh::proto` 15 passed and
+`mesh_sim` 8 passed. It judged the 5000331 policy call (overrides survive a
+lower) sound.
+
+- **MP-2, a race:** the session's filter compared a dot with this device's
+  log when the dot arrived; this device could mint that seq before the
+  peer's Commit landed (the store lock is released in between), and the
+  store's own comparison then produced fork evidence against itself.
+  **Fixed:** `store::validate_commit` takes the store's own device id and
+  ignores own-origin dot hashes at or below its log *inside the commit's
+  transaction* (a signed own-origin item with another hash still counts).
+  Test `proto::tests::a_peers_dot_above_this_devices_log_never_forks_it_after_it_mints`
+  (the agent's race), failing first with the store check disabled
+  (`evidence/MP-2_baseline_fail.log.txt`). The session's filter stays as a
+  first line.
+- **The "lower settles" amendment masked real under-burns:** subtracting
+  override-held rights outright excused them twice when nobody had
+  overspent (the effective target already counts overrides). **Fixed:** the
+  floor is `max(effective target, total used + override-held rights)`
+  (`sim::caps::unsettled`, unit test with seed 5000331's figures and the
+  agent's masked case, failing first with the first formula,
+  `evidence/MC-4_baseline_fail.log.txt`). Seed 5000331, the CI seeds and the
+  injection test pass with it.
+- **CHANGELOG** "the total holds even while devices cannot reach each
+  other" is now qualified (enforcement per device, limited overshoot,
+  overrides).
+
+The plan allows one repeat of Phase D; these three items were remediated
+exactly as the agent specified, each with the failing test it described,
+and the agent stated it would concur once they were done.
+
+## Verdict
+
+**41 of 41 confirmed findings fixed and tested; 7 accepted findings
+documented; MP-2's narrowed decision justified.** Residual risks are in
+[`KNOWN_LIMITATIONS.md`](../../KNOWN_LIMITATIONS.md) and summarized in
+[`REVIEW_HANDOFF.md`](../../REVIEW_HANDOFF.md).

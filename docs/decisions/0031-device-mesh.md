@@ -447,7 +447,9 @@ first (`evidence/<id>_baseline_fail.log.txt`):
 - **Bisection and self-reports (MP-2).** `ChainReply` entries outside the
   queried `(lo, hi]` are ignored, and a device never reports its own origin
   forked from a peer's chain claim or dot hash (own-origin dots at or below
-  its own log are dropped; found by the Phase D verification). The broader decision ("fork evidence needs
+  its own log are dropped by the session and ignored again by
+  `store::validate_commit` inside the commit's transaction; both found by
+  the Phase D verification). The broader decision ("fork evidence needs
   two signed items") was not adopted: superseded items survive only as dot
   hashes, so it would leave real forks in superseded history unreported, and
   any known device's `fork.report` already counts (§6.3), so a member gains
