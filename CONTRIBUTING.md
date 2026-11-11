@@ -132,6 +132,13 @@ released migration; add a new numbered one. Restoring backups requires
 matching schema versions, so bumping the schema also means teaching restore
 about the old version (see ADR 0006).
 
+A schema bump also reaches an already-installed background gateway. The
+gateway opens the database with `db::open_at_current_version`, so a gateway
+built for the previous schema refuses the newer one: it keeps forwarding on
+its last-known-good routes and stops recording, visibly, until it is updated
+(`docs/gateway/PRODUCT_BEHAVIOR.md`, `docs/gateway/KNOWN_CONFLICTS.md` C15).
+This is intended; don't work around it in a migration.
+
 ## Commit style
 
 Conventional commits (`feat:`, `fix:`, `test:`, `docs:`, `chore:`), present

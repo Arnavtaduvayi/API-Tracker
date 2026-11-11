@@ -12,6 +12,7 @@ api-tracker-core = { version = "0.1.0", path = "../../crates/core" }
 api-tracker-gateway = { version = "0.1.0", path = "../../crates/gateway" }
 api-tracker-tracking = { version = "0.1.0", path = "../../crates/tracking" }
 api-tracker-observe = { version = "0.1.0", path = "../../crates/observe" }
+api-tracker-mesh = { version = "0.1.0", path = "../../crates/mesh" }
 clap = { version = "4.6.2", features = ["derive"] }
 rpassword = "7.5.4"
 serde = "1.0.228"

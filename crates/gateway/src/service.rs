@@ -185,11 +185,13 @@ pub struct ServiceControl {
     db_path: PathBuf,
     started: Instant,
     retention: Arc<KeyRetention>,
+    capgate: Arc<crate::capgate::CapGate>,
 }
 
 impl ControlTarget for ServiceControl {
     fn status(&self) -> Status {
         let table = self.routes.table();
+        let caps = self.capgate.status();
         let unavailable = table
             .iter_routes()
             .filter(|r| matches!(r.target, RouteTarget::Unforwardable(_)))
@@ -217,6 +219,9 @@ impl ControlTarget for ServiceControl {
             pid: std::process::id(),
             matching_key_deadline_secs: self.retention.remaining_secs(),
             matching_key_expired: self.retention.expired(),
+            caps: caps.caps,
+            caps_inactive_reason: caps.inactive_reason,
+            caps_failing_open: caps.failing_open,
         }
     }
 
@@ -330,7 +335,12 @@ impl Service {
         let sink = writer.sink();
 
         let routes = Arc::new(RouteState::new(&db_path));
-        let gateway = Gateway::new(routes.clone(), sink.clone(), bound_port);
+        let mut gateway = Gateway::new(routes.clone(), sink.clone(), bound_port);
+        // The spend-cap gate reads its first snapshot before the listener
+        // serves, so an enforced cap holds from the first request.
+        let capgate = Arc::new(crate::capgate::CapGate::new(&db_path));
+        capgate.refresh(&route_providers(&routes));
+        gateway.capgate = Some(capgate.clone());
         // The listener answers identity challenges derived from this boot's
         // nonce (D11), so status/link/doctor can distinguish this gateway
         // from a port squatter without the nonce crossing the TCP socket.
@@ -346,6 +356,7 @@ impl Service {
             db_path: db_path.clone(),
             started: Instant::now(),
             retention: retention.clone(),
+            capgate: capgate.clone(),
         };
         // A control channel that cannot start is a REAL degradation (no
         // status, no attribution, no graceful stop), so the reason is kept
@@ -376,6 +387,7 @@ impl Service {
         let poll_gw = gateway.clone();
         let poll_sink = sink.clone();
         let poll_retention = retention.clone();
+        let poll_caps = capgate.clone();
         let poller_handle = std::thread::Builder::new()
             .name("tethra-gateway-routes".into())
             .spawn(move || {
@@ -389,6 +401,9 @@ impl Service {
                 };
                 while !poll_gw.shutdown.load(Ordering::Relaxed) {
                     poll_routes.reload_if_changed();
+                    // Every poll, not only on change: the month, the escrow
+                    // acks and the gate's own spend all move without one.
+                    poll_caps.refresh(&route_providers(&poll_routes));
                     // Sleep in small slices so a stop is observed promptly:
                     // sleeping the whole poll interval would make shutdown
                     // wait up to ROUTE_POLL_INTERVAL for no reason.
@@ -609,4 +624,17 @@ pub fn run_as_service(data_dir: &Path, port: u16, mut log: impl FnMut(&str)) -> 
             }
         }
     }
+}
+
+/// The providers of the installed routes (the gate prices completed
+/// requests for these).
+fn route_providers(routes: &RouteState) -> Vec<String> {
+    let mut out: Vec<String> = routes
+        .table()
+        .iter_routes()
+        .map(|r| r.provider_id.clone())
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }

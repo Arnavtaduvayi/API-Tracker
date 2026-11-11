@@ -1,0 +1,9 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- restore_never_imports_mesh_rows_from_an_older_backup stdout ----
+
+thread 'restore_never_imports_mesh_rows_from_an_older_backup' (21508722) panicked at crates/core/tests/mesh_audit_identity.rs:508:67:
+called `Result::unwrap()` on an `Err` value: Db(SqliteFailure(Error { code: ConstraintViolation, extended_code: 275 }, Some("CHECK constraint failed: source IN ('manual', 'gossip', 'mdns')")))
+

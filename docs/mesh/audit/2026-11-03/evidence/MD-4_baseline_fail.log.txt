@@ -1,0 +1,30 @@
+# MD-4 baseline (before the fix): cd apps/desktop && npx vitest run src/components/MeshCredentialSharePanel.test.tsx
+# HEAD fb55b07 + the new/updated assertions only; the component text is unchanged
+
+ FAIL  src/components/MeshCredentialSharePanel.test.tsx > MeshCredentialSharePanel > lists where it is shared; revoke asks first, says what it does not do, and links rotation
+TestingLibraryElementError: Unable to find an element with the text: /To cut a device off, revoke its share first, then rotate/. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <section
+      aria-labelledby=":r5:"
+      class="card stack"
+    >
+      <h2
+        id=":r5:"
+      >
+        Shared with my devices
+  …(rest of the failure output, a DOM dump, trimmed)
+
+# CLI half: # CARGO_TARGET_DIR=<scratch>/target-r4 API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-cli --test mesh_cli
+# HEAD fb55b07 + the new assertions only; apps/cli/src unchanged
+test share_a_credential_and_import_it_on_another_device_over_a_real_node ... FAILED
+---- share_a_credential_and_import_it_on_another_device_over_a_real_node stdout ----
+
+thread 'share_a_credential_and_import_it_on_another_device_over_a_real_node' (21500109) panicked at apps/cli/tests/mesh_cli.rs:1103:5:
+Revoked 1 share(s):
+  OPENAI_API_KEY to dev-b (57f94d29)
+Revoking a share later does not revoke the credential at its provider, and a device keeps whatever it imported: to cut a device off, rotate the credential (`tethra rotation plan <credential>`).
+
+(line 1103: assert!(out.contains("to cut a device off, revoke its share first, then rotate")))

@@ -1,0 +1,25 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- deleting_a_credential_with_live_shares_is_refused_until_they_are_revoked stdout ----
+
+thread 'deleting_a_credential_with_live_shares_is_refused_until_they_are_revoked' (21508718) panicked at crates/core/tests/mesh_audit_identity.rs:600:10:
+a credential with live shares is not deleted: Credential { id: "a0d50916-2048-4719-80df-c67107d6c8c2", project_id: "ff586ea6-23b7-4f54-9d94-2da072515677", project_name: "app", provider: "openai", name: "OPENAI_API_KEY", environment: Development, credential_type: "api_key", masked_value: "sk-t…86", is_reference: false, linked_credential_id: None, linked_target: None, created_at: "2026-11-04T06:46:4
+
+
+failures:
+    a_failed_mint_batch_in_another_store_never_stops_this_one
+    a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok
+    a_failed_rotation_after_removal_is_completed_by_a_retry
+    backup_payload_carries_no_mesh_rows
+    deleting_a_credential_with_live_shares_is_refused_until_they_are_revoked
+    every_mesh_writing_connection_uses_fullfsync
+    leave_succeeds_on_a_missing_mismatched_or_rolled_back_marker
+    leave_succeeds_under_a_rollback_hold
+    restore_never_imports_mesh_rows_from_an_older_backup
+
+test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.24s
+
+error: test failed, to rerun pass `-p api-tracker-core --test mesh_audit_identity`
+(the Debug of the deleted credential is cut at 400 characters; the masked value only, no secret)

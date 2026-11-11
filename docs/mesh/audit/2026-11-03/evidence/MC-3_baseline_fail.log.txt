@@ -1,0 +1,23 @@
+# MC-3 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_caps caps_deleting_local_usage_never_returns_spent_rights
+# After delete_project_data the reconciler published a lower cap.used (epoch bumped), returning the 10 USD already spent.
+
+running 1 test
+test caps_deleting_local_usage_never_returns_spent_rights ... FAILED
+
+failures:
+
+---- caps_deleting_local_usage_never_returns_spent_rights stdout ----
+
+thread 'caps_deleting_local_usage_never_returns_spent_rights' (21285984) panicked at crates/core/tests/mesh_caps.rs:1239:5:
+assertion `left == right` failed: no decrease is published
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    caps_deleting_local_usage_never_returns_spent_rights
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `-p api-tracker-core --test mesh_caps`

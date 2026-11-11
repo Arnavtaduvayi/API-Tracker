@@ -1,0 +1,6 @@
+# MC-12 baseline: the text at HEAD 70ebeb1 before remediation (documentation finding; the 'failing test' is this stale text)
+74:(4.3k → 13.5k req/s) with no measurable idle-CPU cost. Recorded here as
+98:## Spend-cap admission (Tethra Mesh, Increment 08)
+110:The difference is inside the run-to-run noise (the second run benefits from
+111:a warmer machine): admission is an `Arc` read and a few atomics. The small
+70ebeb1:CHANGELOG.md:112:- The admission check adds no measurable latency

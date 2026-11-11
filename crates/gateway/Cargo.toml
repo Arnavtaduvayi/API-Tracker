@@ -7,9 +7,10 @@
 #
 # Dependency policy (ADR 0019 "Dependency choice"): ZERO net-new third-party
 # crates. Every entry below is already in the workspace lockfile via core or
-# observe; `socket2` is promoted to a direct dependency for loopback peer
-# checks and (future) SO_EXCLUSIVEADDRUSE on Windows. No tokio, no hyper, no
-# new TLS or HTTP stack. The Unix-domain control channel uses std.
+# observe. Loopback peer checks use std; ADR 0019's planned `socket2` direct
+# dependency was never used and was removed (Cargo 1.100's unused-dependency
+# lint). No tokio, no hyper, no new TLS or HTTP stack. The Unix-domain control
+# channel uses std.
 
 [package]
 name = "api-tracker-gateway"
@@ -25,7 +26,6 @@ api-tracker-observe = { version = "0.1.0", path = "../observe" }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1"
 httparse = "1.10"
-socket2 = "0.6"
 # The observation writer thread owns its own SQLite connection, exactly like
 # the observe session writer. Same pinned version/features as core.
 rusqlite = { version = "0.40.1", features = ["bundled"] }

@@ -1,0 +1,19 @@
+# MD-1 baseline (before the fix): cd apps/desktop && npx vitest run src/components/CapsPanel.test.tsx
+# HEAD fb55b07 + the new/updated assertions only; the component text is unchanged
+
+ FAIL  src/components/CapsPanel.test.tsx > CapsPanel enforcement > needs the master password, explains the 403 behaviour, then switches it on
+Error: expect(element).not.toHaveTextContent()
+
+Expected element not to have text content:
+  /at most one request/
+Received:
+  Enforce this spend cap on this deviceWith enforcement on, this device's gateway refuses requests to this project with HTTP 403 (not 429, so SDKs do not retry them) once this device's share of the cap for the month is used up; a refused request never reaches the provider. A request's cost is known only after its response, so near the cap the gateway lets one request through at a time and the overshoot is at most one request. Models without a price and responses without usage are never blocked (they are counted as unpriced or unmetered). It is a self-limit on traffic through Tethra's gateway, not a security boundary: requests that do not go through the gateway are not capped. It applies to this device only, and no other device can change it.Confirm your master password to continue.Master passwordEnforceCancel
+ ❯ src/components/CapsPanel.test.tsx:360:24
+    358|     expect(dialog).toHaveTextContent(/HTTP 403 \(not 429, so SDKs do n…
+    359|     // The overshoot is qualified, never "at most one request" (MD-1).
+    360|     expect(dialog).not.toHaveTextContent(/at most one request/);
+       |                        ^
+    361|     expect(dialog).toHaveTextContent(
+    362|       /while no request cost is known \(after a gateway restart or at …
+
+  …(rest of the failure output, a DOM dump, trimmed)

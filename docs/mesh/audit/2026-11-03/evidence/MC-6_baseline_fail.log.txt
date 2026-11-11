@@ -1,0 +1,23 @@
+# MC-6 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_caps caps_a_reclaim_never_takes_a_local_override
+# The holder answered the owner's reclaim with its 50 USD share AND its own 20 USD local override.
+
+running 1 test
+test caps_a_reclaim_never_takes_a_local_override ... FAILED
+
+failures:
+
+---- caps_a_reclaim_never_takes_a_local_override stdout ----
+
+thread 'caps_a_reclaim_never_takes_a_local_override' (21281649) panicked at crates/core/tests/mesh_caps.rs:1203:5:
+assertion `left == right` failed: the share goes back, the override stays
+  left: 70000000
+ right: 50000000
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    caps_a_reclaim_never_takes_a_local_override
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.30s
+
+error: test failed, to rerun pass `-p api-tracker-core --test mesh_caps`

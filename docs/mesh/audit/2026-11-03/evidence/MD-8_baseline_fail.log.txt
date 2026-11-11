@@ -1,0 +1,11 @@
+# MD-8 baseline (before the fix): # CARGO_TARGET_DIR=<scratch>/target-r4 API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-cli --test mesh_cli
+# HEAD fb55b07 + the new assertions only; apps/cli/src unchanged
+
+test share_bind_and_read_usage_across_two_devices_from_the_cli ... FAILED
+---- share_bind_and_read_usage_across_two_devices_from_the_cli stdout ----
+
+thread 'share_bind_and_read_usage_across_two_devices_from_the_cli' (21500110) panicked at apps/cli/tests/mesh_cli.rs:682:5:
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+(line 682: assert!(!ok && err.contains("--yes")) after `mesh settings set retention.usage_days 30` lowered the default 90 non-interactively, without --yes: the command succeeded and asked nothing)
+test result: FAILED. 7 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.21s

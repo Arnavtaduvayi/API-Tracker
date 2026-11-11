@@ -30,6 +30,22 @@ versions, and use only fake credentials in reproductions.
 - The app auto-locks after a configurable inactivity period; CLI sessions
   expire on the same schedule.
 - Backups are single files encrypted under a separate backup password.
+- **Credential sharing between your own paired devices (Tethra Mesh, ADR
+  0033)** is opt-in, one credential at a time. Sharing and importing each
+  require the master password, checked in core. The value is sealed
+  (`crypto_box`: X25519 + XSalsa20-Poly1305) to each chosen device's own
+  sealing key and signed by the sharing device; the receiving device opens it
+  only inside a reauthenticated import, checks every sealed field against the
+  signed envelope and its signer (so a paired device cannot plant a credential
+  under another device's name), and re-encrypts it under its own project key.
+  Nothing is imported automatically. Tests capture the encrypted wire, every
+  session frame, every database column, errors and CLI output and assert the
+  value appears in none of them. Revoking a share does not remove the value
+  from a device that imported it, and does not revoke the credential at its
+  provider: revoke that device's share, then rotate the credential. There is
+  no forward secrecy (static device keys). Only the value is sealed: a
+  share's name, provider and recipient are readable by every paired device.
+  Backups never carry mesh keys or items; a restored vault pairs again.
 - Duplicate detection uses a *keyed* fingerprint (BLAKE3 keyed hash with a
   vault-specific wrapped key), so database access alone does not enable
   offline guess-confirmation of credential values.

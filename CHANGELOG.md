@@ -6,6 +6,138 @@ Dates are UTC.
 
 ## [Unreleased]
 
+### Added — Tethra Mesh: peer-to-peer replication between your own devices
+
+Pair your laptop, desktop and home server and they share projects, show API
+usage across devices, hold a monthly spend cap together, and pass a credential
+between them when you ask, directly over your LAN or a VPN you run. There is
+no Tethra server, relay or cloud, and every device keeps working offline and
+catches up when it reconnects. Opt-in: nothing happens until you start a mesh
+([ADR 0031](docs/decisions/0031-device-mesh.md),
+[user guide](docs/mesh/USER_GUIDE.md),
+[limitations](docs/mesh/KNOWN_LIMITATIONS.md)).
+
+- **Pair and run.** `tethra mesh init` starts a mesh; `tethra mesh invite`
+  (master password) prints a one-time invite, valid 10 minutes, single use,
+  five wrong attempts and it is dead, with a typo checksum; `tethra mesh join
+  <invite>` (or `join -` from standard input) adds a device. `tethra mesh
+  serve --listen ADDR:PORT` runs a node that exchanges with every known peer
+  every 30 seconds, learns the addresses your devices publish, retries with
+  backoff, and optionally finds devices on the LAN with mDNS (`--discover`;
+  the announcement carries no name). Nothing listens unless you ask; all
+  interfaces need `--all-interfaces`. Devices relay for one another and check
+  every origin's signature. `devices`, `rename`, `remove`, `leave`, `peer`,
+  `replicate`, `stop`, `status` and `doctor` (with `--rebuild` and
+  `--repair`) manage it. There is no background service: the node runs while
+  `serve` or the unlocked desktop app does, and holds its keys only then.
+- **Shared projects and cross-device usage.** `tethra mesh project share`
+  shares a project; on another device `project bind` connects one of its own
+  projects (never automatically; also `rename`, `archive`, `merge`,
+  `unbind`). `tethra mesh usage` shows each device's gateway-observed
+  requests, tokens and estimated cost on its own row, "as of" its last
+  exchange, with stale, removed and "no data from" labels; unpriced and
+  not-extracted requests are counted beside the estimate, never in it, and
+  the figures are never added to provider-reported cost. Deleting or expiring
+  gateway data follows to your other devices; `tethra mesh settings set
+  retention.usage_days <n>` (default 90) sets how long counters are kept, and
+  lowering it asks first.
+- **Spend caps across devices.** `tethra mesh cap create <project> --monthly
+  <usd>` gives each active device a share of the cap (its rights), counted
+  against its own gateway's estimate, so devices that cannot reach each other
+  can still each hold to their share. The total holds only as far as each
+  device enforces it (below), within the limited overshoot, and above it by
+  what a device's own overrides allow
+  ([limitations](docs/mesh/KNOWN_LIMITATIONS.md#spend-caps)). From the 20th the owner hands out next month's
+  shares in advance; a device running low asks one with spare rights during
+  an exchange. `raise` (a labelled local override on a device that does not
+  own the cap), `lower`, `reclaim`, `show` and `rights`; alerts at 80% and
+  100%, labelled cross-device and estimated. A cap is a self-limit, not a
+  security boundary, and never a budget.
+- **Gateway enforcement where you switch it on.** `tethra mesh cap enforce
+  <cap> on` (master password, this device only; no other device can change
+  it) has this device's gateway refuse a capped project's requests once its
+  rights are used up: HTTP 403 (not 429, which SDKs retry) in the provider's
+  error shape with an `x-tethra-cap` header, before the request reaches the
+  provider. Overshoot is limited, not zero: cost is known only when a
+  response completes; near the cap, and while no request cost is known,
+  requests run one at a time; otherwise concurrent requests that each cost
+  far more than the cap's typical (p95) request can together go over by more
+  than one request, and a gateway restart can forget spend not yet saved.
+  Unpriced traffic and responses without usage are never charged against the
+  cap. If the gateway cannot read the caps it forwards everything and
+  `tethra gateway status` says why. Rights a device gives away are fenced
+  against its running gateway first. In a benchmark of admission alone
+  (printed, not asserted) the check added no latency beyond run-to-run noise
+  ([measurements](docs/gateway/PERFORMANCE_RESULTS.md)).
+- **Share one credential with your devices.** `tethra mesh credential
+  share|list|import|revoke|reseal`, or a credential's **Shared with my
+  devices** panel and **Devices → Credentials shared with this device**
+  ([ADR 0033](docs/decisions/0033-credential-sharing.md)). Share with all
+  your devices or chosen ones; the receiving device imports into a project of
+  its choice, only when asked. A device paired later, or a changed value,
+  gets a reseal offer you act on. Revoking is not rotating: a device that
+  imported the value keeps it, so to cut a device off revoke its share, then
+  rotate the credential (a reseal never offers a revoked device). Removing a
+  device warns that what it imported stays usable.
+- **In the desktop app.** A **Devices** view creates or joins a mesh, pairs
+  devices (the invite is shown once), shows each device's state and last
+  exchange, removes devices, manages peers, runs the health checks,
+  replicates now and leaves; "Run mesh while Tethra is open" runs the node
+  in-process while the app is unlocked. A project's page shares it, shows its
+  usage across devices and manages its cap; a credential's page shares it.
+  No analytics are sent for any of it.
+- **Upgrading.** Database migrations v21-v24 add the mesh tables. As with
+  every schema change, an already-installed background gateway built before
+  them keeps forwarding but stops recording until it is updated too.
+
+### Security — Tethra Mesh
+
+- **Authenticated before anything is read.** Sessions use Noise
+  (`XXpsk0` with the mesh access key; pairing `XXpsk3` with the invite's
+  key). A device without the access key fails at the first message and never
+  learns a device's static key; only active roster devices get past the
+  handshake; only a 16-byte preamble and handshake messages of at most 1 KiB,
+  under one deadline, are read before that. Connections, handshakes and
+  everything a session stages are bounded.
+- **Encrypted per connection, readable by every member.** Every paired
+  device reads what it holds and relays — project names, usage counters, cap
+  figures, share metadata — so a compromised device of yours reads all of it.
+  Only a shared credential's value is sealed (`crypto_box`, X25519 +
+  XSalsa20-Poly1305) to each chosen device's own sealing key, inside an item
+  the sharer signs; an import checks every sealed field against that signed
+  envelope before storing anything. There is no forward secrecy.
+- **Signed, convergent history.** Every replicated item is Ed25519-signed by
+  its origin, device ids are derived from the device's keys, and a removed
+  device's later items stop counting everywhere. A deterministic simulator
+  checks nine invariants against an independently written model of the
+  protocol, in every CI run and in long soaks.
+- **Copies and rollbacks.** An identity marker beside the database records
+  how far the device's own log was committed; a copied or rolled-back
+  database refuses to create anything until you leave and pair again, and a
+  full copy is caught as a fork when the histories meet. Backups carry no
+  mesh keys or items; a restored vault pairs again.
+- **Your password in core.** Inviting, removing a device, leaving, sharing,
+  importing, resealing, switching cap enforcement and opening the node to
+  your network each require the master password, checked in Tethra's core.
+  Tests capture the encrypted wire, every frame, every database column,
+  errors, audit rows and CLI output and assert a shared value appears in
+  none of them.
+- **Independent audit.** Four auditors reviewed the mesh
+  ([findings](docs/mesh/audit/2026-11-03/FINDINGS_INDEX.md)): 48 findings, 41
+  confirmed and fixed with a test that failed first (among them: a removed
+  device could cancel its own removal; a failed multi-block write could lock
+  a device's identity; a cold gateway admitted unbounded concurrency; a burn
+  awaiting the gateway's acknowledgement could be burned again; any member
+  could revoke another device's share; a copied key could shadow a device),
+  and 7 accepted as documented limits. Thirteen mutation checks pin the
+  load-bearing protections.
+- **Limits, stated plainly.** No NAT traversal or relay; removal and key
+  rotation are eventually consistent; a compromised member of your own mesh
+  can remove your other devices, report a device forked or pin a replicated
+  setting; caps can be bypassed by traffic that does not use the gateway.
+  See [docs/mesh/KNOWN_LIMITATIONS.md](docs/mesh/KNOWN_LIMITATIONS.md) and
+  [docs/mesh/THREAT_MODEL.md](docs/mesh/THREAT_MODEL.md).
+
 ### Changed — A card-based interface and a one-folder first run
 
 **First run.** Opening Tethra for the first time now asks for one thing: a

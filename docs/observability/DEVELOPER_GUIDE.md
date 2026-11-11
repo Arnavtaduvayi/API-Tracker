@@ -69,7 +69,8 @@ Connection lifecycle (architecture §6):
      We do not pretend to understand HTTP/2.
    - Mode A always takes the opaque path regardless of ALPN.
 
-Timeouts use `SO_RCVTIMEO`/`SO_SNDTIMEO` (`socket2`) plus an overall
+Timeouts use `SO_RCVTIMEO`/`SO_SNDTIMEO` (std's `TcpStream::set_read_timeout`/
+`set_write_timeout`) plus an overall
 connection deadline checked between relay iterations. All bounds are in the
 threat model's RO-11 table (Slowloris, oversized heads, idle, lifetime); if
 you change one, update that table.
@@ -136,8 +137,8 @@ Non-negotiable rules (RO-6):
   answer is chaining plus adding the corporate root via `SSL_CERT_FILE`-style
   configuration (RO-18) — never disabling verification.
 
-Dependency posture: `rustls` 0.23, `rustls-pki-types`, `webpki-roots`,
-`httparse`, `socket2` are all already in the lockfile; `rcgen`
+Dependency posture: `rustls` 0.23, `rustls-pki-types`, `webpki-roots` and
+`httparse` are all already in the lockfile; `rcgen`
 (`default-features = false, features = ["pem", "ring", "zeroize"]`) is the
 single genuinely new crate, on the already-vendored `ring` backend. No
 `openssl`, no `native-tls`. The crate is `forbid(unsafe_code)`.

@@ -17,6 +17,7 @@ import type {
 import { formatTimestamp, safeExternalUrl, statusLabel, statusSeverity } from "../utils";
 import { ReauthDialog } from "./ReauthDialog";
 import { ConfirmDialog, PromptDialog } from "./ConfirmDialog";
+import { MeshCredentialSharePanel } from "./MeshCredentialSharePanel";
 
 function activitySourceLabel(source: string): string {
   switch (source) {
@@ -42,6 +43,8 @@ export function CredentialDetail(props: {
   id: string;
   onBack: (projectIdent: string | null) => void;
   onEdit: () => void;
+  /** Opens the Rotation view (linked from the mesh share notice). */
+  onOpenRotation?: () => void;
 }) {
   const [credential, setCredential] = useState<Credential | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -457,6 +460,9 @@ export function CredentialDetail(props: {
           </div>
         </div>
       )}
+
+      {/* Tethra Mesh (Increment 11): share this credential with paired devices. */}
+      <MeshCredentialSharePanel credential={c} onOpenRotation={props.onOpenRotation} />
 
       <h2>Lifecycle</h2>
       <p className="muted">

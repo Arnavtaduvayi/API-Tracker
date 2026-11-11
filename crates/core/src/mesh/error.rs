@@ -1,0 +1,195 @@
+//! Typed errors for the mesh layer.
+//!
+//! Like [`crate::error::CoreError`], messages carry identifiers, sizes and
+//! static context only. They never carry key material, invite tokens, item
+//! payloads or credential values — a malformed item's bytes are attacker
+//! controlled, so even parse errors are reduced to a static description
+//! instead of echoing what the parser saw.
+
+use thiserror::Error;
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MeshError {
+    #[error("mesh item is {size} bytes; the limit is {max}")]
+    ItemTooLarge { size: usize, max: usize },
+
+    #[error("mesh item is malformed: {0}")]
+    Malformed(&'static str),
+
+    #[error("mesh item is not in canonical form")]
+    NonCanonical,
+
+    #[error("mesh item format v{0} is not supported by this version of Tethra")]
+    UnsupportedFormat(u64),
+
+    #[error("mesh item belongs to a different mesh")]
+    WrongMesh,
+
+    #[error("mesh item signature does not verify")]
+    BadSignature,
+
+    #[error("invalid {kind} item: {reason}")]
+    InvalidPayload {
+        kind: &'static str,
+        reason: &'static str,
+    },
+
+    #[error("item kind is '{found}', expected '{expected}'")]
+    KindMismatch {
+        expected: &'static str,
+        found: String,
+    },
+
+    #[error("invalid mesh identifier: expected 32 lowercase hexadecimal characters")]
+    InvalidId,
+
+    #[error("invalid public key")]
+    InvalidKey,
+
+    #[error("the two rosters belong to different meshes (genesis devices differ)")]
+    GenesisMismatch,
+
+    #[error("not enough spend-cap rights: {available} micro-USD available, {requested} requested")]
+    InsufficientRights { available: i128, requested: u64 },
+
+    #[error("invalid spend-cap operation: {0}")]
+    InvalidOperation(&'static str),
+
+    /// The local mesh database failed. The context is static; SQLite's own
+    /// message is not carried, so a value from a row can never surface here.
+    #[error("local mesh storage failed: {0}")]
+    Storage(&'static str),
+
+    #[error("this device is not part of a mesh; run `tethra mesh init` to start one")]
+    NotInitialized,
+
+    #[error("this device is already part of a mesh; run `tethra mesh leave` before starting or joining another")]
+    AlreadyInMesh,
+
+    /// The identity marker does not vouch for this database: it is missing,
+    /// belongs to another installation, or records seqs the database does
+    /// not have (DESIGN §D5, PROTOCOL.md §7.5).
+    #[error("this device's mesh identity cannot be trusted: {0}; run `tethra mesh leave` and pair again")]
+    IdentityMismatch(&'static str),
+
+    #[error("a device name must be 1-64 characters without control characters")]
+    InvalidDeviceName,
+
+    /// Static text only: an invite string holds a bearer token.
+    #[error("this is not a valid mesh invite: {0}")]
+    InvalidInvite(&'static str),
+
+    #[error("the invite was refused: {0}")]
+    InviteRefused(&'static str),
+
+    #[error("that device is not a member of this mesh")]
+    NotAMember,
+
+    #[error("a device can only rename itself; rename that device on the device")]
+    NotThisDevice,
+
+    #[error("this device is no longer an active member of its mesh")]
+    NotActive,
+
+    #[error("that device is already removed")]
+    AlreadyRemoved,
+
+    #[error("this device's mesh identity has forked (another installation used the same identity); run `tethra mesh leave` and pair again")]
+    Forked,
+
+    #[error("a peer address must be HOST:PORT (an IP address or a host name, and a port from 1 to 65535)")]
+    InvalidPeerAddress,
+
+    /// A peer holds this device's own items past what its database
+    /// remembers (PROTOCOL.md §7.4): minting waits until they come back.
+    #[error("this device is recovering its own mesh items from a peer after a rollback; it creates new items again once they are back")]
+    RollbackHold,
+
+    #[error("that mesh project already has a spend cap; raise or lower it instead")]
+    CapExists,
+
+    /// The cap's owner device was removed: nobody may mint for it again
+    /// (DESIGN §D15).
+    #[error("this spend cap is frozen because its owner device was removed; no new rights can be added to it. Create a new cap for the project with `tethra mesh cap create`")]
+    CapFrozen,
+
+    /// The change widens who on the network can reach this device; it needs
+    /// the master password (`node_settings::needs_reauth`).
+    #[error("this change lets other machines on your network reach this device; confirm your master password to make it")]
+    ReauthRequired,
+
+    /// Static text: the desktop's node settings were refused.
+    #[error("invalid mesh node settings: {0}")]
+    InvalidNodeSettings(&'static str),
+
+    /// A credential can be shared only from a project bound to a mesh
+    /// project (Increment 11).
+    #[error("this credential's project is not shared with your devices; share it first with `tethra mesh project share`")]
+    ProjectNotBound,
+
+    /// An opened share's sealed contents disagree with its signed envelope
+    /// or its signer (ADR 0033): a device may be trying to plant a
+    /// credential. The field name is static; no value is ever carried.
+    #[error(
+        "this credential share does not match its signed envelope ({0}); nothing was imported"
+    )]
+    ShareBindingMismatch(&'static str),
+
+    /// The sealed box did not open with this device's sealing key.
+    #[error("this credential share cannot be opened by this device; nothing was imported")]
+    ShareUnreadable,
+
+    #[error("this credential share was revoked; ask for it to be shared again")]
+    ShareRevoked,
+
+    /// The device that made the share has since been removed (or forked):
+    /// what it shared is not trusted any more (ADR 0033).
+    #[error("the device that shared this credential has been removed from the mesh; ask an active device to share it again")]
+    ShareFromRemovedDevice,
+}
+
+impl MeshError {
+    /// Stable machine-readable code, surfaced through
+    /// [`crate::error::CoreError::code`] for the CLI's `--json` mode and the
+    /// desktop frontend.
+    pub fn code(&self) -> &'static str {
+        match self {
+            MeshError::ItemTooLarge { .. } => "mesh_item_too_large",
+            MeshError::Malformed(_) => "mesh_item_malformed",
+            MeshError::NonCanonical => "mesh_item_non_canonical",
+            MeshError::UnsupportedFormat(_) => "mesh_item_unsupported_format",
+            MeshError::WrongMesh => "mesh_wrong_mesh",
+            MeshError::BadSignature => "mesh_bad_signature",
+            MeshError::InvalidPayload { .. } => "mesh_invalid_payload",
+            MeshError::KindMismatch { .. } => "mesh_kind_mismatch",
+            MeshError::InvalidId => "mesh_invalid_id",
+            MeshError::InvalidKey => "mesh_invalid_key",
+            MeshError::GenesisMismatch => "mesh_genesis_mismatch",
+            MeshError::InsufficientRights { .. } => "mesh_insufficient_rights",
+            MeshError::InvalidOperation(_) => "mesh_invalid_operation",
+            MeshError::Storage(_) => "mesh_storage",
+            MeshError::NotInitialized => "mesh_not_initialized",
+            MeshError::AlreadyInMesh => "mesh_already_in_mesh",
+            MeshError::IdentityMismatch(_) => "mesh_identity_mismatch",
+            MeshError::InvalidDeviceName => "mesh_invalid_device_name",
+            MeshError::InvalidInvite(_) => "mesh_invalid_invite",
+            MeshError::InviteRefused(_) => "mesh_invite_refused",
+            MeshError::NotAMember => "mesh_not_a_member",
+            MeshError::NotThisDevice => "mesh_not_this_device",
+            MeshError::NotActive => "mesh_not_active",
+            MeshError::AlreadyRemoved => "mesh_already_removed",
+            MeshError::Forked => "mesh_forked",
+            MeshError::InvalidPeerAddress => "mesh_invalid_peer_address",
+            MeshError::RollbackHold => "mesh_rollback_hold",
+            MeshError::CapExists => "mesh_cap_exists",
+            MeshError::CapFrozen => "mesh_cap_frozen",
+            MeshError::InvalidNodeSettings(_) => "mesh_invalid_node_settings",
+            MeshError::ReauthRequired => "mesh_reauth_required",
+            MeshError::ProjectNotBound => "mesh_project_not_bound",
+            MeshError::ShareBindingMismatch(_) => "mesh_share_binding_mismatch",
+            MeshError::ShareUnreadable => "mesh_share_unreadable",
+            MeshError::ShareRevoked => "mesh_share_revoked",
+            MeshError::ShareFromRemovedDevice => "mesh_share_from_removed_device",
+        }
+    }
+}

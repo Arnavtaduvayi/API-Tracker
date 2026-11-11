@@ -1,0 +1,9 @@
+Baseline (unfixed tree, feat/device-mesh at fb55b07 + other tracks' in-progress edits).
+Command: API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --test mesh_audit_identity
+Test file: crates/core/tests/mesh_audit_identity.rs
+
+---- backup_payload_carries_no_mesh_rows stdout ----
+
+thread 'backup_payload_carries_no_mesh_rows' (21508717) panicked at crates/core/tests/mesh_audit_identity.rs:460:5:
+the backup carries ["mesh_access_keys", "mesh_cap_escrow", "mesh_dots", "mesh_exchange_log", "mesh_fork_evidence", "mesh_invites", "mesh_items", "mesh_meta", "mesh_peers", "mesh_project_bindings", "mesh_publish_cursor", "mesh_self", "mesh_share_imports", "mesh_share_outgoing", "mesh_vv"]
+

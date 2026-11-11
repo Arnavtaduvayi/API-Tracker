@@ -3,6 +3,8 @@ import { api, isApiError } from "../api";
 import type { Credential, DetectedCredential, Project, ProjectOverview } from "../types";
 import { formatTimestamp, statusLabel, statusSeverity } from "../utils";
 import { ProjectActivity } from "./ProjectActivity";
+// Tethra Mesh (Increment 10)
+import { MeshProjectPanel } from "./MeshProjectPanel";
 import { ProjectTracking } from "./ProjectTracking";
 import { ProviderMark } from "./visuals/ProviderMarks";
 
@@ -280,6 +282,12 @@ export function ProjectDetail(props: {
           onRefreshHealth={() => void reloadOverview()}
         />
       )}
+
+      {/* Tethra Mesh (Increment 10): sharing with your devices, cross-device
+          usage and spend caps. Separate cards, never mixed with the provider
+          figures above. */}
+      <MeshProjectPanel key={project.id} projectId={project.id} projectName={project.name} />
+      {/* End Tethra Mesh (Increment 10) */}
 
       <h2>Credentials</h2>
       <p>

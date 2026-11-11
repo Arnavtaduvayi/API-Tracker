@@ -44,6 +44,7 @@ import { AccessView } from "./components/AccessView";
 import { NotifyView } from "./components/NotifyView";
 import { ApiActivityView } from "./components/ApiActivityView";
 import { GatewayView, GatewayLockStrip } from "./components/GatewayView";
+import { DevicesView } from "./components/DevicesView";
 import { DashboardView } from "./components/DashboardView";
 import { TrackFlow } from "./components/TrackFlow";
 import { Welcome } from "./components/Welcome";
@@ -94,6 +95,7 @@ export type View =
   | { name: "pricing" }
   | { name: "templates" }
   | { name: "settings" }
+  | { name: "devices" }
   | { name: "backup" };
 
 type VaultState = "loading" | "missing" | "locked" | "unlocked";
@@ -123,7 +125,10 @@ const NAV_GROUPS: { label: string; items: [View["name"], string][] }[] = [
   },
   {
     label: "System",
-    items: [["settings", "Settings"]],
+    items: [
+      ["devices", "Devices"],
+      ["settings", "Settings"],
+    ],
   },
 ];
 
@@ -282,6 +287,7 @@ const SECTION_OF: Record<View["name"], View["name"]> = {
   templates: "settings",
   backup: "settings",
   settings: "settings",
+  devices: "devices",
 };
 
 /** Ambient topology follows the current workspace without reading its data. */
@@ -333,9 +339,13 @@ function prefillFor(row: DetectedCredential): {
   };
 }
 
-/** Finite screen names keep project identifiers and other user data out of Analytics. */
-function analyticsScreenFor(view: View["name"]): AnalyticsScreen {
-  const screens: Record<View["name"], AnalyticsScreen> = {
+/**
+ * Finite screen names keep project identifiers and other user data out of Analytics.
+ * `null` means the view is never reported: the mesh's Devices view has no screen name
+ * by design (MESH-SI-14, no analytics for mesh features).
+ */
+function analyticsScreenFor(view: View["name"]): AnalyticsScreen | null {
+  const screens: Record<View["name"], AnalyticsScreen | null> = {
     dashboard: "dashboard",
     welcome: "welcome",
     track: "tracking_setup",
@@ -363,6 +373,7 @@ function analyticsScreenFor(view: View["name"]): AnalyticsScreen {
     templates: "templates",
     settings: "settings",
     backup: "backup",
+    devices: null,
   };
   return screens[view];
 }
@@ -444,7 +455,8 @@ export default function App() {
     } else if (vaultState === "locked") {
       trackAnalytics({ name: "screen_view", screen_name: "vault_unlock" });
     } else if (vaultState === "unlocked") {
-      trackAnalytics({ name: "screen_view", screen_name: analyticsScreenFor(view.name) });
+      const screen = analyticsScreenFor(view.name);
+      if (screen !== null) trackAnalytics({ name: "screen_view", screen_name: screen });
     }
   }, [analyticsConsent, vaultState, view.name]);
 
@@ -785,6 +797,7 @@ export default function App() {
                   )
                 }
                 onEdit={() => setView({ name: "credential-edit", id: view.id })}
+                onOpenRotation={() => setView({ name: "rotation" })}
               />
             )}
             {view.name === "providers" && (
@@ -798,6 +811,7 @@ export default function App() {
             {view.name === "usage" && <UsageView />}
             {view.name === "api-activity" && <ApiActivityView />}
             {view.name === "pricing" && <PricingView />}
+            {view.name === "devices" && <DevicesView />}
             {isSettingsDestination(view.name) && (
               <div className="settings-workspace">
                 <SettingsNavigation

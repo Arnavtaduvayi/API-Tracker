@@ -238,7 +238,7 @@ the data dir from the same core logic the app uses.
 ## Dependencies
 
 Target: ZERO net-new third-party crates. Everything needed (rustls +
-ring/webpki-roots, httparse, socket2, rusqlite bundled, base64, time, serde,
+ring/webpki-roots, httparse, rusqlite bundled, base64, time, serde,
 zeroize, blake3 via core) is already in the workspace lockfile through core
 and observe. If any platform service-registration helper is unavoidable it
 must be justified in ADR 0019 against the "no unnecessary dependency growth"

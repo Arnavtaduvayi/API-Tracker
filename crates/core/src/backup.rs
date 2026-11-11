@@ -8,12 +8,24 @@
 //! from a backup password chosen at creation time.
 //!
 //! Format versions:
-//! - **v2 (current)**: the payload carries EVERY user table generically
-//!   (name + columns + rows), enumerated from the live schema. New tables
-//!   added by future migrations are included automatically — the backup can
-//!   never silently fall out of sync with the schema again. The plaintext
-//!   `version` field is bound into the AEAD associated data, so a tampered
-//!   header cannot re-route the payload to another parser.
+//! - **v2 (current)**: the payload carries every user table generically
+//!   (name + columns + rows), enumerated from the live schema, EXCEPT the
+//!   Tethra Mesh tables (`mesh_*`). New tables added by future migrations
+//!   are included automatically — the backup can never silently fall out of
+//!   sync with the schema again. The plaintext `version` field is bound into
+//!   the AEAD associated data, so a tampered header cannot re-route the
+//!   payload to another parser.
+//!
+//! **Mesh state is never backed up or restored** (ADR 0031, DESIGN §D5,
+//! MESH-SI-5). A restored vault is a copy, so it must never act as the
+//! device it came from and pairs again; the mesh rows (the wrapped identity
+//! keys, the access keys, the invites' pairing psks, the items) would only
+//! ever be deleted again, so they are not written into backups at all, and
+//! restore skips any `mesh_*` table a backup from an older build still
+//! carries — nothing of them is ever inserted, so no crash or error during a
+//! restore can leave the backed-up identity live. The identity such a table
+//! named is still reported (`BackupInfo::mesh_wipe`), and a marker naming it
+//! is still removed (`mesh::identity::on_restore_after_skipping`).
 //! - **v1 (read-only)**: a typed payload of the five original core tables
 //!   (vault meta, projects, repos, credentials, audit events). Restoring a
 //!   v1 backup preserves that data; anything a v1-era build never captured
@@ -39,7 +51,7 @@ use crate::session;
 use crate::vault::{UnlockedVault, VaultPaths};
 use base64::Engine;
 use rusqlite::types::ValueRef;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -66,6 +78,14 @@ struct BackupFile {
 struct BackupPayloadV2 {
     schema_version: i64,
     tables: Vec<TableExport>,
+    /// The mesh device id the vault had when the backup was made (hex), and
+    /// nothing else of the mesh: restore reports that the restored copy must
+    /// pair again and removes a marker naming that identity. Absent when the
+    /// vault was in no mesh, and in backups from older builds (which carry
+    /// the `mesh_*` tables instead; restore skips them). Older builds ignore
+    /// the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mesh_device: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -148,9 +168,11 @@ fn collect_payload_v2_with(
     let tx = conn.unchecked_transaction()?;
     let schema_version = db::user_version(&tx)?;
     let names: Vec<String> = {
+        // Mesh tables are never backed up (module docs, MESH-SI-5).
         let mut stmt = tx.prepare(
             "SELECT name FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'mesh\\_%' ESCAPE '\\' ORDER BY name",
         )?;
         let names = stmt
             .query_map([], |r| r.get(0))?
@@ -181,10 +203,23 @@ fn collect_payload_v2_with(
             rows,
         });
     }
+    // Only the device id, never a key or an item (module docs).
+    let has_mesh_self: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mesh_self')",
+        [],
+        |r| r.get(0),
+    )?;
+    let mesh_device: Option<String> = if has_mesh_self {
+        tx.query_row("SELECT device_id FROM mesh_self LIMIT 1", [], |r| r.get(0))
+            .optional()?
+    } else {
+        None
+    };
     tx.commit()?;
     let payload = BackupPayloadV2 {
         schema_version,
         tables,
+        mesh_device,
     };
     assert_payload_consistent(&payload)?;
     Ok(payload)
@@ -331,6 +366,11 @@ pub struct BackupInfo {
     pub format_version: u32,
     pub project_count: usize,
     pub credential_count: usize,
+    /// Restore only: the mesh state the restore wiped. A restored vault is a
+    /// copy, so it never keeps acting as the device it came from; it must
+    /// pair again (ADR 0031, DESIGN §D5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mesh_wipe: Option<crate::mesh::identity::WipeReport>,
 }
 
 /// Create an encrypted backup file. Never overwrites unless `overwrite`.
@@ -421,6 +461,7 @@ fn create_backup_with(
             .find(|t| t.name == "credentials")
             .map(|t| t.rows.len())
             .unwrap_or(0),
+        mesh_wipe: None,
     })
 }
 
@@ -485,6 +526,7 @@ fn info_for(path: &Path, file: &BackupFile, payload: &Payload) -> BackupInfo {
         format_version: file.version,
         project_count: payload.table_len("projects"),
         credential_count: payload.table_len("credentials"),
+        mesh_wipe: None,
     }
 }
 
@@ -575,19 +617,52 @@ pub fn restore_backup(
     std::fs::create_dir_all(&target.data_dir)?;
     crate::vault::restrict_data_dir_permissions(&target.data_dir)?;
     let mut conn = db::open(&db_path)?;
-    match payload {
+    let skipped = match payload {
         Payload::V2(payload) => restore_v2(&mut conn, payload)?,
-        Payload::V1(payload) => restore_v1(&mut conn, payload)?,
-    }
+        Payload::V1(payload) => {
+            restore_v1(&mut conn, payload)?;
+            SkippedMesh::default()
+        }
+    };
+    // A restored vault must never act as the mesh device it was backed up
+    // from (MESH-SI-5): its mesh rows were never imported; the wipe still
+    // runs (cap enforcement off, any mesh row deleted) and removes a marker
+    // naming the identity the backup carried.
+    let mesh_wipe = crate::mesh::identity::on_restore_after_skipping(
+        &conn,
+        &target.data_dir,
+        skipped.identity,
+        skipped.rows,
+    )?;
     // Any pre-existing session belongs to the replaced vault.
     session::destroy(target)?;
     crate::audit::record(&conn, "vault_restored_from_backup", None, None, "")?;
+    let mut info = info;
+    info.mesh_wipe = Some(mesh_wipe);
     Ok(info)
 }
 
+/// The mesh rows a restore skipped (a backup from an older build).
+#[derive(Default)]
+struct SkippedMesh {
+    /// The device the skipped `mesh_self` row named.
+    identity: Option<crate::mesh::DeviceId>,
+    rows: u64,
+}
+
+/// The device id in a skipped `mesh_self` table, if it is well formed.
+fn skipped_identity(table: &TableExport) -> Option<crate::mesh::DeviceId> {
+    let col = table.columns.iter().position(|c| c == "device_id")?;
+    match table.rows.first()?.get(col)? {
+        Cell::Text(hex) => crate::mesh::DeviceId::parse(hex).ok(),
+        _ => None,
+    }
+}
+
 /// v2 restore: rebuild the schema at the payload's version, import every
-/// table, then run the normal migrations forward to current.
-fn restore_v2(conn: &mut Connection, payload: BackupPayloadV2) -> Result<()> {
+/// table except the mesh tables (skipped, never inserted), then run the
+/// normal migrations forward to current.
+fn restore_v2(conn: &mut Connection, payload: BackupPayloadV2) -> Result<SkippedMesh> {
     let upto = db::MIGRATIONS
         .iter()
         .position(|m| m.version == payload.schema_version)
@@ -598,11 +673,25 @@ fn restore_v2(conn: &mut Connection, payload: BackupPayloadV2) -> Result<()> {
             ))
         })?;
     db::migrate_with(conn, &db::MIGRATIONS[..=upto])?;
+    let mut skipped = SkippedMesh {
+        identity: payload
+            .mesh_device
+            .as_deref()
+            .and_then(|hex| crate::mesh::DeviceId::parse(hex).ok()),
+        rows: 0,
+    };
     {
         let tx = conn.transaction()?;
         tx.execute_batch("PRAGMA defer_foreign_keys = ON")?;
         for table in payload.tables {
             let quoted = checked_ident(&table.name)?;
+            if table.name.starts_with("mesh_") {
+                if table.name == "mesh_self" {
+                    skipped.identity = skipped.identity.or(skipped_identity(&table));
+                }
+                skipped.rows += table.rows.len() as u64;
+                continue;
+            }
             if table.rows.is_empty() {
                 continue;
             }
@@ -641,7 +730,7 @@ fn restore_v2(conn: &mut Connection, payload: BackupPayloadV2) -> Result<()> {
     }
     // Upgrade an older-schema import to the current schema.
     db::migrate(conn)?;
-    Ok(())
+    Ok(skipped)
 }
 
 /// v1 restore: the typed five-table import. Every column it names exists in
@@ -913,6 +1002,43 @@ mod tests {
         );
         let revealed = restored.reveal_credential("app/main", &master).unwrap();
         assert_eq!(revealed.expose(), "sk-proj-FAKE-legacy-backup-test-0001");
+    }
+
+    /// A v1-format backup carries no mesh tables, so restoring one wipes
+    /// nothing and leaves any marker in the target directory alone (ADR 0031).
+    #[test]
+    fn a_v1_backup_restore_is_a_mesh_no_op() {
+        use crate::mesh::dot::{DeviceId, MarkerNonce};
+        use crate::mesh::marker::{self, MarkerContents, MarkerRemoval};
+        let dir = tempfile::tempdir().unwrap();
+        let paths = VaultPaths::new(dir.path().join("orig"));
+        let master = SecretString::from("legacy-master-password-02");
+        let vault = crate::vault::create_vault(&paths, &master).unwrap();
+        // The source is in a mesh; a v1 payload has no table to carry it.
+        vault.mesh_init("source-device").unwrap();
+        let backup_password = SecretString::from("legacy-backup-password-02");
+        let payload = v1_payload_from_vault(vault.connection(), 5);
+        let file_path = dir.path().join("legacy.backup");
+        write_v1_backup_file(&file_path, vault.vault_id(), &backup_password, &payload);
+
+        // The target directory already holds another identity's marker.
+        let target = VaultPaths::new(dir.path().join("restored"));
+        std::fs::create_dir_all(&target.data_dir).unwrap();
+        let foreign = MarkerContents::new(
+            DeviceId::from_bytes([4; 16]),
+            MarkerNonce::from_bytes([4; 16]),
+            64,
+        );
+        marker::write(&target.data_dir, &foreign).unwrap();
+
+        let info = restore_backup(&file_path, &backup_password, &target, false).unwrap();
+        let wipe = info.mesh_wipe.expect("restore reports the mesh wipe");
+        assert_eq!(wipe.identity, None);
+        assert_eq!(wipe.rows_deleted, 0);
+        assert_eq!(wipe.marker, MarkerRemoval::LeftInPlace);
+        assert_eq!(marker::read(&target.data_dir).unwrap(), Some(foreign));
+        let restored = crate::vault::unlock_vault(&target, &master).unwrap();
+        assert!(!restored.mesh_status().unwrap().initialized);
     }
 
     /// CONC-04 regression: a project-key rotation committing between two

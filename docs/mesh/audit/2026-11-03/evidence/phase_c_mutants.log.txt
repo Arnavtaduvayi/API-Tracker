@@ -1,0 +1,74 @@
+# Phase C mutants (2026-11-05), on the remediated head 9e1eaf6 plus this script's anchor updates: API_TRACKER_INSECURE_FAST_KDF=1 bash scripts/mutation_checks.sh <13 mesh names>
+Mutation checks for the load-bearing security properties
+========================================================
+
+── mutation: mesh_vv_before_commit
+   file:     crates/core/src/mesh/store.rs
+   test:     cargo test -p api-tracker-core --lib mesh::sqlite_store::tests::a_batch_with_a_hole_in_its_range_is_refused_and_writes_nothing
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_skip_sig_verify
+   file:     crates/core/src/mesh/proto.rs
+   test:     cargo test -p api-tracker-core --test mesh_sim each_adversary_alone_is_exercised_and_defended
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_drift_clamp_removed
+   file:     crates/core/src/mesh/hlc.rs
+   test:     cargo test -p api-tracker-core --lib mesh::hlc::tests::observe_clamps_at_now_plus_max_drift_and_reports_skew
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_cutoff_ignored
+   file:     crates/core/src/mesh/crdt/roster.rs
+   test:     cargo test -p api-tracker-core --lib mesh::crdt::roster::tests::removal_cuts_off_later_items_but_keeps_earlier_ones
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_view_clamp_removed
+   file:     crates/core/src/mesh/crdt/bounded.rs
+   test:     cargo test -p api-tracker-core --lib mesh::crdt::bounded::tests::the_clamped_view_ignores_a_forged_over_transfer
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_escrow_fence_skipped
+   file:     crates/core/src/mesh/caps/escrow.rs
+   test:     cargo test -p api-tracker-core --test mesh_caps caps_escrow_publishes_at_once_unfenced_and_waits_for_the_gateway_ack_when_fenced
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_one_in_flight_never_set
+   file:     crates/gateway/src/capgate.rs
+   test:     cargo test -p api-tracker-gateway --test cap_enforcement near_exhaustion_one_request_at_a_time_and_the_slot_clears_on_every_exit
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_cap_403_becomes_429
+   file:     crates/gateway/src/forward.rs
+   test:     cargo test -p api-tracker-gateway --test cap_enforcement at_exhaustion_a_non_retryable_403_is_sent_before_any_upstream_byte
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_share_bindings_skipped
+   file:     crates/core/src/mesh/share.rs
+   test:     cargo test -p api-tracker-core --test mesh_share a_member_cannot_plant_a_credential_in_the_name_of_another_device
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_restore_wipe_skipped
+   file:     crates/core/src/mesh/identity.rs
+   test:     cargo test -p api-tracker-core --test mesh_schema backup_then_restore_wipes_mesh_state_and_mints_nothing
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_cutoff_takes_the_max
+   file:     crates/core/src/mesh/crdt/roster.rs
+   test:     cargo test -p api-tracker-core --lib mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_marker_floor_ignored
+   file:     crates/core/src/mesh/marker.rs
+   test:     cargo test -p api-tracker-core --test mesh_audit_identity a_failed_mint_batch_spanning_blocks_keeps_the_identity_ok
+   RESULT:   killed — the test fails without the protection, as it must.
+
+── mutation: mesh_open_burns_ignored
+   file:     crates/core/src/mesh/caps/view.rs
+   test:     cargo test -p api-tracker-core --test mesh_caps caps_a_burn_awaiting_the_ack_is_not_burned_twice
+   RESULT:   killed — the test fails without the protection, as it must.
+
+========================================================
+killed (protection is genuinely pinned): 13
+skipped (anchor moved or build broke):   0
+SURVIVING MUTANTS:                       0
+All mutation checks killed.

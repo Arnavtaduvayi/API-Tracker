@@ -1,0 +1,3 @@
+# MD-10 baseline: the text at HEAD 70ebeb1 before remediation (documentation finding; the 'failing test' is this stale text)
+70ebeb1:apps/cli/src/mesh_cmd.rs-161-    /// Monthly spend caps on mesh projects, kept across your devices
+70ebeb1:apps/cli/src/mesh_cmd.rs:162:    /// (alerts only in this version).

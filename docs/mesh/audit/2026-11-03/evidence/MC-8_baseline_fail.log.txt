@@ -1,0 +1,21 @@
+# MC-8 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-gateway --test cap_enforcement one_failing_refresh_between_two_good_ones_keeps_enforcing
+# One refresh that could not open the database installed an empty fail-open snapshot at once: an exhausted cap admitted.
+
+running 1 test
+test one_failing_refresh_between_two_good_ones_keeps_enforcing ... FAILED
+
+failures:
+
+---- one_failing_refresh_between_two_good_ones_keeps_enforcing stdout ----
+
+thread 'one_failing_refresh_between_two_good_ones_keeps_enforcing' (21528017) panicked at crates/gateway/tests/cap_enforcement.rs:995:5:
+one failed refresh: still enforcing
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    one_failing_refresh_between_two_good_ones_keeps_enforcing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.10s
+
+error: test failed, to rerun pass `-p api-tracker-gateway --test cap_enforcement`

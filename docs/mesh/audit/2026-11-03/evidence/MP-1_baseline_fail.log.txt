@@ -1,0 +1,34 @@
+# MP-1 baseline (before the fix): API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-core --lib a_removed_devices_own_remove_cannot_raise_its_cutoff
+# HEAD fb55b07 + the new tests only; the cutoff is the MAX over counting removes
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.94s
+     Running unittests src/lib.rs (<scratch>/target-r1/debug/deps/api_tracker_core-adc27cd358eaf2b3)
+
+running 2 tests
+test mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff ... FAILED
+test mesh::sim::oracle::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff ... FAILED
+
+failures:
+
+---- mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff stdout ----
+
+thread 'mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff' (21275809) panicked at crates/core/src/mesh/crdt/roster.rs:551:9:
+assertion `left == right` failed
+  left: Some(18446744073709551615)
+ right: Some(2)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- mesh::sim::oracle::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff stdout ----
+
+thread 'mesh::sim::oracle::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff' (21275810) panicked at crates/core/src/mesh/sim/oracle.rs:1474:9:
+assertion `left == right` failed
+  left: Some(18446744073709551615)
+ right: Some(2)
+
+
+failures:
+    mesh::crdt::roster::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff
+    mesh::sim::oracle::tests::a_removed_devices_own_remove_cannot_raise_its_cutoff
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 551 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p api-tracker-core --lib`

@@ -1,0 +1,29 @@
+# MD-3 baseline (before the fix): cd apps/desktop && npx vitest run src/components/DevicesView.test.tsx
+# HEAD fb55b07 + the new/updated assertions only; the component text is unchanged
+
+ FAIL  src/components/DevicesView.test.tsx > Remove a device > needs a confirmation and then the master password, in that order
+TestingLibraryElementError: Unable to find an element with the text: /Credentials it already imported/. This could be because the text is broken up by multiple elements. In this case, you can provide a function for your text matcher to make your matcher more flexible.
+
+Ignored nodes: comments, script, style
+<body>
+  <div>
+    <div>
+      <div
+        class="screen-heading"
+      >
+        <div>
+          <p
+            class="screen-kicker"
+          >
+  …(rest of the failure output, a DOM dump, trimmed)
+
+# CLI half: # CARGO_TARGET_DIR=<scratch>/target-r4 API_TRACKER_INSECURE_FAST_KDF=1 cargo test -p api-tracker-cli --test mesh_cli
+# HEAD fb55b07 + the new assertions only; apps/cli/src unchanged
+test invite_join_devices_remove_and_leave_across_three_devices ... FAILED
+---- invite_join_devices_remove_and_leave_across_three_devices stdout ----
+
+thread 'invite_join_devices_remove_and_leave_across_three_devices' (21500106) panicked at apps/cli/tests/mesh_cli.rs:303:5:
+Removed device ab7bbb57.
+The mesh access key rotated to epoch 2; the other devices receive it in their next exchanges.
+
+(line 303: assert!(out.contains("Credentials it imported, and shares sealed to it that it already holds")) — the remove output says nothing about them)

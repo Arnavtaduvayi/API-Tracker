@@ -104,6 +104,34 @@ import type {
   VarPreview,
   VaultSettings,
   VaultStatus,
+  MeshDevice,
+  MeshDoctorReport,
+  MeshInitResult,
+  MeshInvite,
+  MeshJoinResult,
+  MeshLeaveResult,
+  MeshNodeSettings,
+  MeshNodeSettingsResult,
+  MeshPeer,
+  MeshPeerAddResult,
+  MeshPeerRemoveResult,
+  MeshRemoveResult,
+  MeshReplicateResult,
+  MeshStatus,
+  MeshCapChanged,
+  MeshCapCreated,
+  MeshCapReport,
+  MeshEnforceResult,
+  MeshImportReceipt,
+  MeshRevokedShare,
+  MeshShareReceipt,
+  MeshSharesList,
+  MeshMergeResult,
+  MeshProjectRow,
+  MeshReclaimResult,
+  MeshShareResult,
+  MeshUsageFilter,
+  MeshUsageReport,
 } from "./types";
 
 let onVaultLocked: (() => void) | null = null;
@@ -219,10 +247,24 @@ export function isApiError(e: unknown): e is ApiError {
   return typeof e === "object" && e !== null && "code" in e && "message" in e;
 }
 
-async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+interface CallOptions {
+  /**
+   * `false` sends no product analytics signal for this call, whatever the
+   * command. The mesh paths use it (MESH-SI-14: the mesh emits no analytics).
+   */
+  productAnalytics?: boolean;
+}
+
+async function call<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  options: CallOptions = {},
+): Promise<T> {
   try {
     const result = await invoke<T>(command, args);
-    publishProductAnalytics(productAnalyticsSignal(command, args, result));
+    if (options.productAnalytics !== false) {
+      publishProductAnalytics(productAnalyticsSignal(command, args, result));
+    }
     return result;
   } catch (raw) {
     const err: ApiError = isApiError(raw) ? raw : { code: "unknown", message: String(raw) };
@@ -300,6 +342,18 @@ export const api = {
     environments: Environment[];
     repoPaths: string[];
   }) => call<Project>("project_create", args),
+  /**
+   * The same `project_create`, for "Devices → Available from your devices →
+   * Bind to… → a new project": no product analytics signal, so no
+   * `project_created` or inventory event (MESH-SI-14).
+   */
+  projectCreateForMesh: (args: {
+    name: string;
+    description: string;
+    notes: string;
+    environments: Environment[];
+    repoPaths: string[];
+  }) => call<Project>("project_create", args, { productAnalytics: false }),
   projectUpdate: (
     ident: string,
     args: {
@@ -801,4 +855,99 @@ export const api = {
   projectNameUnknownApi: (host: string, provider: string | null, apiName: string | null) =>
     call<void>("project_name_unknown_api", { host, provider, apiName }),
   projectRestoreTracking: () => call<ProjectRestoreEntry[]>("project_restore_tracking"),
+
+  // --- Tethra Mesh (ADR 0031, Increment 09). No analytics (MESH-SI-14). ---
+  meshStatus: () => call<MeshStatus>("mesh_status"),
+  meshInit: (name: string) => call<MeshInitResult>("mesh_init", { name }),
+  /** Reauthenticated in core. Needs a running node; the invite is shown once. */
+  meshInviteCreate: (masterPassword: string, ttlMinutes: number | null) =>
+    call<MeshInvite>("mesh_invite_create", { masterPassword, ttlMinutes }),
+  meshJoin: (invite: string, name: string) =>
+    call<MeshJoinResult>("mesh_join", { invite, name }),
+  meshDevices: () => call<MeshDevice[]>("mesh_devices"),
+  meshDeviceRename: (name: string) => call<void>("mesh_device_rename", { name }),
+  /** Reauthenticated in core; confirm first. */
+  meshDeviceRemove: (masterPassword: string, deviceId: string) =>
+    call<MeshRemoveResult>("mesh_device_remove", { masterPassword, deviceId }),
+  /** Reauthenticated in core; confirm first. */
+  meshLeave: (masterPassword: string) =>
+    call<MeshLeaveResult>("mesh_leave", { masterPassword }),
+  meshPeersList: () => call<MeshPeer[]>("mesh_peers_list"),
+  meshPeerAdd: (addr: string) => call<MeshPeerAddResult>("mesh_peer_add", { addr }),
+  meshPeerRemove: (addr: string) => call<MeshPeerRemoveResult>("mesh_peer_remove", { addr }),
+  meshReplicateNow: (peer: string | null) =>
+    call<MeshReplicateResult>("mesh_replicate_now", { peer }),
+  meshDoctor: () => call<MeshDoctorReport>("mesh_doctor"),
+  meshNodeGetSettings: () => call<MeshNodeSettings>("mesh_node_get_settings"),
+  /** Widening the LAN surface without `masterPassword` fails with code
+   *  `mesh_reauth_required`; ask for it and retry. */
+  meshNodeSetSettings: (settings: MeshNodeSettings, masterPassword: string | null) =>
+    call<MeshNodeSettingsResult>("mesh_node_set_settings", { settings, masterPassword }),
+
+  // --- Tethra Mesh shared projects, usage and spend caps (Increment 10). No analytics. ---
+  meshProjectsList: () => call<MeshProjectRow[]>("mesh_projects_list"),
+  meshProjectShare: (localProjectId: string) =>
+    call<MeshShareResult>("mesh_project_share", { localProjectId }),
+  /** Explicit, never automatic. Returns the mesh project id. */
+  meshProjectBind: (meshProjectId: string, localProjectId: string) =>
+    call<string>("mesh_project_bind", { meshProjectId, localProjectId }),
+  meshProjectUnbind: (localProjectId: string) =>
+    call<boolean>("mesh_project_unbind", { localProjectId }),
+  meshProjectRename: (meshProjectId: string, name: string) =>
+    call<string>("mesh_project_rename", { meshProjectId, name }),
+  meshProjectArchive: (meshProjectId: string) =>
+    call<string>("mesh_project_archive", { meshProjectId }),
+  /** Confirm first; refused when both projects have caps. */
+  meshProjectMerge: (a: string, b: string) =>
+    call<MeshMergeResult>("mesh_project_merge", { a, b }),
+  /** `publish: true` publishes this device's usage first (explicit refresh only; never poll it). */
+  meshUsageReport: (filter: MeshUsageFilter, publish: boolean) =>
+    call<MeshUsageReport>("mesh_usage_report", { filter, publish }),
+  /** `reconcile: true` runs the cap reconciler first (on open / after actions; never poll it). */
+  meshCapsList: (reconcile: boolean) => call<MeshCapReport>("mesh_caps_list", { reconcile }),
+  /** Amounts are dollar text such as "25" or "12.50"; core parses them. */
+  meshCapCreate: (meshProjectId: string, monthlyUsd: string) =>
+    call<MeshCapCreated>("mesh_cap_create", { meshProjectId, monthlyUsd }),
+  meshCapRaise: (capId: string, usd: string) =>
+    call<MeshCapChanged>("mesh_cap_raise", { capId, usd }),
+  meshCapLower: (capId: string, usd: string) =>
+    call<MeshCapChanged>("mesh_cap_lower", { capId, usd }),
+  meshCapRights: (capId: string) => call<MeshCapReport>("mesh_cap_rights", { capId }),
+  meshCapReclaim: (capId: string, fromDevice: string | null) =>
+    call<MeshReclaimResult>("mesh_cap_reclaim", { capId, fromDevice }),
+  /** Reauthenticated in core. `capId: null` = every cap. */
+  meshCapEnforce: (masterPassword: string, capId: string | null, on: boolean) =>
+    call<MeshEnforceResult>("mesh_cap_enforce", { masterPassword, capId, on }),
+
+  // Tethra Mesh credential sharing (Increment 11): mesh_share_cmds.rs. Share,
+  // reseal and import are reauthenticated in core; nothing returns a value.
+  /** `purge: false` is the polled read (writes nothing). */
+  meshSharesList: (purge: boolean) => call<MeshSharesList>("mesh_shares_list", { purge }),
+  /** `devices: null` = all my current devices (and an offer for later ones). */
+  meshCredentialShare: (
+    masterPassword: string,
+    credentialId: string,
+    devices: string[] | null,
+  ) =>
+    call<MeshShareReceipt>("mesh_credential_share", { masterPassword, credentialId, devices }),
+  meshCredentialReseal: (masterPassword: string, credentialId: string) =>
+    call<MeshShareReceipt>("mesh_credential_reseal", { masterPassword, credentialId }),
+  meshCredentialImport: (
+    masterPassword: string,
+    shareId: string,
+    localProjectId: string,
+    replace: boolean,
+    environment: string | null,
+  ) =>
+    call<MeshImportReceipt>("mesh_credential_import", {
+      masterPassword,
+      shareId,
+      localProjectId,
+      replace,
+      environment,
+    }),
+  meshShareRevoke: (shareId: string) =>
+    call<MeshRevokedShare[]>("mesh_share_revoke", { shareId }),
+  meshCredentialRevoke: (credentialId: string) =>
+    call<MeshRevokedShare[]>("mesh_credential_revoke", { credentialId }),
 };

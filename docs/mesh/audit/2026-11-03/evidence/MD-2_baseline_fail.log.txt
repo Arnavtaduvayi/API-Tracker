@@ -1,0 +1,18 @@
+# MD-2 baseline (before the fix): cd apps/desktop && npx vitest run src/components/DevicesView.test.tsx
+# HEAD fb55b07 + the new/updated assertions only; the component text is unchanged
+
+ FAIL  src/components/DevicesView.test.tsx > DevicesView rendering > offers Create mesh and Join a mesh outside a mesh, and no in-mesh panels
+Error: expect(element).not.toBeInTheDocument()
+
+expected document not to contain element, found <p>
+  There is no Tethra server: devices only talk to each other, encrypted end to end. Credential values do not replicate.
+</p> instead
+ ❯ src/components/DevicesView.test.tsx:182:74
+    180|     // credential (MD-2); every hop is encrypted, but members read wha…
+    181|     // relay, so the intro never says "end to end" (MD-12).
+    182|     expect(screen.queryByText(/Credential values do not replicate/)).n…
+       |                                                                          ^
+    183|     expect(
+    184|       screen.getByText(
+
+  …(rest of the failure output, a DOM dump, trimmed)

@@ -1,0 +1,442 @@
+{
+  "audit": "Tethra Mesh, Increment 12",
+  "date": "2026-11-03",
+  "head_audited": "fb55b07",
+  "base": "5ec8198",
+  "findings": [
+    {
+      "id": "MP-1",
+      "auditor": "A1",
+      "severity": "high",
+      "verdict": "confirmed",
+      "title": "A removed device's own roster.remove can raise its cutoff to u64::MAX and cancel its removal",
+      "remediation_track": "R1",
+      "decision": "Cutoff becomes the minimum over counting removes; a hostile low cutoff only shrinks what counts."
+    },
+    {
+      "id": "MP-2",
+      "auditor": "A1",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Peer-supplied dot hashes and unbounded ChainReply seqs yield fork evidence (even against oneself)",
+      "remediation_track": "R1",
+      "decision": "ChainReply entries bounded to the queried (lo, hi]; a device never reports its own origin forked from a peer's chain claim. Amended at remediation (2026-11-05): the broader 'fork evidence needs two verified signed items' was not adopted, because superseded items survive only as dot hashes (requiring signed items would leave real forks in superseded history unreported) and any known device's fork.report already counts (PROTOCOL 6.3), so tricking an honest device into reporting gains a member nothing it cannot do directly. Residual documented in KNOWN_LIMITATIONS (Membership) and ADR 0031.",
+      "decision_original": "Fork evidence needs two verified signed items; an unsigned mismatch ends the session; ChainReply seqs bounded to (lo, hi]; never report a fork against oneself from a peer's word."
+    },
+    {
+      "id": "MP-3",
+      "auditor": "A1",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "A device far behind never catches up while any repair is due (repair items push past max_staged)",
+      "remediation_track": "R1",
+      "decision": "The sender's plan budgets repair items inside max_staged, main path first."
+    },
+    {
+      "id": "MP-4",
+      "auditor": "A1",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "A trickled handshake holds a session slot far past the handshake timeout",
+      "remediation_track": "R1",
+      "decision": "One deadline for the whole handshake."
+    },
+    {
+      "id": "MP-5",
+      "auditor": "A1",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "noise_pub and seal_pub in roster.add are not checked for small-order points; a share to such a key is readable by anyone",
+      "remediation_track": "R1",
+      "decision": "Refuse small-order X25519 keys at parse (R10: invalid payload rejected)."
+    },
+    {
+      "id": "MP-6",
+      "auditor": "A1",
+      "severity": "medium",
+      "verdict": "accepted",
+      "title": "An LWW write at Hlc::MAX can never be overridden",
+      "remediation_track": "-",
+      "decision": "LWW order is (hlc, origin), so any fixed HLC ceiling only moves where a compromised member can pin a register; a real fix needs causal supersession (each write naming the entry it replaces), a payload change for every LWW kind. Recovery today: replace the pinned object (a new cap, a new mesh project, or a new mesh). Documented in KNOWN_LIMITATIONS."
+    },
+    {
+      "id": "MP-7",
+      "auditor": "A1",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "A member can add a device with a copied noise_pub and shadow the real device at the handshake",
+      "remediation_track": "R1",
+      "decision": "A static key matching several active devices resolves by the Hello's device id."
+    },
+    {
+      "id": "MP-8",
+      "auditor": "A1",
+      "severity": "low",
+      "verdict": "accepted",
+      "title": "Equal-epoch access keys are grindable; the epoch ceiling counts removes of made-up ids",
+      "remediation_track": "-",
+      "decision": "Defense-in-depth layer only: the roster check after the handshake refuses a removed device. Documented in KNOWN_LIMITATIONS."
+    },
+    {
+      "id": "MP-9",
+      "auditor": "A1",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "A RollbackNotice above the reporter's own Hello can stop a device minting",
+      "remediation_track": "R1",
+      "decision": "Ignore a notice whose held_seq exceeds the reporter's Hello vv for this device."
+    },
+    {
+      "id": "MP-10",
+      "auditor": "A1",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Any member can revoke another device's share",
+      "remediation_track": "R1",
+      "decision": "A revoke counts only from the share's sharer or its recipient (PROTOCOL §5.6)."
+    },
+    {
+      "id": "MP-11",
+      "auditor": "A1",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Network failures during pairing burn invite attempts",
+      "remediation_track": "R1",
+      "decision": "Count only authenticated failures as attempts."
+    },
+    {
+      "id": "MP-12",
+      "auditor": "A1",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "inviter_verified is reported but not enforced",
+      "remediation_track": "R1",
+      "decision": "A join whose inviter key does not match fails."
+    },
+    {
+      "id": "MI-1",
+      "auditor": "A2",
+      "severity": "high",
+      "verdict": "confirmed",
+      "title": "A failed multi-block mint batch leaves the marker >64 ahead of the durable VV: the identity is RolledBack for good",
+      "remediation_track": "R2",
+      "decision": "Reservations must survive a rolled-back minting transaction without looking like a rollback."
+    },
+    {
+      "id": "MI-2",
+      "auditor": "A2",
+      "severity": "high",
+      "verdict": "confirmed",
+      "title": "mesh leave fails exactly when the identity is untrusted (marker missing/mismatched/rolled back, rollback hold)",
+      "remediation_track": "R2",
+      "decision": "Leave falls back to a local wipe when the self-removal cannot be minted; status shows an unreadable marker as a problem."
+    },
+    {
+      "id": "MI-3",
+      "auditor": "A2",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Restore commits mesh rows before the wipe in separate transactions",
+      "remediation_track": "R2",
+      "decision": "Backups carry no mesh_* rows and restore skips them (with MI-4)."
+    },
+    {
+      "id": "MI-4",
+      "auditor": "A2",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Backups contain wrapped mesh keys, access keys and invite psks",
+      "remediation_track": "R2",
+      "decision": "Exclude mesh_* tables from backups."
+    },
+    {
+      "id": "MI-5",
+      "auditor": "A2",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Removal and access-key rotation are separate transactions; a failed rotation is never retried",
+      "remediation_track": "R2",
+      "decision": "A retry of a removal whose rotation is missing rotates."
+    },
+    {
+      "id": "MI-6",
+      "auditor": "A2",
+      "severity": "low",
+      "verdict": "accepted",
+      "title": "Unix single-instance claim can race with a stale socket",
+      "remediation_track": "-",
+      "decision": "Database-level safety holds (one writer per transaction, generation reloads); documented in KNOWN_LIMITATIONS."
+    },
+    {
+      "id": "MI-7",
+      "auditor": "A2",
+      "severity": "low",
+      "verdict": "accepted",
+      "title": "Fork evidence noted in an earlier committed chunk is not reported if a later chunk fails",
+      "remediation_track": "-",
+      "decision": "The fork is found again at the next Hello (chain comparison); documented."
+    },
+    {
+      "id": "MI-8",
+      "auditor": "A2",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Deleting a shared credential leaves its shares live and unrevocable from this device",
+      "remediation_track": "R2",
+      "decision": "Deleting a credential with live outgoing shares is refused until they are revoked."
+    },
+    {
+      "id": "MI-9",
+      "auditor": "A2",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Vault-connection mesh writes (init, join, rotation, wipe) lack fullfsync",
+      "remediation_track": "R2",
+      "decision": "Set fullfsync on those connections."
+    },
+    {
+      "id": "MC-1",
+      "auditor": "A3",
+      "severity": "high",
+      "verdict": "confirmed",
+      "title": "A cold gate (p95 unknown after restart or at month start) admits unbounded concurrency",
+      "remediation_track": "R3",
+      "decision": "Serialize while no request cost is known."
+    },
+    {
+      "id": "MC-2",
+      "auditor": "A3",
+      "severity": "high",
+      "verdict": "confirmed",
+      "title": "A burn awaiting the gateway's ack is not subtracted from the pending decrease: repeated reconciles burn again",
+      "remediation_track": "R3",
+      "decision": "Open burns in escrow count against the pending decrease (and reclaim asks)."
+    },
+    {
+      "id": "MC-3",
+      "auditor": "A3",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Deleting local usage lowers cap.used and returns spent rights",
+      "remediation_track": "R3",
+      "decision": "cap.used never decreases within a month."
+    },
+    {
+      "id": "MC-4",
+      "auditor": "A3",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "The caps simulator never runs the escrow fence and has no over-burn invariant",
+      "remediation_track": "R3",
+      "decision": "Add an over-burn invariant at quiescence; the fence-mode simulation is recorded as remaining work.",
+      "decision_note": "The invariant allows the integer fair-share remainder (fewer than one micro per holder): seed 6 settled 2 micros under the target on the base commit too (3 holders x floor(590000/3)), reproduced on HEAD 70ebeb1 with only the invariant applied."
+    },
+    {
+      "id": "MC-5",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "avail is read before in_flight.fetch_add",
+      "remediation_track": "R3",
+      "decision": "Read avail after the reservation."
+    },
+    {
+      "id": "MC-6",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "A reclaim can take a holder's local override",
+      "remediation_track": "R3",
+      "decision": "A holder gives back at most its rights above its overrides."
+    },
+    {
+      "id": "MC-7",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "A charge for a vanished project leaves the gate's count without an incomplete flag",
+      "remediation_track": "R3",
+      "decision": "Flag accounting incomplete."
+    },
+    {
+      "id": "MC-8",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "One failed refresh installs an empty fail-open snapshot at once",
+      "remediation_track": "R3",
+      "decision": "Keep the last good snapshot until it is stale."
+    },
+    {
+      "id": "MC-9",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "accepted",
+      "title": "The gateway-running probe happens outside the write transaction",
+      "remediation_track": "-",
+      "decision": "Window bounded by the 5 s poll and needs a gateway start in between; documented."
+    },
+    {
+      "id": "MC-10",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Cap alert text ignores carried-over switches and the fail-open state",
+      "remediation_track": "R3",
+      "decision": "Alert text from the gate status."
+    },
+    {
+      "id": "MC-11",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "accepted",
+      "title": "The 403 drain holds a connection thread up to 5 s",
+      "remediation_track": "-",
+      "decision": "Bounded (5 s, 64 MiB); documented in KNOWN_LIMITATIONS."
+    },
+    {
+      "id": "MC-12",
+      "auditor": "A3",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "The perf result is printed, not asserted, and measures neither charge nor a running poller",
+      "remediation_track": "R4",
+      "decision": "Honest wording in PERFORMANCE_RESULTS (measurement scope)."
+    },
+    {
+      "id": "MD-1",
+      "auditor": "A4",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Docs and UI say overshoot is at most one request; concurrent admission and restart loss allow more",
+      "remediation_track": "R4",
+      "decision": "Qualify every such sentence (and MC-1, MC-5 shrink the gap)."
+    },
+    {
+      "id": "MD-2",
+      "auditor": "A4",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "MeshSetup says credential values do not replicate",
+      "remediation_track": "R4",
+      "decision": "Reword; update the test."
+    },
+    {
+      "id": "MD-3",
+      "auditor": "A4",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Removing a device does not warn that its imported credentials stay usable",
+      "remediation_track": "R4",
+      "decision": "Remove confirmations (CLI, desktop) say to rotate and suggest cap reclaim."
+    },
+    {
+      "id": "MD-4",
+      "auditor": "A4",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "'Rotate to cut a device off' plus all-device reseal resends the new value to that device",
+      "remediation_track": "R4",
+      "decision": "Guidance: revoke that device's share first (reseal never offers a revoked device)."
+    },
+    {
+      "id": "MD-5",
+      "auditor": "A4",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Bind to a new project from Devices emits project_created analytics (MESH-SI-14)",
+      "remediation_track": "R4",
+      "decision": "Create the project without the analytics signal on that path; test with invoke mocked."
+    },
+    {
+      "id": "MD-6",
+      "auditor": "A4",
+      "severity": "medium",
+      "verdict": "confirmed",
+      "title": "Absolute 'no double spending' claims",
+      "remediation_track": "R4",
+      "decision": "Qualify and point to limitations."
+    },
+    {
+      "id": "MD-7",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Project panel says other devices see a shared project only after binding",
+      "remediation_track": "R4",
+      "decision": "Correct the text (name and usage are visible to every member)."
+    },
+    {
+      "id": "MD-8",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Lowering retention.usage_days (destructive, replicated) has no confirmation",
+      "remediation_track": "R4",
+      "decision": "CLI asks (or --yes) before lowering it."
+    },
+    {
+      "id": "MD-9",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Stale status text in KNOWN_LIMITATIONS, mesh THREAT_MODEL, PRODUCT_SPEC, SI-8, SI-14",
+      "remediation_track": "R4",
+      "decision": "Update."
+    },
+    {
+      "id": "MD-10",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "CLI help says caps are alerts only",
+      "remediation_track": "R4",
+      "decision": "Update help text."
+    },
+    {
+      "id": "MD-11",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Unlocked-session row understates what can be done without the password",
+      "remediation_track": "R4",
+      "decision": "List it."
+    },
+    {
+      "id": "MD-12",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "What-replicates lists do not say share metadata is readable by every member",
+      "remediation_track": "R4",
+      "decision": "Say so."
+    },
+    {
+      "id": "MD-13",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "mesh status spacing; shares from removed devices counted as importable",
+      "remediation_track": "R4",
+      "decision": "Fix both."
+    },
+    {
+      "id": "MD-14",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "confirmed",
+      "title": "Inventory labels for revoke/list purge rows",
+      "remediation_track": "R4",
+      "decision": "Correct."
+    },
+    {
+      "id": "MD-15",
+      "auditor": "A4",
+      "severity": "low",
+      "verdict": "accepted",
+      "title": "Invite copies in plain Strings for the response",
+      "remediation_track": "-",
+      "decision": "The invite must reach the user once; short-lived (≤ 60 min, single use); documented."
+    }
+  ]
+}
