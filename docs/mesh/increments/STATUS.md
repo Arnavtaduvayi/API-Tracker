@@ -21,7 +21,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | done | 2026-11-03 | 2026-11-03 | `1e3e387` | CI `41682903354` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); its macOS service run `41682903236` was **cancelled** (superseded by the next push), and the service run on `c8c019f`, which contains all of 11, `41684406424` succeeded |
-| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | done | 2026-11-03 | 2026-11-06 | `c8c019f`, `798be3e`, `d7accf6`, `fb55b07`, `70ebeb1` (Phase A-B); `bd49ebf`, `0b569ae`, `e2999b7`, `9e1eaf6`, `6a279d4` (Phase C); `fadb4a0`, `92e5530` (Phase D); `24eb4a4` + record `ff19449` (Phase E) | Final code head `92e5530`: CI `42154484846` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `42154484849` (success). Earlier: `9e1eaf6` CI `42113513995` / service `42113514032`, `6a279d4` CI `42113920148` / service `42113919915`, `24eb4a4` CI `42121555608` / service `42121555601`, all success. Record `ff19449`: CI `42160837827` (success, all five jobs, rustc 1.99.1), macOS service `42160837720` (success) |
+| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | done | 2026-11-03 | 2026-11-06 | `c8c019f`, `798be3e`, `d7accf6`, `fb55b07`, `70ebeb1` (Phase A-B); `bd49ebf`, `0b569ae`, `e2999b7`, `9e1eaf6`, `6a279d4` (Phase C); `fadb4a0`, `92e5530` (Phase D); `24eb4a4` + record `ff19449` (Phase E) | Final code head `92e5530`: CI `42154484846` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `42154484849` (success). Earlier: `9e1eaf6` CI `42113513995` / service `42113514032`, `6a279d4` CI `42113920148` / service `42113919915`, `24eb4a4` CI `42121555608` / service `42121555601`, all success. Record `ff19449`: CI `42160837827` (success, all five jobs, rustc 1.99.1), macOS service `42160837720` (success). Post-12 dependency cleanup `822f671` (2026-11-11): CI `43058998167` (success, all five jobs, rustc 1.99.1), macOS service `43058998240` (success) |
 
 Sizes are rough context cost for a 1M-token session:
 - **M** is about 15-25% of the session.
@@ -154,7 +154,7 @@ No increment is pending; this session checked the PR and the next toolchain.
       `peer_addr`).
   - No source file references either `socket2`, on any platform. Observe's
     timeouts use std's `set_read_timeout` and `set_write_timeout`.
-  - All three are removed in the `chore(build)` commit after `ff19449`.
+  - All three are removed in `822f671` (`chore(build)`).
     - `Cargo.lock` loses two edges; `socket2` stays as a transitive dependency.
     - The observability and gateway docs that named `socket2` now say std.
     - ADR 0019 and the old handoffs are left as historical records.
@@ -181,6 +181,11 @@ No increment is pending; this session checked the PR and the next toolchain.
     destination-matrix block. That block pipes the CLI's output into `grep -q`, which
     exits at its first match while the CLI is still writing; those checks pass.
 - The desktop frontend was not touched.
+
+**CI on `822f671`.** CI `43058998167` succeeded on all five jobs (Rust core+CLI+mesh
+on Linux, Rust core+mesh on Windows, desktop frontend, desktop backend, packaged app
+on macOS; rustc 1.99.1), and macOS service `43058998240` succeeded. The record
+commit after it changes docs only. PR #19 still had no comments when CI finished.
 
 **For the owner.**
 - The `socket2` removals touch the gateway and observe manifests on this branch,

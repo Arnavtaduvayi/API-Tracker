@@ -80,6 +80,17 @@ not allow for. The policy is the documented one (ADR 0032 D4); the invariant
 was corrected, the seed is a permanent regression test, and the consequence
 is in KNOWN_LIMITATIONS ([`FINAL_VERDICT.md`](audit/2026-11-03/FINAL_VERDICT.md)).
 
+On 2026-11-11, `822f671` removed three dependencies that nothing uses, after
+Cargo 1.100's new manifest lints reported them: the root workspace's
+`api-tracker-core` entry, and `socket2` in observe and in the gateway. All three
+were already on `main`. After that change:
+- `cargo fmt --check` is clean.
+- Clippy `-D warnings` is clean on the same packages and on the desktop crate,
+  with 1.96.1, with 1.99.1 (CI's stable) and with the 1.100.0 pre-release (due as stable
+  on 2026-11-12). Cargo 1.100 also reports no manifest warnings.
+- Tests: **1 923 passed, 0 failed, 14 ignored**.
+- Smoke: **186 passed**.
+
 Earlier, Phase A: protocol soak 481 000 seeds × 3 000 steps in 30 min, 0
 failing; caps soak 3 136 seeds, 2 failing (a real policy bug, fixed in
 `d7accf6`, both seeds now regression tests), then 1 600 seeds, 0 failing.
@@ -99,15 +110,16 @@ failing; caps soak 3 136 seeds, 2 failing (a real policy bug, fixed in
 
 ## CI on the final head
 
-Head `92e5530` (the last commit with code; the record commit after it
-changes docs only):
+Head `822f671` (the last commit that changes the build; it only removes the
+unused dependencies above, and the record commit after it changes docs only):
 
 | Workflow | Run | Result |
 |---|---|---|
-| CI (Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, desktop frontend, desktop backend, packaged app on macOS) | `42154484846` | success |
-| Packaged macOS service lifecycle | `42154484849` | success |
+| CI (Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, desktop frontend, desktop backend, packaged app on macOS) | `43058998167` | success |
+| Packaged macOS service lifecycle | `43058998240` | success |
 
-Earlier remediation heads: `9e1eaf6` CI `42113513995`, service
+The last commit with mesh code, `92e5530`: CI `42154484846`, service
+`42154484849` (both success). Earlier remediation heads: `9e1eaf6` CI `42113513995`, service
 `42113514032`; `6a279d4` CI `42113920148`, service `42113919915`;
 `24eb4a4` CI `42121555608`, service `42121555601` (all success). The record commit's own runs are listed in `increments/STATUS.md`.
 
