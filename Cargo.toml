@@ -17,9 +17,6 @@ license = "Apache-2.0"
 repository = "https://github.com/Arnavtaduvayi/API-Tracker"
 rust-version = "1.85"
 
-[workspace.dependencies]
-api-tracker-core = { path = "crates/core" }
-
 [profile.release]
 strip = true
 

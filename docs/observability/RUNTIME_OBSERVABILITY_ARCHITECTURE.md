@@ -112,7 +112,8 @@ Justification:
 - Bounded resources come from a counting semaphore over a hard connection cap
   (default 64 concurrent, configurable), not from an executor's fairness.
 
-Timeouts are enforced with `SO_RCVTIMEO`/`SO_SNDTIMEO` (`socket2`) plus an
+Timeouts are enforced with `SO_RCVTIMEO`/`SO_SNDTIMEO` (std's
+`TcpStream::set_read_timeout`/`set_write_timeout`) plus an
 overall connection deadline checked between relay iterations.
 
 ## 6. Connection lifecycle

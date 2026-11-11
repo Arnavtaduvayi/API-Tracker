@@ -183,10 +183,15 @@ bash scripts/smoke.sh          # builds the release CLI; ~140+ checks against a 
 - The fast KDF works only in debug builds.
 - CI's `stable` can be newer than this machine's: on 2026-10-26, CI ran rustc 1.99.1 and
   the local default was 1.96.1. A lint or deprecation that is new in CI's version fails
-  its `clippy -D warnings`. Toolchain 1.99.1 is installed alongside the default, so also
-  run `CARGO_TARGET_DIR=<scratch>/target199 cargo +1.99.1 clippy …` with the same `-p`
-  list before pushing (STATUS.md, Increment 01 handoff). Keep the 1.85 MSRV in mind:
-  don't fix a deprecation with an API newer than 1.85.
+  its `clippy -D warnings`. Toolchains 1.99.1 and 1.100.0 (the pre-release build, due as
+  stable on 2026-11-12) are installed alongside the default, so also run the newest,
+  `CARGO_TARGET_DIR=<scratch>/target1100 cargo +1.100.0 clippy …`, with the same `-p`
+  list before pushing (STATUS.md, the Increment 01 handoff and the 2026-11-11 note).
+  Keep the 1.85 MSRV in mind: don't fix a deprecation with an API newer than 1.85.
+- Cargo 1.100 also reports warn-level manifest lints (`cargo::unused_dependencies`,
+  `cargo::unused_workspace_dependencies`). `-D warnings` does not reach them, so CI
+  stays green, but keep them at zero, and rerun after each fix: one appeared only after
+  another was fixed.
 - macOS has no `timeout(1)`.
 - `~/.npm` may be root-owned, which is why the commands above pass `--cache "$(mktemp -d)"`.
 - The validation manifest (`scripts/validation_manifest.json`) is generated and covers

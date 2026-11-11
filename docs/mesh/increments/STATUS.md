@@ -4,9 +4,9 @@ Every session reads this file first and updates it at the end (README §1).
 
 **States:** `pending`, `in-progress`, `done`, `blocked` (give the reason).
 
-| Branch | Base | Draft PR |
+| Branch | Base | PR |
 |---|---|---|
-| `feat/device-mesh` | `origin/main` @ `5ec8198` (2026-10-26) | [#19](https://github.com/Arnavtaduvayi/API-Tracker/pull/19) (draft) |
+| `feat/device-mesh` | `origin/main` @ `5ec8198` (2026-10-26) | [#19](https://github.com/Arnavtaduvayi/API-Tracker/pull/19) (ready for review) |
 
 | # | Increment | Mode | Size | State | Started | Finished | Commits | CI run (result) |
 |---|---|---|---|---|---|---|---|---|
@@ -21,7 +21,7 @@ Every session reads this file first and updates it at the end (README §1).
 | 09 | [Desktop: devices & node](09-desktop-devices-and-node.md) | O | M | done | 2026-10-29 | 2026-11-02 | `a661b68` (contract), `771b7ed` | CI `41402633802` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41402633847` (success). This record `c38ca54` + contract `75dc394`: CI `41406091491`, service `41406091486` (success) |
 | 10 | [Desktop: projects, usage & caps](10-desktop-projects-usage-caps.md) | O | M | done | 2026-11-02 | 2026-11-02 | `75dc394` (contract), `aa63799` | CI `41414305749` (success: frontend, desktop backend, Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, packaged app on macOS); macOS service `41414305748` (success). Record `95a20ca`: CI `41416744779`, service `41416744841` (both success) |
 | 11 | [Opt-in credential sharing](11-credential-sharing.md) | S+R | L | done | 2026-11-03 | 2026-11-03 | `1e3e387` | CI `41682903354` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); its macOS service run `41682903236` was **cancelled** (superseded by the next push), and the service run on `c8c019f`, which contains all of 11, `41684406424` succeeded |
-| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | done | 2026-11-03 | 2026-11-06 | `c8c019f`, `798be3e`, `d7accf6`, `fb55b07`, `70ebeb1` (Phase A-B); `bd49ebf`, `0b569ae`, `e2999b7`, `9e1eaf6`, `6a279d4` (Phase C); `fadb4a0`, `92e5530` (Phase D); `24eb4a4` + this record (Phase E) | Final code head `92e5530`: CI `42154484846` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `42154484849` (success). Earlier: `9e1eaf6` CI `42113513995` / service `42113514032`, `6a279d4` CI `42113920148` / service `42113919915`, `24eb4a4` CI `42121555608` / service `42121555601`, all success |
+| 12 | [Hardening, audit & ship](12-hardening-audit-ship.md) | O | L | done | 2026-11-03 | 2026-11-06 | `c8c019f`, `798be3e`, `d7accf6`, `fb55b07`, `70ebeb1` (Phase A-B); `bd49ebf`, `0b569ae`, `e2999b7`, `9e1eaf6`, `6a279d4` (Phase C); `fadb4a0`, `92e5530` (Phase D); `24eb4a4` + record `ff19449` (Phase E) | Final code head `92e5530`: CI `42154484846` (success: Rust core+CLI+mesh on Linux, Rust core+mesh on Windows, frontend, desktop backend, packaged app on macOS); macOS service `42154484849` (success). Earlier: `9e1eaf6` CI `42113513995` / service `42113514032`, `6a279d4` CI `42113920148` / service `42113919915`, `24eb4a4` CI `42121555608` / service `42121555601`, all success. Record `ff19449`: CI `42160837827` (success, all five jobs, rustc 1.99.1), macOS service `42160837720` (success) |
 
 Sizes are rough context cost for a 1M-token session:
 - **M** is about 15-25% of the session.
@@ -115,6 +115,79 @@ also update DESIGN.md and the affected increment files; README §7.)_
 
 _(Per increment: surprises, load-bearing facts, environment gotchas, anything not done,
 pending CI runs to check first.)_
+
+### After 12 — PR #19 follow-up and the Rust 1.100 check (2026-11-11)
+
+No increment is pending; this session checked the PR and the next toolchain.
+
+**PR #19.**
+- Ready for review (not a draft), mergeable, merge state clean.
+- On 2026-11-11 it had no reviews, no review comments and no conversation comments,
+  so there was nothing to address.
+- Not merged: the owner merges.
+
+**CI on the record commit `ff19449`.**
+- CI `42160837827`: success on all five jobs, running rustc 1.99.1.
+- macOS service `42160837720`: success.
+
+**Toolchain check (load-bearing).**
+- **What was run.** CI runs on `stable`. On 2026-11-11, stable was still **1.99.1**
+  (the static.rust-lang.org stable manifest is dated 2026-10-15). **1.100.0**
+  (`0ef1bc386 2026-11-09`) was staged on Rust's official pre-release server for the
+  2026-11-12 release.
+- **How it was installed:** `RUSTUP_DIST_SERVER=https://dev-static.rust-lang.org rustup
+  toolchain install 1.100.0 --profile minimal -c clippy -c rustfmt`.
+  - The install also self-updated rustup from 1.29.2 to 1.29.3; pass
+    `--no-self-update` next time.
+  - If the 1.100.0 release is re-spun, reinstall it from the normal server.
+- **Result.** On 1.100.0, `cargo fmt --check` is clean, and so are the README §3
+  clippy line and `-p api-tracker-desktop`: no rustc or clippy lint.
+- **New Cargo manifest lints.** Cargo 1.100 adds two warn-level lints,
+  `cargo::unused_dependencies` and `cargo::unused_workspace_dependencies`.
+  - They are outside `-D warnings` and would not have failed CI.
+  - They found **three unused dependencies, all already on `main`**:
+    - `[workspace.dependencies] api-tracker-core` in the root `Cargo.toml`, which no
+      member uses through `workspace = true`;
+    - `socket2` in `crates/observe`;
+    - `socket2` in `crates/gateway` (ADR 0019 planned it for Windows
+      `SO_EXCLUSIVEADDRUSE` and loopback checks; the loopback checks use std's
+      `peer_addr`).
+  - No source file references either `socket2`, on any platform. Observe's
+    timeouts use std's `set_read_timeout` and `set_write_timeout`.
+  - All three are removed in the `chore(build)` commit after `ff19449`.
+    - `Cargo.lock` loses two edges; `socket2` stays as a transitive dependency.
+    - The observability and gateway docs that named `socket2` now say std.
+    - ADR 0019 and the old handoffs are left as historical records.
+    - The removals cannot affect the 1.85 MSRV.
+  - The lint reported observe's `socket2` first, and the gateway's only after
+    observe's was removed. Rebuild the workspace members (`cargo +1.100.0 clean
+    --target-dir <dir> -p …`) and rerun until the list is empty.
+- **Cargo 1.100's target-dir layout differs** (`debug/build/<pkg>/<hash>`, with no
+  `.fingerprint` or `deps` directories). Keep its own target dir
+  (`<scratch>/target1100`).
+
+**Checks on the change (2026-11-11).**
+- `cargo fmt --all -- --check`: clean.
+- Clippy `-D warnings` on the README §3 line and on the desktop crate: clean with
+  1.96.1 (local default), 1.99.1 (CI's stable) and 1.100.0. With 1.100.0, Cargo also
+  reports no manifest warnings.
+- **1,923 Rust tests passed, 0 failed, 14 ignored** (`API_TRACKER_INSECURE_FAST_KDF=1
+  cargo test --no-fail-fast -p api-tracker-core -p api-tracker-cli -p
+  api-tracker-observe -p api-tracker-gateway -p api-tracker-tracking -p
+  api-tracker-mesh`; the same as 12).
+- `documentation_claims` and `no_mesh_dependency`: rerun after the doc edits, both pass.
+- **Smoke: 186 passed, 0 failed** (`bash scripts/smoke.sh`).
+  - Two `failed printing to stdout: Broken pipe` panics appear in its log, in the
+    destination-matrix block. That block pipes the CLI's output into `grep -q`, which
+    exits at its first match while the CLI is still writing; those checks pass.
+- The desktop frontend was not touched.
+
+**For the owner.**
+- The `socket2` removals touch the gateway and observe manifests on this branch,
+  and `main` still has all three unused entries. If you'd rather keep them out of
+  #19, revert that commit's manifest, lockfile and observability/gateway doc hunks
+  (STATUS.md and the increments README travel in the same commit) and apply them to `main`.
+- 12's CLAUDE.md note ("end-to-end encrypted") still stands.
 
 ### Increment 12 — Hardening, audit & ship (2026-11-03 → 2026-11-06)
 
